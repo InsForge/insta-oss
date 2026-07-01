@@ -1,0 +1,22 @@
+{
+  "name": "@insforge/insta-oss",
+  "version": "0.1.0",
+  "description": "Instacloud-oss — open-source self-hosted runtime: branchable, agent-native environments on local Docker. Speaks the same API surface as the Instacloud platform, so the stock `insta` CLI and MCP work unchanged.",
+  "type": "module",
+  "bin": { "insta-oss": "src/main.ts" },
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "fastify": "^4.28.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
