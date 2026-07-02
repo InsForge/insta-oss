@@ -51,28 +51,101 @@ graph TD
 | auth | OAuth | none — localhost trust |
 | orgs / billing / usage / metrics | ✅ | 501 (cloud-only) |
 
-## Run
+## Getting started (from zero)
+
+**Prerequisites:** Docker (running) and Node ≥ 20. Nothing else — no cloud account, no API keys.
+
+### 1. Spawn the daemon
 
 ```bash
+git clone git@github.com:InsForge/insta-oss.git && cd insta-oss
 npm install
-npx tsx src/main.ts          # daemon on 127.0.0.1:8080 (INSTA_OSS_PORT to change)
+npx tsx src/main.ts               # instad on 127.0.0.1:8080  (INSTA_OSS_PORT=4800 to change)
 ```
 
-Then use the normal CLI (no login needed):
+First run pulls `postgres:16-alpine`, `minio/minio`, `minio/mc` — give it a minute.
+Keep this terminal open (daemon runs in the foreground for now).
+
+### 2. Get the `insta` CLI
+
+The same CLI that drives the cloud. Until it's on npm, run it from source:
 
 ```bash
-insta project create demo    # provisions main (Postgres + bucket)
-insta branch create feat     # clone: db + bucket copied, apps redeployed — isolated
-insta deploy --image you/app:latest --port 8080
-insta secrets --print        # the seam: DATABASE_URL + AWS_* S3 bundle
-insta manifest               # agent-legible env view
-insta project delete         # gated → approval required (HITL)
-insta approvals approve <id> # [--always]
-insta events                 # audit timeline (resource + govern + agent ingest)
+git clone git@github.com:InsForge/insta-cli.git && cd insta-cli && npm install
+alias insta='npx tsx ~/insta-cli/src/index.ts'     # or: npm run build && link the binary
 ```
 
-> The shared MinIO runs as one persistent `io-minio` container holding every branch's
-> bucket — that container surviving teardown is by design.
+No `insta login` needed — the daemon trusts localhost and has a builtin `local` user.
+If the daemon isn't on the default port: `export INSTA_API_URL=http://127.0.0.1:4800`.
+
+### 3. Spawn a project (db + storage + compute)
+
+```bash
+cd ~/my-app          # the CLI links the project to your cwd (./.insta/project.json)
+insta project create demo
+#   resources: postgres, storage, compute
+insta secrets --print          # DATABASE_URL + AWS_* S3 bundle for branch main
+```
+
+Behind the scenes: a `io-demo-main-pg` Postgres container, a `io-demo-main` bucket on the
+shared MinIO, and a Docker network per branch.
+
+### 4. Spawn your app into it (custom compute)
+
+```bash
+insta deploy --image ghcr.io/you/app:latest --port 8080
+# → http://localhost:8080 — container gets DATABASE_URL + the S3 creds injected
+insta deploy --image ghcr.io/you/api:latest --port 8090 --group backend   # more compute groups
+```
+
+Your app just reads `process.env.DATABASE_URL` / the `AWS_*` vars — same code runs on the cloud.
+
+### 5. Spawn a branch — a full isolated clone
+
+```bash
+insta branch create feat       # copies the db + bucket, redeploys your app groups
+insta manifest                 # see both branches with their own db/storage/compute
+insta branch switch feat && insta secrets   # .env now points at the clone
+```
+
+Break anything in `feat` — `main` is untouched. Throw it away with `insta branch delete feat`.
+
+### 6. Govern it (the HITL circuit breaker)
+
+```bash
+insta policy set deploy approve      # now deploys need a human
+insta deploy --image you/app:v2 --port 8080
+# → approval required — run: insta approvals approve <id>
+insta approvals approve <id> --always   # approve AND stop asking
+insta events                            # the full audit timeline
+```
+
+### Use it with an AI agent
+
+Point any coding agent (Claude Code, Cursor, …) at the daemon and let it drive the CLI:
+each agent can `branch create` its own disposable environment, work, and delete it —
+while `policy` + `approvals` keep destructive actions behind a human. Set
+`INSTA_API_URL` in the agent's environment; the `insta-skills` playbook teaches the workflow.
+(MCP server: same endpoints, coming via the `mcp/` submodule.)
+
+### Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `Docker is required and must be running` | start Docker Desktop / dockerd |
+| port 8080 in use (e.g. platform dev server) | `INSTA_OSS_PORT=4800 npx tsx src/main.ts` + `export INSTA_API_URL=http://127.0.0.1:4800` |
+| first commands slow | one-time image pulls (postgres/minio/mc) |
+| where's my state? | `~/.insta-oss/state.json` (override with `INSTA_OSS_STATE`) |
+| `io-minio` container never goes away | by design — it's the shared storage server holding every branch's buckets |
+
+### Uninstall / clean slate
+
+```bash
+insta project delete            # per project (approval-gated)
+docker rm -f io-minio           # shared storage server (deletes all buckets)
+docker ps -aq --filter name=io- | xargs docker rm -f   # any strays
+rm -rf ~/.insta-oss             # daemon state
+```
 
 ## Test
 
