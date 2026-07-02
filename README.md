@@ -8,10 +8,44 @@ on local containers, single-tenant, no accounts, no billing.
 (paths + response shapes) as the Instacloud platform, and the CLI's default API URL is
 already `http://localhost:8080`. MCP gets the same property — one thin client, two targets.
 
+## What it can do (v1)
+
+- **Projects with real resources** — `project create` provisions a Postgres container, an
+  S3 bucket (shared MinIO), and compute slots for your app images.
+- **Branch = a disposable isolated environment** — `branch create` clones the whole stack:
+  database copied (`pg_dump` → restore), bucket copied (`mc mirror`), every app group
+  re-deployed against the clone. Writes to a branch never touch its source (test-verified).
+- **Deploy your own compute** — `deploy --image you/app` runs your container per compute
+  group, injected with that branch's `DATABASE_URL` + S3 credentials. Redeploy = replace.
+- **The secret seam** — `insta secrets` is the only way credentials leave the daemon:
+  `DATABASE_URL`, `AWS_ACCESS_KEY_ID/SECRET`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION`,
+  `BUCKET_NAME` — the same key names the cloud mints, so the same app runs on both.
+- **Governance (HITL)** — `secrets.read | deploy | project.delete | branch.delete` gate to
+  allow/deny/approve; approvals are one-shot (`approve --always` makes it permanent);
+  per-project `policy set`.
+- **Audit timeline** — every resource + govern action lands in `insta events`; agents ingest
+  findings via `POST /projects/:id/events` with dedup (observe-hook compatible).
+- **Agent-legible manifest** — `insta manifest` prints each branch's db / storage / compute.
+
+Full roadmap and what's deliberately not in v1: [`docs/superpowers/plans/2026-07-02-insta-oss-roadmap.md`](docs/superpowers/plans/2026-07-02-insta-oss-roadmap.md).
+
+## Architecture
+
+```mermaid
+graph TD
+  CLI["insta CLI · MCP · (dashboard)"] --> D["instad — local daemon<br/>127.0.0.1 · no OAuth · single-tenant"]
+  D --> ENG["Engine — project/branch lifecycle"]
+  D --> GOV["Govern — gates · approvals · policy"]
+  D --> EV["Events — audit timeline"]
+  ENG --> PG[("LocalPostgres<br/>one container per branch")]
+  ENG --> ST[("LocalMinio<br/>shared server · bucket per branch")]
+  ENG --> CP["DockerCompute<br/>your image per group"]
+```
+
 | | Instacloud (cloud) | insta-oss (this repo) |
 | --- | --- | --- |
 | db / storage / compute | Neon / Tigris / Fly (microVM) | Postgres / MinIO / Docker containers |
-| branch (clone) | CoW | copy (`pg_dump` → restore) — isolated |
+| branch (clone) | CoW | copy (`pg_dump` + bucket mirror) — isolated |
 | compute on branch | re-deploy | re-deploy (same semantics) |
 | governance (HITL) + events | ✅ | ✅ same gates, one-shot grants, `--always` |
 | auth | OAuth | none — localhost trust |
@@ -27,8 +61,8 @@ npx tsx src/main.ts          # daemon on 127.0.0.1:8080 (INSTA_OSS_PORT to chang
 Then use the normal CLI (no login needed):
 
 ```bash
-insta project create demo    # provisions main (Postgres container)
-insta branch create feat     # clone: copies data, redeploys apps — isolated
+insta project create demo    # provisions main (Postgres + bucket)
+insta branch create feat     # clone: db + bucket copied, apps redeployed — isolated
 insta deploy --image you/app:latest --port 8080
 insta secrets --print        # the seam: DATABASE_URL + AWS_* S3 bundle
 insta manifest               # agent-legible env view
@@ -36,6 +70,9 @@ insta project delete         # gated → approval required (HITL)
 insta approvals approve <id> # [--always]
 insta events                 # audit timeline (resource + govern + agent ingest)
 ```
+
+> The shared MinIO runs as one persistent `io-minio` container holding every branch's
+> bucket — that container surviving teardown is by design.
 
 ## Test
 
@@ -52,6 +89,7 @@ src/engine.ts          project/branch lifecycle (clone = copy + redeploy)
 src/govern.ts          HITL gates · policies · one-shot approvals
 src/adapters/          local providers: postgres (copy-branching) · docker compute · shared MinIO (bucket-per-branch)
 src/state.ts           single-tenant JSON state
+docs/superpowers/      plans (capabilities + roadmap)
 ```
 
 ## CLI command parity (stock `insta` CLI vs this daemon)
@@ -72,7 +110,7 @@ Verified by running every registered CLI command against the daemon:
 | `approvals list/approve/deny` (`--always`) | ✅ one-shot grants, same 202 flow |
 | `events` | ✅ resource + govern timeline, agent ingest with dedup |
 | `login/logout` | cloud-only (no OAuth locally — localhost trust) |
-| `metrics` / `logs` | 501 with clear message (docker stats/logs planned) |
+| `metrics` / `logs` | 501 with clear message (docker stats/logs planned — roadmap Phase 2) |
 | `usage` / `billing` | 501 — cloud-only by design (no metering in OSS) |
 | `org create` / `tokens` | 501 — single-tenant |
 
