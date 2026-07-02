@@ -53,3 +53,29 @@ src/govern.ts          HITL gates · policies · one-shot approvals
 src/adapters/          local providers: postgres (copy-branching) · docker compute · shared MinIO (bucket-per-branch)
 src/state.ts           single-tenant JSON state
 ```
+
+## CLI command parity (stock `insta` CLI vs this daemon)
+
+The OSS follows the canonical CLI/cloud command surface exactly — no OSS-only commands.
+Verified by running every registered CLI command against the daemon:
+
+| Command | insta-oss behavior |
+| --- | --- |
+| `status` | ✅ (`user: local`) |
+| `org list` | ✅ builtin single org (`local`) |
+| `project create/link/list/delete` | ✅ (delete is govern-gated) |
+| `branch create/switch/delete/list` | ✅ (create = clone: db copy + bucket copy + app redeploy) |
+| `deploy` | ✅ (govern-gated) |
+| `secrets` / `secrets list` | ✅ full bundle: `DATABASE_URL` + `AWS_*` + `BUCKET_NAME` (gated) |
+| `manifest` | ✅ per-branch postgres / storage / compute |
+| `policy` / `policy set` | ✅ |
+| `approvals list/approve/deny` (`--always`) | ✅ one-shot grants, same 202 flow |
+| `events` | ✅ resource + govern timeline, agent ingest with dedup |
+| `login/logout` | cloud-only (no OAuth locally — localhost trust) |
+| `metrics` / `logs` | 501 with clear message (docker stats/logs planned) |
+| `usage` / `billing` | 501 — cloud-only by design (no metering in OSS) |
+| `org create` / `tokens` | 501 — single-tenant |
+
+**Branching vs merging:** `branch` = a disposable isolated environment (clone). There is no
+`branch merge` in the cloud or here — merge happens at the **git level**: merge your code,
+run migrations against main, redeploy, delete the branch env. Branch data never merges back.
