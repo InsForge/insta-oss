@@ -9,7 +9,7 @@ vi.mock('../src/docker', () => ({ docker: vi.fn(async () => Buffer.from('')) }))
 
 import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
-import type { DatabaseAdapter, ComputeAdapter } from '../src/types'
+import type { DatabaseAdapter, ComputeAdapter, StorageAdapter } from '../src/types'
 
 const calls: string[] = []
 const db: DatabaseAdapter = {
@@ -19,15 +19,20 @@ const db: DatabaseAdapter = {
   destroy: async (ref) => { calls.push(`db.destroy:${ref}`) },
 }
 const compute: ComputeAdapter = {
-  deploy: async (ref, o) => { calls.push(`deploy:${ref}:${o.group}:${o.image}`); return { url: `http://localhost:${o.port}` } },
+  deploy: async (ref, o) => { calls.push(`deploy:${ref}:${o.group}:${o.image}:s3=${o.envVars.BUCKET_NAME ?? 'none'}`); return { url: `http://localhost:${o.port}` } },
   destroy: async (ref) => { calls.push(`compute.destroy:${ref}`) },
+}
+const storage: StorageAdapter = {
+  provision: async (ref) => { calls.push(`st.provision:${ref}`); return { bucket: `io-${ref}`, env: { BUCKET_NAME: `io-${ref}`, AWS_ACCESS_KEY_ID: 'k', AWS_SECRET_ACCESS_KEY: 's', AWS_ENDPOINT_URL_S3: 'http://io-minio:9000', AWS_REGION: 'local' } } },
+  cloneInto: async (src, dst) => { calls.push(`st.clone:${src}->${dst}`) },
+  destroy: async (ref) => { calls.push(`st.destroy:${ref}`) },
 }
 
 let app: ReturnType<typeof buildServer>
 beforeEach(() => {
   process.env.INSTA_OSS_STATE = join(mkdtempSync(join(tmpdir(), 'io-')), 'state.json')
   calls.length = 0
-  app = buildServer(new Engine(db, compute))
+  app = buildServer(new Engine(db, compute, storage))
 })
 
 const post = (url: string, payload?: unknown) => app.inject({ method: 'POST', url, payload })
@@ -51,8 +56,9 @@ test('project create returns {project, defaultBranch, resources[].kind} and prov
   const body = r.json()
   expect(body.project.name).toBe('demo')
   expect(body.defaultBranch.name).toBe('main')
-  expect(body.resources.map((x: { kind: string }) => x.kind)).toContain('postgres')
+  expect(body.resources.map((x: { kind: string }) => x.kind)).toEqual(expect.arrayContaining(['postgres', 'storage', 'compute']))
   expect(calls).toContain('db.provision:demo-main')
+  expect(calls).toContain('st.provision:demo-main')
 })
 
 test('branch create clones data + redeploys apps; branches list has is_default/status', async () => {
@@ -62,7 +68,8 @@ test('branch create clones data + redeploys apps; branches list has is_default/s
   expect(r.statusCode).toBe(200)
   expect(r.json().branch.name).toBe('feat')
   expect(calls).toContain('db.clone:demo-main->demo-feat')
-  expect(calls).toContain('deploy:demo-feat:default:app:1') // compute = redeploy on the clone
+  expect(calls).toContain('st.clone:demo-main->demo-feat') // storage branching = bucket copy
+  expect(calls).toContain('deploy:demo-feat:default:app:1:s3=io-demo-feat') // redeploy wired to the CLONE's bucket
 
   const branches = (await get(`/projects/${id}/branches`)).json().branches
   expect(branches.map((b: { name: string }) => b.name).sort()).toEqual(['feat', 'main'])
@@ -74,6 +81,7 @@ test('secrets returns the branch bundle (seam) and is gateable', async () => {
   const r = await get(`/projects/${id}/secrets?branch=main`)
   expect(r.statusCode).toBe(200)
   expect(r.json().secrets.DATABASE_URL).toBe('pg://demo-main')
+  expect(r.json().secrets.BUCKET_NAME).toBe('io-demo-main') // S3 bundle rides the same seam
 
   await app.inject({ method: 'PUT', url: `/projects/${id}/policy/secrets.read`, payload: { decision: 'approve' } })
   const gatedRes = await get(`/projects/${id}/secrets?branch=main`)
@@ -129,9 +137,8 @@ test('manifest detail: project/branches/resources with ref.url', async () => {
   const d = (await get(`/projects/${id}`)).json()
   expect(d.project.org_id).toBe('local')
   const kinds = d.resources.map((r: { kind: string }) => r.kind)
-  expect(kinds).toContain('postgres')
-  expect(kinds).toContain('compute')
-  expect(d.resources.every((r: { ref: { url?: string } }) => r.ref.url)).toBe(true)
+  expect(kinds).toEqual(expect.arrayContaining(['postgres', 'storage', 'compute']))
+  expect(d.resources.every((r: { ref: { url?: string; bucket?: string } }) => r.ref.url || r.ref.bucket)).toBe(true)
 })
 
 test('cloud-only surfaces return 501 with a clear message', async () => {

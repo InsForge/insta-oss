@@ -59,7 +59,7 @@ export function buildServer(engine: Engine): FastifyInstance {
     return {
       project: { id: project.id, name: project.name, status: project.status },
       defaultBranch: { id: defaultBranch.id, name: defaultBranch.name },
-      resources: [{ kind: 'postgres' }, { kind: 'compute' }],
+      resources: [{ kind: 'postgres' }, { kind: 'storage' }, { kind: 'compute' }],
     }
   })
 

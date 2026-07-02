@@ -18,6 +18,8 @@ export interface Branch {
   status: string
   network: string
   dbUrl: string
+  bucket: string
+  s3: Record<string, string> // S3 credential bundle for this branch (endpoint, keys, bucket)
   cloneOf: string | null
   createdAt: number
   // deployed app per compute group (group -> spec)
@@ -57,4 +59,10 @@ export interface ComputeAdapter {
     opts: { image: string; port: number; envVars: Record<string, string>; network: string; group: string },
   ): Promise<{ url: string }>
   destroy(ref: string): Promise<void>
+}
+
+export interface StorageAdapter {
+  provision(ref: string, network: string): Promise<{ bucket: string; env: Record<string, string> }>
+  cloneInto(srcRef: string, dstRef: string, network: string): Promise<void>
+  destroy(ref: string, network: string): Promise<void>
 }

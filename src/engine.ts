@@ -4,16 +4,16 @@
 import { randomUUID } from 'node:crypto'
 import { docker } from './docker'
 import { loadState, mutate } from './state'
-import type { Branch, Project, DatabaseAdapter, ComputeAdapter, AuditEvent } from './types'
+import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, AuditEvent } from './types'
 
 const DEFAULT_BRANCH = 'main'
 const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
 
 export class Engine {
-  constructor(private db: DatabaseAdapter, private compute: ComputeAdapter) {}
+  constructor(private db: DatabaseAdapter, private compute: ComputeAdapter, private storage: StorageAdapter) {}
 
   // Branch ref keys containers/networks: <project-slug>-<branch-name>.
-  private ref(project: Project, branch: string): string { return `${slug(project.name)}-${branch}` }
+  private ref(project: Project, branch: string): string { return `${slug(project.name)}-${slug(branch)}` }
   private net(project: Project, branch: string): string { return `io-${this.ref(project, branch)}` }
 
   emit(projectId: string, branch: string | null, source: AuditEvent['source'], kind: string, payload: unknown = {}, dedupKey: string | null = null): void {
@@ -35,9 +35,17 @@ export class Engine {
     const network = this.net(project, name)
     try { await docker(['network', 'create', network]) } catch { /* exists */ }
     const { url } = await this.db.provision(this.ref(project, name), network)
+    let st: { bucket: string; env: Record<string, string> }
+    try { st = await this.storage.provision(this.ref(project, name), network) }
+    catch (e) {
+      // compensate: don't orphan the db container if storage fails
+      await this.db.destroy(this.ref(project, name)).catch(() => {})
+      await docker(['network', 'rm', network]).catch(() => {})
+      throw e
+    }
     const b: Branch = {
       id: randomUUID(), projectId: project.id, name, isDefault, status: 'ready',
-      network, dbUrl: url, cloneOf, createdAt: Date.now(), apps: {},
+      network, dbUrl: url, bucket: st.bucket, s3: st.env, cloneOf, createdAt: Date.now(), apps: {},
     }
     mutate((s) => { s.branches[b.id] = b })
     return b
@@ -67,6 +75,7 @@ export class Engine {
 
     const b = await this.provisionBranch(project, name, false, source.name)
     await this.db.cloneInto(this.ref(project, source.name), this.ref(project, name))
+    await this.storage.cloneInto(this.ref(project, source.name), this.ref(project, name), b.network)
     // compute = redeploy: re-run each of the source's app groups against the clone's db
     for (const [group, app] of Object.entries(source.apps)) {
       await this.deploy(projectId, name, { image: app.image, port: app.port + 1000, group })
@@ -84,7 +93,7 @@ export class Engine {
     const port = opts.port ?? 8080
     const { url } = await this.compute.deploy(this.ref(project, b.name), {
       image: opts.image, port, network: b.network, group,
-      envVars: { DATABASE_URL: b.dbUrl },
+      envVars: { ...b.s3, DATABASE_URL: b.dbUrl },
     })
     mutate((s) => { s.branches[b.id].apps[group] = { image: opts.image, port, url } })
     this.emit(projectId, b.name, 'resource', 'deploy', { image: opts.image, group, url })
@@ -94,7 +103,7 @@ export class Engine {
   secrets(projectId: string, branchName: string): Record<string, string> {
     const b = this.getBranchByName(projectId, branchName)
     if (!b) throw new Error(`branch "${branchName}" not found`)
-    return { DATABASE_URL: b.dbUrl }
+    return { DATABASE_URL: b.dbUrl, ...b.s3 }
   }
 
   async destroyBranch(projectId: string, branchId: string): Promise<void> {
@@ -105,6 +114,7 @@ export class Engine {
     const ref = this.ref(project, b.name)
     await this.compute.destroy(ref)
     await this.db.destroy(ref)
+    await this.storage.destroy(ref, b.network)
     try { await docker(['network', 'rm', this.net(project, b.name)]) } catch { /* gone */ }
     mutate((s) => { delete s.branches[branchId] })
     this.emit(projectId, b.name, 'resource', 'branch.deleted', {})
@@ -117,6 +127,7 @@ export class Engine {
       const ref = this.ref(project, b.name)
       await this.compute.destroy(ref)
       await this.db.destroy(ref)
+      await this.storage.destroy(ref, b.network)
       try { await docker(['network', 'rm', this.net(project, b.name)]) } catch { /* gone */ }
       mutate((s) => { delete s.branches[b.id] })
     }
@@ -130,6 +141,7 @@ export class Engine {
     const branches = this.listBranches(projectId)
     const resources = branches.flatMap((b) => [
       { kind: 'postgres', name: null, branchId: b.id, ref: { url: b.dbUrl }, status: 'ready' },
+      { kind: 'storage', name: null, branchId: b.id, ref: { bucket: b.bucket }, status: 'ready' },
       ...Object.entries(b.apps).map(([group, app]) => (
         { kind: 'compute', name: group, branchId: b.id, ref: { url: app.url, image: app.image }, status: 'ready' }
       )),
