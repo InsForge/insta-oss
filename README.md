@@ -149,17 +149,50 @@ rm -rf ~/.insta-oss             # daemon state
 npm test        # 10 API-contract tests (no Docker) + 2 real-Docker isolation tests (db + bucket)
 ```
 
-## Layout
+## Code structure
 
 ```
-src/main.ts            daemon entry (instad)
-src/server.ts          the platform-compatible API surface
-src/engine.ts          project/branch lifecycle (clone = copy + redeploy)
-src/govern.ts          HITL gates · policies · one-shot approvals
-src/adapters/          local providers: postgres (copy-branching) · docker compute · shared MinIO (bucket-per-branch)
-src/state.ts           single-tenant JSON state
-docs/superpowers/      plans (capabilities + roadmap)
+insta-oss/
+├── src/
+│   ├── main.ts                 entry point — starts instad on 127.0.0.1 (checks Docker first)
+│   ├── server.ts               HTTP layer (Fastify): the standard API surface + govern gating
+│   │                           of sensitive routes (202 approval flow); cloud-only routes → 501
+│   ├── engine.ts               core orchestration: project/branch lifecycle, deploy,
+│   │                           clone = db copy + bucket copy + app redeploy, teardown
+│   │                           with compensation, audit-event emission
+│   ├── govern.ts               HITL policy engine: allow/deny/approve per action,
+│   │                           one-shot grants, `--always` → permanent allow
+│   ├── state.ts                single-tenant persistence (~/.insta-oss/state.json):
+│   │                           projects · branches · policies · approvals · events
+│   ├── types.ts                the model + adapter contracts (Database/Compute/Storage)
+│   ├── docker.ts               one helper: spawn the docker CLI, capture stdout, stdin pipe
+│   └── adapters/               swappable providers behind the contracts in types.ts
+│       ├── postgres.ts         LocalPostgres — container per branch; clone = pg_dump→restore
+│       ├── compute.ts          DockerCompute — your image per group; listen port fixed,
+│       │                       host port mapped (branch clones shift host side only)
+│       └── storage.ts          LocalMinio — one shared server, bucket per branch;
+│                               clone = mc mirror; S3 creds minted per branch
+├── test/
+│   ├── server.test.ts          API contract tests (fake adapters, no Docker, ~100ms)
+│   ├── clone-isolation.int.test.ts   real Docker: db clone is copied AND isolated
+│   └── storage.int.test.ts     real Docker: bucket clone is copied AND isolated
+├── docs/superpowers/plans/     capabilities + phased roadmap
+└── .github/workflows/ci.yml    typecheck + lint + full test suite on every push/PR
 ```
+
+**How a request flows:** CLI/MCP → `server.ts` (route + govern gate) → `engine.ts`
+(orchestration + state + events) → an adapter (`adapters/*`) → `docker.ts` → Docker.
+The engine never talks to Docker directly for resources — only through the adapter contracts.
+
+**Where to extend:**
+
+- **Different database/storage/compute backend** → implement the matching interface in
+  `types.ts` as a new file in `src/adapters/`, wire it in `main.ts`. Nothing else changes —
+  the engine, server, tests, and CLI are provider-agnostic.
+- **New endpoint** → don't. The surface mirrors the standard `insta` CLI (see parity table);
+  additions belong in the shared CLI/platform contract first.
+- **Behavior change** → contract test in `server.test.ts` (fast, fake adapters) and, if it
+  touches containers or clone isolation, an integration test alongside the existing two.
 
 ## CLI command support
 
