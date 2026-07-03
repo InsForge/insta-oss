@@ -1,3 +1,6 @@
 node_modules/
 dist/
 .insta-oss/
+
+# local-machine workaround (stray global postcss config); not part of the project
+postcss.config.mjs

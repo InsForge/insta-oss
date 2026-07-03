@@ -1,12 +1,12 @@
 # insta-oss
 
-**Instacloud-oss** — the open-source, self-hostable runtime behind [Instacloud](https://github.com/InsForge/insta-cloud).
-Runs anywhere Docker runs. Same branchable, agent-native workflow as the managed cloud —
-on local containers, single-tenant, no accounts, no billing.
+**insta-oss** — a self-hostable runtime for **branchable, agent-native environments**.
+Every project gets a database, object storage, and your app containers; every **branch is a
+disposable, fully isolated clone** of all three. Runs anywhere Docker runs — single-tenant,
+no accounts, no billing, no external services.
 
-**The stock `insta` CLI works unchanged**: this daemon serves the same API surface
-(paths + response shapes) as the Instacloud platform, and the CLI's default API URL is
-already `http://localhost:8080`. MCP gets the same property — one thin client, two targets.
+Driven by the standard **`insta` CLI** (its default API URL is already `http://localhost:8080`,
+so it works out of the box). Workflows built here run unchanged on managed Instacloud.
 
 ## What it can do (v1)
 
@@ -19,7 +19,7 @@ already `http://localhost:8080`. MCP gets the same property — one thin client,
   group, injected with that branch's `DATABASE_URL` + S3 credentials. Redeploy = replace.
 - **The secret seam** — `insta secrets` is the only way credentials leave the daemon:
   `DATABASE_URL`, `AWS_ACCESS_KEY_ID/SECRET`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION`,
-  `BUCKET_NAME` — the same key names the cloud mints, so the same app runs on both.
+  `BUCKET_NAME` — standard Postgres/S3 env vars, so apps need no insta-specific code.
 - **Governance (HITL)** — `secrets.read | deploy | project.delete | branch.delete` gate to
   allow/deny/approve; approvals are one-shot (`approve --always` makes it permanent);
   per-project `policy set`.
@@ -42,15 +42,6 @@ graph TD
   ENG --> CP["DockerCompute<br/>your image per group"]
 ```
 
-| | Instacloud (cloud) | insta-oss (this repo) |
-| --- | --- | --- |
-| db / storage / compute | Neon / Tigris / Fly (microVM) | Postgres / MinIO / Docker containers |
-| branch (clone) | CoW | copy (`pg_dump` + bucket mirror) — isolated |
-| compute on branch | re-deploy | re-deploy (same semantics) |
-| governance (HITL) + events | ✅ | ✅ same gates, one-shot grants, `--always` |
-| auth | OAuth | none — localhost trust |
-| orgs / billing / usage / metrics | ✅ | 501 (cloud-only) |
-
 ## Getting started (from zero)
 
 **Prerequisites:** Docker (running) and Node ≥ 20. Nothing else — no cloud account, no API keys.
@@ -68,7 +59,7 @@ Keep this terminal open (daemon runs in the foreground for now).
 
 ### 2. Get the `insta` CLI
 
-The same CLI that drives the cloud. Until it's on npm, run it from source:
+Until it's published to npm, run it from source:
 
 ```bash
 git clone git@github.com:InsForge/insta-cli.git && cd insta-cli && npm install
@@ -126,7 +117,7 @@ Point any coding agent (Claude Code, Cursor, …) at the daemon and let it drive
 each agent can `branch create` its own disposable environment, work, and delete it —
 while `policy` + `approvals` keep destructive actions behind a human. Set
 `INSTA_API_URL` in the agent's environment; the `insta-skills` playbook teaches the workflow.
-(MCP server: same endpoints, coming via the `mcp/` submodule.)
+(MCP server over the same endpoints: coming.)
 
 ### Troubleshooting
 
@@ -165,9 +156,9 @@ src/state.ts           single-tenant JSON state
 docs/superpowers/      plans (capabilities + roadmap)
 ```
 
-## CLI command parity (stock `insta` CLI vs this daemon)
+## CLI command support
 
-The OSS follows the canonical CLI/cloud command surface exactly — no OSS-only commands.
+insta-oss implements the standard `insta` command surface — no custom commands.
 Verified by running every registered CLI command against the daemon:
 
 | Command | insta-oss behavior |
@@ -182,11 +173,11 @@ Verified by running every registered CLI command against the daemon:
 | `policy` / `policy set` | ✅ |
 | `approvals list/approve/deny` (`--always`) | ✅ one-shot grants, same 202 flow |
 | `events` | ✅ resource + govern timeline, agent ingest with dedup |
-| `login/logout` | cloud-only (no OAuth locally — localhost trust) |
+| `login/logout` | not needed — localhost trust, no accounts |
 | `metrics` / `logs` | 501 with clear message (docker stats/logs planned — roadmap Phase 2) |
-| `usage` / `billing` | 501 — cloud-only by design (no metering in OSS) |
+| `usage` / `billing` | 501 — no metering/billing in insta-oss |
 | `org create` / `tokens` | 501 — single-tenant |
 
 **Branching vs merging:** `branch` = a disposable isolated environment (clone). There is no
-`branch merge` in the cloud or here — merge happens at the **git level**: merge your code,
-run migrations against main, redeploy, delete the branch env. Branch data never merges back.
+`branch merge` — merge happens at the **git level**: merge your code, run migrations against
+main, redeploy, delete the branch env. Branch data never merges back.

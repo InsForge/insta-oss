@@ -1,13 +1,16 @@
 {
   "name": "@insforge/insta-oss",
   "version": "0.1.0",
-  "description": "Instacloud-oss — open-source self-hosted runtime: branchable, agent-native environments on local Docker. Speaks the same API surface as the Instacloud platform, so the stock `insta` CLI and MCP work unchanged.",
+  "description": "Self-hostable runtime for branchable, agent-native environments: per-project database, object storage, and app containers; every branch is a disposable isolated clone. Driven by the standard insta CLI.",
   "type": "module",
-  "bin": { "insta-oss": "src/main.ts" },
+  "bin": {
+    "insta-oss": "src/main.ts"
+  },
   "scripts": {
     "dev": "tsx src/main.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
   },
   "license": "Apache-2.0",
   "dependencies": {
@@ -17,6 +20,24 @@
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
-  }
+    "vitest": "^2.1.0",
+    "typescript-eslint": "^8.0.0",
+    "eslint": "^9.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/InsForge/insta-oss.git"
+  },
+  "keywords": [
+    "branchable-environments",
+    "agent-native",
+    "self-hosted",
+    "docker",
+    "postgres",
+    "preview-environments",
+    "hitl-governance"
+  ]
 }
