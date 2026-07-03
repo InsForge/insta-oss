@@ -56,7 +56,8 @@ export interface DatabaseAdapter {
 export interface ComputeAdapter {
   deploy(
     ref: string,
-    opts: { image: string; port: number; envVars: Record<string, string>; network: string; group: string },
+    // port = the port the app LISTENS on (never changes); hostPort = the host-side mapping.
+    opts: { image: string; port: number; hostPort: number; envVars: Record<string, string>; network: string; group: string },
   ): Promise<{ url: string }>
   destroy(ref: string): Promise<void>
 }

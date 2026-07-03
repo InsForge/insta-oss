@@ -76,23 +76,24 @@ export class Engine {
     const b = await this.provisionBranch(project, name, false, source.name)
     await this.db.cloneInto(this.ref(project, source.name), this.ref(project, name))
     await this.storage.cloneInto(this.ref(project, source.name), this.ref(project, name), b.network)
-    // compute = redeploy: re-run each of the source's app groups against the clone's db
+    // compute = redeploy: same image, SAME listen port, shifted host mapping (no collision with the source)
     for (const [group, app] of Object.entries(source.apps)) {
-      await this.deploy(projectId, name, { image: app.image, port: app.port + 1000, group })
+      await this.deploy(projectId, name, { image: app.image, port: app.port, hostPort: app.port + 1000, group })
     }
     this.emit(projectId, name, 'resource', 'branch.created', { from: source.name })
     return b
   }
 
-  async deploy(projectId: string, branchName: string, opts: { image: string; port?: number; group?: string }): Promise<{ url: string; branch: string; group: string }> {
+  async deploy(projectId: string, branchName: string, opts: { image: string; port?: number; hostPort?: number; group?: string }): Promise<{ url: string; branch: string; group: string }> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     const b = this.getBranchByName(projectId, branchName)
     if (!b) throw new Error(`branch "${branchName}" not found`)
     const group = opts.group ?? 'default'
     const port = opts.port ?? 8080
+    const hostPort = opts.hostPort ?? port
     const { url } = await this.compute.deploy(this.ref(project, b.name), {
-      image: opts.image, port, network: b.network, group,
+      image: opts.image, port, hostPort, network: b.network, group,
       envVars: { ...b.s3, DATABASE_URL: b.dbUrl },
     })
     mutate((s) => { s.branches[b.id].apps[group] = { image: opts.image, port, url } })

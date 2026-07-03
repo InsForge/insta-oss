@@ -19,7 +19,7 @@ const db: DatabaseAdapter = {
   destroy: async (ref) => { calls.push(`db.destroy:${ref}`) },
 }
 const compute: ComputeAdapter = {
-  deploy: async (ref, o) => { calls.push(`deploy:${ref}:${o.group}:${o.image}:s3=${o.envVars.BUCKET_NAME ?? 'none'}`); return { url: `http://localhost:${o.port}` } },
+  deploy: async (ref, o) => { calls.push(`deploy:${ref}:${o.group}:${o.image}:s3=${o.envVars.BUCKET_NAME ?? 'none'}:p=${o.port}->${o.hostPort}`); return { url: `http://localhost:${o.hostPort}` } },
   destroy: async (ref) => { calls.push(`compute.destroy:${ref}`) },
 }
 const storage: StorageAdapter = {
@@ -69,7 +69,8 @@ test('branch create clones data + redeploys apps; branches list has is_default/s
   expect(r.json().branch.name).toBe('feat')
   expect(calls).toContain('db.clone:demo-main->demo-feat')
   expect(calls).toContain('st.clone:demo-main->demo-feat') // storage branching = bucket copy
-  expect(calls).toContain('deploy:demo-feat:default:app:1:s3=io-demo-feat') // redeploy wired to the CLONE's bucket
+  // redeploy wired to the CLONE's bucket; SAME listen port (3000), shifted host mapping (4000)
+  expect(calls).toContain('deploy:demo-feat:default:app:1:s3=io-demo-feat:p=3000->4000')
 
   const branches = (await get(`/projects/${id}/branches`)).json().branches
   expect(branches.map((b: { name: string }) => b.name).sort()).toEqual(['feat', 'main'])

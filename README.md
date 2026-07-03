@@ -44,7 +44,7 @@ graph TD
 
 ## Getting started (from zero)
 
-**Prerequisites:** Docker (running) and Node ≥ 20. Nothing else — no cloud account, no API keys.
+**Prerequisites:** Docker (running) and Node ≥ 22. Nothing else — no cloud account, no API keys.
 
 ### 1. Spawn the daemon
 
@@ -79,16 +79,19 @@ insta secrets --print          # DATABASE_URL + AWS_* S3 bundle for branch main
 ```
 
 Behind the scenes: a `io-demo-main-pg` Postgres container, a `io-demo-main` bucket on the
-shared MinIO, and a Docker network per branch.
+shared MinIO, and a Docker network per branch. `project create` also installs the related
+agent skills into your project (`.agents/skills/`, gitignored) so coding agents know the workflow.
 
 ### 4. Spawn your app into it (custom compute)
 
 ```bash
 insta deploy --image ghcr.io/you/app:latest --port 8080
 # → http://localhost:8080 — container gets DATABASE_URL + the S3 creds injected
-insta deploy --image ghcr.io/you/api:latest --port 8090 --group backend   # more compute groups
+insta deploy --image ghcr.io/you/api:latest --port 3000 --group backend   # more compute groups
 ```
 
+**`--port` = the port your app listens on inside the container** (it's also the host port for
+direct deploys). Give the container a few seconds to boot before hitting the URL.
 Your app just reads `process.env.DATABASE_URL` / the `AWS_*` vars — same code runs on the cloud.
 
 ### 5. Spawn a branch — a full isolated clone
@@ -99,6 +102,8 @@ insta manifest                 # see both branches with their own db/storage/com
 insta branch switch feat && insta secrets   # .env now points at the clone
 ```
 
+Branch apps keep the **same listen port** but map to **host port +1000** (e.g. main on
+`localhost:8080` → feat on `localhost:9080`; `insta manifest` shows each URL).
 Break anything in `feat` — `main` is untouched. Throw it away with `insta branch delete feat`.
 
 ### 6. Govern it (the HITL circuit breaker)
