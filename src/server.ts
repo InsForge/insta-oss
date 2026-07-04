@@ -49,6 +49,7 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.get('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
   app.get('/orgs/:id/billing', async (_req, reply) => notCloud(reply, 'billing'))
   app.get('/projects/:id/usage', async (_req, reply) => notCloud(reply, 'usage metering'))
+  app.get('/orgs/:id/usage', async (_req, reply) => notCloud(reply, 'usage metering'))
   app.get('/projects/:id/metrics', async (_req, reply) => notCloud(reply, 'metrics (coming to insta-oss via docker stats)'))
   app.get('/projects/:id/logs', async (_req, reply) => notCloud(reply, 'logs (coming to insta-oss via docker logs)'))
 
@@ -155,6 +156,52 @@ export function buildServer(engine: Engine): FastifyInstance {
   }
   app.post('/projects/:id/approvals/:aid/approve', decideRoute('granted'))
   app.post('/projects/:id/approvals/:aid/deny', decideRoute('denied'))
+
+  // ---- services (services-model parity) ----
+  app.get('/projects/:id/services', async (req, reply) => {
+    try { return { services: engine.services((req.params as { id: string }).id) } }
+    catch { return reply.code(404).send({ error: 'project not found' }) }
+  })
+
+  app.post('/projects/:id/services', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const body = (req.body ?? {}) as { type?: string; name?: string }
+    if (!body.type || !body.name) return reply.code(400).send({ error: 'type and name required' })
+    if (body.type !== 'compute') {
+      return reply.code(501).send({ error: `multi-${body.type} services are cloud-only for now — insta-oss provisions one postgres + one storage per project` })
+    }
+    if (!gated(id, 'service.add', reply)) return reply
+    try { return { service: engine.addComputeService(id, body.name) } }
+    catch (e) { return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) }) }
+  })
+
+  app.delete('/projects/:id/services/:sid', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    if (!sid.startsWith('cp-')) {
+      return reply.code(501).send({ error: 'removing postgres/storage services is cloud-only — insta-oss provisions one of each per project' })
+    }
+    if (!gated(id, 'service.remove', reply)) return reply
+    try { await engine.removeComputeService(id, sid.slice(3)); return { ok: true } }
+    catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
+  })
+
+  // ---- user-defined secrets (insta secrets set/unset) ----
+  app.put('/projects/:id/secrets/:name', async (req, reply) => {
+    const { id, name } = req.params as { id: string; name: string }
+    const body = (req.body ?? {}) as { value?: string; branch?: string }
+    if (!body.value) return reply.code(400).send({ error: 'value required' })
+    if (!gated(id, 'secrets.write', reply)) return reply
+    try { engine.setUserSecret(id, name, body.value, body.branch ?? null); return { ok: true } }
+    catch (e) { return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) }) }
+  })
+
+  app.delete('/projects/:id/secrets/:name', async (req, reply) => {
+    const { id, name } = req.params as { id: string; name: string }
+    const branch = (req.query as { branch?: string }).branch ?? null
+    if (!gated(id, 'secrets.write', reply)) return reply
+    engine.unsetUserSecret(id, name, branch)
+    return { ok: true }
+  })
 
   app.get('/projects/:id/events', async (req) => {
     const { id } = req.params as { id: string }

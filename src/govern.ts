@@ -8,9 +8,12 @@ import { GATED_ACTIONS } from './types'
 
 const DEFAULTS: Record<GatedAction, Decision> = {
   'secrets.read': 'allow',
+  'secrets.write': 'allow',
   deploy: 'allow',
   'project.delete': 'approve',
   'branch.delete': 'allow',
+  'service.add': 'allow',
+  'service.remove': 'allow',
 }
 
 export type GateResult =

@@ -2,7 +2,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import type { Project, Branch, Approval, AuditEvent, GatedAction, Decision } from './types'
+import type { Project, Branch, Approval, AuditEvent, GatedAction, Decision, UserSecret } from './types'
 
 export interface State {
   projects: Record<string, Project>
@@ -10,9 +10,10 @@ export interface State {
   policies: Record<string, Partial<Record<GatedAction, Decision>>> // per project
   approvals: Approval[]
   events: AuditEvent[]
+  userSecrets: Record<string, UserSecret[]> // per project id
 }
 
-const EMPTY: State = { projects: {}, branches: {}, policies: {}, approvals: [], events: [] }
+const EMPTY: State = { projects: {}, branches: {}, policies: {}, approvals: [], events: [], userSecrets: {} }
 const statePath = (): string => process.env.INSTA_OSS_STATE ?? join(homedir(), '.insta-oss', 'state.json')
 
 export function loadState(): State {

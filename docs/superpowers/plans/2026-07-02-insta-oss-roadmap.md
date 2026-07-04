@@ -34,13 +34,20 @@ projects start empty, named per-service creds, `insta secrets set/unset`, org-le
 Tested insta-oss with CLI v0.0.4: core flow green (create/secrets/deploy/branch/manifest/govern),
 but the new surfaces 404:
 
-- [ ] `insta services list/add/remove` → implement `/projects/:id/services` routes (map to the
-      existing adapters; `scale`/`upgrade` → clean 501, single-tenant local has no paid specs).
-- [ ] `insta secrets set/unset` (user-defined secrets, `secrets.write` gate) → store in state,
-      merge into the bundle + deploy env; reject reserved names.
-- [ ] `insta usage` now hits the **org** path → return the friendly 501 there too (today: bare 404).
-- [ ] Decide: keep auto-provisioned starter resources on `project create` (nice locally) or match
-      the cloud's empty-project semantics — either way, document it.
+- [x] `insta services list/add/remove` → `/projects/:id/services` routes: list reports the fixed
+      postgres (`db`) + storage (`store`) pair and every compute group; `add compute <name>` registers
+      a group (materializes on first `deploy --group`); `remove` destroys the group's containers on
+      every branch. `add/remove postgres|storage` → clean 501 (one of each per project locally);
+      gated `service.add`/`service.remove`.
+- [x] `insta secrets set/unset` → user secrets in state (project-wide + branch-scoped override),
+      merged into the bundle + deploy env; reserved names rejected; branch-scoped secrets clone with
+      the branch; gated `secrets.write`.
+- [x] `insta usage` (org path) → friendly cloud-only 501. **Decision: oss does NOT replicate cloud
+      usage** — the cloud's usage is the billing pipeline (5-dimension rate card, cost snapshots,
+      billing-cycle windows, Stripe reconciliation), meaningless without billing. Local visibility =
+      `manifest` today + Phase 2 docker-stats metrics/logs (real telemetry, no fake billing shape).
+- [x] Starter resources: keep auto-provisioning postgres+storage on `project create` locally
+      (zero-ceremony local UX; the cloud's empty-project semantics stay a cloud behavior) — documented.
 
 ## Phase 2 — metrics & logs (docker-backed)
 

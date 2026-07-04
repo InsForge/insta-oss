@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto'
 import { docker } from './docker'
 import { loadState, mutate } from './state'
-import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, AuditEvent } from './types'
+import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, AuditEvent, UserSecret } from './types'
 
 const DEFAULT_BRANCH = 'main'
 const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
@@ -80,6 +80,12 @@ export class Engine {
     for (const [group, app] of Object.entries(source.apps)) {
       await this.deploy(projectId, name, { image: app.image, port: app.port, hostPort: app.port + 1000, group })
     }
+    // platform parity: the parent branch's user-defined (branch-scoped) secrets clone onto the new branch
+    mutate((st) => {
+      const list = st.userSecrets[projectId] ?? []
+      const inherited = list.filter((u) => u.branch === source.name).map((u) => ({ ...u, branch: name }))
+      st.userSecrets[projectId] = [...list, ...inherited]
+    })
     this.emit(projectId, name, 'resource', 'branch.created', { from: source.name })
     return b
   }
@@ -94,7 +100,7 @@ export class Engine {
     const hostPort = opts.hostPort ?? port
     const { url } = await this.compute.deploy(this.ref(project, b.name), {
       image: opts.image, port, hostPort, network: b.network, group,
-      envVars: { ...b.s3, DATABASE_URL: b.dbUrl },
+      envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.userSecretsFor(projectId, b.name) },
     })
     mutate((s) => { s.branches[b.id].apps[group] = { image: opts.image, port, url } })
     this.emit(projectId, b.name, 'resource', 'deploy', { image: opts.image, group, url })
@@ -104,7 +110,95 @@ export class Engine {
   secrets(projectId: string, branchName: string): Record<string, string> {
     const b = this.getBranchByName(projectId, branchName)
     if (!b) throw new Error(`branch "${branchName}" not found`)
-    return { DATABASE_URL: b.dbUrl, ...b.s3 }
+    return { DATABASE_URL: b.dbUrl, ...b.s3, ...this.userSecretsFor(projectId, branchName) }
+  }
+
+  // ---- user-defined secrets (insta secrets set/unset) ----
+
+  /** Effective user secrets for a branch: project-wide first, branch-scoped override. */
+  userSecretsFor(projectId: string, branchName: string): Record<string, string> {
+    const list = loadState().userSecrets[projectId] ?? []
+    const out: Record<string, string> = {}
+    for (const u of list) if (u.branch === null) out[u.name] = u.value
+    for (const u of list) if (u.branch === branchName) out[u.name] = u.value
+    return out
+  }
+
+  /** Reserved = platform-minted credential names — user secrets must not clobber them. */
+  isReservedSecret(name: string): boolean {
+    return name === 'DATABASE_URL' || name === 'BUCKET_NAME' || name.startsWith('AWS_') ||
+      name.startsWith('DATABASE_URL_') || name.startsWith('BUCKET_NAME_')
+  }
+
+  setUserSecret(projectId: string, name: string, value: string, branch: string | null): void {
+    if (!this.getProject(projectId)) throw new Error('project not found')
+    if (this.isReservedSecret(name)) throw new Error(`"${name}" is a reserved platform credential name`)
+    if (branch && !this.getBranchByName(projectId, branch)) throw new Error(`branch "${branch}" not found`)
+    mutate((st) => {
+      const list = (st.userSecrets[projectId] ??= [])
+      const existing = list.find((u) => u.name === name && u.branch === branch)
+      if (existing) existing.value = value
+      else list.push({ name, value, branch } satisfies UserSecret)
+    })
+    this.emit(projectId, branch, 'govern', 'secrets.write', { name, scope: branch ?? 'project' })
+  }
+
+  unsetUserSecret(projectId: string, name: string, branch: string | null): void {
+    mutate((st) => {
+      st.userSecrets[projectId] = (st.userSecrets[projectId] ?? []).filter((u) => !(u.name === name && u.branch === branch))
+    })
+    this.emit(projectId, branch, 'govern', 'secrets.unset', { name, scope: branch ?? 'project' })
+  }
+
+  // ---- services view (services model parity) ----
+
+  /** The project's services as the CLI expects them: the fixed postgres + storage pair and
+   *  one compute service per group (registered or already deployed on the default branch). */
+  services(projectId: string): Array<{ id: string; type: string; name: string; status: string; machine_count?: number; domain?: string }> {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const main = this.listBranches(projectId).find((b) => b.isDefault)
+    const groups = new Set<string>(project.computeGroups ?? [])
+    for (const b of this.listBranches(projectId)) for (const g of Object.keys(b.apps)) groups.add(g)
+    return [
+      { id: 'pg-db', type: 'postgres', name: 'db', status: 'ready' },
+      { id: 'st-store', type: 'storage', name: 'store', status: 'ready' },
+      ...[...groups].sort().map((g) => ({
+        id: `cp-${g}`, type: 'compute', name: g, status: 'ready', machine_count: 1,
+        domain: main?.apps[g]?.url,
+      })),
+    ]
+  }
+
+  /** Register a compute group as a service (materializes on first deploy --group <name>). */
+  addComputeService(projectId: string, name: string): { id: string; type: string; name: string } {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const groups = new Set(project.computeGroups ?? [])
+    for (const b of this.listBranches(projectId)) for (const g of Object.keys(b.apps)) groups.add(g)
+    if (groups.has(name)) throw new Error(`compute service "${name}" already exists`)
+    mutate((st) => {
+      const pr = st.projects[projectId]
+      pr.computeGroups = [...(pr.computeGroups ?? []), name]
+    })
+    this.emit(projectId, null, 'resource', 'service.added', { type: 'compute', name })
+    return { id: `cp-${name}`, type: 'compute', name }
+  }
+
+  /** Remove a compute group: destroy its containers on every branch, unregister. */
+  async removeComputeService(projectId: string, name: string): Promise<void> {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    for (const b of this.listBranches(projectId)) {
+      if (!b.apps[name]) continue
+      await docker(['rm', '-f', `io-${this.ref(project, b.name)}-app-${name}`]).catch(() => {})
+      mutate((st) => { delete st.branches[b.id].apps[name] })
+    }
+    mutate((st) => {
+      const pr = st.projects[projectId]
+      pr.computeGroups = (pr.computeGroups ?? []).filter((g) => g !== name)
+    })
+    this.emit(projectId, null, 'resource', 'service.removed', { type: 'compute', name })
   }
 
   async destroyBranch(projectId: string, branchId: string): Promise<void> {

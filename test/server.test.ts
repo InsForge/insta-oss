@@ -149,3 +149,73 @@ test('cloud-only surfaces return 501 with a clear message', async () => {
     expect(r.json().error).toMatch(/cloud-only|coming/)
   }
 })
+
+// ---- services-model parity (Phase 1.5) ----
+
+test('services list: fixed postgres+storage + compute groups; CLI shape', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
+  const { services } = (await get(`/projects/${id}/services`)).json()
+  const types = services.map((s: { type: string }) => s.type)
+  expect(types).toEqual(expect.arrayContaining(['postgres', 'storage', 'compute']))
+  const api = services.find((s: { name: string }) => s.name === 'api')
+  expect(api).toMatchObject({ id: 'cp-api', type: 'compute', status: 'ready', machine_count: 1 })
+})
+
+test('services add compute registers a group; duplicates 409; pg/storage add → 501', async () => {
+  const id = await createProject()
+  const r = await post(`/projects/${id}/services`, { type: 'compute', name: 'worker' })
+  expect(r.statusCode).toBe(200)
+  expect(r.json().service).toMatchObject({ id: 'cp-worker', type: 'compute', name: 'worker' })
+  expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'worker' })).statusCode).toBe(409)
+  expect((await post(`/projects/${id}/services`, { type: 'postgres', name: 'db2' })).statusCode).toBe(501)
+})
+
+test('services remove compute destroys the group; pg/storage remove → 501', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
+  const del = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/cp-api` })
+  expect(del.statusCode).toBe(200)
+  const { services } = (await get(`/projects/${id}/services`)).json()
+  expect(services.some((s: { name: string }) => s.name === 'api')).toBe(false)
+  expect((await app.inject({ method: 'DELETE', url: `/projects/${id}/services/pg-db` })).statusCode).toBe(501)
+})
+
+// ---- user-defined secrets (insta secrets set/unset) ----
+
+test('secrets set/unset: project-wide + branch override, merged into the bundle + deploy env', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  expect((await app.inject({ method: 'PUT', url: `/projects/${id}/secrets/MY_FLAG`, payload: { value: 'proj' } })).statusCode).toBe(200)
+  await app.inject({ method: 'PUT', url: `/projects/${id}/secrets/MY_FLAG`, payload: { value: 'feat-only', branch: 'feat' } })
+
+  expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.MY_FLAG).toBe('proj')
+  expect((await get(`/projects/${id}/secrets?branch=feat`)).json().secrets.MY_FLAG).toBe('feat-only')
+
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  expect(calls.some((c) => c.includes('deploy:demo-main'))).toBe(true) // env carried via adapter (see fake)
+
+  await app.inject({ method: 'DELETE', url: `/projects/${id}/secrets/MY_FLAG?branch=feat` })
+  expect((await get(`/projects/${id}/secrets?branch=feat`)).json().secrets.MY_FLAG).toBe('proj') // falls back to project-wide
+})
+
+test('secrets set rejects reserved names and is gateable via secrets.write', async () => {
+  const id = await createProject()
+  expect((await app.inject({ method: 'PUT', url: `/projects/${id}/secrets/DATABASE_URL`, payload: { value: 'x' } })).statusCode).toBe(400)
+  expect((await app.inject({ method: 'PUT', url: `/projects/${id}/secrets/AWS_SECRET_ACCESS_KEY`, payload: { value: 'x' } })).statusCode).toBe(400)
+  await app.inject({ method: 'PUT', url: `/projects/${id}/policy/secrets.write`, payload: { decision: 'approve' } })
+  expect((await app.inject({ method: 'PUT', url: `/projects/${id}/secrets/OK_NAME`, payload: { value: 'x' } })).statusCode).toBe(202)
+})
+
+test('branch create clones the parent branch-scoped user secrets', async () => {
+  const id = await createProject()
+  await app.inject({ method: 'PUT', url: `/projects/${id}/secrets/ONLY_MAIN`, payload: { value: 'v', branch: 'main' } })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  expect((await get(`/projects/${id}/secrets?branch=feat`)).json().secrets.ONLY_MAIN).toBe('v')
+})
+
+test('org-level usage returns the friendly cloud-only 501 (CLI >=0.0.4 default path)', async () => {
+  const r = await get('/orgs/local/usage')
+  expect(r.statusCode).toBe(501)
+  expect(r.json().error).toMatch(/cloud-only/)
+})

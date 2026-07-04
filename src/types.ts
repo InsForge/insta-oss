@@ -4,11 +4,14 @@
 // compute = redeploy.
 
 export type Decision = 'allow' | 'deny' | 'approve'
-export const GATED_ACTIONS = ['secrets.read', 'deploy', 'project.delete', 'branch.delete'] as const
+export const GATED_ACTIONS = ['secrets.read', 'secrets.write', 'deploy', 'project.delete', 'branch.delete', 'service.add', 'service.remove'] as const
 export type GatedAction = (typeof GATED_ACTIONS)[number]
 export const isGatedAction = (a: string): a is GatedAction => (GATED_ACTIONS as readonly string[]).includes(a)
 
-export interface Project { id: string; name: string; status: string; createdAt: number }
+export interface Project { id: string; name: string; status: string; createdAt: number; computeGroups?: string[] }
+
+// User-defined secret (via `insta secrets set`): project-wide when branch is null.
+export interface UserSecret { name: string; value: string; branch: string | null }
 
 export interface Branch {
   id: string
