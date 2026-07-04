@@ -59,11 +59,8 @@ Keep this terminal open (daemon runs in the foreground for now).
 
 ### 2. Get the `insta` CLI
 
-Until it's published to npm, run it from source:
-
 ```bash
-git clone git@github.com:InsForge/insta-cli.git && cd insta-cli && npm install
-alias insta='npx tsx ~/insta-cli/src/index.ts'     # or: npm run build && link the binary
+npm install -g insta        # the standard InstaCloud CLI (or: npx insta <cmd>)
 ```
 
 No `insta login` needed — the daemon trusts localhost and has a builtin `local` user.
