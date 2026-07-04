@@ -60,7 +60,9 @@ Keep this terminal open (daemon runs in the foreground for now).
 ### 2. Get the `insta` CLI
 
 ```bash
-npm install -g insta        # the standard InstaCloud CLI (or: npx insta <cmd>)
+# native binary — no Node required (macOS/Linux/WSL; checksum-verified)
+curl -fsSL https://raw.githubusercontent.com/InsForge/insta-cli/main/install.sh | sh
+# or, with Node:  npm install -g insta        (one-off try: npx insta@latest <cmd>)
 ```
 
 No `insta login` needed — the daemon trusts localhost and has a builtin `local` user.
