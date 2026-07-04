@@ -27,6 +27,21 @@ Shared MinIO note: one persistent `io-minio` container holds all branch buckets 
 
 ---
 
+## Phase 1.5 — services-model parity (drift found by live test, 2026-07-04)
+
+The platform/CLI moved to the **services model** (`insta services add|list|remove|scale|upgrade`,
+projects start empty, named per-service creds, `insta secrets set/unset`, org-level `usage`).
+Tested insta-oss with CLI v0.0.4: core flow green (create/secrets/deploy/branch/manifest/govern),
+but the new surfaces 404:
+
+- [ ] `insta services list/add/remove` → implement `/projects/:id/services` routes (map to the
+      existing adapters; `scale`/`upgrade` → clean 501, single-tenant local has no paid specs).
+- [ ] `insta secrets set/unset` (user-defined secrets, `secrets.write` gate) → store in state,
+      merge into the bundle + deploy env; reject reserved names.
+- [ ] `insta usage` now hits the **org** path → return the friendly 501 there too (today: bare 404).
+- [ ] Decide: keep auto-provisioned starter resources on `project create` (nice locally) or match
+      the cloud's empty-project semantics — either way, document it.
+
 ## Phase 2 — metrics & logs (docker-backed)
 
 Replace the 501s with real local implementations, keeping the cloud response shapes.
