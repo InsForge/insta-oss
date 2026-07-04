@@ -115,10 +115,20 @@ insta events                            # the full audit timeline
 
 ### Use it with an AI agent
 
-Point any coding agent (Claude Code, Cursor, …) at the daemon and let it drive the CLI:
-each agent can `branch create` its own disposable environment, work, and delete it —
-while `policy` + `approvals` keep destructive actions behind a human. Set
-`INSTA_API_URL` in the agent's environment; the `insta-skills` playbook teaches the workflow.
+The runtime is agent-native out of the box — **the agent skills install themselves**:
+
+- `insta project create` / `link` auto-installs the **`insta` skill** (the workflow playbook:
+  branch-per-task, secrets seam, approvals) plus the Neon-Postgres / Tigris-S3 / Better-Auth
+  skills into your project (`.claude/skills/` for Claude Code, `.agents/skills/` for Codex —
+  gitignored). Any agent opened in the repo picks them up automatically and knows how to
+  drive `insta` correctly.
+- It also installs the **observe hook** (`./.insta/observe`) — a credential-audit hook that
+  scans the agent's tool calls for secret leaks and reports findings to `insta events`.
+- Installed already / different agent? Add manually: `npx skills add InsForge/insta-skills -s insta`
+
+Then just point the agent at the daemon (`INSTA_API_URL` if not on the default port) and
+let it work: each agent can `branch create` its own disposable environment, develop, test,
+and delete it — while `policy` + `approvals` keep destructive actions behind a human.
 (MCP server over the same endpoints: coming.)
 
 ### Troubleshooting
