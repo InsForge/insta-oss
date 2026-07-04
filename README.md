@@ -60,10 +60,15 @@ Keep this terminal open (daemon runs in the foreground for now).
 ### 2. Get the `insta` CLI
 
 ```bash
-# native binary — no Node required (macOS/Linux/WSL; checksum-verified)
+# quick try (always the newest version — the CLI is young and updates often):
+npx insta@latest status
+# for regular use — native binary, no Node required (macOS/Linux/WSL; checksum-verified):
 curl -fsSL https://raw.githubusercontent.com/InsForge/insta-cli/main/install.sh | sh
-# or, with Node:  npm install -g insta        (one-off try: npx insta@latest <cmd>)
+# or, with Node:  npm install -g insta
 ```
+
+> The CLI is evolving fast (v0.0.x). If an installed `insta` misbehaves, update it first —
+> re-run the installer (idempotent) or `npm update -g insta`.
 
 No `insta login` needed — the daemon trusts localhost and has a builtin `local` user.
 If the daemon isn't on the default port: `export INSTA_API_URL=http://127.0.0.1:4800`.
