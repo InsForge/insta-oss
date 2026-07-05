@@ -17,6 +17,12 @@ so it works out of the box). Workflows built here run unchanged on managed Insta
   re-deployed against the clone. Writes to a branch never touch its source (test-verified).
 - **Deploy your own compute** — `deploy --image you/app` runs your container per compute
   group, injected with that branch's `DATABASE_URL` + S3 credentials. Redeploy = replace.
+- **Services** — `insta services list` shows the project's postgres / storage / compute;
+  `services add compute <name>` registers extra compute groups (workers, APIs) that materialize
+  on their first `deploy --group <name>`; `services remove compute <name>` tears one down.
+- **User secrets** — `insta secrets set NAME value` (project-wide, or `--branch` for one branch);
+  merged into the credential bundle and injected on every deploy; reserved platform names rejected;
+  branch-scoped secrets clone with the branch.
 - **The secret seam** — `insta secrets` is the only way credentials leave the daemon:
   `DATABASE_URL`, `AWS_ACCESS_KEY_ID/SECRET`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION`,
   `BUCKET_NAME` — standard Postgres/S3 env vars, so apps need no insta-specific code.
@@ -79,7 +85,9 @@ If the daemon isn't on the default port: `export INSTA_API_URL=http://127.0.0.1:
 cd ~/my-app          # the CLI links the project to your cwd (./.insta/project.json)
 insta project create demo
 #   resources: postgres, storage, compute
+insta services list            # postgres/db · storage/store (+ compute groups as you add them)
 insta secrets --print          # DATABASE_URL + AWS_* S3 bundle for branch main
+insta secrets set APP_MODE demo   # your own config — rides the same bundle, injected on deploy
 ```
 
 Behind the scenes: a `io-demo-main-pg` Postgres container, a `io-demo-main` bucket on the
@@ -118,6 +126,45 @@ insta deploy --image you/app:v2 --port 8080
 # → approval required — run: insta approvals approve <id>
 insta approvals approve <id> --always   # approve AND stop asking
 insta events                            # the full audit timeline
+```
+
+### Complete example session (verified)
+
+The exact flow below is run against every release — each output shown is real:
+
+```bash
+$ insta status
+api:     http://127.0.0.1:8080     user: local     project: (none linked)
+
+$ insta project create demo
+created project 4496c3e1-… (demo)
+  resources: postgres, storage, compute
+
+$ insta services list
+postgres/db  [ready]  pg-db
+storage/store  [ready]  st-store
+
+$ insta secrets set APP_MODE demo && insta secrets --print
+DATABASE_URL="postgres://postgres:insta@io-demo-main-pg:5432/app"
+AWS_ACCESS_KEY_ID="…"  AWS_SECRET_ACCESS_KEY="…"  AWS_ENDPOINT_URL_S3="http://io-minio:9000"
+BUCKET_NAME="io-demo-main"
+APP_MODE="demo"
+
+$ insta deploy --image nginx:alpine --port 80
+deployed nginx:alpine -> http://localhost:80 (branch main, group default)
+$ curl -s -o /dev/null -w '%{http_code}' http://localhost:80        # verify before trusting it
+200
+
+$ insta branch create feat        # clones db (with data) + bucket, redeploys the app
+created branch feat
+# feat's app: http://localhost:1080 (host port +1000, same listen port) — also serves 200
+# feat's db has main's rows; writes to feat never touch main (test-verified)
+
+$ insta project delete
+approval required for project.delete — run: insta approvals approve 7c3c9b68-…
+$ insta approvals approve 7c3c9b68-…
+$ insta project delete
+deleted project 4496c3e1-…       # zero containers left behind
 ```
 
 ### Use it with an AI agent
@@ -220,14 +267,16 @@ Verified by running every registered CLI command against the daemon:
 | `project create/link/list/delete` | ✅ (delete is govern-gated) |
 | `branch create/switch/delete/list` | ✅ (create = clone: db copy + bucket copy + app redeploy) |
 | `deploy` | ✅ (govern-gated) |
-| `secrets` / `secrets list` | ✅ full bundle: `DATABASE_URL` + `AWS_*` + `BUCKET_NAME` (gated) |
+| `secrets` / `secrets list` | ✅ full bundle: `DATABASE_URL` + `AWS_*` + `BUCKET_NAME` + user secrets (gated) |
+| `secrets set/unset NAME [--branch]` | ✅ user secrets: project-wide + branch override, injected on deploy; reserved names rejected (gated `secrets.write`) |
+| `services list` / `add compute` / `remove compute` | ✅ (gated); `add/remove postgres\|storage` → 501 — one of each per project locally |
 | `manifest` | ✅ per-branch postgres / storage / compute |
 | `policy` / `policy set` | ✅ |
 | `approvals list/approve/deny` (`--always`) | ✅ one-shot grants, same 202 flow |
 | `events` | ✅ resource + govern timeline, agent ingest with dedup |
 | `login/logout` | not needed — localhost trust, no accounts |
 | `metrics` / `logs` | 501 with clear message (docker stats/logs planned — roadmap Phase 2) |
-| `usage` / `billing` | 501 — no metering/billing in insta-oss |
+| `usage` / `billing` | 501 — cloud usage is the billing pipeline (rate card + cycles); local visibility = `manifest` + upcoming docker-stats metrics/logs |
 | `org create` / `tokens` | 501 — single-tenant |
 
 **Branching vs merging:** `branch` = a disposable isolated environment (clone). There is no
