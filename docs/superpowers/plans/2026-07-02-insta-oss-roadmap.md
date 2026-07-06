@@ -81,8 +81,13 @@ One MCP server, thin client over the same endpoints (lives in the `mcp/` submodu
 
 ## Phase 6 — local dashboard (open) via shared insta-ui
 
-- [ ] `insta-ui` package: project/branch/deploy/manifest/govern views + API-client hooks (backend-agnostic — same endpoints both sides).
-- [ ] Single-tenant shell: no auth, points at instad. (Cloud dashboard = closed shell over the same insta-ui.)
+Detailed, design-driven plan: **[2026-07-06-local-dashboard.md](./2026-07-06-local-dashboard.md)**
+(Vite/React SPA in `ui/`, served by instad at `/`; pages: Service, Branches, Logs, Usage
+(docker stats), Approvals, Settings; presentational components = the future shared insta-ui).
+Note: its Phase 2 implements this roadmap's Phase 2 endpoints (logs/metrics) as a prerequisite.
+
+- [ ] Execute the local-dashboard plan (Phases 0–4).
+- [ ] Later, when the cloud dashboard starts: extract presentational components + API hooks into a shared `insta-ui` package (cloud = closed shell over the same components/endpoints).
 
 ## Hardening backlog (any time)
 
