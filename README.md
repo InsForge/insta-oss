@@ -73,6 +73,15 @@ one command to add it.
 Anything gated that you trigger from the UI pops the same `202 → approve → retry` flow the CLI
 uses — one governance model, three clients.
 
+<details>
+<summary><b>More screenshots</b> — governance policy matrix + audit timeline, branches</summary>
+
+![Settings: per-action policy matrix and the audit-event timeline](docs/img/dashboard-settings.png)
+
+![Branches: the default branch with its Production chip; create/delete clones](docs/img/dashboard-branches.png)
+
+</details>
+
 UI development: `cd ui && npm run dev` (Vite on :5173, proxying API calls to the daemon;
 set `VITE_INSTA_API` if instad isn't on :8080).
 
