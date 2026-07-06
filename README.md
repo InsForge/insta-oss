@@ -32,8 +32,31 @@ so it works out of the box). Workflows built here run unchanged on managed Insta
 - **Audit timeline** — every resource + govern action lands in `insta events`; agents ingest
   findings via `POST /projects/:id/events` with dedup (observe-hook compatible).
 - **Agent-legible manifest** — `insta manifest` prints each branch's db / storage / compute.
+- **Local dashboard** — the daemon serves a web UI at its own URL (see below): per-branch
+  service table (live container status + local endpoints), branches, a pending-approvals
+  inbox with one-click grant/deny, and the governance policy matrix.
 
 Full roadmap and what's deliberately not in v1: [`docs/superpowers/plans/2026-07-02-insta-oss-roadmap.md`](docs/superpowers/plans/2026-07-02-insta-oss-roadmap.md).
+
+## Dashboard
+
+Build once, then `instad` serves it itself — same origin as the API, no extra process, no auth
+(localhost trust, like everything else here):
+
+```bash
+npm run build:ui        # one-time (and after pulling UI changes)
+npm run dev             # start the daemon as usual
+open http://127.0.0.1:8080     # ← the dashboard (the CLI talks to the same URL)
+```
+
+Pages: **Service** (per-branch table — status from live `docker ps`, local endpoints, updated),
+**Branches** (create/delete clones), **Approvals** (pending HITL grants with grant-once /
+grant-always / deny), **Settings** (policy matrix + event timeline). Gated actions triggered from
+the UI pop the same 202 → approve → retry flow the CLI uses. Logs/Usage light up with the
+docker-backed observability phase (Usage = live container CPU/mem — deliberately not billing).
+
+UI development: `cd ui && npm run dev` (Vite on :5173, proxying API calls to the daemon;
+set `VITE_INSTA_API` if instad isn't on :8080).
 
 ## Architecture
 
@@ -213,7 +236,7 @@ rm -rf ~/.insta-oss             # daemon state
 ## Test
 
 ```bash
-npm test        # 10 API-contract tests (no Docker) + 2 real-Docker isolation tests (db + bucket)
+npm test        # 22 API-contract tests (no Docker) + 2 real-Docker isolation tests (db + bucket)
 ```
 
 ## Code structure

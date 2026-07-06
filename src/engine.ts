@@ -120,7 +120,7 @@ export class Engine {
       image: opts.image, port, hostPort, network: b.network, group,
       envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.userSecretsFor(projectId, b.name) },
     })
-    mutate((s) => { s.branches[b.id].apps[group] = { image: opts.image, port, hostPort, url } })
+    mutate((s) => { s.branches[b.id].apps[group] = { image: opts.image, port, hostPort, url, updatedAt: Date.now() } })
     this.emit(projectId, b.name, 'resource', 'deploy', { image: opts.image, group, url })
     return { url, branch: b.name, group }
   }
@@ -185,20 +185,49 @@ export class Engine {
   // ---- services view (services model parity) ----
 
   /** The project's services as the CLI expects them: the fixed postgres + storage pair and
-   *  one compute service per group (registered or already deployed on the default branch). */
-  services(projectId: string): Array<{ id: string; type: string; name: string; status: string; machine_count?: number; domain?: string }> {
+   *  one compute service per group (registered or already deployed on the default branch).
+   *  Additive dashboard fields (never touching `status`, which the CLI prints): `runtime`
+   *  from live docker ps, `endpoint` (everything is local — container:port or host url),
+   *  `updated_at`. Branch-aware via `branchName` (defaults to the default branch). */
+  async services(projectId: string, branchName?: string): Promise<Array<{
+    id: string; type: string; name: string; status: string; machine_count?: number; domain?: string
+    runtime?: string; endpoint?: string; updated_at?: string
+  }>> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
-    const main = this.listBranches(projectId).find((b) => b.isDefault)
+    const branches = this.listBranches(projectId)
+    const branch = branchName ? branches.find((b) => b.name === branchName) : branches.find((b) => b.isDefault)
+    if (branchName && !branch) throw new Error(`branch "${branchName}" not found`)
     const groups = new Set<string>(project.computeGroups ?? [])
-    for (const b of this.listBranches(projectId)) for (const g of Object.keys(b.apps)) groups.add(g)
+    for (const b of branches) for (const g of Object.keys(b.apps)) groups.add(g)
+    let running: Set<string> | null = null
+    try {
+      const out = await docker(['ps', '--format', '{{.Names}}'])
+      running = new Set(out.toString().trim().split('\n').filter(Boolean))
+    } catch { /* docker unavailable — omit runtime rather than guess */ }
+    const ref = branch ? this.ref(project, branch.name) : undefined
+    const iso = (ms?: number): string | undefined => (ms ? new Date(ms).toISOString() : undefined)
+    const runtimeOf = (container: string): string | undefined =>
+      running ? (running.has(container) ? 'online' : 'stopped') : undefined
     return [
-      { id: 'pg-db', type: 'postgres', name: 'db', status: 'ready' },
-      { id: 'st-store', type: 'storage', name: 'store', status: 'ready' },
-      ...[...groups].sort().map((g) => ({
-        id: `cp-${g}`, type: 'compute', name: g, status: 'ready', machine_count: 1,
-        domain: main?.apps[g]?.url,
-      })),
+      { id: 'pg-db', type: 'postgres', name: 'db', status: 'ready',
+        endpoint: ref ? `io-${ref}-pg:5432` : undefined,
+        runtime: ref ? runtimeOf(`io-${ref}-pg`) : undefined,
+        updated_at: iso(branch?.createdAt) },
+      { id: 'st-store', type: 'storage', name: 'store', status: 'ready',
+        endpoint: branch ? `io-minio:9000/${branch.bucket}` : undefined,
+        runtime: runtimeOf('io-minio'),
+        updated_at: iso(branch?.createdAt) },
+      ...[...groups].sort().map((g) => {
+        const app = branch?.apps[g]
+        return {
+          id: `cp-${g}`, type: 'compute', name: g, status: 'ready', machine_count: 1,
+          domain: app?.url,
+          endpoint: app ? app.url.replace(/^https?:\/\//, '') : undefined,
+          runtime: app && ref ? runtimeOf(`io-${ref}-app-${g}`) : app ? undefined : 'none',
+          updated_at: iso(app?.updatedAt),
+        }
+      }),
     ]
   }
 

@@ -228,3 +228,55 @@ test('redeploying to a branch keeps its allocated host port (regression: collide
   await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'feat', port: 3000 }) // redeploy new image
   expect(calls).toContain('deploy:demo-feat:default:app:2:s3=io-demo-feat:p=3000->4000') // NOT ->3000
 })
+
+// ---- dashboard additions ----
+
+test('services carry dashboard fields (runtime/endpoint/updated_at) and are branch-aware', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+
+  const main = (await get(`/projects/${id}/services`)).json().services // defaults to the default branch
+  const db = main.find((s: { id: string }) => s.id === 'pg-db')
+  expect(db.endpoint).toBe('io-demo-main-pg:5432')
+  expect(db.runtime).toBe('stopped') // fake docker ps lists nothing
+  const cp = main.find((s: { id: string }) => s.id === 'cp-default')
+  expect(cp.endpoint).toBe('localhost:3000')
+  expect(cp.updated_at).toBeTruthy()
+  expect(cp.status).toBe('ready') // CLI-printed field untouched
+
+  const feat = (await get(`/projects/${id}/services?branch=feat`)).json().services
+  expect(feat.find((s: { id: string }) => s.id === 'cp-default').endpoint).toBe('localhost:4000')
+  expect((await get(`/projects/${id}/services?branch=nope`)).statusCode).toBe(404)
+})
+
+test('registered-but-undeployed compute reports runtime none', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'worker' })
+  const { services } = (await get(`/projects/${id}/services`)).json()
+  expect(services.find((s: { id: string }) => s.id === 'cp-worker').runtime).toBe('none')
+})
+
+test('dashboard serving: SPA fallback for non-API GETs; API routes always win', async () => {
+  const { mkdirSync, writeFileSync } = await import('node:fs')
+  const dist = mkdtempSync(join(tmpdir(), 'io-ui-'))
+  mkdirSync(dist, { recursive: true })
+  writeFileSync(join(dist, 'index.html'), '<html>dash</html>')
+  process.env.INSTA_OSS_UI_DIST = dist
+  const ui = buildServer(new Engine(db, compute, storage))
+  delete process.env.INSTA_OSS_UI_DIST
+
+  expect((await ui.inject({ method: 'GET', url: '/' })).body).toContain('dash')
+  expect((await ui.inject({ method: 'GET', url: '/p/some-project/main/services' })).body).toContain('dash')
+  const api = await ui.inject({ method: 'GET', url: '/projects/nope' })
+  expect(api.statusCode).toBe(404)
+  expect(api.json().error).toBeTruthy() // JSON error, not the SPA shell
+})
+
+test('dashboard serving: without a build, / explains how to get the UI', async () => {
+  process.env.INSTA_OSS_UI_DIST = join(tmpdir(), 'io-ui-definitely-missing')
+  const bare = buildServer(new Engine(db, compute, storage))
+  delete process.env.INSTA_OSS_UI_DIST
+  const r = await bare.inject({ method: 'GET', url: '/' })
+  expect(r.body).toContain('build:ui')
+})
