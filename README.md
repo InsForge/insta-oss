@@ -41,11 +41,12 @@ Full roadmap and what's deliberately not in v1: [`docs/superpowers/plans/2026-07
 ## Dashboard
 
 Build once, then `instad` serves it itself — same origin as the API, no extra process, no auth
-(localhost trust, like everything else here):
+(localhost trust, like everything else here). Full startup from zero is in
+[Getting started](#getting-started-from-zero); if the daemon is already set up:
 
 ```bash
-npm run build:ui        # one-time (and after pulling UI changes)
-npm run dev             # start the daemon as usual
+npm run build:ui               # one-time (and after pulling UI changes)
+npm run dev                    # start the daemon as usual
 open http://127.0.0.1:8080     # ← the dashboard (the CLI talks to the same URL)
 ```
 
@@ -75,13 +76,18 @@ graph TD
 
 **Prerequisites:** Docker (running) and Node ≥ 22. Nothing else — no cloud account, no API keys.
 
-### 1. Spawn the daemon
+### 1. Spawn the daemon (+ dashboard)
 
 ```bash
 git clone git@github.com:InsForge/insta-oss.git && cd insta-oss
 npm install
+npm run build:ui                  # one-time: build the dashboard the daemon will serve
 npx tsx src/main.ts               # instad on 127.0.0.1:8080  (INSTA_OSS_PORT=4800 to change)
 ```
+
+Then open **http://127.0.0.1:8080** in a browser — that's the dashboard. The same URL is the
+API the CLI talks to; one process serves both. (Skipping `build:ui` is fine — the daemon runs
+API-only and `/` tells you how to add the UI later.)
 
 First run pulls `postgres:16-alpine`, `minio/minio`, `minio/mc` — give it a minute.
 Keep this terminal open (daemon runs in the foreground for now).
