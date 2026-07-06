@@ -48,19 +48,19 @@ Extra page the mock doesn't have but OSS must: **Approvals** (sidebar badge with
 - Components stay presentational (props in, callbacks out) + one `api.ts` client (fetch, 202-aware) — the future `insta-ui` seam. Every mutation helper surfaces `{status:'approval_required'}` as a typed result, so any page can pop the approval modal.
 - State: plain fetch + `useSWR`-style polling (5s) — the daemon is local; no websockets needed for v1.
 
-## Phase 0 — serving skeleton
+## Phase 0 — serving skeleton ✅ (shipped 2026-07-06)
 
-- [ ] `ui/` scaffold (Vite React-TS + Tailwind), `ui/dist` gitignored; root `npm run build:ui` script.
-- [ ] `instad` serves `ui/dist` when present (`@fastify/static`, SPA fallback; `GET /` without a build → helpful "run npm run build:ui" page). Contract test: API routes still win.
-- [ ] App shell: top bar (org/project/branch/page breadcrumb from live data, daemon health dot), sidebar (sections + active states per mock), routing `/p/:project/:branch/<page>`.
-- [ ] Project switcher + branch picker dropdowns (from `GET /orgs/local/projects`, `GET /projects/:id/branches`); default-branch chip.
+- [x] `ui/` scaffold (Vite React-TS + Tailwind), `ui/dist` gitignored; root `npm run build:ui` script.
+- [x] `instad` serves `ui/dist` when present (`@fastify/static`, SPA fallback; `GET /` without a build → helpful "run npm run build:ui" page). Contract test: API routes still win.
+- [x] App shell: top bar (org/project/branch/page breadcrumb from live data, daemon health dot), sidebar (sections + active states per mock), routing `/p/:project/:branch/<page>`.
+- [x] Project switcher + branch picker dropdowns (from `GET /orgs/local/projects`, `GET /projects/:id/branches`); default-branch chip.
 
-## Phase 1 — Service page (the mock's page) + Branches
+## Phase 1 — Service page (the mock's page) + Branches ✅ (shipped, live-verified vs the mock)
 
-- [ ] Daemon: extend `GET /projects/:id/services` items with `status` from `docker inspect` (running → `online`, exited → `stopped`, absent → `not deployed`), `endpoint` (container name + port, or `localhost:<hostPort>` for compute), `updated_at` (from state; add timestamps on deploy/provision writes). Contract tests.
-- [ ] Service table per mock: icon, name, status dot, endpoint, relative `updated`; per-branch (compute rows follow the selected branch; postgres row = that branch's container).
-- [ ] `+ Add` dialog → `POST /projects/:id/services` (compute groups); postgres/storage disabled with the local-fixed-pair note; remove with confirm (202-aware: `service.remove` gate).
-- [ ] Branches page: table (name, default chip, clone-of lineage, created, app count) + create-from dialog + delete (202-aware `branch.delete`).
+- [x] Daemon: extend `GET /projects/:id/services` items with `status` from `docker inspect` (running → `online`, exited → `stopped`, absent → `not deployed`), `endpoint` (container name + port, or `localhost:<hostPort>` for compute), `updated_at` (from state; add timestamps on deploy/provision writes). Contract tests.
+- [x] Service table per mock: icon, name, status dot, endpoint, relative `updated`; per-branch (compute rows follow the selected branch; postgres row = that branch's container).
+- [x] `+ Add` dialog → `POST /projects/:id/services` (compute groups); postgres/storage disabled with the local-fixed-pair note; remove with confirm (202-aware: `service.remove` gate).
+- [x] Branches page: table (name, default chip, clone-of lineage, created, app count) + create-from dialog + delete (202-aware `branch.delete`).
 
 ## Phase 2 — Logs + Usage (needs the docker-backed observability endpoints)
 
@@ -68,11 +68,11 @@ Extra page the mock doesn't have but OSS must: **Approvals** (sidebar badge with
 - [ ] Logs page: branch-scoped, component/group selector, tail view with auto-refresh + pause.
 - [ ] Usage page: live CPU % + memory per container of the project (all branches), sparkline per series; copy states clearly "local telemetry — no billing in insta-oss".
 
-## Phase 3 — Governance surfaces
+## Phase 3 — Governance surfaces ✅ (shipped early — endpoints already existed; 202→grant→retry loop click-tested)
 
-- [ ] Approvals page: pending list (action, requested_at) with Grant / Grant always / Deny; sidebar badge = pending count (poll).
-- [ ] Settings page: policy matrix (7 gated actions × allow/approve/deny selects → `PUT /policy/:action`), daemon info card (version, port, state path), events timeline (reuse `GET /events`).
-- [ ] Approval modal wired into every 202-returning mutation (deploy/delete/service/secret writes) — retry-after-grant UX matching the CLI's one-shot grant semantics.
+- [x] Approvals page: pending list (action, requested_at) with Grant / Grant always / Deny; sidebar badge = pending count (poll).
+- [x] Settings page: policy matrix (7 gated actions × allow/approve/deny selects → `PUT /policy/:action`), daemon info card (version, port, state path), events timeline (reuse `GET /events`).
+- [x] Approval modal wired into every 202-returning mutation (deploy/delete/service/secret writes) — retry-after-grant UX matching the CLI's one-shot grant semantics.
 
 ## Phase 4 — polish & release
 

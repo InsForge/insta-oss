@@ -26,7 +26,7 @@ export interface Branch {
   cloneOf: string | null
   createdAt: number
   // deployed app per compute group (group -> spec)
-  apps: Record<string, { image: string; port: number; hostPort?: number; url: string }>
+  apps: Record<string, { image: string; port: number; hostPort?: number; url: string; updatedAt?: number }>
 }
 
 export interface Approval {

@@ -4,3 +4,5 @@ dist/
 
 # local-machine workaround (stray global postcss config); not part of the project
 postcss.config.mjs
+ui/node_modules/
+ui/dist/

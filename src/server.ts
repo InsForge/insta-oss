@@ -2,7 +2,11 @@
 // Instacloud platform control-plane, so the stock `insta` CLI and MCP work unchanged — just
 // pointed at localhost. Single-tenant: no OAuth; a builtin "local" org/user stand in for the
 // account system. Cloud-only surfaces (billing, usage, tokens, members) return 501.
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify'
+import fastifyStatic from '@fastify/static'
 import type { Engine } from './engine'
 import * as govern from './govern'
 import { isGatedAction, type Approval, type AuditEvent, type GatedAction } from './types'
@@ -157,10 +161,11 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.post('/projects/:id/approvals/:aid/approve', decideRoute('granted'))
   app.post('/projects/:id/approvals/:aid/deny', decideRoute('denied'))
 
-  // ---- services (services-model parity) ----
+  // ---- services (services-model parity; ?branch= scopes the dashboard's runtime columns) ----
   app.get('/projects/:id/services', async (req, reply) => {
-    try { return { services: engine.services((req.params as { id: string }).id) } }
-    catch { return reply.code(404).send({ error: 'project not found' }) }
+    const branch = (req.query as { branch?: string }).branch
+    try { return { services: await engine.services((req.params as { id: string }).id, branch) } }
+    catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : 'project not found' }) }
   })
 
   app.post('/projects/:id/services', async (req, reply) => {
@@ -220,6 +225,22 @@ export function buildServer(engine: Engine): FastifyInstance {
     engine.emit(id, body.branch ?? null, (body.source as AuditEvent['source']) ?? 'agent', body.kind, body.payload ?? {}, body.dedup_key ?? null)
     return reply.code(201).send({ ok: true })
   })
+
+  // ---- local dashboard: serve ui/dist when built (same origin as the API — localhost trust,
+  // no CORS, no auth). API routes above always win; unknown non-API GETs fall back to the SPA.
+  const uiDist = process.env.INSTA_OSS_UI_DIST ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'ui', 'dist')
+  const isApiPath = (url: string): boolean =>
+    ['/projects', '/orgs', '/me', '/tokens', '/healthz'].some((p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`))
+  if (existsSync(join(uiDist, 'index.html'))) {
+    app.register(fastifyStatic, { root: uiDist, wildcard: false })
+    app.setNotFoundHandler((req, reply) => {
+      if (req.method === 'GET' && !isApiPath(req.url)) return reply.sendFile('index.html')
+      return reply.code(404).send({ error: 'not found' })
+    })
+  } else {
+    app.get('/', async (_req, reply) => reply.type('text/html').send(
+      '<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;max-width:40rem;margin:4rem auto"><h2>insta-oss daemon</h2><p>The API is up. To get the dashboard, build the UI once:</p><pre>npm run build:ui</pre><p>then restart <code>instad</code>.</p></body>'))
+  }
 
   return app
 }
