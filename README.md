@@ -180,9 +180,15 @@ The runtime is agent-native out of the box — **the agent skills install themse
   scans the agent's tool calls for secret leaks and reports findings to `insta events`.
 - Installed already / different agent? Add manually: `npx skills add InsForge/insta-skills -s insta`
 
-Then just point the agent at the daemon (`INSTA_API_URL` if not on the default port) and
-let it work: each agent can `branch create` its own disposable environment, develop, test,
-and delete it — while `policy` + `approvals` keep destructive actions behind a human.
+Then open your coding agent in the project and just say what to build. The division of labor:
+
+- **You** run the daemon once and hold the approval power (`insta policy set … approve` puts any
+  action behind your explicit sign-off; `insta events` is your audit trail of everything).
+- **The agent** works branch-per-task: it creates its own disposable environment (data included),
+  deploys there, verifies the URL, and throws it away — `main` is never its playground.
+- **The platform enforces the boundary** — a gated action physically waits for
+  `insta approvals approve <id>`; an agent that ignores its instructions still can't get past it.
+
 (MCP server over the same endpoints: coming.)
 
 ### Troubleshooting
