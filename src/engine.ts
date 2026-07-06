@@ -76,9 +76,23 @@ export class Engine {
     const b = await this.provisionBranch(project, name, false, source.name)
     await this.db.cloneInto(this.ref(project, source.name), this.ref(project, name))
     await this.storage.cloneInto(this.ref(project, source.name), this.ref(project, name), b.network)
-    // compute = redeploy: same image, SAME listen port, shifted host mapping (no collision with the source)
+    // compute = redeploy: same image, SAME listen port, allocated host mapping. The naive
+    // parent+1000 collides as soon as a second branch exists (or the OS holds the port —
+    // e.g. macOS AirPlay on 5000), so allocate from state and retry on bind failures.
     for (const [group, app] of Object.entries(source.apps)) {
-      await this.deploy(projectId, name, { image: app.image, port: app.port, hostPort: app.port + 1000, group })
+      let lastErr: unknown
+      let deployed = false
+      for (const candidate of this.freeHostPorts(app.port, 5)) {
+        try {
+          await this.deploy(projectId, name, { image: app.image, port: app.port, hostPort: candidate, group })
+          deployed = true
+          break
+        } catch (e) {
+          lastErr = e
+          if (!/port is already allocated|address already in use/i.test(e instanceof Error ? e.message : '')) throw e
+        }
+      }
+      if (!deployed) throw lastErr
     }
     // platform parity: the parent branch's user-defined (branch-scoped) secrets clone onto the new branch
     mutate((st) => {
@@ -102,9 +116,23 @@ export class Engine {
       image: opts.image, port, hostPort, network: b.network, group,
       envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.userSecretsFor(projectId, b.name) },
     })
-    mutate((s) => { s.branches[b.id].apps[group] = { image: opts.image, port, url } })
+    mutate((s) => { s.branches[b.id].apps[group] = { image: opts.image, port, hostPort, url } })
     this.emit(projectId, b.name, 'resource', 'deploy', { image: opts.image, group, url })
     return { url, branch: b.name, group }
+  }
+
+  /** Host-port candidates for a branch redeploy: base+1000·k, skipping ports any app already uses. */
+  private freeHostPorts(basePort: number, count: number): number[] {
+    const used = new Set<number>()
+    for (const b of Object.values(loadState().branches)) {
+      for (const app of Object.values(b.apps)) used.add(app.hostPort ?? app.port)
+    }
+    const out: number[] = []
+    for (let k = 1; out.length < count && k < 50; k++) {
+      const cand = basePort + 1000 * k
+      if (!used.has(cand)) out.push(cand)
+    }
+    return out
   }
 
   secrets(projectId: string, branchName: string): Record<string, string> {
