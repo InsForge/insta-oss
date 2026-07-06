@@ -111,7 +111,8 @@ export class Engine {
     if (!b) throw new Error(`branch "${branchName}" not found`)
     const group = opts.group ?? 'default'
     const port = opts.port ?? 8080
-    const hostPort = opts.hostPort ?? port
+    // a redeploy keeps the branch app's existing host address; only brand-new apps default to port
+    const hostPort = opts.hostPort ?? b.apps[group]?.hostPort ?? port
     const { url } = await this.compute.deploy(this.ref(project, b.name), {
       image: opts.image, port, hostPort, network: b.network, group,
       envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.userSecretsFor(projectId, b.name) },

@@ -219,3 +219,12 @@ test('org-level usage returns the friendly cloud-only 501 (CLI >=0.0.4 default p
   expect(r.statusCode).toBe(501)
   expect(r.json().error).toMatch(/cloud-only/)
 })
+
+test('redeploying to a branch keeps its allocated host port (regression: collided with main)', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' }) // feat allocated 3000->4000
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'feat', port: 3000 }) // redeploy new image
+  expect(calls).toContain('deploy:demo-feat:default:app:2:s3=io-demo-feat:p=3000->4000') // NOT ->3000
+})
