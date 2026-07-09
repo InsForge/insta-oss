@@ -3,7 +3,7 @@ import { api } from './api'
 import { usePoll } from './hooks'
 import { Layout } from './components/Layout'
 import { Services } from './pages/Services'
-import { Branches } from './pages/Branches'
+import { Environments } from './pages/Environments'
 import { Logs } from './pages/Logs'
 import { Usage } from './pages/Usage'
 import { Approvals } from './pages/Approvals'
@@ -51,7 +51,9 @@ export default function App() {
       <Route path="/p/:projectId/:branch" element={<ProjectShell />}>
         <Route index element={<Navigate to="services" replace />} />
         <Route path="services" element={<Services />} />
-        <Route path="branches" element={<Branches />} />
+        <Route path="env" element={<Environments />} />
+        {/* pre-rename bookmarks */}
+        <Route path="branches" element={<Navigate to="../env" replace />} />
         <Route path="logs" element={<Logs />} />
         <Route path="usage" element={<Usage />} />
         <Route path="approvals" element={<Approvals />} />

@@ -16,7 +16,7 @@ export function Logs() {
           <p className="text-sm font-medium text-neutral-600">Coming with the docker-backed observability phase</p>
           <p className="mx-auto mt-2 max-w-md text-sm text-neutral-400">
             {error && 'status' in error && (error as { status?: number }).status === 501
-              ? 'The daemon will tail this branch\'s containers via docker logs — same response shape as the cloud.'
+              ? 'The daemon will tail this environment\'s containers via docker logs — same response shape as the cloud.'
               : error?.message}
           </p>
           <p className="mt-4 font-mono text-xs text-neutral-400">

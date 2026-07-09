@@ -33,7 +33,8 @@ so it works out of the box). Workflows built here run unchanged on managed Insta
   findings via `POST /projects/:id/events` with dedup (observe-hook compatible).
 - **Agent-legible manifest** — `insta manifest` prints each branch's db / storage / compute.
 - **Local dashboard** — the daemon serves a web UI at its own URL (see below): per-branch
-  service table (live container status + local endpoints), branches, a pending-approvals
+  service table (live container status + local endpoints), environments (the project's
+  branches), a pending-approvals
   inbox with one-click grant/deny, and the governance policy matrix.
 
 Full roadmap and what's deliberately not in v1: [`docs/superpowers/plans/2026-07-02-insta-oss-roadmap.md`](docs/superpowers/plans/2026-07-02-insta-oss-roadmap.md).
@@ -64,21 +65,21 @@ one command to add it.
 
 | Page | What it shows / does |
 | --- | --- |
-| **Service** | The selected branch's stack: Postgres, storage, and each compute group — status dot from live `docker ps` (Online / Stopped / Not deployed), the **local endpoint** (`io-<ref>-pg:5432`, `localhost:<port>`), last-updated. `+ Add` registers a compute group; ✕ removes one. |
-| **Branches** | Every branch with its `Production` chip on the default; create a branch (full clone: db copy + bucket copy + app redeploys) or delete one. Click a branch to scope the whole UI to it — the picker in the top bar does the same. |
+| **Service** | The selected environment's stack: Postgres, storage, and each compute group — status dot from live `docker ps` (Online / Stopped / Not deployed), the **local endpoint** (`io-<ref>-pg:5432`, `localhost:<port>`), last-updated. `+ Add` registers a compute group; ✕ removes one. |
+| **Environments** | Every environment (= a project branch, same as `insta branch`) with its `Prod` chip on the default; create one (full clone: db copy + bucket copy + app redeploys) or delete one. Click an environment to scope the whole UI to it — the picker in the top bar does the same. |
 | **Approvals** | The HITL inbox: every action your policy gates waits here with **Grant once / Grant always / Deny**. The sidebar badge shows the pending count live. |
 | **Settings** | The governance policy matrix (`allow / approve / deny` per action — enforced by the daemon for every caller: CLI, agent, or this dashboard) and the audit-event timeline. |
-| **Logs / Usage** | Placeholders until the docker-backed observability phase: Logs will tail the branch's containers; Usage will show live container CPU/mem (deliberately *not* billing — that's cloud-only). |
+| **Logs / Usage** | Placeholders until the docker-backed observability phase: Logs will tail the environment's containers; Usage will show live container CPU/mem (deliberately *not* billing — that's cloud-only). |
 
 Anything gated that you trigger from the UI pops the same `202 → approve → retry` flow the CLI
 uses — one governance model, three clients.
 
 <details>
-<summary><b>More screenshots</b> — governance policy matrix + audit timeline, branches</summary>
+<summary><b>More screenshots</b> — governance policy matrix + audit timeline, environments</summary>
 
 ![Settings: per-action policy matrix and the audit-event timeline](docs/img/dashboard-settings.png)
 
-![Branches: the default branch with its Production chip; create/delete clones](docs/img/dashboard-branches.png)
+![Environments: the default branch with its Prod chip; create/delete clones](docs/img/dashboard-branches.png)
 
 </details>
 

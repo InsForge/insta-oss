@@ -88,13 +88,13 @@ function SideBar() {
     <aside className="flex w-56 shrink-0 flex-col border-r border-neutral-200 bg-neutral-100">
       <nav className="flex-1 space-y-0.5 p-2">
         <SideItem to={`${base}/usage`} label="Usage" glyph="◫" />
-        <SideItem to={`${base}/branches`} label="Branches" glyph="⑂" />
+        <SideItem to={`${base}/env`} label="Environments" glyph="⑂" />
         <SideItem to={`${base}/approvals`} label="Approvals" glyph="⚖" badge={pending} />
-        <div className="px-3 pb-1 pt-4 text-[11px] font-medium uppercase tracking-wide text-neutral-400">Branch</div>
+        <div className="px-3 pb-1 pt-4 text-[11px] font-medium uppercase tracking-wide text-neutral-400">Environment</div>
         <div className="flex items-center gap-2 px-3 py-1.5 text-sm text-neutral-800">
           <span className="w-4 text-center text-[13px] opacity-70">⑂</span>
           <span className="font-medium">{branch}</span>
-          {isDefault && <Chip>Production</Chip>}
+          {isDefault && <Chip>Prod</Chip>}
         </div>
         <SideItem to={`${base}/services`} label="Service" glyph="❖" />
         <SideItem to={`${base}/logs`} label="Logs" glyph="≡" />
