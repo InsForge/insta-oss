@@ -1,79 +1,69 @@
-import { useEffect, type ReactNode } from 'react'
+import { type ReactNode } from 'react'
+import {
+  cn,
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@insforge/ui'
+import { Database, HardDrive, Server, type LucideIcon } from 'lucide-react'
 
-/** Runtime → dot + label, mock-style. */
+/** Runtime → dot + label, styled like insta-frontend's service StatusCell. */
 export function StatusDot({ runtime }: { runtime?: string }) {
-  const map: Record<string, { color: string; label: string }> = {
-    online: { color: 'bg-green-500 text-green-600', label: 'Online' },
-    stopped: { color: 'bg-neutral-400 text-neutral-500', label: 'Stopped' },
-    none: { color: 'bg-neutral-300 text-neutral-400', label: 'Not deployed' },
+  const map: Record<string, { dot: string; text: string; label: string }> = {
+    online: { dot: 'bg-success', text: 'text-success', label: 'Online' },
+    stopped: { dot: 'bg-disabled', text: 'text-muted-foreground', label: 'Stopped' },
+    none: { dot: 'bg-disabled', text: 'text-muted-foreground', label: 'Not deployed' },
   }
-  const m = map[runtime ?? ''] ?? { color: 'bg-neutral-300 text-neutral-400', label: '—' }
-  const [dot, text] = m.color.split(' ')
+  const m = map[runtime ?? ''] ?? { dot: 'bg-disabled', text: 'text-muted-foreground', label: '—' }
   return (
-    <span className={`inline-flex items-center gap-1.5 text-sm ${text}`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+    <span className={cn('inline-flex items-center gap-2 text-sm', m.text)}>
+      <span className={cn('size-1.5 rounded-full', m.dot)} />
       {m.label}
     </span>
   )
 }
 
+/** Environment status chip — same styles as insta-frontend's EnvStatusBadge. */
 export function Chip({ children }: { children: ReactNode }) {
   return (
-    <span className="rounded border border-amber-400 px-1.5 py-px text-[11px] font-medium text-amber-600">
+    <span className="inline-flex items-center rounded-md bg-warning px-2 py-0.5 text-xs font-medium text-inverse">
       {children}
     </span>
   )
 }
 
-export function Button({ children, onClick, kind = 'primary', disabled, title }: {
-  children: ReactNode; onClick?: () => void; kind?: 'primary' | 'ghost' | 'danger'; disabled?: boolean; title?: string
+/** Controlled modal over the @insforge/ui Radix dialog (no trigger — pages open it from state). */
+export function Modal({ title, onClose, children, footer }: {
+  title: string; onClose: () => void; children: ReactNode; footer?: ReactNode
 }) {
-  const styles = {
-    primary: 'bg-green-600 text-white hover:bg-green-700',
-    ghost: 'border border-neutral-200 text-neutral-700 hover:bg-neutral-50',
-    danger: 'border border-red-200 text-red-600 hover:bg-red-50',
-  }[kind]
   return (
-    <button
-      className={`rounded-md px-3 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${styles}`}
-      onClick={onClick} disabled={disabled} title={title}
-    >
-      {children}
-    </button>
-  )
-}
-
-export function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  useEffect(() => {
-    const esc = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
-    window.addEventListener('keydown', esc)
-    return () => window.removeEventListener('keydown', esc)
-  }, [onClose])
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={onClose}>
-      <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <h3 className="mb-4 text-base font-semibold text-neutral-800">{title}</h3>
-        {children}
-      </div>
-    </div>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+        </DialogHeader>
+        <DialogBody>{children}</DialogBody>
+        {footer && <DialogFooter>{footer}</DialogFooter>}
+      </DialogContent>
+    </Dialog>
   )
 }
 
 export function ErrorNote({ error }: { error?: Error | string }) {
   if (!error) return null
-  return (
-    <p className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-      {typeof error === 'string' ? error : error.message}
-    </p>
-  )
+  return <p className="mt-3 text-sm text-destructive">{typeof error === 'string' ? error : error.message}</p>
 }
 
-/** Service-type glyph (kept dependency-free: no icon lib). */
+/** Service-type icon on a semantic surface, like insta-frontend's ServiceTypeIcon tile
+ *  (lucide Database instead of the postgres brand mark — no simple-icons dependency here). */
 export function TypeIcon({ type }: { type: string }) {
-  const glyph = type === 'postgres' ? '🐘' : type === 'storage' ? '🪣' : '📦'
+  const Icon: LucideIcon = type === 'postgres' ? Database : type === 'storage' ? HardDrive : Server
   return (
-    <span className="grid h-9 w-9 place-items-center rounded-full border border-neutral-200 bg-white text-lg">
-      {glyph}
+    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-semantic-1">
+      <Icon className="size-5 text-muted-foreground" />
     </span>
   )
 }

@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { api, relTime, type Service } from '../api'
+import { Button, Input } from '@insforge/ui'
+import { Plus, X } from 'lucide-react'
+import { api, relTime } from '../api'
 import { usePoll } from '../hooks'
-import { Button, Dialog, ErrorNote, StatusDot, TypeIcon } from '../components/ui'
+import { ErrorNote, Modal, StatusDot, TypeIcon } from '../components/ui'
 import { ApprovalPrompt, type PendingApproval } from '../components/ApprovalPrompt'
 
 function AddDialog({ projectId, onClose, onDone, onApproval }: {
@@ -19,45 +21,28 @@ function AddDialog({ projectId, onClose, onDone, onApproval }: {
     onClose(); onDone()
   }
   return (
-    <Dialog title="Add service" onClose={onClose}>
-      <label className="text-xs font-medium text-neutral-500">Compute group name</label>
-      <input
+    <Modal
+      title="Add service"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={submit}>Add</Button>
+        </>
+      }
+    >
+      <label className="text-xs font-medium text-muted-foreground">Compute group name</label>
+      <Input
         autoFocus value={name} onChange={(e) => setName(e.target.value)}
         onKeyDown={(e) => e.key === 'Enter' && submit()}
-        placeholder="worker" className="mt-1 w-full rounded-md border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-green-500"
+        placeholder="worker" className="mt-1"
       />
-      <p className="mt-3 text-xs text-neutral-500">
+      <p className="mt-3 text-xs text-muted-foreground">
         Postgres and storage are the fixed local pair — one of each per project, provisioned automatically.
         A compute group materializes on its first <code className="font-mono">insta deploy --group</code>.
       </p>
       <ErrorNote error={error} />
-      <div className="mt-5 flex justify-end gap-2">
-        <Button kind="ghost" onClick={onClose}>Cancel</Button>
-        <Button onClick={submit}>+ Add</Button>
-      </div>
-    </Dialog>
-  )
-}
-
-function Row({ s, onRemove }: { s: Service; onRemove?: () => void }) {
-  return (
-    <div className="group flex items-center rounded-xl border border-neutral-200 bg-neutral-50/60 px-4 py-3 hover:bg-neutral-50">
-      <div className="flex w-2/5 items-center gap-3">
-        <TypeIcon type={s.type} />
-        <span className="text-sm font-medium capitalize text-neutral-800">
-          {s.type === 'postgres' ? 'Postgres' : s.type === 'storage' ? 'Storage' : s.name}
-        </span>
-      </div>
-      <div className="w-1/5"><StatusDot runtime={s.runtime} /></div>
-      <div className="w-1/4 truncate font-mono text-xs text-neutral-600" title={s.endpoint}>{s.endpoint ?? '—'}</div>
-      <div className="flex flex-1 items-center justify-end gap-3 text-sm text-neutral-500">
-        {relTime(s.updated_at)}
-        {onRemove && (
-          <button onClick={onRemove} title={`remove ${s.name}`}
-            className="invisible text-neutral-400 hover:text-red-600 group-hover:visible">✕</button>
-        )}
-      </div>
-    </div>
+    </Modal>
   )
 }
 
@@ -77,24 +62,56 @@ export function Services() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl px-8 py-10">
-      <div className="mb-8 flex items-center justify-between">
-        <h1 className="text-3xl font-bold text-neutral-900">Service</h1>
-        <Button onClick={() => setAdding(true)}>+ Add</Button>
+    <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="text-[32px] leading-12 font-bold">Service</h1>
+        <Button variant="primary" className="gap-1.5" onClick={() => setAdding(true)}>
+          <Plus className="size-4" />
+          Add Service
+        </Button>
       </div>
-      <div className="mb-2 flex px-4 text-xs font-medium text-neutral-500">
-        <span className="w-2/5">Service</span>
-        <span className="w-1/5">Status</span>
-        <span className="w-1/4">Endpoint</span>
-        <span className="flex-1 text-right">Updated</span>
-      </div>
-      <div className="space-y-2">
-        {(services ?? []).map((s) => (
-          <Row key={s.id} s={s} onRemove={s.type === 'compute' ? () => remove(s.id) : undefined} />
-        ))}
+      <div className="overflow-x-auto rounded-lg border border-border bg-card">
+        <table className="w-full">
+          <thead>
+            <tr className="border-b border-border">
+              <th className="px-4 py-3 text-left text-sm font-normal text-muted-foreground">Service</th>
+              <th className="px-4 py-3 text-left text-sm font-normal text-muted-foreground">Status</th>
+              <th className="px-4 py-3 text-left text-sm font-normal text-muted-foreground">Endpoint</th>
+              <th className="px-4 py-3 text-left text-sm font-normal text-muted-foreground">Updated</th>
+              <th className="w-12" aria-label="Actions" />
+            </tr>
+          </thead>
+          <tbody>
+            {(services ?? []).map((s) => (
+              <tr key={s.id} className="group border-b border-border last:border-b-0">
+                <td className="px-4 py-2">
+                  <div className="flex items-center gap-3">
+                    <TypeIcon type={s.type} />
+                    <span className="text-sm font-medium capitalize">
+                      {s.type === 'postgres' ? 'Postgres' : s.type === 'storage' ? 'Storage' : s.name}
+                    </span>
+                  </div>
+                </td>
+                <td className="px-4 py-2"><StatusDot runtime={s.runtime} /></td>
+                <td className="max-w-48 truncate px-4 py-2 font-mono text-xs text-muted-foreground" title={s.endpoint}>
+                  {s.endpoint ?? '—'}
+                </td>
+                <td className="px-4 py-2 text-sm text-muted-foreground">{relTime(s.updated_at)}</td>
+                <td className="px-2 py-2 text-right">
+                  {s.type === 'compute' && (
+                    <Button variant="ghost" size="icon-sm" onClick={() => remove(s.id)}
+                      title={`remove ${s.name}`} className="invisible group-hover:visible">
+                      <X className="size-4 text-muted-foreground" />
+                    </Button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
       {services && services.length === 2 && (
-        <p className="mt-6 text-center text-sm text-neutral-400">
+        <p className="text-center text-sm text-muted-foreground">
           No compute yet — deploy with <code className="font-mono">insta deploy --image &lt;img&gt; --port &lt;p&gt;</code> or add a group.
         </p>
       )}

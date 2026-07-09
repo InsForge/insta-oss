@@ -10,24 +10,24 @@ export function Usage() {
 
   if (!data) {
     return (
-      <div className="mx-auto max-w-4xl px-8 py-10">
-        <h1 className="mb-8 text-3xl font-bold text-neutral-900">Usage</h1>
-        <div className="rounded-xl border border-dashed border-neutral-200 px-6 py-10 text-center">
-          <p className="text-sm font-medium text-neutral-600">Local telemetry, not billing</p>
-          <p className="mx-auto mt-2 max-w-md text-sm text-neutral-400">
+      <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
+        <h1 className="text-[32px] leading-12 font-bold">Usage</h1>
+        <div className="rounded-lg border border-dashed border-border px-6 py-10 text-center">
+          <p className="text-sm font-medium">Local telemetry, not billing</p>
+          <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
             {error && 'status' in error && (error as { status?: number }).status === 501
               ? 'This page will show live CPU and memory per container via docker stats (roadmap Phase 2). insta-oss deliberately has no billing usage — that pipeline is cloud-only.'
               : error?.message}
           </p>
-          <p className="mt-4 font-mono text-xs text-neutral-400">meanwhile: docker stats</p>
+          <p className="mt-4 font-mono text-xs text-muted-foreground">meanwhile: docker stats</p>
         </div>
       </div>
     )
   }
   return (
-    <div className="mx-auto max-w-4xl px-8 py-10">
-      <h1 className="mb-8 text-3xl font-bold text-neutral-900">Usage</h1>
-      <pre className="overflow-x-auto rounded-xl bg-neutral-900 p-4 text-xs text-neutral-100">{JSON.stringify(data, null, 2)}</pre>
+    <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
+      <h1 className="text-[32px] leading-12 font-bold">Usage</h1>
+      <pre className="overflow-x-auto rounded-lg bg-semantic-6 p-4 text-xs text-inverse">{JSON.stringify(data, null, 2)}</pre>
     </div>
   )
 }

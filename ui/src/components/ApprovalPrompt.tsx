@@ -1,6 +1,7 @@
 import { useState } from 'react'
+import { Button } from '@insforge/ui'
 import { api, type ApiResult } from '../api'
-import { Button, Dialog, ErrorNote } from './ui'
+import { ErrorNote, Modal } from './ui'
 
 export type PendingApproval = { action: string; approvalId: string; retry: () => void } | null
 
@@ -24,17 +25,22 @@ export function ApprovalPrompt({ projectId, pending, onClose }: {
   }
 
   return (
-    <Dialog title="Approval required" onClose={onClose}>
-      <p className="text-sm text-neutral-600">
-        Policy gates <code className="rounded bg-neutral-100 px-1 font-mono text-[13px]">{pending.action}</code> behind
+    <Modal
+      title="Approval required"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="destructive" onClick={() => decide('deny')} disabled={busy}>Deny</Button>
+          <Button variant="secondary" onClick={() => decide('approve', true)} disabled={busy}>Grant always</Button>
+          <Button variant="primary" onClick={() => decide('approve')} disabled={busy}>Grant once</Button>
+        </>
+      }
+    >
+      <p className="text-sm text-muted-foreground">
+        Policy gates <code className="rounded bg-semantic-1 px-1 font-mono text-[13px] text-foreground">{pending.action}</code> behind
         a human decision. Grant it to run this action once, or grant always to stop asking.
       </p>
       <ErrorNote error={error} />
-      <div className="mt-5 flex justify-end gap-2">
-        <Button kind="danger" onClick={() => decide('deny')} disabled={busy}>Deny</Button>
-        <Button kind="ghost" onClick={() => decide('approve', true)} disabled={busy}>Grant always</Button>
-        <Button onClick={() => decide('approve')} disabled={busy}>Grant once</Button>
-      </div>
-    </Dialog>
+    </Modal>
   )
 }

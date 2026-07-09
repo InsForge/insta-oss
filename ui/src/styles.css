@@ -1,6 +1,68 @@
 @import "tailwindcss";
+@import "@insforge/ui/styles.css";
 
+/* Tailwind can't see class names inside pre-built packages — scan the ui dist. */
+@source "../node_modules/@insforge/ui/dist";
+
+/*
+ * Map @insforge/ui design tokens (defined in styles.css above) to Tailwind v4
+ * theme colors — same mapping as insta-frontend's globals.css. RGB-triplet
+ * tokens are wrapped in rgb(); alpha tokens are already full colors.
+ * (Font: the package's Inter-first stack; no webfont bundled — the dashboard
+ * must work offline, so we take the system fallback when Inter isn't local.)
+ */
+
+/* InstaCloud brand: primary actions are black (white in dark mode), per Figma. */
 :root {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --primary: var(--insforge-black);
+}
+.dark {
+  --primary: var(--insforge-white);
+}
+
+@theme inline {
+  --font-sans: var(--insforge-font);
+
+  /* general */
+  --color-foreground: rgb(var(--foreground));
+  --color-muted-foreground: rgb(var(--muted-foreground));
+  --color-disabled: rgb(var(--disabled));
+  --color-inverse: rgb(var(--inverse));
+  --color-primary: rgb(var(--primary));
+  --color-success: rgb(var(--success));
+  --color-destructive: rgb(var(--destructive));
+  --color-warning: rgb(var(--warning));
+  --color-info: rgb(var(--info));
+  --color-border: var(--border);
+
+  /* special surfaces */
+  --color-card: rgb(var(--card));
+  --color-toast: rgb(var(--toast));
+  --color-page: rgb(var(--page));
+
+  /* natural/semantic surface scale */
+  --color-semantic-0: rgb(var(--semantic-0));
+  --color-semantic-1: rgb(var(--semantic-1));
+  --color-semantic-2: rgb(var(--semantic-2));
+  --color-semantic-3: rgb(var(--semantic-3));
+  --color-semantic-4: rgb(var(--semantic-4));
+  --color-semantic-5: rgb(var(--semantic-5));
+  --color-semantic-6: rgb(var(--semantic-6));
+
+  /* natural/alpha overlays */
+  --color-alpha-4: var(--alpha-4);
+  --color-alpha-8: var(--alpha-8);
+  --color-alpha-12: var(--alpha-12);
+  --color-alpha-16: var(--alpha-16);
+  --color-alpha-inverse-4: var(--alpha-inverse-4);
+  --color-alpha-inverse-8: var(--alpha-inverse-8);
+  --color-alpha-inverse-12: var(--alpha-inverse-12);
+  --color-alpha-inverse-16: var(--alpha-inverse-16);
+}
+
+body {
+  background: rgb(var(--page));
+  color: rgb(var(--foreground));
+  font-family: var(--insforge-font);
   -webkit-font-smoothing: antialiased;
 }
