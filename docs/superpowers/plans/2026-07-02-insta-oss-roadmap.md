@@ -78,6 +78,19 @@ services — branching stays pure in-container CoW writes. Custom compute there 
 `ComputeAdapter` seam: a platform adapter (e.g. Railway's service-create API) or none (BYO
 runtime: apps run natively on the PaaS, wired via `insta secrets`).
 
+**Empirically validated on Railway (2026-07-09, live PoC in the founder's account):** postgres:18
+as a predefined service + volume ran `SET file_copy_method = clone; CREATE DATABASE … STRATEGY
+file_copy` successfully — PG18 errors if the filesystem can't reflink, so success proves Railway
+volumes support CoW. 100k-row database: 5 clones incl. a branch-of-branch, each ~2.5s measured
+cross-continent (server-side cost is a fraction), perfect isolation census (each branch saw only
+its own marker row; parents untouched). Compute: two probe services created via Railway's public
+API from one codebase, each env-wired to a different branch db over the private network
+(`io-pg.railway.internal`) — each reported exactly its own branch's data on public URLs.
+Adapter-critical gotchas found live: bind `::` (Railway proxy + private net are IPv6-only;
+`0.0.0.0` boots then 502s forever) and pin `PORT` to the domain's target port. Policy: Railway's
+template marketplace explicitly welcomes open-source templates (community publishing, up to 25%
+usage kickback, OSS/Technology Partners program requires open source).
+
 - [ ] `SharedPostgresCow` adapter (PG18 image, startup reflink probe, pause→clone→release, WAL_LOG
       and dump/restore fallbacks); isolation tests must pass unchanged against it.
 - [ ] `docker-compose.yml` + self-host README section (incl. socket-mount trust note, xfs/btrfs
