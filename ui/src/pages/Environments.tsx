@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import { Button, Input } from '@insforge/ui'
+import { GitBranch, Plus, X } from 'lucide-react'
 import { api } from '../api'
 import { usePoll } from '../hooks'
-import { Button, Chip, Dialog, ErrorNote } from '../components/ui'
+import { Chip, ErrorNote, Modal } from '../components/ui'
 import { ApprovalPrompt, type PendingApproval } from '../components/ApprovalPrompt'
 
 function NewEnvironmentDialog({ projectId, from, onClose, onDone }: {
@@ -22,27 +24,34 @@ function NewEnvironmentDialog({ projectId, from, onClose, onDone }: {
     onClose(); onDone(name.trim())
   }
   return (
-    <Dialog title="New environment" onClose={onClose}>
-      <label className="text-xs font-medium text-neutral-500">Name</label>
-      <input autoFocus value={name} onChange={(e) => setName(e.target.value)}
+    <Modal
+      title="New environment"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={submit} disabled={busy}>{busy ? 'Cloning…' : 'Create environment'}</Button>
+        </>
+      }
+    >
+      <label className="text-xs font-medium text-muted-foreground">Name</label>
+      <Input
+        autoFocus value={name} onChange={(e) => setName(e.target.value)}
         onKeyDown={(e) => e.key === 'Enter' && submit()}
-        placeholder="feature-x" className="mt-1 w-full rounded-md border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-green-500" />
-      <label className="mt-3 block text-xs font-medium text-neutral-500">Clone from</label>
+        placeholder="feature-x" className="mt-1"
+      />
+      <label className="mt-3 block text-xs font-medium text-muted-foreground">Clone from</label>
       <select value={source} onChange={(e) => setSource(e.target.value)}
-        className="mt-1 w-full rounded-md border border-neutral-200 px-3 py-2 text-sm">
+        className="mt-1 w-full rounded-md border border-border bg-card px-3 py-2 text-sm">
         {from.map((b) => <option key={b}>{b}</option>)}
       </select>
-      <p className="mt-3 text-xs text-neutral-500">
+      <p className="mt-3 text-xs text-muted-foreground">
         An environment is a full isolated clone: its own Postgres (data copied), its own bucket (objects copied),
         and a redeploy of every app — nothing it does touches the source environment
         (<code className="font-mono">insta branch create</code> on the CLI).
       </p>
       <ErrorNote error={error} />
-      <div className="mt-5 flex justify-end gap-2">
-        <Button kind="ghost" onClick={onClose}>Cancel</Button>
-        <Button onClick={submit} disabled={busy}>{busy ? 'Cloning…' : 'Create environment'}</Button>
-      </div>
-    </Dialog>
+    </Modal>
   )
 }
 
@@ -63,28 +72,35 @@ export function Environments() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl px-8 py-10">
-      <div className="mb-8 flex items-center justify-between">
-        <h1 className="text-3xl font-bold text-neutral-900">Environments</h1>
-        <Button onClick={() => setCreating(true)}>+ Add Environment</Button>
+    <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="text-[32px] leading-12 font-bold">Environments</h1>
+        <Button variant="primary" className="gap-1.5" onClick={() => setCreating(true)}>
+          <Plus className="size-4" />
+          Add Environment
+        </Button>
       </div>
-      <div className="space-y-2">
+      <div className="overflow-hidden rounded-lg border border-border bg-card">
         {(branches ?? []).map((b) => (
-          <div key={b.id} className="group flex items-center rounded-xl border border-neutral-200 bg-neutral-50/60 px-4 py-3 hover:bg-neutral-50">
+          <div key={b.id} className="group flex items-center border-b border-border px-4 py-3 last:border-b-0">
             <button onClick={() => nav(`/p/${projectId}/${b.name}/services`)}
-              className="flex items-center gap-2 text-sm font-medium text-neutral-800 hover:underline">
-              ⑂ {b.name}
+              className="flex items-center gap-2 text-sm font-medium hover:underline">
+              <GitBranch className="size-4 text-muted-foreground" />
+              {b.name}
             </button>
             <span className="ml-3">{b.is_default && <Chip>Prod</Chip>}</span>
-            <span className="ml-auto mr-4 text-xs text-neutral-400">{b.status}</span>
+            <span className="ml-auto mr-4 text-xs text-muted-foreground">{b.status}</span>
             {!b.is_default && (
-              <button onClick={() => del(b.id)} title="delete environment (full teardown of its containers)"
-                className="invisible text-neutral-400 hover:text-red-600 group-hover:visible">✕</button>
+              <Button variant="ghost" size="icon-sm" onClick={() => del(b.id)}
+                title="delete environment (full teardown of its containers)"
+                className="invisible group-hover:visible">
+                <X className="size-4 text-muted-foreground hover:text-destructive" />
+              </Button>
             )}
           </div>
         ))}
       </div>
-      <p className="mt-6 text-xs text-neutral-400">
+      <p className="text-xs text-muted-foreground">
         Environments never merge — promote by merging code in git, running migration files against the target
         environment, and redeploying it (see the insta skill's branching guide).
       </p>

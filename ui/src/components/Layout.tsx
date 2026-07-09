@@ -1,16 +1,23 @@
 import { Outlet, NavLink, Link, useNavigate, useParams } from 'react-router-dom'
+import { cn } from '@insforge/ui'
+import {
+  Box,
+  ChartColumn,
+  GitBranch,
+  ScrollText,
+  Settings,
+  ShieldCheck,
+  Zap,
+  type LucideIcon,
+} from 'lucide-react'
 import { api } from '../api'
 import { usePoll } from '../hooks'
 import { Chip } from './ui'
 
-function Crumb({ children }: { children: React.ReactNode }) {
-  return <span className="flex items-center gap-1 text-sm text-neutral-700">{children}</span>
-}
-
 function Picker({ value, options, onPick }: { value: string; options: { key: string; label: string }[]; onPick: (k: string) => void }) {
   return (
     <select
-      className="cursor-pointer appearance-none rounded-md bg-transparent py-1 pr-5 text-sm font-medium text-neutral-800 hover:bg-neutral-100"
+      className="cursor-pointer appearance-none rounded-md bg-transparent py-1 pr-5 text-sm font-medium text-foreground hover:bg-alpha-4"
       style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2710%27 height=%276%27%3E%3Cpath d=%27M1 1l4 4 4-4%27 stroke=%27%23737373%27 fill=%27none%27/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 4px center', paddingLeft: 6 }}
       value={value}
       onChange={(e) => onPick(e.target.value)}
@@ -29,17 +36,16 @@ function TopBar() {
   const project = projects?.find((p) => p.id === projectId)
 
   return (
-    <header className="flex h-12 items-center justify-between border-b border-neutral-200 bg-neutral-50 px-4">
+    <header className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
       <div className="flex items-center gap-2">
-        <Link to="/" className="mr-1 text-lg" title="insta-oss">⚡</Link>
-        <Crumb>local</Crumb>
-        <span className="text-neutral-300">/</span>
+        <span className="text-sm text-muted-foreground">local</span>
+        <span className="text-border">/</span>
         <Picker
           value={projectId ?? ''}
           options={(projects ?? (project ? [project] : [])).map((p) => ({ key: p.id, label: p.name }))}
           onPick={(id) => nav(`/p/${id}/main/services`)}
         />
-        <span className="text-neutral-300">/</span>
+        <span className="text-border">/</span>
         <Picker
           value={branch ?? ''}
           options={(branches ?? []).map((b) => ({ key: b.name, label: b.name }))}
@@ -47,12 +53,12 @@ function TopBar() {
         />
       </div>
       <div className="flex items-center gap-4">
-        <span className="flex items-center gap-1.5 text-xs text-neutral-500" title="instad daemon">
-          <span className={`h-1.5 w-1.5 rounded-full ${health?.ok ? 'bg-green-500' : 'bg-red-500'}`} />
+        <span className="flex items-center gap-1.5 text-xs text-muted-foreground" title="instad daemon">
+          <span className={cn('size-1.5 rounded-full', health?.ok ? 'bg-success' : 'bg-destructive')} />
           daemon
         </span>
         <a href="https://github.com/InsForge/insta-oss#readme" target="_blank" rel="noreferrer"
-          className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-medium text-neutral-700 hover:bg-neutral-100">
+          className="rounded-md px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-alpha-4 hover:text-foreground">
           Docs
         </a>
       </div>
@@ -60,17 +66,22 @@ function TopBar() {
   )
 }
 
-function SideItem({ to, label, glyph, badge }: { to: string; label: string; glyph: string; badge?: number }) {
+function SideItem({ to, label, icon: Icon, badge }: { to: string; label: string; icon: LucideIcon; badge?: number }) {
   return (
     <NavLink
       to={to}
       className={({ isActive }) =>
-        `flex items-center gap-2.5 rounded-md px-3 py-1.5 text-sm ${isActive ? 'bg-white font-medium text-neutral-900 shadow-sm' : 'text-neutral-600 hover:bg-neutral-200/60'}`}
+        cn(
+          'flex h-10 items-center gap-3 pr-3 pl-3.5 text-sm transition-colors',
+          isActive
+            ? 'bg-alpha-8 font-medium text-foreground'
+            : 'text-muted-foreground hover:bg-alpha-4 hover:text-foreground',
+        )}
     >
-      <span className="w-4 text-center text-[13px] opacity-70">{glyph}</span>
+      <Icon className="size-5 shrink-0" />
       {label}
       {badge ? (
-        <span className="ml-auto rounded-full bg-amber-500 px-1.5 text-[11px] font-semibold text-white">{badge}</span>
+        <span className="ml-auto rounded-full bg-warning px-1.5 text-[11px] font-semibold text-inverse">{badge}</span>
       ) : null}
     </NavLink>
   )
@@ -85,22 +96,32 @@ function SideBar() {
   const pending = approvals?.filter((a) => a.status === 'pending').length ?? 0
 
   return (
-    <aside className="flex w-56 shrink-0 flex-col border-r border-neutral-200 bg-neutral-100">
-      <nav className="flex-1 space-y-0.5 p-2">
-        <SideItem to={`${base}/usage`} label="Usage" glyph="◫" />
-        <SideItem to={`${base}/env`} label="Environments" glyph="⑂" />
-        <SideItem to={`${base}/approvals`} label="Approvals" glyph="⚖" badge={pending} />
-        <div className="px-3 pb-1 pt-4 text-[11px] font-medium uppercase tracking-wide text-neutral-400">Environment</div>
-        <div className="flex items-center gap-2 px-3 py-1.5 text-sm text-neutral-800">
-          <span className="w-4 text-center text-[13px] opacity-70">⑂</span>
+    <aside className="flex w-60 shrink-0 flex-col border-r border-border bg-semantic-1">
+      <Link
+        to="/"
+        className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-2.5 transition-colors hover:bg-alpha-4"
+        title="insta-oss"
+      >
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-foreground text-inverse">
+          <Zap className="size-4" />
+        </span>
+        <span className="flex-1 truncate text-sm font-bold">insta-oss</span>
+      </Link>
+      <nav className="flex flex-1 flex-col py-2">
+        <SideItem to={`${base}/usage`} label="Usage" icon={ChartColumn} />
+        <SideItem to={`${base}/env`} label="Environments" icon={GitBranch} />
+        <SideItem to={`${base}/approvals`} label="Approvals" icon={ShieldCheck} badge={pending} />
+        <div className="my-2 border-t border-border" />
+        <div className="flex h-10 items-center gap-3 pr-3 pl-3.5 text-sm">
+          <GitBranch className="size-5 shrink-0 text-muted-foreground" />
           <span className="font-medium">{branch}</span>
           {isDefault && <Chip>Prod</Chip>}
         </div>
-        <SideItem to={`${base}/services`} label="Service" glyph="❖" />
-        <SideItem to={`${base}/logs`} label="Logs" glyph="≡" />
+        <SideItem to={`${base}/services`} label="Service" icon={Box} />
+        <SideItem to={`${base}/logs`} label="Logs" icon={ScrollText} />
       </nav>
-      <div className="border-t border-neutral-200 p-2">
-        <SideItem to={`${base}/settings`} label="Settings" glyph="⚙" />
+      <div className="border-t border-border py-2">
+        <SideItem to={`${base}/settings`} label="Settings" icon={Settings} />
       </div>
     </aside>
   )
@@ -108,11 +129,11 @@ function SideBar() {
 
 export function Layout() {
   return (
-    <div className="flex h-screen flex-col bg-white text-neutral-900">
-      <TopBar />
-      <div className="flex min-h-0 flex-1">
-        <SideBar />
-        <main className="min-w-0 flex-1 overflow-y-auto">
+    <div className="flex h-screen">
+      <SideBar />
+      <div className="flex min-w-0 flex-1 flex-col bg-semantic-0">
+        <TopBar />
+        <main className="min-w-0 flex-1 overflow-y-auto px-8 pt-8 pb-6">
           <Outlet />
         </main>
       </div>

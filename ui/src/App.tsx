@@ -29,10 +29,10 @@ function ProjectRedirect({ projectId }: { projectId: string }) {
 
 function CenterNote({ title, body }: { title: string; body: string }) {
   return (
-    <div className="flex h-screen items-center justify-center bg-white">
+    <div className="flex h-screen items-center justify-center">
       <div className="text-center">
-        <h1 className="text-xl font-semibold text-neutral-800">{title}</h1>
-        <p className="mt-2 font-mono text-sm text-neutral-500">{body}</p>
+        <h1 className="text-xl font-semibold">{title}</h1>
+        <p className="mt-2 font-mono text-sm text-muted-foreground">{body}</p>
       </div>
     </div>
   )
