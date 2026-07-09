@@ -8,7 +8,8 @@ import { DockerCompute } from './adapters/compute'
 import { LocalMinio } from './adapters/storage'
 import { docker } from './docker'
 
-const port = Number(process.env.INSTA_OSS_PORT ?? process.argv[process.argv.indexOf('--port') + 1] ?? 8080)
+const portFlag = process.argv.indexOf('--port')
+const port = Number(process.env.INSTA_OSS_PORT ?? (portFlag === -1 ? undefined : process.argv[portFlag + 1]) ?? 8080)
 
 async function main(): Promise<void> {
   try { await docker(['version', '--format', '{{.Server.Version}}']) }
