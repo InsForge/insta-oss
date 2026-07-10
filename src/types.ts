@@ -59,8 +59,10 @@ export interface DatabaseAdapter {
 export interface ComputeAdapter {
   deploy(
     ref: string,
-    // port = the port the app LISTENS on (never changes); hostPort = the host-side mapping.
-    opts: { image: string; port: number; hostPort: number; envVars: Record<string, string>; network: string; group: string },
+    // port = the port the app LISTENS on (never changes). hostPort/network are LOCAL-substrate
+    // hints (docker host mapping + branch network); platform adapters (Railway, …) ignore them
+    // and own their routing/URL story.
+    opts: { image: string; port: number; hostPort?: number; envVars: Record<string, string>; network?: string; group: string },
   ): Promise<{ url: string }>
   destroy(ref: string): Promise<void>
 }

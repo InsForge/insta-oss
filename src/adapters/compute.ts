@@ -8,15 +8,17 @@ const appName = (ref: string, group: string): string => `io-${ref}-app-${group}`
 export class DockerCompute implements ComputeAdapter {
   async deploy(
     ref: string,
-    opts: { image: string; port: number; hostPort: number; envVars: Record<string, string>; network: string; group: string },
+    opts: { image: string; port: number; hostPort?: number; envVars: Record<string, string>; network?: string; group: string },
   ): Promise<{ url: string }> {
     const name = appName(ref, opts.group)
+    if (!opts.network) throw new Error('DockerCompute requires the branch network')
+    const hostPort = opts.hostPort ?? opts.port
     try { await docker(['rm', '-f', name]) } catch { /* not running yet */ }
     const envArgs = Object.entries(opts.envVars).flatMap(([k, v]) => ['-e', `${k}=${v}`])
     // host-side mapping may differ (branch clones); the app's listen port never changes
     await docker(['run', '-d', '--name', name, '--network', opts.network,
-      ...envArgs, '-p', `${opts.hostPort}:${opts.port}`, opts.image])
-    return { url: `http://localhost:${opts.hostPort}` }
+      ...envArgs, '-p', `${hostPort}:${opts.port}`, opts.image])
+    return { url: `http://localhost:${hostPort}` }
   }
 
   async destroy(ref: string): Promise<void> {
