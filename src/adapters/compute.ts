@@ -16,7 +16,7 @@ export class DockerCompute implements ComputeAdapter {
     try { await docker(['rm', '-f', name]) } catch { /* not running yet */ }
     const envArgs = Object.entries(opts.envVars).flatMap(([k, v]) => ['-e', `${k}=${v}`])
     // host-side mapping may differ (branch clones); the app's listen port never changes
-    await docker(['run', '-d', '--name', name, '--network', opts.network,
+    await docker(['run', '-d', '--restart', 'unless-stopped', '--name', name, '--network', opts.network,
       ...envArgs, '-p', `${hostPort}:${opts.port}`, opts.image])
     return { url: `http://localhost:${hostPort}` }
   }
