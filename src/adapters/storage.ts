@@ -22,7 +22,7 @@ export class LocalMinio implements StorageAdapter {
     if (out.toString().trim()) {
       await docker(['start', MINIO]).catch(() => { /* already running */ })
     } else {
-      const base = ['run', '-d', '--name', MINIO,
+      const base = ['run', '-d', '--restart', 'unless-stopped', '--name', MINIO,
         '-e', `MINIO_ROOT_USER=${USER}`, '-e', `MINIO_ROOT_PASSWORD=${PASS}`]
       try { await docker([...base, '-p', '9000:9000', IMAGE, 'server', '/data']) }
       catch {

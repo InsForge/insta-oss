@@ -10,7 +10,7 @@ const pgName = (ref: string): string => `io-${ref}-pg`
 // cloneInto pipes pg_dump of the source into the (already provisioned) destination.
 export class LocalPostgres implements DatabaseAdapter {
   async provision(ref: string, network: string): Promise<{ url: string }> {
-    await docker(['run', '-d', '--name', pgName(ref), '--network', network,
+    await docker(['run', '-d', '--restart', 'unless-stopped', '--name', pgName(ref), '--network', network,
       '-e', `POSTGRES_PASSWORD=${PASS}`, '-e', `POSTGRES_DB=${DB}`, IMAGE])
     await this.waitReady(ref)
     return { url: `postgres://postgres:${PASS}@${pgName(ref)}:5432/${DB}` }
