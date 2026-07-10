@@ -49,6 +49,56 @@ but the new surfaces 404:
 - [x] Starter resources: keep auto-provisioning postgres+storage on `project create` locally
       (zero-ceremony local UX; the cloud's empty-project semantics stay a cloud behavior) — documented.
 
+## Architecture decision (2026-07-07) — the self-host substrate
+
+Recorded from design review; supersedes "one Postgres container per branch" as the end-state.
+
+**Branching must never require creating containers.** Only *data* branches; data lives in shared
+engines and branches by CoW *inside* them:
+
+- **Postgres**: ONE shared `io-pg` (PostgreSQL 18). Branch = `CREATE DATABASE <ref> TEMPLATE
+  <src> STRATEGY FILE_COPY` with `file_copy_method = clone` — a reflink CoW clone inside the same
+  container's volume (~200ms for 100GB on xfs/btrfs/zfs). Probe at startup: reflink unsupported →
+  same statement via `WAL_LOG` (real copy, identical semantics) → dump/restore as last resort.
+  Today's container-per-branch `LocalPostgres` stays as an explicit `--isolation=container` mode.
+- **Storage**: ONE shared `io-minio`, bucket per branch (already true).
+- **Compute**: the user's image. Docker already gives its *storage* CoW for free (all branch apps
+  share the same image layers; each container adds only a thin write layer), and compute is
+  stateless by doctrine (state belongs in db/bucket; redeploy = replace) — so branch compute is
+  "run another instance with that branch's env", and its only real per-branch cost is RAM, which
+  Phase 3's reaper reclaims by suspending idle branch apps.
+
+**Truly self-hostable = a predefined stack.** `docker-compose.yml`: `instad` (in a container,
+docker socket mounted, spawns branch apps as *siblings* — the Coolify/Dokploy pattern) + `io-pg` +
+`io-minio`. Three fixed containers; app containers only for active branches. The socket mount is
+the documented trust boundary — and where the govern gates sit.
+
+**No-socket hosts (Railway-style PaaS)** can still run the whole control+data plane as predefined
+services — branching stays pure in-container CoW writes. Custom compute there goes through the
+`ComputeAdapter` seam: a platform adapter (e.g. Railway's service-create API) or none (BYO
+runtime: apps run natively on the PaaS, wired via `insta secrets`).
+
+**Empirically validated on Railway (2026-07-09, live PoC in the founder's account):** postgres:18
+as a predefined service + volume ran `SET file_copy_method = clone; CREATE DATABASE … STRATEGY
+file_copy` successfully — PG18 errors if the filesystem can't reflink, so success proves Railway
+volumes support CoW. 100k-row database: 5 clones incl. a branch-of-branch, each ~2.5s measured
+cross-continent (server-side cost is a fraction), perfect isolation census (each branch saw only
+its own marker row; parents untouched). Compute: two probe services created via Railway's public
+API from one codebase, each env-wired to a different branch db over the private network
+(`io-pg.railway.internal`) — each reported exactly its own branch's data on public URLs.
+Adapter-critical gotchas found live: bind `::` (Railway proxy + private net are IPv6-only;
+`0.0.0.0` boots then 502s forever) and pin `PORT` to the domain's target port. Policy: Railway's
+template marketplace explicitly welcomes open-source templates (community publishing, up to 25%
+usage kickback, OSS/Technology Partners program requires open source).
+
+- [ ] `SharedPostgresCow` adapter (PG18 image, startup reflink probe, pause→clone→release, WAL_LOG
+      and dump/restore fallbacks); isolation tests must pass unchanged against it.
+- [ ] `docker-compose.yml` + self-host README section (incl. socket-mount trust note, xfs/btrfs
+      volume advice for instant branches).
+- [ ] Remote self-host mode: opt-in `--listen 0.0.0.0` + shared bearer token (CLI already supports
+      `INSTA_API_URL` + bearer); TLS via reverse proxy, documented.
+- [ ] (later) `RailwayCompute`/host-process compute adapters for no-socket hosts.
+
 ## Phase 2 — metrics & logs (docker-backed)
 
 Replace the 501s with real local implementations, keeping the cloud response shapes.
