@@ -122,11 +122,11 @@ Keep this terminal open (daemon runs in the foreground for now).
 ### 2. Get the `insta` CLI
 
 ```bash
-# quick try (always the newest version — the CLI is young and updates often):
-npx insta@latest status
-# for regular use — native binary, no Node required (macOS/Linux/WSL; checksum-verified):
+# one-liner — CLI + agent skills for every coding agent on the machine (recommended):
+curl -fsSL agents.instacloud.com | sh
+# CLI only (native binary, no Node; macOS/Linux/WSL; checksum-verified):
 curl -fsSL https://raw.githubusercontent.com/InsForge/insta-cli/main/install.sh | sh
-# or, with Node:  npm install -g insta
+# or, with Node:  npm install -g insta   · quick try:  npx insta@latest status
 ```
 
 > The CLI is evolving fast (v0.0.x). If an installed `insta` misbehaves, update it first —
