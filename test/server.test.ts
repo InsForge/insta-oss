@@ -21,11 +21,16 @@ const db: DatabaseAdapter = {
 const compute: ComputeAdapter = {
   deploy: async (ref, o) => { calls.push(`deploy:${ref}:${o.group}:${o.image}:s3=${o.envVars.BUCKET_NAME ?? 'none'}:p=${o.port}->${o.hostPort}`); return { url: `http://localhost:${o.hostPort}` } },
   destroy: async (ref) => { calls.push(`compute.destroy:${ref}`) },
+  start: async (ref, group) => { calls.push(`compute.start:${ref}:${group}`) },
+  stop: async (ref, group) => { calls.push(`compute.stop:${ref}:${group}`) },
+  suspend: async (ref, group) => { calls.push(`compute.suspend:${ref}:${group}`) },
+  state: async () => 'running',
 }
 const storage: StorageAdapter = {
   provision: async (ref) => { calls.push(`st.provision:${ref}`); return { bucket: `io-${ref}`, env: { BUCKET_NAME: `io-${ref}`, AWS_ACCESS_KEY_ID: 'k', AWS_SECRET_ACCESS_KEY: 's', AWS_ENDPOINT_URL_S3: 'http://io-minio:9000', AWS_REGION: 'local' } } },
   cloneInto: async (src, dst) => { calls.push(`st.clone:${src}->${dst}`) },
   destroy: async (ref) => { calls.push(`st.destroy:${ref}`) },
+  setAccess: async (ref, _network, isPublic) => { calls.push(`st.access:${ref}:${isPublic}`) },
 }
 
 let app: ReturnType<typeof buildServer>
@@ -37,6 +42,7 @@ beforeEach(() => {
 
 const post = (url: string, payload?: unknown) => app.inject({ method: 'POST', url, payload })
 const get = (url: string) => app.inject({ method: 'GET', url })
+const put = (url: string, payload?: unknown) => app.inject({ method: 'PUT', url, payload })
 
 async function createProject(name = 'demo'): Promise<string> {
   const r = await post('/orgs/local/projects', { name })
@@ -162,13 +168,20 @@ test('services list: fixed postgres+storage + compute groups; CLI shape', async 
   expect(api).toMatchObject({ id: 'cp-api', type: 'compute', status: 'ready', machine_count: 1 })
 })
 
-test('services add compute registers a group; duplicates 409; pg/storage add → 501', async () => {
+test('services add compute registers a group; duplicates 409; pg/storage add is idempotent (contract parity)', async () => {
   const id = await createProject()
   const r = await post(`/projects/${id}/services`, { type: 'compute', name: 'worker' })
   expect(r.statusCode).toBe(200)
   expect(r.json().service).toMatchObject({ id: 'cp-worker', type: 'compute', name: 'worker' })
   expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'worker' })).statusCode).toBe(409)
-  expect((await post(`/projects/${id}/services`, { type: 'postgres', name: 'db2' })).statusCode).toBe(501)
+  // the same `services add postgres|storage` onboarding script must run on both targets
+  const pg = await post(`/projects/${id}/services`, { type: 'postgres', name: 'db2' })
+  expect(pg.statusCode).toBe(200)
+  expect(pg.json().service).toMatchObject({ id: 'pg-db', type: 'postgres', name: 'db' })
+  const st = await post(`/projects/${id}/services`, { type: 'storage', name: 'blobs' })
+  expect(st.statusCode).toBe(200)
+  expect(st.json().service).toMatchObject({ id: 'st-store', type: 'storage', name: 'store', public: false })
+  expect((await post(`/projects/${id}/services`, { type: 'queue', name: 'q' })).statusCode).toBe(400)
 })
 
 test('services remove compute destroys the group; pg/storage remove → 501', async () => {
@@ -279,4 +292,112 @@ test('dashboard serving: without a build, / explains how to get the UI', async (
   delete process.env.INSTA_OSS_UI_DIST
   const r = await bare.inject({ method: 'GET', url: '/' })
   expect(r.body).toContain('build:ui')
+})
+
+// ---- contract parity: secrets tree, service secrets, merge, lifecycle, access ----
+
+test('secrets tree: minted creds under their service; user secrets grouped by binding', async () => {
+  const id = await createProject()
+  await put(`/projects/${id}/secrets/GLOBAL_KEY`, { value: 'v' })
+  await put(`/projects/${id}/secrets/BRANCH_KEY`, { value: 'v', branch: 'main' })
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'api' })
+  await put(`/projects/${id}/secrets/API_KEY`, { value: 'v', branch: 'main', service: 'compute/api' })
+  const tree = (await get(`/projects/${id}/secrets/tree`)).json()
+  expect(tree.projectWide).toEqual(['GLOBAL_KEY'])
+  const main = tree.branches.find((b: { name: string }) => b.name === 'main')
+  expect(main.isDefault).toBe(true)
+  expect(main.unbound).toEqual(['BRANCH_KEY'])
+  expect(main.services.find((s: { type: string }) => s.type === 'postgres').secrets).toContain('DATABASE_URL')
+  expect(main.services.find((s: { type: string }) => s.type === 'storage').secrets).toContain('BUCKET_NAME')
+  expect(main.services.find((s: { name: string }) => s.name === 'api').secrets).toEqual(['API_KEY'])
+})
+
+test('secrets tree is gated by secrets.read', async () => {
+  const id = await createProject()
+  await put(`/projects/${id}/policy/secrets.read`, { decision: 'approve' })
+  expect((await get(`/projects/${id}/secrets/tree`)).statusCode).toBe(202)
+})
+
+test('secret service binding requires a branch and an existing service', async () => {
+  const id = await createProject()
+  expect((await put(`/projects/${id}/secrets/X`, { value: 'v', service: 'compute/api' })).statusCode).toBe(400)
+  expect((await put(`/projects/${id}/secrets/X`, { value: 'v', branch: 'main', service: 'compute/nope' })).statusCode).toBe(400)
+})
+
+test('service secrets endpoint returns names only, per service', async () => {
+  const id = await createProject()
+  expect((await get(`/projects/${id}/services/pg-db/secrets`)).json().secrets).toEqual(['DATABASE_URL'])
+  expect((await get(`/projects/${id}/services/st-store/secrets`)).json().secrets).toContain('AWS_ACCESS_KEY_ID')
+  expect((await get(`/projects/${id}/services/cp-nope/secrets`)).statusCode).toBe(404)
+})
+
+test('a service-bound secret is injected only into its own compute group', async () => {
+  const envs: Record<string, string[]> = {}
+  const localCompute: ComputeAdapter = {
+    deploy: async (_r, o) => { envs[o.group] = Object.keys(o.envVars); return { url: `http://localhost:${o.hostPort ?? o.port}` } },
+    destroy: async () => {},
+  }
+  const local = buildServer(new Engine(db, localCompute, storage))
+  const lpost = (url: string, payload?: unknown) => local.inject({ method: 'POST', url, payload })
+  const id = (await lpost('/orgs/local/projects', { name: 'bind-demo' })).json().project.id
+  await lpost(`/projects/${id}/services`, { type: 'compute', name: 'api' })
+  await lpost(`/projects/${id}/services`, { type: 'compute', name: 'worker' })
+  await local.inject({ method: 'PUT', url: `/projects/${id}/secrets/ONLY_API`, payload: { value: 'v', branch: 'main', service: 'compute/api' } })
+  await lpost(`/projects/${id}/deploy`, { image: 'a:1', branch: 'main', group: 'api' })
+  await lpost(`/projects/${id}/deploy`, { image: 'a:1', branch: 'main', group: 'worker' })
+  expect(envs.api).toContain('ONLY_API')
+  expect(envs.worker).not.toContain('ONLY_API')
+})
+
+test('branch merge is structural + additive: missing compute groups materialize on the target', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  await post(`/projects/${id}/deploy`, { image: 'worker:1', branch: 'feat', port: 3100, group: 'worker' })
+  const r = await post(`/projects/${id}/branches/main/merge`, { from: 'feat' })
+  expect(r.statusCode).toBe(200)
+  expect(r.json().created).toEqual([{ type: 'compute', name: 'worker' }])
+  expect(r.json().skipped).toEqual(expect.arrayContaining([
+    { type: 'postgres', name: 'db', reason: 'exists' },
+    { type: 'storage', name: 'store', reason: 'exists' },
+    { type: 'compute', name: 'default', reason: 'exists' },
+  ]))
+  // the new group runs against MAIN's own resources — no data or creds carried from feat
+  expect(calls.some((c) => c.startsWith('deploy:demo-main:worker:worker:1:s3=io-demo-main'))).toBe(true)
+  // re-merge is idempotent
+  expect((await post(`/projects/${id}/branches/main/merge`, { from: 'feat' })).json().created).toEqual([])
+  // errors: same branch / unknown source → 400; unknown target → 404
+  expect((await post(`/projects/${id}/branches/main/merge`, { from: 'main' })).statusCode).toBe(400)
+  expect((await post(`/projects/${id}/branches/main/merge`, { from: 'nope' })).statusCode).toBe(400)
+  expect((await post(`/projects/${id}/branches/nope/merge`, { from: 'feat' })).statusCode).toBe(404)
+})
+
+test('compute lifecycle: stop sets desired intent; state reports desired vs live', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  const r = await post(`/projects/${id}/services/cp-default/stop`)
+  expect(r.statusCode).toBe(200)
+  expect(r.json().service.desired_state).toBe('stopped')
+  expect(r.json().state).toBe('running') // fake adapter always reports running
+  expect(calls).toContain('compute.stop:demo-main:default')
+  const st = (await get(`/projects/${id}/services/cp-default/state`)).json()
+  expect(st).toEqual({ desiredState: 'stopped', state: 'running' })
+  await post(`/projects/${id}/services/cp-default/start`)
+  expect((await get(`/projects/${id}/services/cp-default/state`)).json().desiredState).toBe('running')
+  // lifecycle is compute-only; unknown services 404
+  expect((await post(`/projects/${id}/services/pg-db/stop`)).statusCode).toBe(400)
+  expect((await get(`/projects/${id}/services/cp-nope/state`)).statusCode).toBe(404)
+})
+
+test('storage access mode flips public/private; scale/upgrade stay clean 501s', async () => {
+  const id = await createProject()
+  const r = await put(`/projects/${id}/services/st-store/access`, { public: true })
+  expect(r.statusCode).toBe(200)
+  expect(r.json().service).toMatchObject({ id: 'st-store', public: true })
+  expect(calls).toContain('st.access:demo-main:true')
+  expect((await get(`/projects/${id}/services`)).json().services.find((s: { id: string }) => s.id === 'st-store').public).toBe(true)
+  expect((await put(`/projects/${id}/services/pg-db/access`, { public: true })).statusCode).toBe(400)
+  expect((await put(`/projects/${id}/services/st-store/access`, {})).statusCode).toBe(400)
+  expect((await post(`/projects/${id}/services/cp-x/scale`, { machineCount: 2 })).statusCode).toBe(501)
+  expect((await post(`/projects/${id}/services/cp-x/upgrade`, { spec: '2vcpu-2gb' })).statusCode).toBe(501)
 })

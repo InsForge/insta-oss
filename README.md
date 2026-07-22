@@ -20,9 +20,18 @@ so it works out of the box). Workflows built here run unchanged on managed Insta
 - **Services** — `insta services list` shows the project's postgres / storage / compute;
   `services add compute <name>` registers extra compute groups (workers, APIs) that materialize
   on their first `deploy --group <name>`; `services remove compute <name>` tears one down.
-- **User secrets** — `insta secrets set NAME value` (project-wide, or `--branch` for one branch);
+- **User secrets** — `insta secrets set NAME value` (project-wide, `--branch` for one branch, or
+  `--service` to bind it to one branch service so only that compute group's deploys receive it);
   merged into the credential bundle and injected on every deploy; reserved platform names rejected;
-  branch-scoped secrets clone with the branch.
+  branch-scoped secrets clone with the branch. `insta secrets list`/`tree` show the whole
+  project→branch→service binding picture (names only).
+- **Branch merge (structural)** — `insta branch merge <source>` materializes on the target every
+  compute group deployed on the source but missing there, against the target's own db/bucket.
+  No data ever merges — migration files carry schema forward, same as the cloud.
+- **Compute lifecycle** — `insta compute start|stop|suspend|status` per branch: persistent
+  developer intent (docker start/stop/pause) + live runtime state.
+- **Storage access mode** — `insta services set-access storage store public|private` flips the
+  branch bucket between anonymous public-read and private (MinIO anonymous policy).
 - **The secret seam** — `insta secrets` is the only way credentials leave the daemon:
   `DATABASE_URL`, `AWS_ACCESS_KEY_ID/SECRET`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION`,
   `BUCKET_NAME` — standard Postgres/S3 env vars, so apps need no insta-specific code.

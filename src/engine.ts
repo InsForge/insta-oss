@@ -76,23 +76,9 @@ export class Engine {
     const b = await this.provisionBranch(project, name, false, source.name)
     await this.db.cloneInto(this.ref(project, source.name), this.ref(project, name))
     await this.storage.cloneInto(this.ref(project, source.name), this.ref(project, name), b.network)
-    // compute = redeploy: same image, SAME listen port, allocated host mapping. The naive
-    // parent+1000 collides as soon as a second branch exists (or the OS holds the port —
-    // e.g. macOS AirPlay on 5000), so allocate from state and retry on bind failures.
+    // compute = redeploy: same image, SAME listen port, allocated host mapping.
     for (const [group, app] of Object.entries(source.apps)) {
-      let lastErr: unknown
-      let deployed = false
-      for (const candidate of this.freeHostPorts(app.port, 5)) {
-        try {
-          await this.deploy(projectId, name, { image: app.image, port: app.port, hostPort: candidate, group })
-          deployed = true
-          break
-        } catch (e) {
-          lastErr = e
-          if (!/port is already allocated|address already in use/i.test(e instanceof Error ? e.message : '')) throw e
-        }
-      }
-      if (!deployed) throw lastErr
+      await this.deployAllocatingPort(projectId, name, group, app)
     }
     // platform parity: the parent branch's user-defined (branch-scoped) secrets clone onto the new branch
     mutate((st) => {
@@ -118,11 +104,28 @@ export class Engine {
     const hostPort = opts.hostPort ?? priorHost ?? port
     const { url } = await this.compute.deploy(this.ref(project, b.name), {
       image: opts.image, port, hostPort, network: b.network, group,
-      envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.userSecretsFor(projectId, b.name) },
+      envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.deploySecretsFor(projectId, b.name, group) },
     })
     mutate((s) => { s.branches[b.id].apps[group] = { image: opts.image, port, hostPort, url, updatedAt: Date.now() } })
     this.emit(projectId, b.name, 'resource', 'deploy', { image: opts.image, group, url })
     return { url, branch: b.name, group }
+  }
+
+  /** Deploy an app spec onto a branch with an allocated host mapping. The naive parent+1000
+   *  collides as soon as a second branch exists (or the OS holds the port — e.g. macOS AirPlay
+   *  on 5000), so allocate from state and retry on bind failures. */
+  private async deployAllocatingPort(projectId: string, branchName: string, group: string, app: { image: string; port: number }): Promise<void> {
+    let lastErr: unknown
+    for (const candidate of this.freeHostPorts(app.port, 5)) {
+      try {
+        await this.deploy(projectId, branchName, { image: app.image, port: app.port, hostPort: candidate, group })
+        return
+      } catch (e) {
+        lastErr = e
+        if (!/port is already allocated|address already in use/i.test(e instanceof Error ? e.message : '')) throw e
+      }
+    }
+    throw lastErr
   }
 
   /** Host-port candidates for a branch redeploy: base+1000·k, skipping ports any app already uses. */
@@ -156,23 +159,39 @@ export class Engine {
     return out
   }
 
+  /** Env for one compute group's deploy: project-wide + branch-unbound + secrets bound to
+   *  THIS group. Secrets bound to a different service never leak into another group's env. */
+  private deploySecretsFor(projectId: string, branchName: string, group: string): Record<string, string> {
+    const list = loadState().userSecrets[projectId] ?? []
+    const out: Record<string, string> = {}
+    for (const u of list) if (u.branch === null) out[u.name] = u.value
+    for (const u of list) if (u.branch === branchName && !u.service) out[u.name] = u.value
+    for (const u of list) if (u.branch === branchName && u.service === `compute/${group}`) out[u.name] = u.value
+    return out
+  }
+
   /** Reserved = platform-minted credential names — user secrets must not clobber them. */
   isReservedSecret(name: string): boolean {
     return name === 'DATABASE_URL' || name === 'BUCKET_NAME' || name.startsWith('AWS_') ||
       name.startsWith('DATABASE_URL_') || name.startsWith('BUCKET_NAME_')
   }
 
-  setUserSecret(projectId: string, name: string, value: string, branch: string | null): void {
+  setUserSecret(projectId: string, name: string, value: string, branch: string | null, service: string | null = null): void {
     if (!this.getProject(projectId)) throw new Error('project not found')
     if (this.isReservedSecret(name)) throw new Error(`"${name}" is a reserved platform credential name`)
     if (branch && !this.getBranchByName(projectId, branch)) throw new Error(`branch "${branch}" not found`)
+    if (service) {
+      if (!branch) throw new Error('binding a secret to a service requires a branch')
+      const valid = ['postgres/db', 'storage/store', ...this.computeGroupNames(projectId).map((g) => `compute/${g}`)]
+      if (!valid.includes(service)) throw new Error(`service not found: ${service}`)
+    }
     mutate((st) => {
       const list = (st.userSecrets[projectId] ??= [])
       const existing = list.find((u) => u.name === name && u.branch === branch)
-      if (existing) existing.value = value
-      else list.push({ name, value, branch } satisfies UserSecret)
+      if (existing) { existing.value = value; existing.service = service }
+      else list.push({ name, value, branch, service } satisfies UserSecret)
     })
-    this.emit(projectId, branch, 'govern', 'secrets.write', { name, scope: branch ?? 'project' })
+    this.emit(projectId, branch, 'govern', 'secrets.write', { name, scope: branch ?? 'project', service })
   }
 
   unsetUserSecret(projectId: string, name: string, branch: string | null): void {
@@ -184,6 +203,25 @@ export class Engine {
 
   // ---- services view (services model parity) ----
 
+  /** Every compute group name: registered on the project plus any group already deployed. */
+  private computeGroupNames(projectId: string): string[] {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const groups = new Set<string>(project.computeGroups ?? [])
+    for (const b of this.listBranches(projectId)) for (const g of Object.keys(b.apps)) groups.add(g)
+    return [...groups].sort()
+  }
+
+  /** Resolve a stable oss service id (pg-db | st-store | cp-<group>) to its type + name. */
+  private serviceOf(projectId: string, serviceId: string): { type: 'postgres' | 'storage' | 'compute'; name: string } {
+    if (serviceId === 'pg-db') return { type: 'postgres', name: 'db' }
+    if (serviceId === 'st-store') return { type: 'storage', name: 'store' }
+    if (serviceId.startsWith('cp-') && this.computeGroupNames(projectId).includes(serviceId.slice(3))) {
+      return { type: 'compute', name: serviceId.slice(3) }
+    }
+    throw new Error('service not found')
+  }
+
   /** The project's services as the CLI expects them: the fixed postgres + storage pair and
    *  one compute service per group (registered or already deployed on the default branch).
    *  Additive dashboard fields (never touching `status`, which the CLI prints): `runtime`
@@ -191,15 +229,14 @@ export class Engine {
    *  `updated_at`. Branch-aware via `branchName` (defaults to the default branch). */
   async services(projectId: string, branchName?: string): Promise<Array<{
     id: string; type: string; name: string; status: string; machine_count?: number; domain?: string
-    runtime?: string; endpoint?: string; updated_at?: string
+    runtime?: string; endpoint?: string; updated_at?: string; public?: boolean; desired_state?: string
   }>> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     const branches = this.listBranches(projectId)
     const branch = branchName ? branches.find((b) => b.name === branchName) : branches.find((b) => b.isDefault)
     if (branchName && !branch) throw new Error(`branch "${branchName}" not found`)
-    const groups = new Set<string>(project.computeGroups ?? [])
-    for (const b of branches) for (const g of Object.keys(b.apps)) groups.add(g)
+    const groups = new Set<string>(this.computeGroupNames(projectId))
     let running: Set<string> | null = null
     try {
       const out = await docker(['ps', '--format', '{{.Names}}'])
@@ -215,6 +252,7 @@ export class Engine {
         runtime: ref ? runtimeOf(`io-${ref}-pg`) : undefined,
         updated_at: iso(branch?.createdAt) },
       { id: 'st-store', type: 'storage', name: 'store', status: 'ready',
+        public: branch?.storagePublic ?? false,
         endpoint: branch ? `io-minio:9000/${branch.bucket}` : undefined,
         runtime: runtimeOf('io-minio'),
         updated_at: iso(branch?.createdAt) },
@@ -222,6 +260,7 @@ export class Engine {
         const app = branch?.apps[g]
         return {
           id: `cp-${g}`, type: 'compute', name: g, status: 'ready', machine_count: 1,
+          desired_state: app?.desiredState ?? 'running',
           domain: app?.url,
           endpoint: app ? app.url.replace(/^https?:\/\//, '') : undefined,
           runtime: app && ref ? runtimeOf(`io-${ref}-app-${g}`) : app ? undefined : 'none',
@@ -229,6 +268,143 @@ export class Engine {
         }
       }),
     ]
+  }
+
+  /** Names-only secret inventory as project→branch→service→secrets (SecretTree contract shape).
+   *  Minted credential names sit under their service (DATABASE_URL → postgres, AWS_* / BUCKET_NAME
+   *  → storage), matching the cloud, where minted secrets are service-bound rows. */
+  secretTree(projectId: string): {
+    projectWide: string[]
+    branches: Array<{ name: string; isDefault: boolean; services: Array<{ type: string; name: string; secrets: string[] }>; unbound: string[] }>
+  } {
+    if (!this.getProject(projectId)) throw new Error('project not found')
+    const list = loadState().userSecrets[projectId] ?? []
+    const groups = this.computeGroupNames(projectId)
+    const bound = (branch: string, service: string): string[] =>
+      list.filter((u) => u.branch === branch && u.service === service).map((u) => u.name)
+    return {
+      projectWide: list.filter((u) => u.branch === null).map((u) => u.name).sort(),
+      branches: this.listBranches(projectId).map((b) => ({
+        name: b.name,
+        isDefault: b.isDefault,
+        services: [
+          { type: 'postgres', name: 'db', secrets: ['DATABASE_URL', ...bound(b.name, 'postgres/db')].sort() },
+          { type: 'storage', name: 'store', secrets: [...Object.keys(b.s3), ...bound(b.name, 'storage/store')].sort() },
+          ...groups.map((g) => ({ type: 'compute', name: g, secrets: bound(b.name, `compute/${g}`).sort() })),
+        ],
+        unbound: list.filter((u) => u.branch === b.name && !u.service).map((u) => u.name).sort(),
+      })),
+    }
+  }
+
+  /** A service's secret names (names only): minted credentials + user secrets bound to it. */
+  serviceSecretNames(projectId: string, serviceId: string): string[] {
+    const svc = this.serviceOf(projectId, serviceId)
+    const list = loadState().userSecrets[projectId] ?? []
+    const bound = list.filter((u) => u.service === `${svc.type}/${svc.name}`).map((u) => u.name)
+    const minted = svc.type === 'postgres' ? ['DATABASE_URL']
+      : svc.type === 'storage' ? Object.keys(this.listBranches(projectId)[0]?.s3 ?? {})
+      : []
+    return [...new Set([...minted, ...bound])].sort()
+  }
+
+  /** Structural merge (additive, no data — platform spec §6): materialize on the target branch
+   *  every compute group deployed on `from` but absent there, against the TARGET's own db/bucket.
+   *  The fixed postgres/storage pair exists on every oss branch, so it always reports as skipped. */
+  async mergeBranch(projectId: string, targetName: string, fromName: string): Promise<{
+    created: Array<{ type: string; name: string }>
+    skipped: Array<{ type: string; name: string; reason: string }>
+  }> {
+    if (!this.getProject(projectId)) throw new Error('project not found')
+    const target = this.getBranchByName(projectId, targetName)
+    if (!target) throw new Error(`target branch not found: ${targetName}`)
+    const source = this.getBranchByName(projectId, fromName)
+    if (!source) throw new Error(`source branch not found: ${fromName}`)
+    if (source.id === target.id) throw new Error('source and target are the same branch')
+
+    const created: Array<{ type: string; name: string }> = []
+    const skipped: Array<{ type: string; name: string; reason: string }> = [
+      { type: 'postgres', name: 'db', reason: 'exists' },
+      { type: 'storage', name: 'store', reason: 'exists' },
+    ]
+    for (const [group, app] of Object.entries(source.apps).sort(([a], [b]) => a.localeCompare(b))) {
+      if (target.apps[group]) { skipped.push({ type: 'compute', name: group, reason: 'exists' }); continue }
+      await this.deployAllocatingPort(projectId, target.name, group, app)
+      created.push({ type: 'compute', name: group })
+    }
+    this.emit(projectId, target.name, 'resource', 'branch.merge', { from: source.name, into: target.name, created: created.length })
+    return { created, skipped }
+  }
+
+  /** Compute lifecycle (start|stop|suspend): persistent developer intent + best-effort adapter op.
+   *  Branch-scoped — oss service ids don't encode a branch, so callers pass one (default branch
+   *  otherwise). Returns the service row + live runtime state, the shape the CLI prints. */
+  async lifecycle(projectId: string, serviceId: string, verb: 'start' | 'stop' | 'suspend', branchName?: string): Promise<{
+    service: Record<string, unknown> | undefined; state: string
+  }> {
+    const { branch, group } = this.computeTarget(projectId, serviceId, branchName)
+    const project = this.getProject(projectId)!
+    const ref = this.ref(project, branch.name)
+    const desired = verb === 'start' ? 'running' : verb === 'stop' ? 'stopped' : 'suspended'
+    let state = 'none'
+    if (branch.apps[group]) {
+      const op = this.compute[verb]
+      if (!op) throw new Error(`${verb} is not supported by this compute adapter`)
+      await op.call(this.compute, ref, group).catch(() => { /* best-effort, platform parity */ })
+      mutate((s) => { s.branches[branch.id].apps[group].desiredState = desired })
+      state = await this.liveState(ref, group)
+    }
+    this.emit(projectId, branch.name, 'resource', `service.${verb}`, { service: serviceId })
+    const service = (await this.services(projectId, branch.name)).find((x) => x.id === serviceId)
+    return { service, state }
+  }
+
+  /** A compute service's desired (developer intent) vs. live runtime state. */
+  async serviceState(projectId: string, serviceId: string, branchName?: string): Promise<{ desiredState: string; state: string }> {
+    const { branch, group } = this.computeTarget(projectId, serviceId, branchName)
+    const project = this.getProject(projectId)!
+    const app = branch.apps[group]
+    return {
+      desiredState: app?.desiredState ?? 'running',
+      state: app ? await this.liveState(this.ref(project, branch.name), group) : 'none',
+    }
+  }
+
+  /** Set a storage service's bucket access mode (anonymous public-read vs private). */
+  async setServiceAccess(projectId: string, serviceId: string, isPublic: boolean, branchName?: string): Promise<Record<string, unknown> | undefined> {
+    const svc = this.serviceOf(projectId, serviceId)
+    if (svc.type !== 'storage') throw new Error('access control is only supported for storage services')
+    const project = this.getProject(projectId)!
+    const branch = branchName ? this.getBranchByName(projectId, branchName) : this.listBranches(projectId).find((b) => b.isDefault)
+    if (!branch) throw new Error(`branch "${branchName}" not found`)
+    if (!this.storage.setAccess) throw new Error('access control is not supported by this storage adapter')
+    await this.storage.setAccess(this.ref(project, branch.name), branch.network, isPublic)
+    mutate((s) => { s.branches[branch.id].storagePublic = isPublic })
+    this.emit(projectId, branch.name, 'resource', 'service.setAccess', { service: serviceId, public: isPublic })
+    return (await this.services(projectId, branch.name)).find((x) => x.id === serviceId)
+  }
+
+  /** Resolve a lifecycle target: a compute service id + branch (default branch unless given). */
+  private computeTarget(projectId: string, serviceId: string, branchName?: string): { branch: Branch; group: string } {
+    const svc = this.serviceOf(projectId, serviceId)
+    if (svc.type !== 'compute') throw new Error('lifecycle control is only supported for compute services')
+    const branch = branchName ? this.getBranchByName(projectId, branchName) : this.listBranches(projectId).find((b) => b.isDefault)
+    if (!branch) throw new Error(`branch "${branchName}" not found`)
+    return { branch, group: svc.name }
+  }
+
+  private liveState(ref: string, group: string): Promise<string> {
+    return this.compute.state ? this.compute.state(ref, group) : Promise.resolve('unknown')
+  }
+
+  /** Contract parity with the cloud: `services add postgres|storage` must succeed so one
+   *  onboarding script runs on both. insta-oss has exactly one of each per project (auto-
+   *  provisioned on create), so this is idempotent — returns the existing fixed service. */
+  fixedService(projectId: string, type: 'postgres' | 'storage'): { id: string; type: string; name: string; public?: boolean } {
+    if (!this.getProject(projectId)) throw new Error('project not found')
+    if (type === 'postgres') return { id: 'pg-db', type: 'postgres', name: 'db' }
+    const def = this.listBranches(projectId).find((b) => b.isDefault)
+    return { id: 'st-store', type: 'storage', name: 'store', public: def?.storagePublic ?? false }
   }
 
   /** Register a compute group as a service (materializes on first deploy --group <name>). */

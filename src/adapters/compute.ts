@@ -27,4 +27,32 @@ export class DockerCompute implements ComputeAdapter {
     const ids = out.toString().trim().split('\n').filter(Boolean)
     if (ids.length) await docker(['rm', '-f', ...ids])
   }
+
+  // ---- lifecycle (persistent developer intent; suspend = docker pause) ----
+  // A paused container must be unpaused before start/stop can take effect.
+  async start(ref: string, group: string): Promise<void> {
+    const name = appName(ref, group)
+    await docker(['unpause', name]).catch(() => { /* not paused */ })
+    await docker(['start', name])
+  }
+
+  async stop(ref: string, group: string): Promise<void> {
+    const name = appName(ref, group)
+    await docker(['unpause', name]).catch(() => { /* not paused */ })
+    await docker(['stop', name])
+  }
+
+  async suspend(ref: string, group: string): Promise<void> {
+    await docker(['pause', appName(ref, group)])
+  }
+
+  async state(ref: string, group: string): Promise<string> {
+    try {
+      const s = (await docker(['inspect', '-f', '{{.State.Status}}', appName(ref, group)])).toString().trim()
+      if (s === 'running') return 'running'
+      if (s === 'paused') return 'suspended'
+      if (s === 'exited' || s === 'created' || s === 'dead') return 'stopped'
+      return 'unknown'
+    } catch { return 'none' }
+  }
 }

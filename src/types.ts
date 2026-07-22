@@ -4,14 +4,15 @@
 // compute = redeploy.
 
 export type Decision = 'allow' | 'deny' | 'approve'
-export const GATED_ACTIONS = ['secrets.read', 'secrets.write', 'deploy', 'project.delete', 'branch.delete', 'service.add', 'service.remove'] as const
+export const GATED_ACTIONS = ['secrets.read', 'secrets.write', 'deploy', 'project.delete', 'branch.delete', 'service.add', 'service.remove', 'service.setAccess'] as const
 export type GatedAction = (typeof GATED_ACTIONS)[number]
 export const isGatedAction = (a: string): a is GatedAction => (GATED_ACTIONS as readonly string[]).includes(a)
 
 export interface Project { id: string; name: string; status: string; createdAt: number; computeGroups?: string[] }
 
-// User-defined secret (via `insta secrets set`): project-wide when branch is null.
-export interface UserSecret { name: string; value: string; branch: string | null }
+// User-defined secret (via `insta secrets set`): project-wide when branch is null. `service`
+// binds it to a branch service ("<type>/<name>", requires a branch) — platform spec §5.
+export interface UserSecret { name: string; value: string; branch: string | null; service?: string | null }
 
 export interface Branch {
   id: string
@@ -25,8 +26,10 @@ export interface Branch {
   s3: Record<string, string> // S3 credential bundle for this branch (endpoint, keys, bucket)
   cloneOf: string | null
   createdAt: number
-  // deployed app per compute group (group -> spec)
-  apps: Record<string, { image: string; port: number; hostPort?: number; url: string; updatedAt?: number }>
+  // storage access mode for this branch's bucket (anonymous public-read vs private)
+  storagePublic?: boolean
+  // deployed app per compute group (group -> spec); desiredState = developer lifecycle intent
+  apps: Record<string, { image: string; port: number; hostPort?: number; url: string; updatedAt?: number; desiredState?: 'running' | 'stopped' | 'suspended' }>
 }
 
 export interface Approval {
@@ -65,10 +68,18 @@ export interface ComputeAdapter {
     opts: { image: string; port: number; hostPort?: number; envVars: Record<string, string>; network?: string; group: string },
   ): Promise<{ url: string }>
   destroy(ref: string): Promise<void>
+  // Lifecycle (optional — platform parity for `insta compute start|stop|suspend|status`).
+  // Adapters that can't control a deployed app's runtime simply omit these.
+  start?(ref: string, group: string): Promise<void>
+  stop?(ref: string, group: string): Promise<void>
+  suspend?(ref: string, group: string): Promise<void>
+  state?(ref: string, group: string): Promise<string> // running|suspended|stopped|none|unknown
 }
 
 export interface StorageAdapter {
   provision(ref: string, network: string): Promise<{ bucket: string; env: Record<string, string> }>
   cloneInto(srcRef: string, dstRef: string, network: string): Promise<void>
   destroy(ref: string, network: string): Promise<void>
+  // Bucket access mode (optional — `insta services set-access storage <name> public|private`).
+  setAccess?(ref: string, network: string, isPublic: boolean): Promise<void>
 }
