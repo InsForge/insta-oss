@@ -25,6 +25,7 @@ const compute: ComputeAdapter = {
   stop: async (ref, group) => { calls.push(`compute.stop:${ref}:${group}`) },
   suspend: async (ref, group) => { calls.push(`compute.suspend:${ref}:${group}`) },
   state: async () => 'running',
+  rename: async (ref, from_, to) => { calls.push(`compute.rename:${ref}:${from_}->${to}`) },
 }
 const storage: StorageAdapter = {
   provision: async (ref) => { calls.push(`st.provision:${ref}`); return { bucket: `io-${ref}`, env: { BUCKET_NAME: `io-${ref}`, AWS_ACCESS_KEY_ID: 'k', AWS_SECRET_ACCESS_KEY: 's', AWS_ENDPOINT_URL_S3: 'http://io-minio:9000', AWS_REGION: 'local' } } },
@@ -400,4 +401,26 @@ test('storage access mode flips public/private; scale/upgrade stay clean 501s', 
   expect((await put(`/projects/${id}/services/st-store/access`, {})).statusCode).toBe(400)
   expect((await post(`/projects/${id}/services/cp-x/scale`, { machineCount: 2 })).statusCode).toBe(501)
   expect((await post(`/projects/${id}/services/cp-x/upgrade`, { spec: '2vcpu-2gb' })).statusCode).toBe(501)
+})
+
+test('service rename: re-keys group, containers, bindings; conflicts 409; pg/storage 501', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
+  await put(`/projects/${id}/secrets/API_KEY`, { value: 'v', branch: 'main', service: 'compute/api' })
+  const r = await post(`/projects/${id}/services/cp-api/rename`, { name: 'gateway' })
+  expect(r.statusCode).toBe(200)
+  expect(r.json().service).toMatchObject({ id: 'cp-gateway', type: 'compute', name: 'gateway' })
+  expect(calls).toContain('compute.rename:demo-main:api->gateway')
+  const { services } = (await get(`/projects/${id}/services`)).json()
+  expect(services.map((s: { name: string }) => s.name)).toContain('gateway')
+  expect(services.map((s: { name: string }) => s.name)).not.toContain('api')
+  // the secret binding followed the rename
+  const tree = (await get(`/projects/${id}/secrets/tree`)).json()
+  expect(tree.branches[0].services.find((s: { name: string }) => s.name === 'gateway').secrets).toEqual(['API_KEY'])
+  // conflicts, validation, fixed pair, unknown service
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'worker' })
+  expect((await post(`/projects/${id}/services/cp-worker/rename`, { name: 'gateway' })).statusCode).toBe(409)
+  expect((await post(`/projects/${id}/services/cp-gateway/rename`, { name: 'Bad_Name' })).statusCode).toBe(400)
+  expect((await post(`/projects/${id}/services/pg-db/rename`, { name: 'primary' })).statusCode).toBe(501)
+  expect((await post(`/projects/${id}/services/cp-nope/rename`, { name: 'x' })).statusCode).toBe(404)
 })

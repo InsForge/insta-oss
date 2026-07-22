@@ -422,6 +422,40 @@ export class Engine {
     return { id: `cp-${name}`, type: 'compute', name }
   }
 
+  /** Rename a compute group everywhere it appears: registration, every branch's deployment
+   *  (runtime artifact included, via the adapter), and service-bound user secrets. insta-oss
+   *  mints no per-service secret names for compute, so there is nothing to re-key. */
+  async renameComputeService(projectId: string, oldName: string, newName: string): Promise<Record<string, unknown> | undefined> {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(newName)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+    const groups = this.computeGroupNames(projectId)
+    if (!groups.includes(oldName)) throw new Error('service not found')
+    const current = async (): Promise<Record<string, unknown> | undefined> =>
+      (await this.services(projectId)).find((s) => s.id === `cp-${newName}`)
+    if (newName === oldName) return current()
+    if (groups.includes(newName)) throw new Error(`compute service "${newName}" already exists`)
+    const branches = this.listBranches(projectId)
+    const deployed = branches.filter((b) => b.apps[oldName])
+    if (deployed.length && !this.compute.rename) throw new Error('rename is not supported by this compute adapter')
+    for (const b of deployed) await this.compute.rename!(this.ref(project, b.name), oldName, newName)
+    mutate((st) => {
+      const pr = st.projects[projectId]
+      pr.computeGroups = (pr.computeGroups ?? []).map((g) => (g === oldName ? newName : g))
+      for (const b of branches) {
+        const app = st.branches[b.id].apps[oldName]
+        if (!app) continue
+        st.branches[b.id].apps[newName] = app
+        delete st.branches[b.id].apps[oldName]
+      }
+      for (const u of st.userSecrets[projectId] ?? []) {
+        if (u.service === `compute/${oldName}`) u.service = `compute/${newName}`
+      }
+    })
+    this.emit(projectId, null, 'resource', 'service.rename', { type: 'compute', from: oldName, to: newName })
+    return current()
+  }
+
   /** Remove a compute group: destroy its containers on every branch, unregister. */
   async removeComputeService(projectId: string, name: string): Promise<void> {
     const project = this.getProject(projectId)
