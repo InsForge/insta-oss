@@ -72,6 +72,11 @@ export class LocalMinio implements StorageAdapter {
     await this.mc(network, ['mirror', '--overwrite', `m/${bucketOf(srcRef)}`, `m/${bucketOf(dstRef)}`])
   }
 
+  /** Bucket access mode: anonymous public-read (`mc anonymous set download`) vs private. */
+  async setAccess(ref: string, network: string, isPublic: boolean): Promise<void> {
+    await this.mc(network, ['anonymous', 'set', isPublic ? 'download' : 'none', `m/${bucketOf(ref)}`])
+  }
+
   async destroy(ref: string, network: string): Promise<void> {
     try { await this.mc(network, ['rb', '--force', `m/${bucketOf(ref)}`]) } catch { /* gone / minio down */ }
     await docker(['network', 'disconnect', network, MINIO]).catch(() => { /* not attached */ })

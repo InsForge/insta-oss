@@ -109,6 +109,21 @@ export function buildServer(engine: Engine): FastifyInstance {
     catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 
+  // Structural merge: create on the target branch what exists on `from` and is missing there.
+  // No data moves — only migration files carry schema forward. Gated — service.add.
+  app.post('/projects/:id/branches/:branch/merge', async (req, reply) => {
+    const { id, branch } = req.params as { id: string; branch: string }
+    const { from } = (req.body ?? {}) as { from?: string }
+    if (!from) return reply.code(400).send({ error: 'from (source branch name) required' })
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'service.add', reply)) return reply
+    try { return await engine.mergeBranch(id, branch, from) }
+    catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      return reply.code(m.startsWith('target') ? 404 : 400).send({ error: m })
+    }
+  })
+
   app.get('/projects/:id/secrets', async (req, reply) => {
     const { id } = req.params as { id: string }
     const branch = (req.query as { branch?: string }).branch ?? 'main'
@@ -117,6 +132,14 @@ export function buildServer(engine: Engine): FastifyInstance {
       engine.emit(id, branch, 'govern', 'secrets.read', {})
       return { secrets: engine.secrets(id, branch) }
     } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
+  })
+
+  // The project→branch→service→secrets inventory (names only, no values). Gated — secrets.read.
+  app.get('/projects/:id/secrets/tree', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'secrets.read', reply)) return reply
+    return engine.secretTree(id)
   })
 
   app.post('/projects/:id/deploy', async (req, reply) => {
@@ -170,15 +193,70 @@ export function buildServer(engine: Engine): FastifyInstance {
 
   app.post('/projects/:id/services', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const body = (req.body ?? {}) as { type?: string; name?: string }
+    const body = (req.body ?? {}) as { type?: string; name?: string; branch?: string; public?: boolean }
     if (!body.type || !body.name) return reply.code(400).send({ error: 'type and name required' })
-    if (body.type !== 'compute') {
-      return reply.code(501).send({ error: `multi-${body.type} services are cloud-only for now — insta-oss provisions one postgres + one storage per project` })
-    }
     if (!gated(id, 'service.add', reply)) return reply
+    // Contract parity: postgres/storage add succeeds idempotently (insta-oss has one of each,
+    // auto-provisioned) — the same `services add postgres|storage|compute` script runs on both.
+    if (body.type === 'postgres' || body.type === 'storage') {
+      try {
+        const service = engine.fixedService(id, body.type)
+        // `services add storage <name> --public` provisions the bucket public on the cloud;
+        // here the bucket already exists, so apply the access mode to it.
+        if (body.type === 'storage' && body.public === true) {
+          return { service: await engine.setServiceAccess(id, service.id, true, body.branch) }
+        }
+        return { service }
+      } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
+    }
+    if (body.type !== 'compute') return reply.code(400).send({ error: `unknown service type: ${body.type}` })
     try { return { service: engine.addComputeService(id, body.name) } }
     catch (e) { return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
+
+  // ---- service lifecycle + access (contract parity) ----
+  // Ungated like the platform; ?branch= scopes the target (default branch otherwise) because
+  // oss service ids are stable across branches rather than per-branch rows.
+  const errCode = (m: string): number => (m.includes('not found') ? 404 : 400)
+  for (const verb of ['start', 'stop', 'suspend'] as const) {
+    app.post(`/projects/:id/services/:sid/${verb}`, async (req, reply) => {
+      const { id, sid } = req.params as { id: string; sid: string }
+      if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+      try { return await engine.lifecycle(id, sid, verb, (req.query as { branch?: string }).branch) }
+      catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+    })
+  }
+
+  app.get('/projects/:id/services/:sid/state', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    try { return await engine.serviceState(id, sid, (req.query as { branch?: string }).branch) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+  })
+
+  // A service's secret names (names only). Gated — secrets.read.
+  app.get('/projects/:id/services/:sid/secrets', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'secrets.read', reply)) return reply
+    try { return { secrets: engine.serviceSecretNames(id, sid) } }
+    catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
+  })
+
+  // Storage bucket access mode (anonymous public-read vs private). Gated — service.setAccess.
+  app.put('/projects/:id/services/:sid/access', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    const body = (req.body ?? {}) as { public?: boolean; branch?: string }
+    if (typeof body.public !== 'boolean') return reply.code(400).send({ error: 'public (boolean) required' })
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'service.setAccess', reply)) return reply
+    try { return { service: await engine.setServiceAccess(id, sid, body.public, body.branch) } }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+  })
+
+  // Machine scaling / instance specs are cloud pricing concepts — clean 501, never a bare 404.
+  app.post('/projects/:id/services/:sid/scale', async (_req, reply) => notCloud(reply, 'machine scaling'))
+  app.post('/projects/:id/services/:sid/upgrade', async (_req, reply) => notCloud(reply, 'instance spec upgrades'))
 
   app.delete('/projects/:id/services/:sid', async (req, reply) => {
     const { id, sid } = req.params as { id: string; sid: string }
@@ -193,10 +271,10 @@ export function buildServer(engine: Engine): FastifyInstance {
   // ---- user-defined secrets (insta secrets set/unset) ----
   app.put('/projects/:id/secrets/:name', async (req, reply) => {
     const { id, name } = req.params as { id: string; name: string }
-    const body = (req.body ?? {}) as { value?: string; branch?: string }
+    const body = (req.body ?? {}) as { value?: string; branch?: string; service?: string }
     if (!body.value) return reply.code(400).send({ error: 'value required' })
     if (!gated(id, 'secrets.write', reply)) return reply
-    try { engine.setUserSecret(id, name, body.value, body.branch ?? null); return { ok: true } }
+    try { engine.setUserSecret(id, name, body.value, body.branch ?? null, body.service ?? null); return { ok: true } }
     catch (e) { return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 

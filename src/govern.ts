@@ -14,6 +14,7 @@ const DEFAULTS: Record<GatedAction, Decision> = {
   'branch.delete': 'allow',
   'service.add': 'allow',
   'service.remove': 'allow',
+  'service.setAccess': 'allow',
 }
 
 export type GateResult =
