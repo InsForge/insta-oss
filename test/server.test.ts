@@ -7,6 +7,7 @@ import { join } from 'node:path'
 
 vi.mock('../src/docker', () => ({ docker: vi.fn(async () => Buffer.from('')) }))
 
+import { docker as dockerFn } from '../src/docker'
 import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
 import type { DatabaseAdapter, ComputeAdapter, StorageAdapter } from '../src/types'
@@ -14,7 +15,13 @@ import type { DatabaseAdapter, ComputeAdapter, StorageAdapter } from '../src/typ
 const calls: string[] = []
 const db: DatabaseAdapter = {
   provision: async (ref) => { calls.push(`db.provision:${ref}`); return { url: `pg://${ref}` } },
-  query: async () => '',
+  // Answers the observability SQL with canned JSON (order matters: metrics SQL also mentions pg_stat_activity).
+  query: async (_ref, sql) => {
+    if (sql.includes('row_to_json')) return JSON.stringify({ total: 3, active: 1, idle: 2, max: 100, db_size_bytes: 123456, deadlocks: 0, inserted: 10, updated: 5, deleted: 1, blks_hit: 90, blks_read: 10 })
+    if (sql.includes('pg_stat_statements')) return JSON.stringify([{ queryId: 'q1', query: 'select 1', calls: 3, totalMs: 9, meanMs: 3, rows: 3 }])
+    if (sql.includes('pg_stat_activity')) return JSON.stringify([{ pid: 42, state: 'active', durationMs: 12.5, query: 'select 1' }])
+    return ''
+  },
   cloneInto: async (s, d) => { calls.push(`db.clone:${s}->${d}`) },
   destroy: async (ref) => { calls.push(`db.destroy:${ref}`) },
 }
@@ -148,12 +155,15 @@ test('manifest detail: project/branches/resources with ref.url', async () => {
   expect(d.resources.every((r: { ref: { url?: string; bucket?: string } }) => r.ref.url || r.ref.bucket)).toBe(true)
 })
 
-test('cloud-only surfaces return 501 with a clear message', async () => {
-  for (const url of ['/tokens', '/orgs/local/billing', '/projects/x/usage', '/projects/x/metrics', '/projects/x/logs']) {
+test('cloud-only surfaces (billing/usage/tokens) return 501 with a clear message', async () => {
+  for (const url of ['/tokens', '/orgs/local/billing', '/projects/x/usage']) {
     const r = await get(url)
     expect(r.statusCode).toBe(501)
-    expect(r.json().error).toMatch(/cloud-only|coming/)
+    expect(r.json().error).toMatch(/cloud-only/)
   }
+  // metrics/logs are real (docker-backed) now — unknown project is a 404, not a stub
+  expect((await get('/projects/x/metrics')).statusCode).toBe(404)
+  expect((await get('/projects/x/logs')).statusCode).toBe(404)
 })
 
 // ---- services-model parity (Phase 1.5) ----
@@ -400,4 +410,53 @@ test('storage access mode flips public/private; scale/upgrade stay clean 501s', 
   expect((await put(`/projects/${id}/services/st-store/access`, {})).statusCode).toBe(400)
   expect((await post(`/projects/${id}/services/cp-x/scale`, { machineCount: 2 })).statusCode).toBe(501)
   expect((await post(`/projects/${id}/services/cp-x/upgrade`, { spec: '2vcpu-2gb' })).statusCode).toBe(501)
+})
+
+// ---- observability: logs, metrics, operations, database ----
+
+test('logs endpoint tails containers with the cloud LogsResult shape (db works locally too)', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) =>
+    Buffer.from(args[0] === 'logs' ? '2026-07-22T01:00:00.000Z hello\nno-timestamp-line\n' : ''))
+  const r = (await get(`/projects/${id}/logs?component=compute&branch=main&limit=50`)).json()
+  expect(r.source).toBe('docker-logs')
+  expect(r.lines.find((l: { ts: string }) => l.ts)).toMatchObject({ ts: '2026-07-22T01:00:00.000Z', message: 'hello', instance: 'io-demo-main-app-default' })
+  expect(r.lines.find((l: { ts: string }) => !l.ts)).toMatchObject({ message: 'no-timestamp-line' })
+  const dbLogs = (await get(`/projects/${id}/logs?component=db`)).json()
+  expect(dbLogs.lines.length).toBeGreaterThan(0) // the cloud returns a provider note for db; locally it is a real container
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+})
+
+test('metrics endpoint returns docker-stats series (cpu %, memory bytes)', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) =>
+    Buffer.from(args[0] === 'stats' ? '{"Name":"io-demo-main-app-default","CPUPerc":"1.25%","MemUsage":"12MiB / 4GiB"}\n' : ''))
+  const r = (await get(`/projects/${id}/metrics?component=compute&branch=main`)).json()
+  expect(r.source).toBe('docker-stats')
+  expect(r.series.find((s: { name: string }) => s.name === 'cpu').points[0][1]).toBe(1.25)
+  expect(r.series.find((s: { name: string }) => s.name === 'memory').points[0][1]).toBe(12 * 1024 * 1024)
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+})
+
+test('operations lists the resource timeline newest-first (control-plane shape)', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  const { operations } = (await get(`/projects/${id}/operations?limit=10`)).json()
+  expect(operations[0]).toMatchObject({ action: 'deploy', status: 'finished' })
+  expect(operations.map((o: { action: string }) => o.action)).toContain('project.created')
+})
+
+test('database metrics/activity/query-stats run SQL with the cloud shapes', async () => {
+  const id = await createProject()
+  const m = (await get(`/projects/${id}/database/metrics`)).json()
+  expect(m).toMatchObject({ connections: { active: 1, idle: 2, total: 3, max: 100 }, dbSizeBytes: 123456 })
+  expect(m.cacheHitRatio).toBeCloseTo(0.9)
+  const a = (await get(`/projects/${id}/database/activity`)).json()
+  expect(a.activity[0]).toMatchObject({ pid: 42, state: 'active' })
+  const qs = (await get(`/projects/${id}/database/query-stats?sort=calls&limit=5`)).json()
+  expect(qs).toMatchObject({ extensionReady: true })
+  expect(qs.stats[0]).toMatchObject({ queryId: 'q1', calls: 3 })
+  expect((await get('/projects/nope/database/metrics')).statusCode).toBe(404)
 })

@@ -41,6 +41,12 @@ so it works out of the box). Workflows built here run unchanged on managed Insta
 - **Audit timeline** — every resource + govern action lands in `insta events`; agents ingest
   findings via `POST /projects/:id/events` with dedup (observe-hook compatible).
 - **Agent-legible manifest** — `insta manifest` prints each branch's db / storage / compute.
+- **Observability** — `insta logs db|compute` tails the branch's containers (`docker logs`,
+  cloud LogsResult shape — db logs work locally where the cloud returns a provider note);
+  `insta metrics` serves a point-in-time `docker stats` snapshot; `/operations` exposes the
+  control-plane operation log; `/database/{metrics,activity,query-stats}` run the same SQL as
+  the cloud against the branch database (pg_stat_statements preloaded on new databases).
+  Billing/usage metering stays cloud-only by design.
 - **Local dashboard** — the daemon serves a web UI at its own URL (see below): per-branch
   service table (live container status + local endpoints), environments (the project's
   branches), a pending-approvals

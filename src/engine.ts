@@ -3,6 +3,7 @@
 // redeploy the same app image(s); compute = the user's custom image(s), one per group.
 import { randomUUID } from 'node:crypto'
 import { docker } from './docker'
+import * as observe from './observe'
 import { loadState, mutate } from './state'
 import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, AuditEvent, UserSecret } from './types'
 
@@ -464,6 +465,96 @@ export class Engine {
       mutate((s) => { delete s.branches[b.id] })
     }
     mutate((s) => { delete s.projects[projectId] })
+  }
+
+  // ---- observability (docker + SQL backed; cloud response shapes) ----
+
+  /** Resolve a branch (default branch unless named) or throw. */
+  private branchOrThrow(projectId: string, branchName?: string): { project: Project; branch: Branch } {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const branch = branchName ? this.getBranchByName(projectId, branchName) : this.listBranches(projectId).find((b) => b.isDefault)
+    if (!branch) throw new Error(`branch "${branchName}" not found`)
+    return { project, branch }
+  }
+
+  /** The containers an observability request targets: the branch's pg, or its compute group(s). */
+  private observedContainers(project: Project, branch: Branch, component: 'db' | 'compute', group?: string): string[] {
+    const ref = this.ref(project, branch.name)
+    if (component === 'db') return [`io-${ref}-pg`]
+    const groups = group ? [group] : Object.keys(branch.apps).sort()
+    return groups.filter((g) => branch.apps[g]).map((g) => `io-${ref}-app-${g}`)
+  }
+
+  /** Runtime logs via `docker logs --tail` — same LogsResult shape as the cloud (which serves
+   *  compute from Fly; here BOTH components are real containers, so db logs work too). */
+  async runtimeLogs(projectId: string, opts: { component: 'db' | 'compute'; branchName?: string; group?: string; limit?: number }): Promise<observe.LogsResult> {
+    const { project, branch } = this.branchOrThrow(projectId, opts.branchName)
+    const limit = Math.min(Math.max(opts.limit ?? 100, 1), 1000)
+    const lines: observe.LogLine[] = []
+    for (const name of this.observedContainers(project, branch, opts.component, opts.group)) {
+      try {
+        const raw = (await docker(['logs', '--tail', String(limit), '--timestamps', name], { mergeStderr: true })).toString()
+        lines.push(...observe.parseDockerLogs(raw, name))
+      } catch { /* container gone — skip rather than fail the whole read */ }
+    }
+    lines.sort((a, b) => a.ts.localeCompare(b.ts))
+    return { source: 'docker-logs', lines: lines.slice(-limit) }
+  }
+
+  /** Point-in-time resource metrics via `docker stats --no-stream` — MetricsResult shape. */
+  async runtimeMetrics(projectId: string, opts: { component: 'db' | 'compute'; branchName?: string; group?: string }): Promise<observe.MetricsResult> {
+    const { project, branch } = this.branchOrThrow(projectId, opts.branchName)
+    const names = this.observedContainers(project, branch, opts.component, opts.group)
+    if (!names.length) return { source: 'docker-stats', series: [], note: 'nothing deployed on this branch' }
+    let raw = ''
+    try { raw = (await docker(['stats', '--no-stream', '--format', '{{json .}}', ...names])).toString() }
+    catch { return { source: 'docker-stats', series: [], note: 'containers are not running' } }
+    return {
+      source: 'docker-stats',
+      series: observe.statsToSeries(raw, Math.floor(Date.now() / 1000)),
+      note: 'point-in-time snapshot from docker stats — from/to/step are ignored locally',
+    }
+  }
+
+  /** Control-plane operation log (cloud: Neon operations) — here, the resource-event timeline. */
+  operations(projectId: string, limit = 20): { operations: observe.DbOperation[] } {
+    if (!this.getProject(projectId)) throw new Error('project not found')
+    const ops = this.listEvents(projectId)
+      .filter((e) => e.source === 'resource')
+      .slice(-Math.min(Math.max(limit, 1), 100))
+      .reverse()
+      .map((e) => ({ id: e.id, action: e.kind, status: 'finished', createdAt: e.createdAt }))
+    return { operations: ops }
+  }
+
+  /** Point-in-time DB metrics — runs SQL against the branch database (same query as the cloud). */
+  async dbMetricsSnapshot(projectId: string, branchName?: string): Promise<observe.DbMetricsSnapshot> {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    return observe.toDbMetrics(await this.db.query(this.ref(project, branch.name), observe.DB_METRICS_SQL))
+  }
+
+  /** Currently running queries (pg_stat_activity, ≤100). */
+  async dbActivity(projectId: string, branchName?: string): Promise<{ activity: observe.DbActivityRow[] }> {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    return { activity: observe.toDbActivity(await this.db.query(this.ref(project, branch.name), observe.DB_ACTIVITY_SQL)) }
+  }
+
+  /** Top statements by execution time (pg_stat_statements; preloaded on newly-provisioned branch
+   *  databases — older containers report extensionReady:false, exactly like the cloud's
+   *  "enabled on demand" path when the extension can't load). */
+  async dbQueryStats(projectId: string, branchName: string | undefined, opts: { limit?: number; sort?: observe.QueryStatSort } = {}): Promise<observe.DbQueryStats> {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    const ref = this.ref(project, branch.name)
+    try {
+      await this.db.query(ref, 'create extension if not exists pg_stat_statements')
+      const rows = await this.db.query(ref, observe.queryStatsSql(opts.limit ?? 20, opts.sort ?? 'total'))
+      return { extensionReady: true, stats: observe.toQueryStats(rows) }
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      if (observe.isExtensionUnavailable(m)) return { stats: [], extensionReady: false }
+      throw e
+    }
   }
 
   /** Manifest view: project + branches + per-branch resources (db / compute groups). */
