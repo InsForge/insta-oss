@@ -21,6 +21,14 @@ export type DbActivityRow = {
 export type DbQueryStatRow = { queryId: string; query: string; calls: number; meanMs: number; totalMs: number; rows: number }
 export type DbQueryStats = { stats: DbQueryStatRow[]; extensionReady: boolean }
 export type Operation = { id: string; action: string; status: string; createdAt?: string }
+export type SecretTree = {
+  projectWide: string[]
+  branches: Array<{
+    name: string; isDefault: boolean
+    services: Array<{ type: string; name: string; secrets: string[] }>
+    unbound: string[]
+  }>
+}
 export type LogLine = { ts: string; level?: string; message: string; instance?: string }
 export type LogsResult = { source: string; lines: LogLine[]; note?: string }
 export type MetricSeries = { name: string; unit?: string; labels?: Record<string, string>; points: Array<[number, number]> }
@@ -76,8 +84,9 @@ export const api = {
   metrics: (p: string, component: 'compute' | 'db', branch: string) =>
     get<MetricsResult>(`/projects/${p}/metrics?component=${component}&branch=${encodeURIComponent(branch)}`),
 
-  secretsBundle: async (p: string, branch: string) =>
-    (await get<{ secrets: Record<string, string> }>(`/projects/${p}/secrets?branch=${encodeURIComponent(branch)}`)).secrets,
+  // Names-only inventory — the dashboard never shows secret VALUES (plan v1 non-goal; values
+  // stay behind `insta secrets`, secrets.read-gated). This route emits no audit event.
+  secretTree: (p: string) => get<SecretTree>(`/projects/${p}/secrets/tree`),
   dbMetrics: (p: string, branch: string) =>
     get<DbMetrics>(`/projects/${p}/database/metrics?branch=${encodeURIComponent(branch)}`),
   dbActivity: async (p: string, branch: string) =>

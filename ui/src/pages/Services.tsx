@@ -4,7 +4,7 @@ import {
   Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
   DropdownMenuTrigger, Input,
 } from '@insforge/ui'
-import { EllipsisVertical, Plus } from 'lucide-react'
+import { EllipsisVertical, Plus, X } from 'lucide-react'
 import type { Service } from '../api'
 import { api, relTime } from '../api'
 import { usePoll } from '../hooks'
@@ -50,15 +50,17 @@ function AddDialog({ projectId, onClose, onDone, onApproval }: {
   )
 }
 
-function RenameDialog({ projectId, service, onClose, onDone }: {
+function RenameDialog({ projectId, service, onClose, onDone, onApproval }: {
   projectId: string; service: Service; onClose: () => void; onDone: () => void
+  onApproval: (p: NonNullable<PendingApproval>) => void
 }) {
   const [name, setName] = useState(service.name)
   const [error, setError] = useState<string>()
   const submit = async () => {
     if (!name.trim()) return setError('name required')
     const r = await api.renameService(projectId, service.id, name.trim())
-    if (r.kind !== 'ok') return setError(r.kind === 'error' ? r.error : 'approval required')
+    if (r.kind === 'error') return setError(r.error)
+    if (r.kind === 'approval') { onClose(); return onApproval({ ...r, retry: submit }) }
     onClose(); onDone()
   }
   return (
@@ -85,18 +87,23 @@ function RenameDialog({ projectId, service, onClose, onDone }: {
 
 // Row-level actions, mirroring the cloud console's kebab: lifecycle + rename for compute,
 // access mode for storage. Postgres is the fixed local pair — no actions.
-function ServiceActionsMenu({ projectId, branch, service, onError, onDone, onRename }: {
+function ServiceActionsMenu({ projectId, branch, service, onError, onDone, onRename, onApproval }: {
   projectId: string; branch: string; service: Service
   onError: (m: string) => void; onDone: () => void; onRename: () => void
+  onApproval: (p: NonNullable<PendingApproval>) => void
 }) {
+  // lifecycle is ungated by default; access is gated (service.setAccess) — both route a 202 to
+  // the shared approval prompt so a policy=approve gate isn't silently swallowed.
   const life = async (verb: 'start' | 'stop' | 'suspend') => {
     const r = await api.lifecycle(projectId, service.id, verb, branch)
     if (r.kind === 'error') return onError(r.error)
+    if (r.kind === 'approval') return onApproval({ ...r, retry: () => life(verb) })
     onDone()
   }
   const access = async (isPublic: boolean) => {
     const r = await api.setAccess(projectId, service.id, isPublic, branch)
     if (r.kind === 'error') return onError(r.error)
+    if (r.kind === 'approval') return onApproval({ ...r, retry: () => access(isPublic) })
     onDone()
   }
   if (service.type === 'postgres') return null
@@ -185,11 +192,12 @@ export function Services() {
                 <td className="px-2 py-2 text-right">
                   <div className="flex items-center justify-end gap-0.5">
                     <ServiceActionsMenu projectId={projectId} branch={branch} service={s}
-                      onError={setActionError} onDone={reload} onRename={() => setRenaming(s)} />
+                      onError={setActionError} onDone={reload} onRename={() => setRenaming(s)}
+                      onApproval={setApproval} />
                     {s.type === 'compute' && (
                       <Button variant="ghost" size="icon-sm" onClick={() => remove(s.id)}
-                        title={`remove ${s.name}`}>
-                        <span className="text-destructive">✕</span>
+                        title={`remove ${s.name}`} className="invisible group-hover:visible">
+                        <X className="size-4 text-destructive" />
                       </Button>
                     )}
                   </div>
@@ -207,7 +215,7 @@ export function Services() {
       <ErrorNote error={actionError ?? error} />
       {renaming && (
         <RenameDialog projectId={projectId} service={renaming}
-          onClose={() => setRenaming(null)} onDone={reload} />
+          onClose={() => setRenaming(null)} onDone={reload} onApproval={setApproval} />
       )}
       {adding && (
         <AddDialog projectId={projectId} onClose={() => setAdding(false)} onDone={reload}
