@@ -298,6 +298,24 @@ export function buildServer(engine: Engine): FastifyInstance {
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
   })
 
+  // Rename a service and re-key what derives from its name. Gated — service.rename. The fixed
+  // postgres/storage pair is name-fixed locally (their minted names are unsuffixed).
+  app.post('/projects/:id/services/:sid/rename', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    const { name } = (req.body ?? {}) as { name?: string }
+    if (!name) return reply.code(400).send({ error: 'name required' })
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!sid.startsWith('cp-')) {
+      return reply.code(501).send({ error: 'renaming postgres/storage services is cloud-only — insta-oss provisions one fixed pair (db/store) per project' })
+    }
+    if (!gated(id, 'service.rename', reply)) return reply
+    try { return { service: await engine.renameComputeService(id, sid.slice(3), name) } }
+    catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      return reply.code(m.includes('already exists') ? 409 : errCode(m)).send({ error: m })
+    }
+  })
+
   // Machine scaling / instance specs are cloud pricing concepts — clean 501, never a bare 404.
   app.post('/projects/:id/services/:sid/scale', async (_req, reply) => notCloud(reply, 'machine scaling'))
   app.post('/projects/:id/services/:sid/upgrade', async (_req, reply) => notCloud(reply, 'instance spec upgrades'))

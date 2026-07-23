@@ -46,6 +46,10 @@ export class DockerCompute implements ComputeAdapter {
     await docker(['pause', appName(ref, group)])
   }
 
+  async rename(ref: string, from: string, to: string): Promise<void> {
+    await docker(['rename', appName(ref, from), appName(ref, to)])
+  }
+
   async state(ref: string, group: string): Promise<string> {
     try {
       const s = (await docker(['inspect', '-f', '{{.State.Status}}', appName(ref, group)])).toString().trim()
