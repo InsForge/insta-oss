@@ -1,7 +1,11 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { Button, Input } from '@insforge/ui'
-import { Plus, X } from 'lucide-react'
+import {
+  Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
+  DropdownMenuTrigger, Input,
+} from '@insforge/ui'
+import { EllipsisVertical, Plus } from 'lucide-react'
+import type { Service } from '../api'
 import { api, relTime } from '../api'
 import { usePoll } from '../hooks'
 import { ErrorNote, Modal, StatusDot, TypeIcon } from '../components/ui'
@@ -46,10 +50,91 @@ function AddDialog({ projectId, onClose, onDone, onApproval }: {
   )
 }
 
+function RenameDialog({ projectId, service, onClose, onDone }: {
+  projectId: string; service: Service; onClose: () => void; onDone: () => void
+}) {
+  const [name, setName] = useState(service.name)
+  const [error, setError] = useState<string>()
+  const submit = async () => {
+    if (!name.trim()) return setError('name required')
+    const r = await api.renameService(projectId, service.id, name.trim())
+    if (r.kind !== 'ok') return setError(r.kind === 'error' ? r.error : 'approval required')
+    onClose(); onDone()
+  }
+  return (
+    <Modal
+      title="Rename Service"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={submit}>Rename</Button>
+        </>
+      }
+    >
+      <label className="text-xs font-medium text-muted-foreground">New name</label>
+      <Input autoFocus value={name} onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && submit()} className="mt-1 font-mono" />
+      <p className="mt-3 text-xs text-muted-foreground">
+        Lower-kebab (a-z, 0-9, hyphen). The deployed container and any bound secrets follow the rename.
+      </p>
+      <ErrorNote error={error} />
+    </Modal>
+  )
+}
+
+// Row-level actions, mirroring the cloud console's kebab: lifecycle + rename for compute,
+// access mode for storage. Postgres is the fixed local pair — no actions.
+function ServiceActionsMenu({ projectId, branch, service, onError, onDone, onRename }: {
+  projectId: string; branch: string; service: Service
+  onError: (m: string) => void; onDone: () => void; onRename: () => void
+}) {
+  const life = async (verb: 'start' | 'stop' | 'suspend') => {
+    const r = await api.lifecycle(projectId, service.id, verb, branch)
+    if (r.kind === 'error') return onError(r.error)
+    onDone()
+  }
+  const access = async (isPublic: boolean) => {
+    const r = await api.setAccess(projectId, service.id, isPublic, branch)
+    if (r.kind === 'error') return onError(r.error)
+    onDone()
+  }
+  if (service.type === 'postgres') return null
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${service.name}`}>
+          <EllipsisVertical className="size-4 text-muted-foreground" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {service.type === 'compute' && (
+          <>
+            {service.runtime === 'online'
+              ? <>
+                  <DropdownMenuItem onSelect={() => life('stop')}>Stop</DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => life('suspend')}>Suspend</DropdownMenuItem>
+                </>
+              : <DropdownMenuItem onSelect={() => life('start')}>Start</DropdownMenuItem>}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onRename}>Rename Service</DropdownMenuItem>
+          </>
+        )}
+        {service.type === 'storage' && (
+          <DropdownMenuItem onSelect={() => access(!service.public)}>
+            {service.public ? 'Make Private' : 'Make Public'}
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 export function Services() {
   const { projectId, branch } = useParams() as { projectId: string; branch: string }
   const { data: services, error, reload } = usePoll(() => api.services(projectId, branch), [projectId, branch])
   const [adding, setAdding] = useState(false)
+  const [renaming, setRenaming] = useState<Service | null>(null)
   const [approval, setApproval] = useState<PendingApproval>(null)
   const [actionError, setActionError] = useState<string>()
 
@@ -98,12 +183,16 @@ export function Services() {
                 </td>
                 <td className="px-4 py-2 text-sm text-muted-foreground">{relTime(s.updated_at)}</td>
                 <td className="px-2 py-2 text-right">
-                  {s.type === 'compute' && (
-                    <Button variant="ghost" size="icon-sm" onClick={() => remove(s.id)}
-                      title={`remove ${s.name}`} className="invisible group-hover:visible">
-                      <X className="size-4 text-muted-foreground" />
-                    </Button>
-                  )}
+                  <div className="flex items-center justify-end gap-0.5">
+                    <ServiceActionsMenu projectId={projectId} branch={branch} service={s}
+                      onError={setActionError} onDone={reload} onRename={() => setRenaming(s)} />
+                    {s.type === 'compute' && (
+                      <Button variant="ghost" size="icon-sm" onClick={() => remove(s.id)}
+                        title={`remove ${s.name}`}>
+                        <span className="text-destructive">✕</span>
+                      </Button>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}
@@ -116,6 +205,10 @@ export function Services() {
         </p>
       )}
       <ErrorNote error={actionError ?? error} />
+      {renaming && (
+        <RenameDialog projectId={projectId} service={renaming}
+          onClose={() => setRenaming(null)} onDone={reload} />
+      )}
       {adding && (
         <AddDialog projectId={projectId} onClose={() => setAdding(false)} onDone={reload}
           onApproval={setApproval} />
