@@ -9,6 +9,10 @@ export type Service = {
   machine_count?: number; domain?: string
   runtime?: 'online' | 'stopped' | 'none'; endpoint?: string; updated_at?: string
 }
+export type LogLine = { ts: string; level?: string; message: string; instance?: string }
+export type LogsResult = { source: string; lines: LogLine[]; note?: string }
+export type MetricSeries = { name: string; unit?: string; labels?: Record<string, string>; points: Array<[number, number]> }
+export type MetricsResult = { source: string; series: MetricSeries[]; note?: string }
 export type Approval = { id: string; action: string; status: string; requested_at: string; decided_at: string | null }
 export type AuditEvent = { id: string; branch: string | null; source: string; kind: string; payload: unknown; created_at: string }
 export type Decision = 'allow' | 'deny' | 'approve'
@@ -55,8 +59,10 @@ export const api = {
   approvals: async (p: string) => (await get<{ approvals: Approval[] }>(`/projects/${p}/approvals`)).approvals,
   policy: async (p: string) => (await get<{ policy: Policy }>(`/projects/${p}/policy`)).policy,
   events: async (p: string, limit = 30) => (await get<{ events: AuditEvent[] }>(`/projects/${p}/events?limit=${limit}`)).events,
-  logs: (p: string, component: string) => get<unknown>(`/projects/${p}/logs?component=${component}`),
-  metrics: (p: string, component: string) => get<unknown>(`/projects/${p}/metrics?component=${component}`),
+  logs: (p: string, component: 'compute' | 'db', branch: string, limit = 200) =>
+    get<LogsResult>(`/projects/${p}/logs?component=${component}&branch=${encodeURIComponent(branch)}&limit=${limit}`),
+  metrics: (p: string, component: 'compute' | 'db', branch: string) =>
+    get<MetricsResult>(`/projects/${p}/metrics?component=${component}&branch=${encodeURIComponent(branch)}`),
 
   createBranch: (p: string, name: string, from: string) =>
     call<{ branch: { id: string; name: string } }>('POST', `/projects/${p}/branches`, { name, from }),
