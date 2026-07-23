@@ -54,8 +54,52 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.get('/orgs/:id/billing', async (_req, reply) => notCloud(reply, 'billing'))
   app.get('/projects/:id/usage', async (_req, reply) => notCloud(reply, 'usage metering'))
   app.get('/orgs/:id/usage', async (_req, reply) => notCloud(reply, 'usage metering'))
-  app.get('/projects/:id/metrics', async (_req, reply) => notCloud(reply, 'metrics (coming to insta-oss via docker stats)'))
-  app.get('/projects/:id/logs', async (_req, reply) => notCloud(reply, 'logs (coming to insta-oss via docker logs)'))
+  // ---- observability (docker + SQL backed; same response shapes as the cloud) ----
+  const obsCode = (m: string): number => (m.includes('not found') ? 404 : 502)
+  const component = (q: { component?: string }): 'db' | 'compute' => (q.component === 'db' ? 'db' : 'compute')
+
+  app.get('/projects/:id/metrics', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const q = req.query as { component?: string; branch?: string; group?: string }
+    try { return await engine.runtimeMetrics(id, { component: component(q), branchName: q.branch, group: q.group }) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
+  })
+
+  app.get('/projects/:id/logs', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const q = req.query as { component?: string; branch?: string; group?: string; limit?: string }
+    try { return await engine.runtimeLogs(id, { component: component(q), branchName: q.branch, group: q.group, limit: q.limit ? Number(q.limit) : undefined }) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
+  })
+
+  // Control-plane operation log (cloud: Neon operations; here the resource-event timeline).
+  app.get('/projects/:id/operations', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const q = req.query as { limit?: string }
+    try { return engine.operations(id, q.limit ? Number(q.limit) : undefined) }
+    catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
+  })
+
+  // Point-in-time DB signals — run SQL against the branch database (same queries as the cloud).
+  app.get('/projects/:id/database/metrics', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    try { return await engine.dbMetricsSnapshot(id, (req.query as { branch?: string }).branch) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
+  })
+
+  app.get('/projects/:id/database/activity', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    try { return await engine.dbActivity(id, (req.query as { branch?: string }).branch) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
+  })
+
+  app.get('/projects/:id/database/query-stats', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const q = req.query as { branch?: string; limit?: string; sort?: string }
+    const sort = (['total', 'mean', 'calls'] as const).find((s) => s === q.sort)
+    try { return await engine.dbQueryStats(id, q.branch, { limit: q.limit ? Number(q.limit) : undefined, sort }) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
+  })
 
   app.post('/orgs/:id/projects', async (req, reply) => {
     const { name } = (req.body ?? {}) as { name?: string }
