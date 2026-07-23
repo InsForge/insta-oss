@@ -6,9 +6,9 @@ import { join } from 'node:path'
 import { Engine } from '../src/engine'
 import { LocalPostgres } from '../src/adapters/postgres'
 import { DockerCompute } from '../src/adapters/compute'
-import { LocalMinio } from '../src/adapters/storage'
+import { LocalGarage } from '../src/adapters/garage'
 
-const engine = new Engine(new LocalPostgres(), new DockerCompute(), new LocalMinio())
+const engine = new Engine(new LocalPostgres(), new DockerCompute(), new LocalGarage())
 let projectId = ''
 const pg = new LocalPostgres()
 
