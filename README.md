@@ -1,12 +1,70 @@
-# insta-oss
+<div align="center">
 
-**insta-oss** — a self-hostable runtime for **branchable, agent-native environments**.
-Every project gets a database, object storage, and your app containers; every **branch is a
-disposable, fully isolated clone** of all three. Runs anywhere Docker runs — single-tenant,
-no accounts, no billing, no external services.
+  <h1>insta-oss</h1>
 
+  <p>
+    The self-hostable runtime for <b>branchable, agent-native environments</b>.<br />
+    Every project gets a database, object storage, and your app containers —<br />
+    every <b>branch is a disposable, fully isolated clone</b> of all three.
+  </p>
+
+  <p>
+    <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-orange.svg" alt="License"></a>
+    <a href="https://github.com/InsForge/insta-oss/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/InsForge/insta-oss/ci.yml?branch=main&label=CI" alt="CI"></a>
+    <a href="https://github.com/InsForge/insta-oss/graphs/contributors"><img src="https://img.shields.io/github/contributors/InsForge/insta-oss?color=green" alt="Contributors"></a>
+    <a href="https://github.com/InsForge/insta-oss/pulls"><img src="https://img.shields.io/badge/PRs-welcome-blue.svg" alt="PRs Welcome"></a>
+  </p>
+  <p>
+    <a href="https://x.com/InsForge"><img src="https://img.shields.io/badge/Follow%20on%20X-000000?logo=x&logoColor=white&style=for-the-badge" alt="Follow on X"></a>
+    <a href="https://discord.com/invite/MPxwj5xVvW"><img src="https://img.shields.io/badge/Join%20our%20Discord-5865F2?logo=discord&logoColor=white&style=for-the-badge" alt="Join our Discord"></a>
+  </p>
+
+</div>
+
+<p align="center">
+  ⭐ <em>If branchable local environments are useful to you, a star helps other developers find this. </em>
+</p>
+
+## insta-oss
+
+Runs anywhere Docker runs — single-tenant, no accounts, no billing, no external services.
 Driven by the standard **`insta` CLI** (its default API URL is already `http://localhost:8080`,
 so it works out of the box). Workflows built here run unchanged on managed Instacloud.
+
+### How it works
+
+Coding agents (or you) drive the daemon through the `insta` CLI and its agent skills; every
+sensitive action passes a human-in-the-loop policy gate before it touches a resource:
+
+```mermaid
+graph TB
+
+    subgraph TOP[" "]
+        AG["AI Coding Agents · insta CLI · Dashboard"]
+    end
+
+    subgraph MID[" "]
+        D["instad — the local daemon<br/>govern gates · audit events · branch engine"]
+    end
+
+    AG --> D
+
+    D --> PG[Postgres per branch]
+    D --> ST[S3 bucket per branch]
+    D --> CP[Your containers per branch]
+    D --> OBS[Logs · Metrics · DB insight]
+
+    classDef bar fill:#0b0f14,stroke:#30363d,stroke-width:1px,color:#ffffff
+    classDef card fill:#161b22,stroke:#30363d,stroke-width:1px,color:#ffffff
+
+    class AG,D bar
+    class PG,ST,CP,OBS card
+
+    style TOP fill:transparent,stroke:transparent
+    style MID fill:transparent,stroke:transparent
+
+    linkStyle default stroke:#30363d,stroke-width:1px
+```
 
 ## What it can do (v1)
 
@@ -84,7 +142,7 @@ one command to add it.
 | **Environments** | Every environment (= a project branch, same as `insta branch`) with its `Prod` chip on the default; create one (full clone: db copy + bucket copy + app redeploys) or delete one. Click an environment to scope the whole UI to it — the picker in the top bar does the same. |
 | **Approvals** | The HITL inbox: every action your policy gates waits here with **Grant once / Grant always / Deny**. The sidebar badge shows the pending count live. |
 | **Settings** | The governance policy matrix (`allow / approve / deny` per action — enforced by the daemon for every caller: CLI, agent, or this dashboard) and the audit-event timeline. |
-| **Logs / Usage** | Placeholders until the docker-backed observability phase: Logs will tail the environment's containers; Usage will show live container CPU/mem (deliberately *not* billing — that's cloud-only). |
+| **Logs / Usage** | Live from the docker-backed observability endpoints: Logs tails the environment's containers (`docker logs`, db included); Usage shows a point-in-time container CPU/mem snapshot (`docker stats`) — deliberately *not* billing, that's cloud-only. |
 
 Anything gated that you trigger from the UI pops the same `202 → approve → retry` flow the CLI
 uses — one governance model, three clients.
@@ -284,7 +342,7 @@ rm -rf ~/.insta-oss             # daemon state
 ## Test
 
 ```bash
-npm test        # 22 API-contract tests (no Docker) + 2 real-Docker isolation tests (db + bucket)
+npm test        # API-contract tests (fake adapters, no Docker) + real-Docker isolation tests (db + bucket)
 ```
 
 ## Code structure
@@ -303,6 +361,7 @@ insta-oss/
 │   ├── state.ts                single-tenant persistence (~/.insta-oss/state.json):
 │   │                           projects · branches · policies · approvals · events
 │   ├── types.ts                the model + adapter contracts (Database/Compute/Storage)
+│   ├── observe.ts              observability shapes + parsers (docker logs/stats, DB SQL)
 │   ├── docker.ts               one helper: spawn the docker CLI, capture stdout, stdin pipe
 │   └── adapters/               swappable providers behind the contracts in types.ts
 │       ├── postgres.ts         LocalPostgres — container per branch; clone = pg_dump→restore
@@ -343,19 +402,43 @@ Verified by running every registered CLI command against the daemon:
 | `org list` | ✅ builtin single org (`local`) |
 | `project create/link/list/delete` | ✅ (delete is govern-gated) |
 | `branch create/switch/delete/list` | ✅ (create = clone: db copy + bucket copy + app redeploy) |
+| `branch merge <source>` | ✅ structural + additive: missing compute groups materialize on the target against its OWN db/bucket — data never merges (gated `service.add`) |
 | `deploy` | ✅ (govern-gated) |
-| `secrets` / `secrets list` | ✅ full bundle: `DATABASE_URL` + `AWS_*` + `BUCKET_NAME` + user secrets (gated) |
-| `secrets set/unset NAME [--branch]` | ✅ user secrets: project-wide + branch override, injected on deploy; reserved names rejected (gated `secrets.write`) |
-| `services list` / `add compute` / `remove compute` | ✅ (gated); `add/remove postgres\|storage` → 501 — one of each per project locally |
+| `secrets` / `secrets list` / `secrets tree` | ✅ full bundle (gated) + the names-only project→branch→service binding tree |
+| `secrets set/unset NAME [--branch] [--service]` | ✅ project-wide, branch override, or service-bound (injected only into that group's deploys); reserved names rejected (gated `secrets.write`) |
+| `services list/add/remove` | ✅ (gated); `add postgres\|storage` is idempotent — one of each per project, auto-provisioned, so the same onboarding script runs on both targets |
+| `services secrets` / `set-access storage` | ✅ per-service secret names; bucket public-read ↔ private (gated `service.setAccess`) |
+| `compute start/stop/suspend/status` | ✅ persistent intent (docker start/stop/pause) + live runtime state |
 | `manifest` | ✅ per-branch postgres / storage / compute |
 | `policy` / `policy set` | ✅ |
 | `approvals list/approve/deny` (`--always`) | ✅ one-shot grants, same 202 flow |
 | `events` | ✅ resource + govern timeline, agent ingest with dedup |
+| `metrics` / `logs` | ✅ docker-backed (`docker stats` snapshot / `docker logs` tail — db logs included), cloud response shapes |
 | `login/logout` | not needed — localhost trust, no accounts |
-| `metrics` / `logs` | 501 with clear message (docker stats/logs planned — roadmap Phase 2) |
-| `usage` / `billing` | 501 — cloud usage is the billing pipeline (rate card + cycles); local visibility = `manifest` + upcoming docker-stats metrics/logs |
+| `services scale/upgrade` | 501 — machine scaling / instance specs are cloud pricing concepts |
+| `usage` / `billing` | 501 — billing metering is cloud-only by design; local visibility = `manifest` + docker-backed `metrics`/`logs` |
 | `org create` / `tokens` | 501 — single-tenant |
 
-**Branching vs merging:** `branch` = a disposable isolated environment (clone). There is no
-`branch merge` — merge happens at the **git level**: merge your code, run migrations against
-main, redeploy, delete the branch env. Branch data never merges back.
+**Branching vs merging:** `branch` = a disposable isolated environment (clone).
+`insta branch merge` is **structural only** — it materializes missing services on the target;
+**data never merges back**. Schema moves at the **git level**: merge your code, run migration
+files against main, redeploy, delete the branch env.
+
+## Contributing
+
+If you're interested in contributing, check the guide in [CONTRIBUTING.md](CONTRIBUTING.md).
+We truly appreciate pull requests — all types of help are welcome, from a typo fix to a new
+provider adapter (see **Where to extend** above).
+
+## Documentation & Support
+
+- **Roadmap** — [`docs/superpowers/plans/2026-07-02-insta-oss-roadmap.md`](docs/superpowers/plans/2026-07-02-insta-oss-roadmap.md)
+- **[Discord](https://discord.com/invite/MPxwj5xVvW)** — join the community; we're responsive there
+- **[X / Twitter](https://x.com/InsForge)** — follow for updates
+- **Email** — [info@insforge.dev](mailto:info@insforge.dev)
+
+## License
+
+This project is licensed under the Apache License 2.0 — see the [LICENSE](LICENSE) file for details.
+
+<p align="center">⭐ <b>Star us on GitHub</b> to get notified about new releases!</p>
