@@ -4,7 +4,7 @@
 // compute = redeploy.
 
 export type Decision = 'allow' | 'deny' | 'approve'
-export const GATED_ACTIONS = ['secrets.read', 'secrets.write', 'deploy', 'project.delete', 'branch.delete', 'service.add', 'service.remove', 'service.setAccess'] as const
+export const GATED_ACTIONS = ['secrets.read', 'secrets.write', 'deploy', 'project.delete', 'branch.delete', 'service.add', 'service.remove', 'service.setAccess', 'service.rename'] as const
 export type GatedAction = (typeof GATED_ACTIONS)[number]
 export const isGatedAction = (a: string): a is GatedAction => (GATED_ACTIONS as readonly string[]).includes(a)
 
@@ -74,6 +74,8 @@ export interface ComputeAdapter {
   stop?(ref: string, group: string): Promise<void>
   suspend?(ref: string, group: string): Promise<void>
   state?(ref: string, group: string): Promise<string> // running|suspended|stopped|none|unknown
+  // Rename a deployed group's runtime artifact (optional — `insta services rename compute`).
+  rename?(ref: string, from: string, to: string): Promise<void>
 }
 
 export interface StorageAdapter {
