@@ -204,6 +204,11 @@ export class Engine {
 
   // ---- services view (services model parity) ----
 
+  /** host:port of a branch's S3 server, from its minted endpoint credential. */
+  private s3Host(b: Branch): string | undefined {
+    try { return new URL(b.s3.AWS_ENDPOINT_URL_S3).host } catch { return undefined }
+  }
+
   /** Every compute group name: registered on the project plus any group already deployed. */
   private computeGroupNames(projectId: string): string[] {
     const project = this.getProject(projectId)
@@ -252,10 +257,12 @@ export class Engine {
         endpoint: ref ? `io-${ref}-pg:5432` : undefined,
         runtime: ref ? runtimeOf(`io-${ref}-pg`) : undefined,
         updated_at: iso(branch?.createdAt) },
+      // Storage endpoint/container derive from the branch's OWN minted creds, so branches
+      // provisioned by an older storage adapter still report their real server.
       { id: 'st-store', type: 'storage', name: 'store', status: 'ready',
         public: branch?.storagePublic ?? false,
-        endpoint: branch ? `io-minio:9000/${branch.bucket}` : undefined,
-        runtime: runtimeOf('io-minio'),
+        endpoint: branch ? `${this.s3Host(branch) ?? 'storage'}/${branch.bucket}` : undefined,
+        runtime: branch ? runtimeOf(this.s3Host(branch)?.split(':')[0] ?? '') : undefined,
         updated_at: iso(branch?.createdAt) },
       ...[...groups].sort().map((g) => {
         const app = branch?.apps[g]

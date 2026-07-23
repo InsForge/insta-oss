@@ -69,9 +69,9 @@ graph TB
 ## What it can do (v1)
 
 - **Projects with real resources** — `project create` provisions a Postgres container, an
-  S3 bucket (shared MinIO), and compute slots for your app images.
+  S3 bucket (shared Garage server) with its own bucket-scoped access key, and compute slots for your app images.
 - **Branch = a disposable isolated environment** — `branch create` clones the whole stack:
-  database copied (`pg_dump` → restore), bucket copied (`mc mirror`), every app group
+  database copied (`pg_dump` → restore), bucket copied (`rclone sync`), every app group
   re-deployed against the clone. Writes to a branch never touch its source (test-verified).
 - **Deploy your own compute** — `deploy --image you/app` runs your container per compute
   group, injected with that branch's `DATABASE_URL` + S3 credentials. Redeploy = replace.
@@ -89,7 +89,7 @@ graph TB
 - **Compute lifecycle** — `insta compute start|stop|suspend|status` per branch: persistent
   developer intent (docker start/stop/pause) + live runtime state.
 - **Storage access mode** — `insta services set-access storage store public|private` flips the
-  branch bucket between anonymous public-read and private (MinIO anonymous policy).
+  branch bucket between anonymous public-read (served on Garage's web endpoint, :3902) and private.
 - **The secret seam** — `insta secrets` is the only way credentials leave the daemon:
   `DATABASE_URL`, `AWS_ACCESS_KEY_ID/SECRET`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION`,
   `BUCKET_NAME` — standard Postgres/S3 env vars, so apps need no insta-specific code.
@@ -168,7 +168,7 @@ graph TD
   D --> GOV["Govern — gates · approvals · policy"]
   D --> EV["Events — audit timeline"]
   ENG --> PG[("LocalPostgres<br/>one container per branch")]
-  ENG --> ST[("LocalMinio<br/>shared server · bucket per branch")]
+  ENG --> ST[("LocalGarage<br/>shared server · bucket + scoped key per branch")]
   ENG --> CP["DockerCompute<br/>your image per group"]
 ```
 
@@ -189,7 +189,7 @@ Then open **http://127.0.0.1:8080** in a browser — that's the dashboard. The s
 API the CLI talks to; one process serves both. (Skipping `build:ui` is fine — the daemon runs
 API-only and `/` tells you how to add the UI later.)
 
-First run pulls `postgres:16-alpine`, `minio/minio`, `minio/mc` — give it a minute.
+First run pulls `postgres:16-alpine`, `dxflrs/garage`, `rclone/rclone` — give it a minute.
 Keep this terminal open (daemon runs in the foreground for now).
 
 ### 2. Get the `insta` CLI
@@ -220,7 +220,7 @@ insta secrets set APP_MODE demo   # your own config — rides the same bundle, i
 ```
 
 Behind the scenes: a `io-demo-main-pg` Postgres container, a `io-demo-main` bucket on the
-shared MinIO, and a Docker network per branch. `project create` also installs the related
+shared Garage server (with an access key scoped to exactly that bucket), and a Docker network per branch. `project create` also installs the related
 agent skills into your project (`.agents/skills/`, gitignored) so coding agents know the workflow.
 
 ### 4. Spawn your app into it (custom compute)
@@ -275,7 +275,7 @@ storage/store  [ready]  st-store
 
 $ insta secrets set APP_MODE demo && insta secrets --print
 DATABASE_URL="postgres://postgres:insta@io-demo-main-pg:5432/app"
-AWS_ACCESS_KEY_ID="…"  AWS_SECRET_ACCESS_KEY="…"  AWS_ENDPOINT_URL_S3="http://io-minio:9000"
+AWS_ACCESS_KEY_ID="GK…"  AWS_SECRET_ACCESS_KEY="…"  AWS_ENDPOINT_URL_S3="http://io-garage:3900"
 BUCKET_NAME="io-demo-main"
 APP_MODE="demo"
 
@@ -326,15 +326,15 @@ Then open your coding agent in the project and just say what to build. The divis
 | --- | --- |
 | `Docker is required and must be running` | start Docker Desktop / dockerd |
 | port 8080 in use (e.g. platform dev server) | `INSTA_OSS_PORT=4800 npx tsx src/main.ts` + `export INSTA_API_URL=http://127.0.0.1:4800` |
-| first commands slow | one-time image pulls (postgres/minio/mc) |
+| first commands slow | one-time image pulls (postgres/garage/rclone) |
 | where's my state? | `~/.insta-oss/state.json` (override with `INSTA_OSS_STATE`) |
-| `io-minio` container never goes away | by design — it's the shared storage server holding every branch's buckets |
+| `io-garage` container never goes away | by design — it's the shared storage server holding every branch's buckets |
 
 ### Uninstall / clean slate
 
 ```bash
 insta project delete            # per project (approval-gated)
-docker rm -f io-minio           # shared storage server (deletes all buckets)
+docker rm -f io-garage && docker volume rm io-garage-meta io-garage-data   # shared storage server (deletes all buckets)
 docker ps -aq --filter name=io- | xargs docker rm -f   # any strays
 rm -rf ~/.insta-oss             # daemon state
 ```
@@ -367,8 +367,8 @@ insta-oss/
 │       ├── postgres.ts         LocalPostgres — container per branch; clone = pg_dump→restore
 │       ├── compute.ts          DockerCompute — your image per group; listen port fixed,
 │       │                       host port mapped (branch clones shift host side only)
-│       └── storage.ts          LocalMinio — one shared server, bucket per branch;
-│                               clone = mc mirror; S3 creds minted per branch
+│       └── garage.ts           LocalGarage — one shared server, bucket per branch;
+│                               clone = rclone sync; a bucket-SCOPED access key per branch
 ├── test/
 │   ├── server.test.ts          API contract tests (fake adapters, no Docker, ~100ms)
 │   ├── clone-isolation.int.test.ts   real Docker: db clone is copied AND isolated

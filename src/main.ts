@@ -6,7 +6,7 @@ import { Engine } from './engine'
 import { LocalPostgres } from './adapters/postgres'
 import { DockerCompute } from './adapters/compute'
 import { RailwayCompute } from './adapters/railway'
-import { LocalMinio } from './adapters/storage'
+import { LocalGarage } from './adapters/garage'
 import type { ComputeAdapter } from './types'
 import { docker } from './docker'
 
@@ -33,7 +33,7 @@ async function main(): Promise<void> {
   try { await docker(['version', '--format', '{{.Server.Version}}']) }
   catch { console.error('error: Docker is required and must be running (insta-oss provisions branches as containers)'); process.exit(1) }
 
-  const engine = new Engine(new LocalPostgres(), pickCompute(), new LocalMinio())
+  const engine = new Engine(new LocalPostgres(), pickCompute(), new LocalGarage())
   const app = buildServer(engine)
   await app.listen({ host: '127.0.0.1', port })
   console.log(`insta-oss daemon listening on http://127.0.0.1:${port}`)
