@@ -6,8 +6,28 @@ export type Project = { id: string; name: string; status: string }
 export type BranchInfo = { id: string; name: string; is_default: boolean; status: string }
 export type Service = {
   id: string; type: 'postgres' | 'storage' | 'compute'; name: string; status: string
-  machine_count?: number; domain?: string
+  machine_count?: number; domain?: string; public?: boolean; desired_state?: string
   runtime?: 'online' | 'stopped' | 'none'; endpoint?: string; updated_at?: string
+}
+export type DbMetrics = {
+  connections: { active: number; idle: number; total: number; max: number }
+  dbSizeBytes: number; deadlocks: number
+  tuples: { inserted: number; updated: number; deleted: number }; cacheHitRatio: number
+}
+export type DbActivityRow = {
+  pid: number; state?: string; waitEvent?: string; durationMs?: number
+  query?: string; application?: string; client?: string; queryStart?: string
+}
+export type DbQueryStatRow = { queryId: string; query: string; calls: number; meanMs: number; totalMs: number; rows: number }
+export type DbQueryStats = { stats: DbQueryStatRow[]; extensionReady: boolean }
+export type Operation = { id: string; action: string; status: string; createdAt?: string }
+export type SecretTree = {
+  projectWide: string[]
+  branches: Array<{
+    name: string; isDefault: boolean
+    services: Array<{ type: string; name: string; secrets: string[] }>
+    unbound: string[]
+  }>
 }
 export type LogLine = { ts: string; level?: string; message: string; instance?: string }
 export type LogsResult = { source: string; lines: LogLine[]; note?: string }
@@ -63,6 +83,29 @@ export const api = {
     get<LogsResult>(`/projects/${p}/logs?component=${component}&branch=${encodeURIComponent(branch)}&limit=${limit}`),
   metrics: (p: string, component: 'compute' | 'db', branch: string) =>
     get<MetricsResult>(`/projects/${p}/metrics?component=${component}&branch=${encodeURIComponent(branch)}`),
+
+  // Names-only inventory — the dashboard never shows secret VALUES (plan v1 non-goal; values
+  // stay behind `insta secrets`, secrets.read-gated). This route emits no audit event.
+  secretTree: (p: string) => get<SecretTree>(`/projects/${p}/secrets/tree`),
+  dbMetrics: (p: string, branch: string) =>
+    get<DbMetrics>(`/projects/${p}/database/metrics?branch=${encodeURIComponent(branch)}`),
+  dbActivity: async (p: string, branch: string) =>
+    (await get<{ activity: DbActivityRow[] }>(`/projects/${p}/database/activity?branch=${encodeURIComponent(branch)}`)).activity,
+  dbQueryStats: (p: string, branch: string) =>
+    get<DbQueryStats>(`/projects/${p}/database/query-stats?branch=${encodeURIComponent(branch)}&limit=20`),
+  operations: async (p: string, limit = 50) =>
+    (await get<{ operations: Operation[] }>(`/projects/${p}/operations?limit=${limit}`)).operations,
+
+  setSecret: (p: string, name: string, value: string, branch?: string) =>
+    call<{ ok: boolean }>('PUT', `/projects/${p}/secrets/${encodeURIComponent(name)}`, branch ? { value, branch } : { value }),
+  unsetSecret: (p: string, name: string, branch?: string) =>
+    call<{ ok: boolean }>('DELETE', `/projects/${p}/secrets/${encodeURIComponent(name)}${branch ? `?branch=${encodeURIComponent(branch)}` : ''}`),
+  renameService: (p: string, sid: string, name: string) =>
+    call<{ service: Service }>('POST', `/projects/${p}/services/${sid}/rename`, { name }),
+  lifecycle: (p: string, sid: string, verb: 'start' | 'stop' | 'suspend', branch: string) =>
+    call<{ service?: Service; state: string }>('POST', `/projects/${p}/services/${sid}/${verb}?branch=${encodeURIComponent(branch)}`),
+  setAccess: (p: string, sid: string, isPublic: boolean, branch: string) =>
+    call<{ service?: Service }>('PUT', `/projects/${p}/services/${sid}/access`, { public: isPublic, branch }),
 
   createBranch: (p: string, name: string, from: string) =>
     call<{ branch: { id: string; name: string } }>('POST', `/projects/${p}/branches`, { name, from }),

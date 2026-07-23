@@ -5,6 +5,9 @@ import { Layout } from './components/Layout'
 import { Services } from './pages/Services'
 import { Environments } from './pages/Environments'
 import { Logs } from './pages/Logs'
+import { Secrets } from './pages/Secrets'
+import { DatabaseInsight } from './pages/DatabaseInsight'
+import { Operations } from './pages/Operations'
 import { Usage } from './pages/Usage'
 import { Approvals } from './pages/Approvals'
 import { Settings } from './pages/Settings'
@@ -55,6 +58,9 @@ export default function App() {
         {/* pre-rename bookmarks */}
         <Route path="branches" element={<Navigate to="../env" replace />} />
         <Route path="logs" element={<Logs />} />
+        <Route path="secrets" element={<Secrets />} />
+        <Route path="database" element={<DatabaseInsight />} />
+        <Route path="operations" element={<Operations />} />
         <Route path="usage" element={<Usage />} />
         <Route path="approvals" element={<Approvals />} />
         <Route path="settings" element={<Settings />} />

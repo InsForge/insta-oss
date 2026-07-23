@@ -3,7 +3,10 @@ import { cn } from '@insforge/ui'
 import {
   Box,
   ChartColumn,
+  Database,
   GitBranch,
+  History,
+  KeyRound,
   ScrollText,
   Settings,
   ShieldCheck,
@@ -111,6 +114,7 @@ function SideBar() {
         <SideItem to={`${base}/usage`} label="Usage" icon={ChartColumn} />
         <SideItem to={`${base}/env`} label="Environments" icon={GitBranch} />
         <SideItem to={`${base}/approvals`} label="Approvals" icon={ShieldCheck} badge={pending} />
+        <SideItem to={`${base}/operations`} label="Operations" icon={History} />
         <div className="my-2 border-t border-border" />
         <div className="flex h-10 items-center gap-3 pr-3 pl-3.5 text-sm">
           <GitBranch className="size-5 shrink-0 text-muted-foreground" />
@@ -118,6 +122,8 @@ function SideBar() {
           {isDefault && <Chip>Prod</Chip>}
         </div>
         <SideItem to={`${base}/services`} label="Service" icon={Box} />
+        <SideItem to={`${base}/secrets`} label="Secrets" icon={KeyRound} />
+        <SideItem to={`${base}/database`} label="Database" icon={Database} />
         <SideItem to={`${base}/logs`} label="Logs" icon={ScrollText} />
       </nav>
       <div className="border-t border-border py-2">
