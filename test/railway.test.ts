@@ -34,8 +34,6 @@ const adapter = () => new RailwayCompute({
 
 beforeEach(() => { calls = []; existing = {} })
 
-const ops = () => calls.map((c) => /mutation (\w+)|query (\w+)/.exec(c.query)?.[1] ?? /(\w+)\(/.exec(c.query)?.[1]).join(',')
-
 test('deploy on a fresh ref: creates the service from the image, sets env + PORT, adds a domain, returns its URL', async () => {
   const { url } = await adapter().deploy('demo-main', {
     image: 'ghcr.io/you/app:1', port: 3000, envVars: { DATABASE_URL: 'pg://x', BUCKET_NAME: 'b' }, group: 'default',

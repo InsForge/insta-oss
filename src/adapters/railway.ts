@@ -21,7 +21,7 @@ export interface RailwayConfig {
 export class RailwayCompute implements ComputeAdapter {
   constructor(private cfg: RailwayConfig) {}
 
-  private async gql<T = any>(query: string, variables: Record<string, unknown>): Promise<T> {
+  private async gql<T = unknown>(query: string, variables: Record<string, unknown>): Promise<T> {
     const doFetch = this.cfg.fetchImpl ?? fetch
     const res = await doFetch(API, {
       method: 'POST',
@@ -37,7 +37,7 @@ export class RailwayCompute implements ComputeAdapter {
 
   /** name → service id for every service in the configured project. */
   private async services(): Promise<Record<string, string>> {
-    const data = await this.gql(
+    const data = await this.gql<{ project?: { services?: { edges?: Array<{ node: { id: string; name: string } }> } } }>(
       'query project($id: String!) { project(id: $id) { services { edges { node { id name } } } } }',
       { id: this.cfg.projectId },
     )
@@ -62,7 +62,7 @@ export class RailwayCompute implements ComputeAdapter {
         { serviceId, environmentId: this.cfg.environmentId, input: { source: { image: opts.image } } },
       )
     } else {
-      const created = await this.gql(
+      const created = await this.gql<{ serviceCreate: { id: string } }>(
         `mutation serviceCreate($input: ServiceCreateInput!) { serviceCreate(input: $input) { id } }`,
         { input: { projectId: this.cfg.projectId, name, source: { image: opts.image } } },
       )
@@ -84,14 +84,14 @@ export class RailwayCompute implements ComputeAdapter {
 
     let domain: string | undefined
     try {
-      const d = await this.gql(
+      const d = await this.gql<{ serviceDomainCreate?: { domain?: string } }>(
         `mutation serviceDomainCreate($input: ServiceDomainCreateInput!) { serviceDomainCreate(input: $input) { domain } }`,
         { input: { environmentId: this.cfg.environmentId, serviceId, targetPort: opts.port } },
       )
       domain = d.serviceDomainCreate?.domain
     } catch {
       // domain already exists (redeploys) — read it back instead
-      const d = await this.gql(
+      const d = await this.gql<{ domains?: { serviceDomains?: Array<{ domain?: string }> } }>(
         `query domains($projectId: String!, $environmentId: String!, $serviceId: String!) {
            domains(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) {
              serviceDomains { domain } } }`,

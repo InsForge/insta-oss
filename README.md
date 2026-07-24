@@ -31,6 +31,15 @@ Runs anywhere Docker runs — single-tenant, no accounts, no billing, no externa
 Driven by the standard **`insta` CLI** (its default API URL is already `http://localhost:8080`,
 so it works out of the box). Workflows built here run unchanged on managed Instacloud.
 
+Two things make it more than a local backend:
+
+- **Instant cloning** — `insta branch create` clones the whole stack (database data, object
+  storage, and every app container) into a disposable, fully isolated environment in seconds.
+  Break it, throw it away; the source is never touched. One branch per task, run in parallel.
+- **Built-in observability** — `insta logs` / `insta metrics` tail your containers and sample
+  live CPU/memory, and the dashboard's Database page surfaces live Postgres insight (connections,
+  cache-hit, running queries, top statements) — the same signals the managed cloud shows.
+
 ### How it works
 
 Coding agents (or you) drive the daemon through the `insta` CLI and its agent skills; every
