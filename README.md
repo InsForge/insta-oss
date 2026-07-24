@@ -31,6 +31,15 @@ Runs anywhere Docker runs — single-tenant, no accounts, no billing, no externa
 Driven by the standard **`insta` CLI** (its default API URL is already `http://localhost:8080`,
 so it works out of the box). Workflows built here run unchanged on managed Instacloud.
 
+Two things make it more than a local backend:
+
+- **Instant cloning** — `insta branch create` clones the whole stack (database data, object
+  storage, and every app container) into a disposable, fully isolated environment in seconds.
+  Break it, throw it away; the source is never touched. One branch per task, run in parallel.
+- **Built-in observability** — `insta logs` / `insta metrics` tail your containers and sample
+  live CPU/memory, and the dashboard's Database page surfaces live Postgres insight (connections,
+  cache-hit, running queries, top statements) — the same signals the managed cloud shows.
+
 ### How it works
 
 Coding agents (or you) drive the daemon through the `insta` CLI and its agent skills; every
@@ -65,6 +74,41 @@ graph TB
 
     linkStyle default stroke:#30363d,stroke-width:1px
 ```
+
+## What makes it different
+
+Most local backends hand your app a database and a bucket. insta-oss is built around two ideas
+the commodity stack doesn't have:
+
+### 1. Governance at the credential boundary
+
+The daemon is the **only** thing that holds credentials, and it's a circuit breaker in front of
+them. Every sensitive action — reading secrets, deploying, deleting a project or branch, changing
+a service — passes a per-project policy gate set to **allow / deny / approve** before it touches a
+resource. An `approve` gate physically parks the action (HTTP `202`) until a human runs
+`insta approvals approve <id>`; grants are one-shot, and every action lands in an append-only
+`insta events` audit timeline. This is the same model whether the caller is you, the dashboard, or
+an autonomous agent — so **an agent that ignores its instructions still cannot get past a gate you
+set**. Credentials leave only through the secret seam (`insta secrets` → standard `DATABASE_URL` /
+`AWS_*` env vars), and each branch gets its own bucket-scoped storage key, so a leaked branch
+credential reaches nothing else. Governance, not the database, is the product.
+
+### 2. A branch is a whole environment, cloned — not a git branch
+
+`insta branch create <name>` doesn't fork code; it **clones the entire running stack** into a
+disposable, fully isolated environment, in seconds:
+
+- the **database is copied** (`pg_dump` → restore) — the clone carries the parent's real data;
+- the **storage bucket is copied** (`rclone sync`) with its own scoped credentials;
+- **every app container is redeployed** against the clone, each on its own URL.
+
+Writes to a branch never touch its source (test-verified). That makes the unit of work
+**one task → one branch → one throwaway environment**: point an agent at a branch, let it build,
+deploy, and verify against real cloned data, then delete it — `main` is never its playground, and
+many branches run in parallel with zero collision. Promotion is deliberate and git-shaped: branch
+environments **never merge data**. `insta branch merge` is *structural only* (it materializes
+missing services on the target); schema moves forward the same way it does everywhere — you merge
+your code, run migration files against `main`, redeploy, and delete the branch env.
 
 ## What it can do (v1)
 

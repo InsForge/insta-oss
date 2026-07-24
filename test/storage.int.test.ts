@@ -44,7 +44,6 @@ test('branch credentials are scoped: a branch key cannot touch another branch bu
   const feat = branches.find((b) => b.name === 'feat')!
   const rcloneAs = (creds: Record<string, string>, args: string[]) =>
     // same path the app takes: plain S3 with the branch's minted key
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     import('../src/docker').then(({ docker }) => docker(['run', '--rm', '--network', main.network,
       '-e', 'RCLONE_CONFIG_G_TYPE=s3', '-e', 'RCLONE_CONFIG_G_PROVIDER=Other',
       '-e', `RCLONE_CONFIG_G_ENDPOINT=${main.s3.AWS_ENDPOINT_URL_S3}`, '-e', 'RCLONE_CONFIG_G_REGION=garage',
