@@ -105,11 +105,11 @@ export function buildServer(engine: Engine): FastifyInstance {
     const { name } = (req.body ?? {}) as { name?: string }
     if (!name) return reply.code(400).send({ error: 'name required' })
     const { project, defaultBranch } = await engine.createProject(name)
-    return {
+    return reply.code(201).send({
       project: { id: project.id, name: project.name, status: project.status },
       defaultBranch: { id: defaultBranch.id, name: defaultBranch.name },
       resources: [{ kind: 'postgres' }, { kind: 'storage' }, { kind: 'compute' }],
-    }
+    })
   })
 
   app.get('/orgs/:id/projects', async () => ({
@@ -126,7 +126,7 @@ export function buildServer(engine: Engine): FastifyInstance {
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     if (!gated(id, 'project.delete', reply)) return reply
     await engine.destroyProject(id)
-    return { ok: true }
+    return {}
   })
 
   app.get('/projects/:id/branches', async (req) => ({
@@ -140,7 +140,7 @@ export function buildServer(engine: Engine): FastifyInstance {
     if (!name) return reply.code(400).send({ error: 'name required' })
     try {
       const b = await engine.createBranch(id, name, from)
-      return { branch: { id: b.id, name: b.name } }
+      return reply.code(201).send({ branch: { id: b.id, name: b.name } })
     } catch (e) {
       return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) })
     }
@@ -149,7 +149,7 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.delete('/projects/:id/branches/:bid', async (req, reply) => {
     const { id, bid } = req.params as { id: string; bid: string }
     if (!gated(id, 'branch.delete', reply)) return reply
-    try { await engine.destroyBranch(id, bid); return { ok: true } }
+    try { await engine.destroyBranch(id, bid); return {} }
     catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 
@@ -248,13 +248,13 @@ export function buildServer(engine: Engine): FastifyInstance {
         // `services add storage <name> --public` provisions the bucket public on the cloud;
         // here the bucket already exists, so apply the access mode to it.
         if (body.type === 'storage' && body.public === true) {
-          return { service: await engine.setServiceAccess(id, service.id, true, body.branch) }
+          return reply.code(201).send({ service: await engine.setServiceAccess(id, service.id, true, body.branch) })
         }
-        return { service }
+        return reply.code(201).send({ service })
       } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
     }
     if (body.type !== 'compute') return reply.code(400).send({ error: `unknown service type: ${body.type}` })
-    try { return { service: engine.addComputeService(id, body.name) } }
+    try { return reply.code(201).send({ service: engine.addComputeService(id, body.name) }) }
     catch (e) { return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 
@@ -326,7 +326,7 @@ export function buildServer(engine: Engine): FastifyInstance {
       return reply.code(501).send({ error: 'removing postgres/storage services is cloud-only — insta-oss provisions one of each per project' })
     }
     if (!gated(id, 'service.remove', reply)) return reply
-    try { await engine.removeComputeService(id, sid.slice(3)); return { ok: true } }
+    try { await engine.removeComputeService(id, sid.slice(3)); return {} }
     catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 

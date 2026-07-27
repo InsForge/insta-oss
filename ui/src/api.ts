@@ -90,7 +90,7 @@ export const api = {
   dbMetrics: (p: string, branch: string) =>
     get<DbMetrics>(`/projects/${p}/database/metrics?branch=${encodeURIComponent(branch)}`),
   dbActivity: async (p: string, branch: string) =>
-    (await get<{ activity: DbActivityRow[] }>(`/projects/${p}/database/activity?branch=${encodeURIComponent(branch)}`)).activity,
+    (await get<{ queries: DbActivityRow[] }>(`/projects/${p}/database/activity?branch=${encodeURIComponent(branch)}`)).queries,
   dbQueryStats: (p: string, branch: string) =>
     get<DbQueryStats>(`/projects/${p}/database/query-stats?branch=${encodeURIComponent(branch)}&limit=20`),
   operations: async (p: string, limit = 50) =>
@@ -110,10 +110,10 @@ export const api = {
   createBranch: (p: string, name: string, from: string) =>
     call<{ branch: { id: string; name: string } }>('POST', `/projects/${p}/branches`, { name, from }),
   deleteBranch: (p: string, branchId: string) =>
-    call<{ ok: boolean }>('DELETE', `/projects/${p}/branches/${branchId}`),
+    call<{ teardown?: unknown }>('DELETE', `/projects/${p}/branches/${branchId}`),
   addComputeService: (p: string, name: string) =>
     call<{ service: unknown }>('POST', `/projects/${p}/services`, { type: 'compute', name }),
-  removeService: (p: string, sid: string) => call<{ ok: boolean }>('DELETE', `/projects/${p}/services/${sid}`),
+  removeService: (p: string, sid: string) => call<{ teardown?: unknown }>('DELETE', `/projects/${p}/services/${sid}`),
   setPolicy: (p: string, action: string, decision: Decision) =>
     call<{ policy: Policy }>('PUT', `/projects/${p}/policy/${action}`, { decision }),
   decide: (p: string, approvalId: string, verdict: 'approve' | 'deny', always = false) =>

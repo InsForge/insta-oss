@@ -576,9 +576,9 @@ export class Engine {
   }
 
   /** Currently running queries (pg_stat_activity, ≤100). */
-  async dbActivity(projectId: string, branchName?: string): Promise<{ activity: observe.DbActivityRow[] }> {
+  async dbActivity(projectId: string, branchName?: string): Promise<{ queries: observe.DbActivityRow[] }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    return { activity: observe.toDbActivity(await this.db.query(this.ref(project, branch.name), observe.DB_ACTIVITY_SQL)) }
+    return { queries: observe.toDbActivity(await this.db.query(this.ref(project, branch.name), observe.DB_ACTIVITY_SQL)) }
   }
 
   /** Top statements by execution time (pg_stat_statements; preloaded on newly-provisioned branch
