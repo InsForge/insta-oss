@@ -89,6 +89,11 @@ test('branch create clones data + redeploys apps; branches list has is_default/s
   const branches = (await get(`/projects/${id}/branches`)).json().branches
   expect(branches.map((b: { name: string }) => b.name).sort()).toEqual(['feat', 'main'])
   expect(branches.find((b: { name: string }) => b.name === 'main').is_default).toBe(true)
+
+  const feat = branches.find((b: { name: string }) => b.name === 'feat')
+  const del = await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${feat.id}` })
+  expect(del.statusCode).toBe(200)
+  expect(del.json()).toEqual({})
 })
 
 test('secrets returns the branch bundle (seam) and is gateable', async () => {
@@ -193,6 +198,9 @@ test('services add compute registers a group; duplicates 409; pg/storage add is 
   const st = await post(`/projects/${id}/services`, { type: 'storage', name: 'blobs' })
   expect(st.statusCode).toBe(201)
   expect(st.json().service).toMatchObject({ id: 'st-store', type: 'storage', name: 'store', public: false })
+  const publicSt = await post(`/projects/${id}/services`, { type: 'storage', name: 'blobs', public: true })
+  expect(publicSt.statusCode).toBe(201)
+  expect(publicSt.json().service).toMatchObject({ id: 'st-store', type: 'storage', name: 'store', public: true })
   expect((await post(`/projects/${id}/services`, { type: 'queue', name: 'q' })).statusCode).toBe(400)
 })
 
