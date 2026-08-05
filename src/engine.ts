@@ -10,6 +10,15 @@ import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, 
 const DEFAULT_BRANCH = 'main'
 const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
 
+// Volume-cap parity (platform #166–169): the cloud caps volumes per billing tier; oss has no
+// tiers, so one fixed generous cap serves every project. Grow-only validation is kept so the
+// same CLI sequence behaves identically on both targets. Sizes are ADVISORY locally — neither
+// docker named volumes nor the postgres container enforce a byte quota.
+const VOLUME_CAP_GIB = 100
+const DB_VOLUME_DEFAULT_GIB = 10
+const DB_CAP = { cpuMilli: 8000, memoryMib: 8192, volumeGib: VOLUME_CAP_GIB }
+const VOLUME_MOUNT_PATH = '/data'
+
 export class Engine {
   constructor(private db: DatabaseAdapter, private compute: ComputeAdapter, private storage: StorageAdapter) {}
 
@@ -86,6 +95,8 @@ export class Engine {
       const list = st.userSecrets[projectId] ?? []
       const inherited = list.filter((u) => u.branch === source.name).map((u) => ({ ...u, branch: name }))
       st.userSecrets[projectId] = [...list, ...inherited]
+      // the DB volume-size setting travels with the clone (it describes the copied database)
+      if (source.dbVolumeGib !== undefined) st.branches[b.id].dbVolumeGib = source.dbVolumeGib
     })
     this.emit(projectId, name, 'resource', 'branch.created', { from: source.name })
     return b
@@ -103,8 +114,16 @@ export class Engine {
     const prior = b.apps[group]
     const priorHost = prior?.hostPort ?? (prior?.url ? Number(new URL(prior.url).port) || undefined : undefined)
     const hostPort = opts.hostPort ?? priorHost ?? port
+    // The group's /data volume, if one was attached at service creation. Named per-branch (each
+    // branch is isolated; a clone starts with an EMPTY volume — compute state lives in db/storage)
+    // and keyed by the volume's stable id so a service rename never detaches the data.
+    const vol = project.computeVolumes?.[group]
+    if (vol && !this.compute.supportsVolumes) {
+      throw new Error(`service "${group}" has a /data volume, which this compute adapter does not support — use the docker adapter`)
+    }
     const { url } = await this.compute.deploy(this.ref(project, b.name), {
       image: opts.image, port, hostPort, network: b.network, group,
+      ...(vol ? { volume: { name: `io-${this.ref(project, b.name)}-data-${vol.id}` } } : {}),
       envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.deploySecretsFor(projectId, b.name, group) },
     })
     mutate((s) => { s.branches[b.id].apps[group] = { image: opts.image, port, hostPort, url, updatedAt: Date.now() } })
@@ -236,6 +255,7 @@ export class Engine {
   async services(projectId: string, branchName?: string): Promise<Array<{
     id: string; type: string; name: string; status: string; machine_count?: number; domain?: string
     runtime?: string; endpoint?: string; updated_at?: string; public?: boolean; desired_state?: string
+    volume_gib?: number | null
   }>> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
@@ -268,6 +288,7 @@ export class Engine {
         const app = branch?.apps[g]
         return {
           id: `cp-${g}`, type: 'compute', name: g, status: 'ready', machine_count: 1,
+          volume_gib: project.computeVolumes?.[g]?.sizeGib ?? null, // platform Service.volume_gib (compute only)
           desired_state: app?.desiredState ?? 'running',
           domain: app?.url,
           endpoint: app ? app.url.replace(/^https?:\/\//, '') : undefined,
@@ -415,19 +436,27 @@ export class Engine {
     return { id: 'st-store', type: 'storage', name: 'store', public: def?.storagePublic ?? false }
   }
 
-  /** Register a compute group as a service (materializes on first deploy --group <name>). */
-  addComputeService(projectId: string, name: string): { id: string; type: string; name: string } {
+  /** Register a compute group as a service (materializes on first deploy --group <name>).
+   *  volumeGib optionally attaches a persistent /data volume — CREATE-TIME ONLY, like the
+   *  platform; grow it later via setServiceVolume, never add or detach one. */
+  addComputeService(projectId: string, name: string, volumeGib?: number): { id: string; type: string; name: string; volume_gib: number | null } {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     const groups = new Set(project.computeGroups ?? [])
     for (const b of this.listBranches(projectId)) for (const g of Object.keys(b.apps)) groups.add(g)
     if (groups.has(name)) throw new Error(`compute service "${name}" already exists`)
+    if (volumeGib !== undefined) {
+      if (!Number.isInteger(volumeGib) || volumeGib < 1) throw new Error('volumeGib must be a positive integer (whole Gi)')
+      if (volumeGib > VOLUME_CAP_GIB) throw new Error(`volume exceeds the cap (${VOLUME_CAP_GIB}Gi)`)
+      if (!this.compute.supportsVolumes) throw new Error('/data volumes are not supported by this compute adapter — use the docker adapter')
+    }
     mutate((st) => {
       const pr = st.projects[projectId]
       pr.computeGroups = [...(pr.computeGroups ?? []), name]
+      if (volumeGib !== undefined) (pr.computeVolumes ??= {})[name] = { id: randomUUID().slice(0, 8), sizeGib: volumeGib }
     })
-    this.emit(projectId, null, 'resource', 'service.added', { type: 'compute', name })
-    return { id: `cp-${name}`, type: 'compute', name }
+    this.emit(projectId, null, 'resource', 'service.added', { type: 'compute', name, ...(volumeGib !== undefined ? { volumeGib } : {}) })
+    return { id: `cp-${name}`, type: 'compute', name, volume_gib: volumeGib ?? null }
   }
 
   /** Rename a compute group everywhere it appears: registration, every branch's deployment
@@ -450,6 +479,11 @@ export class Engine {
     mutate((st) => {
       const pr = st.projects[projectId]
       pr.computeGroups = (pr.computeGroups ?? []).map((g) => (g === oldName ? newName : g))
+      // the /data volume record follows the rename; its stable id keeps the docker volume attached
+      if (pr.computeVolumes?.[oldName]) {
+        pr.computeVolumes[newName] = pr.computeVolumes[oldName]
+        delete pr.computeVolumes[oldName]
+      }
       for (const b of branches) {
         const app = st.branches[b.id].apps[oldName]
         if (!app) continue
@@ -464,20 +498,92 @@ export class Engine {
     return current()
   }
 
-  /** Remove a compute group: destroy its containers on every branch, unregister. */
+  /** Remove a compute group: destroy its containers (and /data volumes) on every branch, unregister. */
   async removeComputeService(projectId: string, name: string): Promise<void> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
+    const vol = project.computeVolumes?.[name]
     for (const b of this.listBranches(projectId)) {
       if (!b.apps[name]) continue
       await docker(['rm', '-f', `io-${this.ref(project, b.name)}-app-${name}`]).catch(() => {})
+      if (vol) await docker(['volume', 'rm', '-f', `io-${this.ref(project, b.name)}-data-${vol.id}`]).catch(() => {})
       mutate((st) => { delete st.branches[b.id].apps[name] })
     }
     mutate((st) => {
       const pr = st.projects[projectId]
       pr.computeGroups = (pr.computeGroups ?? []).filter((g) => g !== name)
+      if (pr.computeVolumes) delete pr.computeVolumes[name]
     })
     this.emit(projectId, null, 'resource', 'service.removed', { type: 'compute', name })
+  }
+
+  // ---- volumes + database settings (tier-caps contract parity — platform #166–169) ----
+
+  /** A compute service's /data volume (null when none) + the volume cap — GET …/volume shape. */
+  serviceVolume(projectId: string, serviceId: string): { volume: { sizeGib: number; mountPath: string } | null; cap: { volumeGib: number } } {
+    const svc = this.serviceOf(projectId, serviceId)
+    if (svc.type !== 'compute') throw new Error('volumes are only supported for compute services')
+    const vol = this.getProject(projectId)?.computeVolumes?.[svc.name]
+    return { volume: vol ? { sizeGib: vol.sizeGib, mountPath: VOLUME_MOUNT_PATH } : null, cap: { volumeGib: VOLUME_CAP_GIB } }
+  }
+
+  /** Grow a compute service's /data volume — same three rules as the cloud (grow-only, must have
+   *  been attached at creation, ≤ cap) so the CLI flow is identical; the size itself is advisory
+   *  locally (a docker named volume has no quota to extend). */
+  async setServiceVolume(projectId: string, serviceId: string, sizeGib: number): Promise<{
+    service: Record<string, unknown> | undefined; volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }
+  }> {
+    const svc = this.serviceOf(projectId, serviceId)
+    if (svc.type !== 'compute') throw new Error('volumes are only supported for compute services')
+    const vol = this.getProject(projectId)?.computeVolumes?.[svc.name]
+    if (!vol) throw new Error('this service has no volume — a volume attaches at service creation (volumeGib) and cannot be added later')
+    if (!Number.isInteger(sizeGib) || sizeGib < 1) throw new Error('sizeGib must be a positive integer (whole Gi)')
+    if (sizeGib < vol.sizeGib) throw new Error(`the volume can only grow (currently ${vol.sizeGib}Gi) — the volume is a provisioned disk and cannot shrink`)
+    if (sizeGib > VOLUME_CAP_GIB) throw new Error(`volume exceeds the cap (${VOLUME_CAP_GIB}Gi)`)
+    if (sizeGib !== vol.sizeGib) {
+      mutate((st) => { st.projects[projectId].computeVolumes![svc.name].sizeGib = sizeGib })
+      this.emit(projectId, null, 'resource', 'service.volume', { service: serviceId, sizeGib })
+    }
+    const service = (await this.services(projectId)).find((s) => s.id === serviceId)
+    return { service, volume: { sizeGib, mountPath: VOLUME_MOUNT_PATH }, cap: { volumeGib: VOLUME_CAP_GIB } }
+  }
+
+  /** Read-only DB instance view (DbInstanceInfo shape): settings + volume size + the cap. Local
+   *  values are honest constants — pooling/scale-to-zero are cloud provider levers with no
+   *  docker-postgres analog. Includes the deprecated storage* aliases the platform still mirrors. */
+  dbInstance(projectId: string, branchName?: string): Record<string, unknown> {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    const gib = branch.dbVolumeGib ?? DB_VOLUME_DEFAULT_GIB
+    return {
+      id: 'pg-db', name: 'db', state: branch.status,
+      host: `io-${this.ref(project, branch.name)}-pg`, port: 5432,
+      connectionPooling: false, deletionProtection: false, scaleToZero: false,
+      volumeSize: `${gib}Gi`, volumeGib: gib,
+      storageSize: `${gib}Gi`, storageGiB: gib, // DEPRECATED aliases — dropped when the platform drops them
+      cap: { ...DB_CAP },
+    }
+  }
+
+  /** PATCH database/settings: volumeSize ('10Gi', whole Gi, grow-only) is accepted, persisted,
+   *  and echoed — advisory locally, the postgres container's disk is unbounded. Other settings
+   *  (pooling, scale-to-zero, idle timeout, cpu/memory ceilings) are cloud provider levers with
+   *  no local analog: accepted and ignored so one script runs unchanged on both targets. */
+  dbSettings(projectId: string, patch: { volumeSize?: string; storageSize?: string }, branchName?: string): Record<string, unknown> {
+    const { branch } = this.branchOrThrow(projectId, branchName)
+    const raw = patch.volumeSize ?? patch.storageSize // storageSize = deprecated platform alias
+    if (raw !== undefined) {
+      const m = /^(\d+)Gi$/.exec(String(raw).trim())
+      const want = m ? Number(m[1]) : 0
+      if (want < 1) throw new Error(`invalid volume quantity: ${raw} (whole Gi only — try '10Gi')`)
+      const current = branch.dbVolumeGib ?? DB_VOLUME_DEFAULT_GIB
+      if (want < current) throw new Error(`the volume can only grow (currently ${current}Gi) — the volume is a provisioned disk and cannot shrink`)
+      if (want > VOLUME_CAP_GIB) throw new Error(`volume exceeds the cap (${VOLUME_CAP_GIB}Gi)`)
+      if (want !== current) {
+        mutate((st) => { st.branches[branch.id].dbVolumeGib = want })
+        this.emit(projectId, branch.name, 'resource', 'database.settings', { volumeSize: `${want}Gi` })
+      }
+    }
+    return this.dbInstance(projectId, branchName)
   }
 
   async destroyBranch(projectId: string, branchId: string): Promise<void> {

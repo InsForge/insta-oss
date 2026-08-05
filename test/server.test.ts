@@ -26,7 +26,12 @@ const db: DatabaseAdapter = {
   destroy: async (ref) => { calls.push(`db.destroy:${ref}`) },
 }
 const compute: ComputeAdapter = {
-  deploy: async (ref, o) => { calls.push(`deploy:${ref}:${o.group}:${o.image}:s3=${o.envVars.BUCKET_NAME ?? 'none'}:p=${o.port}->${o.hostPort}`); return { url: `http://localhost:${o.hostPort}` } },
+  supportsVolumes: true,
+  deploy: async (ref, o) => {
+    calls.push(`deploy:${ref}:${o.group}:${o.image}:s3=${o.envVars.BUCKET_NAME ?? 'none'}:p=${o.port}->${o.hostPort}`)
+    if (o.volume) calls.push(`deploy.volume:${ref}:${o.group}:${o.volume.name}`)
+    return { url: `http://localhost:${o.hostPort}` }
+  },
   destroy: async (ref) => { calls.push(`compute.destroy:${ref}`) },
   start: async (ref, group) => { calls.push(`compute.start:${ref}:${group}`) },
   stop: async (ref, group) => { calls.push(`compute.stop:${ref}:${group}`) },
@@ -51,6 +56,7 @@ beforeEach(() => {
 const post = (url: string, payload?: unknown) => app.inject({ method: 'POST', url, payload })
 const get = (url: string) => app.inject({ method: 'GET', url })
 const put = (url: string, payload?: unknown) => app.inject({ method: 'PUT', url, payload })
+const patch = (url: string, payload?: unknown) => app.inject({ method: 'PATCH', url, payload })
 
 async function createProject(name = 'demo'): Promise<string> {
   const r = await post('/orgs/local/projects', { name })
@@ -492,4 +498,119 @@ test('service rename: re-keys group, containers, bindings; conflicts 409; pg/sto
   expect((await post(`/projects/${id}/services/cp-gateway/rename`, { name: 'Bad_Name' })).statusCode).toBe(400)
   expect((await post(`/projects/${id}/services/pg-db/rename`, { name: 'primary' })).statusCode).toBe(501)
   expect((await post(`/projects/${id}/services/cp-nope/rename`, { name: 'x' })).statusCode).toBe(404)
+})
+
+// ---- volumes + database settings (tier-caps contract parity, platform #166–169) ----
+
+test('compute volume: attach at create, mounted at /data on deploy, GET/PUT mirror the cloud shapes', async () => {
+  const id = await createProject()
+  const r = await post(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 5 })
+  expect(r.statusCode).toBe(201)
+  expect(r.json().service).toMatchObject({ id: 'cp-api', type: 'compute', name: 'api', volume_gib: 5 })
+
+  // services list carries the platform Service.volume_gib field (null when no volume)
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'plain' })
+  const { services } = (await get(`/projects/${id}/services`)).json()
+  expect(services.find((s: { id: string }) => s.id === 'cp-api').volume_gib).toBe(5)
+  expect(services.find((s: { id: string }) => s.id === 'cp-plain').volume_gib).toBeNull()
+
+  // deploy mounts a per-branch named volume at /data
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
+  expect(calls.some((c) => c.startsWith('deploy.volume:demo-main:api:io-demo-main-data-'))).toBe(true)
+
+  // GET …/volume: {volume:{sizeGib,mountPath}|null, cap:{volumeGib}}
+  expect((await get(`/projects/${id}/services/cp-api/volume`)).json())
+    .toEqual({ volume: { sizeGib: 5, mountPath: '/data' }, cap: { volumeGib: 100 } })
+  expect((await get(`/projects/${id}/services/cp-plain/volume`)).json())
+    .toEqual({ volume: null, cap: { volumeGib: 100 } })
+
+  // PUT …/volume grows (advisory locally); response = {service, volume, cap}
+  const grow = await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 7 })
+  expect(grow.statusCode).toBe(200)
+  expect(grow.json()).toMatchObject({
+    service: { id: 'cp-api', volume_gib: 7 },
+    volume: { sizeGib: 7, mountPath: '/data' },
+    cap: { volumeGib: 100 },
+  })
+  // no-op re-submit succeeds (a settings form saved unmoved must not fail)
+  expect((await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 7 })).statusCode).toBe(200)
+})
+
+test('compute volume rules: grow-only 400, attach is create-time only, cap + validation, compute-only', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 5 })
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'plain' })
+  const shrink = await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 3 })
+  expect(shrink.statusCode).toBe(400)
+  expect(shrink.json().error).toMatch(/can only grow/)
+  expect((await put(`/projects/${id}/services/cp-plain/volume`, { sizeGib: 3 })).statusCode).toBe(400) // never attached
+  expect((await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 101 })).statusCode).toBe(400) // over cap
+  expect((await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 1.5 })).statusCode).toBe(400) // whole Gi only
+  expect((await put(`/projects/${id}/services/cp-api/volume`, {})).statusCode).toBe(400)
+  expect((await put(`/projects/${id}/services/pg-db/volume`, { sizeGib: 20 })).statusCode).toBe(400) // compute only
+  expect((await get(`/projects/${id}/services/pg-db/volume`)).statusCode).toBe(400)
+  expect((await get(`/projects/${id}/services/cp-nope/volume`)).statusCode).toBe(404)
+  expect((await get(`/projects/nope/services/cp-api/volume`)).statusCode).toBe(404)
+  // create-time validation
+  expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'v2', volumeGib: 0 })).statusCode).toBe(400)
+  expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'v2', volumeGib: 101 })).statusCode).toBe(400)
+})
+
+test('compute volume survives a service rename (record follows, docker volume name is id-keyed)', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 5 })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
+  const volName = calls.find((c) => c.startsWith('deploy.volume:'))!.split(':')[3]
+  await post(`/projects/${id}/services/cp-api/rename`, { name: 'gateway' })
+  expect((await get(`/projects/${id}/services/cp-gateway/volume`)).json().volume).toEqual({ sizeGib: 5, mountPath: '/data' })
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000, group: 'gateway' })
+  expect(calls).toContain(`deploy.volume:demo-main:gateway:${volName}`) // same volume, data kept
+})
+
+test('an adapter without volume support rejects volume-carrying services with a clear error', async () => {
+  const noVol: ComputeAdapter = { deploy: async () => ({ url: 'http://x' }), destroy: async () => {} }
+  const local = buildServer(new Engine(db, noVol, storage))
+  const lpost = (url: string, payload?: unknown) => local.inject({ method: 'POST', url, payload })
+  const id = (await lpost('/orgs/local/projects', { name: 'novol' })).json().project.id
+  const r = await lpost(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 5 })
+  expect(r.statusCode).toBe(400)
+  expect(r.json().error).toMatch(/not supported by this compute adapter/)
+  expect((await lpost(`/projects/${id}/services`, { type: 'compute', name: 'api' })).statusCode).toBe(201) // no volume: fine
+})
+
+test('database instance read + settings PATCH: volumeSize parity (grow-only, advisory locally)', async () => {
+  const id = await createProject()
+  const info = (await get(`/projects/${id}/database/instance`)).json()
+  expect(info).toMatchObject({ name: 'db', volumeSize: '10Gi', volumeGib: 10, cap: { volumeGib: 100 } })
+  expect(info.storageSize).toBe('10Gi') // deprecated alias still mirrored, like the platform
+
+  const up = await patch(`/projects/${id}/database/settings`, { volumeSize: '20Gi' })
+  expect(up.statusCode).toBe(200)
+  expect(up.json()).toMatchObject({ volumeSize: '20Gi', volumeGib: 20 })
+  expect((await get(`/projects/${id}/database/instance`)).json().volumeGib).toBe(20)
+
+  // grow-only + whole-Gi validation + cap; no-op re-submit succeeds
+  expect((await patch(`/projects/${id}/database/settings`, { volumeSize: '20Gi' })).statusCode).toBe(200)
+  const shrink = await patch(`/projects/${id}/database/settings`, { volumeSize: '5Gi' })
+  expect(shrink.statusCode).toBe(400)
+  expect(shrink.json().error).toMatch(/can only grow/)
+  expect((await patch(`/projects/${id}/database/settings`, { volumeSize: '5G' })).statusCode).toBe(400)
+  expect((await patch(`/projects/${id}/database/settings`, { volumeSize: '500Mi' })).statusCode).toBe(400)
+  expect((await patch(`/projects/${id}/database/settings`, { volumeSize: '101Gi' })).statusCode).toBe(400)
+  // deprecated alias accepted; unrelated cloud-lever settings are accepted and ignored
+  expect((await patch(`/projects/${id}/database/settings`, { storageSize: '30Gi' })).statusCode).toBe(200)
+  expect((await patch(`/projects/${id}/database/settings`, { scaleToZero: true, idleTimeout: 60 })).statusCode).toBe(200)
+  expect((await patch(`/projects/nope/database/settings`, { volumeSize: '20Gi' })).statusCode).toBe(404)
+  expect((await get(`/projects/${id}/database/instance?branch=nope`)).statusCode).toBe(404)
+})
+
+test('database volumeSize is per-branch and the setting clones with the branch', async () => {
+  const id = await createProject()
+  await patch(`/projects/${id}/database/settings`, { volumeSize: '20Gi' })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  expect((await get(`/projects/${id}/database/instance?branch=feat`)).json().volumeGib).toBe(20) // inherited
+  await patch(`/projects/${id}/database/settings?branch=feat`, { volumeSize: '40Gi' })
+  expect((await get(`/projects/${id}/database/instance?branch=feat`)).json().volumeGib).toBe(40)
+  expect((await get(`/projects/${id}/database/instance`)).json().volumeGib).toBe(20) // main untouched
 })

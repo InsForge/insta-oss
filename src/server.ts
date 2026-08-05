@@ -237,7 +237,7 @@ export function buildServer(engine: Engine): FastifyInstance {
 
   app.post('/projects/:id/services', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const body = (req.body ?? {}) as { type?: string; name?: string; branch?: string; public?: boolean }
+    const body = (req.body ?? {}) as { type?: string; name?: string; branch?: string; public?: boolean; volumeGib?: number }
     if (!body.type || !body.name) return reply.code(400).send({ error: 'type and name required' })
     if (!gated(id, 'service.add', reply)) return reply
     // Contract parity: postgres/storage add succeeds idempotently (insta-oss has one of each,
@@ -254,8 +254,12 @@ export function buildServer(engine: Engine): FastifyInstance {
       } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
     }
     if (body.type !== 'compute') return reply.code(400).send({ error: `unknown service type: ${body.type}` })
-    try { return reply.code(201).send({ service: engine.addComputeService(id, body.name) }) }
-    catch (e) { return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) }) }
+    // volumeGib (compute only) attaches a persistent /data volume — create-time ONLY, like the cloud.
+    try { return reply.code(201).send({ service: engine.addComputeService(id, body.name, body.volumeGib) }) }
+    catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      return reply.code(m.includes('already exists') ? 409 : 400).send({ error: m })
+    }
   })
 
   // ---- service lifecycle + access (contract parity) ----
@@ -314,6 +318,40 @@ export function buildServer(engine: Engine): FastifyInstance {
       const m = e instanceof Error ? e.message : String(e)
       return reply.code(m.includes('already exists') ? 409 : errCode(m)).send({ error: m })
     }
+  })
+
+  // ---- volumes + database settings (tier-caps contract parity, platform #166–169) ----
+  // Same paths + shapes as the cloud; oss has no billing tiers, so the cap is one fixed generous
+  // constant and recorded sizes are advisory (nothing local enforces a byte quota). Ungated, like
+  // lifecycle: the cloud gates growth behind the paid tier, which does not exist here — the
+  // grow-only and cap validations stay so one CLI sequence behaves identically on both targets.
+  app.get('/projects/:id/services/:sid/volume', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    try { return engine.serviceVolume(id, sid) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+  })
+
+  app.put('/projects/:id/services/:sid/volume', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    const { sizeGib } = (req.body ?? {}) as { sizeGib?: number }
+    if (typeof sizeGib !== 'number') return reply.code(400).send({ error: 'sizeGib (number) required' })
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    try { return await engine.setServiceVolume(id, sid, sizeGib) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+  })
+
+  app.get('/projects/:id/database/instance', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    try { return engine.dbInstance(id, (req.query as { branch?: string }).branch) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+  })
+
+  app.patch('/projects/:id/database/settings', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const body = (req.body ?? {}) as { volumeSize?: string; storageSize?: string }
+    try { return engine.dbSettings(id, body, (req.query as { branch?: string }).branch) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
   })
 
   // Machine scaling / instance specs are cloud pricing concepts — clean 501, never a bare 404.

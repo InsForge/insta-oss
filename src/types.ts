@@ -8,7 +8,13 @@ export const GATED_ACTIONS = ['secrets.read', 'secrets.write', 'deploy', 'projec
 export type GatedAction = (typeof GATED_ACTIONS)[number]
 export const isGatedAction = (a: string): a is GatedAction => (GATED_ACTIONS as readonly string[]).includes(a)
 
-export interface Project { id: string; name: string; status: string; createdAt: number; computeGroups?: string[] }
+export interface Project {
+  id: string; name: string; status: string; createdAt: number; computeGroups?: string[]
+  // Compute /data volumes by group (attach is create-time only; grow-only). `id` keys the docker
+  // volume so the data survives a service rename. The recorded size is ADVISORY on the local
+  // substrate (docker named volumes have no quota) — kept for contract-shape parity with the cloud.
+  computeVolumes?: Record<string, { id: string; sizeGib: number }>
+}
 
 // User-defined secret (via `insta secrets set`): project-wide when branch is null. `service`
 // binds it to a branch service ("<type>/<name>", requires a branch) — platform spec §5.
@@ -28,6 +34,9 @@ export interface Branch {
   createdAt: number
   // storage access mode for this branch's bucket (anonymous public-read vs private)
   storagePublic?: boolean
+  // DB volume (block disk) size in whole Gi — settings parity with the cloud (grow-only).
+  // Advisory locally: the postgres container's disk is unbounded; default 10.
+  dbVolumeGib?: number
   // deployed app per compute group (group -> spec); desiredState = developer lifecycle intent
   apps: Record<string, { image: string; port: number; hostPort?: number; url: string; updatedAt?: number; desiredState?: 'running' | 'stopped' | 'suspended' }>
 }
@@ -60,12 +69,17 @@ export interface DatabaseAdapter {
 }
 
 export interface ComputeAdapter {
+  // /data volumes (optional — platform parity for create-time volumeGib + PUT …/volume). An
+  // adapter that can mount persistent volumes declares supportsVolumes and honors opts.volume;
+  // adapters that can't (e.g. Railway — its volumes don't map onto this deploy path) leave it
+  // unset and the engine rejects volume-carrying services with a clear error.
+  supportsVolumes?: boolean
   deploy(
     ref: string,
     // port = the port the app LISTENS on (never changes). hostPort/network are LOCAL-substrate
     // hints (docker host mapping + branch network); platform adapters (Railway, …) ignore them
-    // and own their routing/URL story.
-    opts: { image: string; port: number; hostPort?: number; envVars: Record<string, string>; network?: string; group: string },
+    // and own their routing/URL story. volume = a named volume to mount at /data.
+    opts: { image: string; port: number; hostPort?: number; envVars: Record<string, string>; network?: string; group: string; volume?: { name: string } },
   ): Promise<{ url: string }>
   destroy(ref: string): Promise<void>
   // Lifecycle (optional — platform parity for `insta compute start|stop|suspend|status`).
