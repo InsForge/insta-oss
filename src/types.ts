@@ -10,9 +10,10 @@ export const isGatedAction = (a: string): a is GatedAction => (GATED_ACTIONS as 
 
 export interface Project {
   id: string; name: string; status: string; createdAt: number; computeGroups?: string[]
-  // Compute /data volumes by group (attach is create-time only; grow-only). `id` keys the docker
-  // volume so the data survives a service rename. The recorded size is ADVISORY on the local
-  // substrate (docker named volumes have no quota) — kept for contract-shape parity with the cloud.
+  // Compute /data volumes by group (attach at create or any time later; grow-only; deletable —
+  // the disk and its data go together, there is no detach). `id` keys the docker volume so the
+  // data survives a service rename. The recorded size is ADVISORY on the local substrate (docker
+  // named volumes have no quota) — kept for contract-shape parity with the cloud.
   computeVolumes?: Record<string, { id: string; sizeGib: number }>
 }
 
