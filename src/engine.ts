@@ -578,8 +578,12 @@ export class Engine {
       const app = b.apps[svc.name]
       if (!app) continue
       await this.deploy(projectId, b.name, { image: app.image, port: app.port, hostPort: app.hostPort, group: svc.name })
+      // Restore the EXACT recorded intent, not a coarser one: unlike the cloud (where a volume
+      // forbids suspend), oss allows a suspended volume-bearing service, so delete-from-suspended
+      // must land back on 'suspend' — mapping it to 'stop' would silently rewrite desiredState
+      // (r2d2 finding on this PR).
       if (app.desiredState === 'stopped' || app.desiredState === 'suspended') {
-        await this.lifecycle(projectId, serviceId, 'stop', b.name).catch(() => {})
+        await this.lifecycle(projectId, serviceId, app.desiredState === 'suspended' ? 'suspend' : 'stop', b.name).catch(() => {})
       }
       await docker(['volume', 'rm', '-f', `io-${this.ref(project!, b.name)}-data-${vol.id}`]).catch(() => {})
     }

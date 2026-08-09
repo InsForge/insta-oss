@@ -594,6 +594,25 @@ test('volume delete (cloud 2026-08-08 contract): eager rebuild without the mount
   expect((await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 1 })).json()).toMatchObject({ attached: true })
 })
 
+test('volume delete preserves lifecycle intent EXACTLY: suspended stays suspended, stopped stays stopped', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 2 })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
+  // Suspended service (allowed with a volume here, unlike the cloud) — delete must land back on
+  // 'suspend', not rewrite desiredState to 'stopped' (r2d2 finding).
+  await post(`/projects/${id}/services/cp-api/suspend`)
+  expect((await del_(`/projects/${id}/services/cp-api/volume`)).statusCode).toBe(200)
+  // desiredState is the recorded intent (the fake adapter's live state is a constant), and intent
+  // is exactly what the regression lost.
+  expect((await get(`/projects/${id}/services/cp-api/state`)).json()).toMatchObject({ desiredState: 'suspended' })
+  expect(calls.some((c) => c.startsWith('compute.suspend:demo-main:api'))).toBe(true)
+  // And the stopped case stays stopped.
+  expect((await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 1 })).statusCode).toBe(200)
+  await post(`/projects/${id}/services/cp-api/stop`)
+  expect((await del_(`/projects/${id}/services/cp-api/volume`)).statusCode).toBe(200)
+  expect((await get(`/projects/${id}/services/cp-api/state`)).json()).toMatchObject({ desiredState: 'stopped' })
+})
+
 test('compute volume survives a service rename (record follows, docker volume name is id-keyed)', async () => {
   const id = await createProject()
   await post(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 5 })
