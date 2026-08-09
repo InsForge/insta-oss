@@ -594,6 +594,20 @@ test('volume delete (cloud 2026-08-08 contract): eager rebuild without the mount
   expect((await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 1 })).json()).toMatchObject({ attached: true })
 })
 
+test('volume delete sweeps EVERY deployed branch: both rebuilt without the mount, both volumes cleaned', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 2 })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' }) // branch inherits the deployed app
+  calls.length = 0
+  expect((await del_(`/projects/${id}/services/cp-api/volume`)).statusCode).toBe(200)
+  // The per-branch loop hit BOTH branches, and neither rebuild carried the mount.
+  expect(calls.some((c) => c.startsWith('deploy:demo-main:api'))).toBe(true)
+  expect(calls.some((c) => c.startsWith('deploy:demo-feat:api'))).toBe(true)
+  expect(calls.some((c) => c.startsWith('deploy.volume:'))).toBe(false)
+  expect((await get(`/projects/${id}/services/cp-api/volume`)).json().volume).toBeNull()
+})
+
 test('volume delete preserves lifecycle intent EXACTLY: suspended stays suspended, stopped stays stopped', async () => {
   const id = await createProject()
   await post(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 2 })

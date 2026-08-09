@@ -564,7 +564,10 @@ export class Engine {
    *  record goes first — deploy() reads it), the branch's named volume is removed, and a stopped
    *  service is re-stopped after its rebuild — the same lifecycle-preserving rule the platform
    *  keeps with skip_launch. Docker cleanup is best-effort like removeComputeService's: oss has
-   *  no billing, and branch teardown sweeps any stragglers. */
+   *  no billing, and branch teardown sweeps any stragglers. Non-transactional like the engine's
+   *  other multi-branch sweeps: a rebuild that throws mid-loop leaves LATER branches still
+   *  mounted with the record already gone — locally a retry or redeploy converges, and nothing
+   *  bills meanwhile (John-bot note on this PR). */
   async removeServiceVolume(projectId: string, serviceId: string): Promise<{
     service: Record<string, unknown> | undefined; volume: null; cap: { volumeGib: number }; removed: true
   }> {
