@@ -254,7 +254,8 @@ export function buildServer(engine: Engine): FastifyInstance {
       } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
     }
     if (body.type !== 'compute') return reply.code(400).send({ error: `unknown service type: ${body.type}` })
-    // volumeGib (compute only) attaches a persistent /data volume — create-time ONLY, like the cloud.
+    // volumeGib (compute only) attaches a persistent /data volume (also attachable later via
+    // PUT …/volume, and deletable via DELETE …/volume — cloud parity).
     try { return reply.code(201).send({ service: engine.addComputeService(id, body.name, body.volumeGib) }) }
     catch (e) {
       const m = e instanceof Error ? e.message : String(e)
@@ -339,6 +340,20 @@ export function buildServer(engine: Engine): FastifyInstance {
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     try { return await engine.setServiceVolume(id, sid, sizeGib) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+  })
+
+  // Delete the /data volume (destroys its data; cloud 2026-08-08 contract). Gated service.remove —
+  // the same approval class as deleting the service, because it destroys data the same way. A
+  // volumeless service is the cloud's 404, not a silent no-op.
+  app.delete('/projects/:id/services/:sid/volume', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'service.remove', reply)) return reply
+    try { return await engine.removeServiceVolume(id, sid) }
+    catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      return reply.code(m.includes('no volume') ? 404 : errCode(m)).send({ error: m })
+    }
   })
 
   app.get('/projects/:id/database/instance', async (req, reply) => {

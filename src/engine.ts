@@ -437,8 +437,9 @@ export class Engine {
   }
 
   /** Register a compute group as a service (materializes on first deploy --group <name>).
-   *  volumeGib optionally attaches a persistent /data volume — CREATE-TIME ONLY, like the
-   *  platform; grow it later via setServiceVolume, never add or detach one. */
+   *  volumeGib optionally attaches a persistent /data volume; it can also attach any time later
+   *  via setServiceVolume (platform #185 parity) and be deleted via removeServiceVolume (data
+   *  destroyed) — but never detached. */
   addComputeService(projectId: string, name: string, volumeGib?: number): { id: string; type: string; name: string; volume_gib: number | null } {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
@@ -527,25 +528,64 @@ export class Engine {
     return { volume: vol ? { sizeGib: vol.sizeGib, mountPath: VOLUME_MOUNT_PATH } : null, cap: { volumeGib: VOLUME_CAP_GIB } }
   }
 
-  /** Grow a compute service's /data volume — same three rules as the cloud (grow-only, must have
-   *  been attached at creation, ≤ cap) so the CLI flow is identical; the size itself is advisory
+  /** Attach or grow a compute service's /data volume — the cloud contract (attach any time,
+   *  platform #185; grow-only; ≤ cap) so the CLI flow is identical; the size itself is advisory
    *  locally (a docker named volume has no quota to extend). */
   async setServiceVolume(projectId: string, serviceId: string, sizeGib: number): Promise<{
-    service: Record<string, unknown> | undefined; volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }
+    service: Record<string, unknown> | undefined; volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }; attached?: boolean
   }> {
     const svc = this.serviceOf(projectId, serviceId)
     if (svc.type !== 'compute') throw new Error('volumes are only supported for compute services')
-    const vol = this.getProject(projectId)?.computeVolumes?.[svc.name]
-    if (!vol) throw new Error('this service has no volume — a volume attaches at service creation (volumeGib) and cannot be added later')
     if (!Number.isInteger(sizeGib) || sizeGib < 1) throw new Error('sizeGib must be a positive integer (whole Gi)')
-    if (sizeGib < vol.sizeGib) throw new Error(`the volume can only grow (currently ${vol.sizeGib}Gi) — the volume is a provisioned disk and cannot shrink`)
     if (sizeGib > VOLUME_CAP_GIB) throw new Error(`volume exceeds the cap (${VOLUME_CAP_GIB}Gi)`)
+    const vol = this.getProject(projectId)?.computeVolumes?.[svc.name]
+    if (!vol) {
+      // Attach-after-create (platform #185 parity): record only — the named volume materializes
+      // when the NEXT deploy rebuilds the container with the mount, exactly the cloud's "mounts
+      // at /data on the next deploy". `attached: true` is what the CLI keys its wording on.
+      if (!this.compute.supportsVolumes) throw new Error('/data volumes are not supported by this compute adapter — use the docker adapter')
+      mutate((st) => { (st.projects[projectId].computeVolumes ??= {})[svc.name] = { id: randomUUID().slice(0, 8), sizeGib } })
+      this.emit(projectId, null, 'resource', 'service.volume', { service: serviceId, sizeGib, attached: true })
+      const attachedSvc = (await this.services(projectId)).find((s) => s.id === serviceId)
+      return { service: attachedSvc, volume: { sizeGib, mountPath: VOLUME_MOUNT_PATH }, cap: { volumeGib: VOLUME_CAP_GIB }, attached: true }
+    }
+    if (sizeGib < vol.sizeGib) throw new Error(`the volume can only grow (currently ${vol.sizeGib}Gi) — the volume is a provisioned disk and cannot shrink`)
     if (sizeGib !== vol.sizeGib) {
       mutate((st) => { st.projects[projectId].computeVolumes![svc.name].sizeGib = sizeGib })
       this.emit(projectId, null, 'resource', 'service.volume', { service: serviceId, sizeGib })
     }
     const service = (await this.services(projectId)).find((s) => s.id === serviceId)
     return { service, volume: { sizeGib, mountPath: VOLUME_MOUNT_PATH }, cap: { volumeGib: VOLUME_CAP_GIB } }
+  }
+
+  /** Delete a compute service's /data volume — the 2026-08-08 cloud contract (DELETE …/volume):
+   *  the only way off the volume path (there is still no detach), destroying the data. EAGER like
+   *  the platform: every branch where the group is deployed is rebuilt WITHOUT the mount now (the
+   *  record goes first — deploy() reads it), the branch's named volume is removed, and a stopped
+   *  service is re-stopped after its rebuild — the same lifecycle-preserving rule the platform
+   *  keeps with skip_launch. Docker cleanup is best-effort like removeComputeService's: oss has
+   *  no billing, and branch teardown sweeps any stragglers. */
+  async removeServiceVolume(projectId: string, serviceId: string): Promise<{
+    service: Record<string, unknown> | undefined; volume: null; cap: { volumeGib: number }; removed: true
+  }> {
+    const svc = this.serviceOf(projectId, serviceId)
+    if (svc.type !== 'compute') throw new Error('volumes are only supported for compute services')
+    const project = this.getProject(projectId)
+    const vol = project?.computeVolumes?.[svc.name]
+    if (!vol) throw new Error('this service has no volume')
+    mutate((st) => { delete st.projects[projectId].computeVolumes![svc.name] })
+    for (const b of this.listBranches(projectId)) {
+      const app = b.apps[svc.name]
+      if (!app) continue
+      await this.deploy(projectId, b.name, { image: app.image, port: app.port, hostPort: app.hostPort, group: svc.name })
+      if (app.desiredState === 'stopped' || app.desiredState === 'suspended') {
+        await this.lifecycle(projectId, serviceId, 'stop', b.name).catch(() => {})
+      }
+      await docker(['volume', 'rm', '-f', `io-${this.ref(project!, b.name)}-data-${vol.id}`]).catch(() => {})
+    }
+    this.emit(projectId, null, 'resource', 'service.volume', { service: serviceId, sizeGib: null, removed: true })
+    const service = (await this.services(projectId)).find((s) => s.id === serviceId)
+    return { service, volume: null, cap: { volumeGib: VOLUME_CAP_GIB }, removed: true }
   }
 
   /** Read-only DB instance view (DbInstanceInfo shape): settings + volume size + the cap. Local

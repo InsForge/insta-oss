@@ -57,6 +57,7 @@ const post = (url: string, payload?: unknown) => app.inject({ method: 'POST', ur
 const get = (url: string) => app.inject({ method: 'GET', url })
 const put = (url: string, payload?: unknown) => app.inject({ method: 'PUT', url, payload })
 const patch = (url: string, payload?: unknown) => app.inject({ method: 'PATCH', url, payload })
+const del_ = (url: string) => app.inject({ method: 'DELETE', url })
 
 async function createProject(name = 'demo'): Promise<string> {
   const r = await post('/orgs/local/projects', { name })
@@ -536,14 +537,12 @@ test('compute volume: attach at create, mounted at /data on deploy, GET/PUT mirr
   expect((await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 7 })).statusCode).toBe(200)
 })
 
-test('compute volume rules: grow-only 400, attach is create-time only, cap + validation, compute-only', async () => {
+test('compute volume rules: grow-only 400, cap + validation, compute-only', async () => {
   const id = await createProject()
   await post(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 5 })
-  await post(`/projects/${id}/services`, { type: 'compute', name: 'plain' })
   const shrink = await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 3 })
   expect(shrink.statusCode).toBe(400)
   expect(shrink.json().error).toMatch(/can only grow/)
-  expect((await put(`/projects/${id}/services/cp-plain/volume`, { sizeGib: 3 })).statusCode).toBe(400) // never attached
   expect((await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 101 })).statusCode).toBe(400) // over cap
   expect((await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 1.5 })).statusCode).toBe(400) // whole Gi only
   expect((await put(`/projects/${id}/services/cp-api/volume`, {})).statusCode).toBe(400)
@@ -554,6 +553,45 @@ test('compute volume rules: grow-only 400, attach is create-time only, cap + val
   // create-time validation
   expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'v2', volumeGib: 0 })).statusCode).toBe(400)
   expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'v2', volumeGib: 101 })).statusCode).toBe(400)
+})
+
+test('attach-after-create (platform #185 parity): PUT on a volumeless service attaches, attached:true, next deploy mounts', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'later' })
+  expect((await get(`/projects/${id}/services/cp-later/volume`)).json().volume).toBeNull()
+  const attach = await put(`/projects/${id}/services/cp-later/volume`, { sizeGib: 2 })
+  expect(attach.statusCode).toBe(200)
+  expect(attach.json()).toMatchObject({ attached: true, volume: { sizeGib: 2, mountPath: '/data' } })
+  // attach validates like create: cap + whole-Gi still apply to a FIRST size
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'later2' })
+  expect((await put(`/projects/${id}/services/cp-later2/volume`, { sizeGib: 101 })).statusCode).toBe(400)
+  // the disk materializes on the next deploy — mounted by volume id, cloud-identical flow
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'later' })
+  expect(calls.some((c) => c.startsWith('deploy.volume:demo-main:later:io-demo-main-data-'))).toBe(true)
+  // from here it is an ordinary volume: a grow is a grow, not another attach
+  const grow = await put(`/projects/${id}/services/cp-later/volume`, { sizeGib: 3 })
+  expect(grow.statusCode).toBe(200)
+  expect(grow.json().attached).toBeUndefined()
+})
+
+test('volume delete (cloud 2026-08-08 contract): eager rebuild without the mount, read-back null, re-attach = new attach', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 5 })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
+  calls.length = 0
+  const del = await del_(`/projects/${id}/services/cp-api/volume`)
+  expect(del.statusCode).toBe(200)
+  expect(del.json()).toMatchObject({ removed: true, volume: null, service: { volume_gib: null } })
+  // EAGER: the deployed branch was rebuilt WITHOUT the mount right away — no deploy.volume call.
+  expect(calls.some((c) => c.startsWith('deploy:demo-main:api'))).toBe(true)
+  expect(calls.some((c) => c.startsWith('deploy.volume:'))).toBe(false)
+  expect((await get(`/projects/${id}/services/cp-api/volume`)).json().volume).toBeNull()
+  // double delete = the cloud's 404, not a silent no-op
+  const again = await del_(`/projects/${id}/services/cp-api/volume`)
+  expect(again.statusCode).toBe(404)
+  expect(again.json().error).toMatch(/no volume/)
+  // the door is reopened: re-attach works as an ordinary NEW attach
+  expect((await put(`/projects/${id}/services/cp-api/volume`, { sizeGib: 1 })).json()).toMatchObject({ attached: true })
 })
 
 test('compute volume survives a service rename (record follows, docker volume name is id-keyed)', async () => {
