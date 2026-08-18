@@ -7,9 +7,10 @@ import { Engine } from '../src/engine'
 import { LocalPostgres } from '../src/adapters/postgres'
 import { DockerCompute } from '../src/adapters/compute'
 import { LocalGarage } from '../src/adapters/garage'
+import { LocalManagedDb } from '../src/adapters/manageddb'
 
 const storage = new LocalGarage()
-const engine = new Engine(new LocalPostgres(), new DockerCompute(), storage)
+const engine = new Engine(new LocalPostgres(), new DockerCompute(), storage, new LocalManagedDb())
 let projectId = ''
 
 const teardown = async () => { try { if (projectId) await engine.destroyProject(projectId) } catch {} }

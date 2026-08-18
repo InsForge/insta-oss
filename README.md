@@ -122,6 +122,12 @@ your code, run migration files against `main`, redeploy, and delete the branch e
 - **Services** — `insta services list` shows the project's postgres / storage / compute;
   `services add compute <name>` registers extra compute groups (workers, APIs) that materialize
   on their first `deploy --group <name>`; `services remove compute <name>` tears one down.
+- **Managed databases** — `services add redis|mysql|mongodb <name>` runs a private
+  Valkey / MySQL / MongoDB container per branch, reachable only on the branch network (the local
+  twin of the cloud's private `.internal` hosts). Credentials ride the secret seam on the cloud's
+  naming contract — `REDIS_URL_<NAME>` etc., plus canonical unsuffixed aliases (`REDIS_URL`) for
+  the oldest service of each type. A branch clone gets a **fresh empty instance with a fresh
+  password** — managed-db data never clones, exactly like the cloud.
 - **User secrets** — `insta secrets set NAME value` (project-wide, `--branch` for one branch, or
   `--service` to bind it to one branch service so only that compute group's deploys receive it);
   merged into the credential bundle and injected on every deploy; reserved platform names rejected;
@@ -404,15 +410,19 @@ insta-oss/
 │   │                           one-shot grants, `--always` → permanent allow
 │   ├── state.ts                single-tenant persistence (~/.insta-oss/state.json):
 │   │                           projects · branches · policies · approvals · events
-│   ├── types.ts                the model + adapter contracts (Database/Compute/Storage)
+│   ├── types.ts                the model + adapter contracts (Database/Compute/Storage/ManagedDb)
+│   ├── manageddb.ts            managed-db catalog (images/ports/env/bundles) + the seam's
+│   │                           suffix naming contract — mirrors the platform's tables
 │   ├── observe.ts              observability shapes + parsers (docker logs/stats, DB SQL)
 │   ├── docker.ts               one helper: spawn the docker CLI, capture stdout, stdin pipe
 │   └── adapters/               swappable providers behind the contracts in types.ts
 │       ├── postgres.ts         LocalPostgres — container per branch; clone = pg_dump→restore
 │       ├── compute.ts          DockerCompute — your image per group; listen port fixed,
 │       │                       host port mapped (branch clones shift host side only)
-│       └── garage.ts           LocalGarage — one shared server, bucket per branch;
-│                               clone = rclone sync; a bucket-SCOPED access key per branch
+│       ├── garage.ts           LocalGarage — one shared server, bucket per branch;
+│       │                       clone = rclone sync; a bucket-SCOPED access key per branch
+│       └── manageddb.ts        LocalManagedDb — redis/mysql/mongodb, one private container
+│                               per branch; a clone = fresh empty instance (no data clone)
 ├── test/
 │   ├── server.test.ts          API contract tests (fake adapters, no Docker, ~100ms)
 │   ├── clone-isolation.int.test.ts   real Docker: db clone is copied AND isolated
@@ -450,7 +460,7 @@ Verified by running every registered CLI command against the daemon:
 | `deploy` | ✅ (govern-gated) |
 | `secrets` / `secrets list` / `secrets tree` | ✅ full bundle (gated) + the names-only project→branch→service binding tree |
 | `secrets set/unset NAME [--branch] [--service]` | ✅ project-wide, branch override, or service-bound (injected only into that group's deploys); reserved names rejected (gated `secrets.write`) |
-| `services list/add/remove` | ✅ (gated); `add postgres\|storage` is idempotent — one of each per project, auto-provisioned, so the same onboarding script runs on both targets |
+| `services list/add/remove` | ✅ (gated); `add postgres\|storage` is idempotent — one of each per project, auto-provisioned, so the same onboarding script runs on both targets; `add redis\|mysql\|mongodb <name>` runs a private managed-db container per branch (fresh empty instance per branch clone, cloud parity) |
 | `services secrets` / `set-access storage` | ✅ per-service secret names; bucket public-read ↔ private (gated `service.setAccess`) |
 | `compute start/stop/suspend/status` | ✅ persistent intent (docker start/stop/pause) + live runtime state |
 | `manifest` | ✅ per-branch postgres / storage / compute |

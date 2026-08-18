@@ -10,7 +10,7 @@ vi.mock('../src/docker', () => ({ docker: vi.fn(async () => Buffer.from('')) }))
 import { docker as dockerFn } from '../src/docker'
 import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
-import type { DatabaseAdapter, ComputeAdapter, StorageAdapter } from '../src/types'
+import type { DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter } from '../src/types'
 
 const calls: string[] = []
 const db: DatabaseAdapter = {
@@ -45,12 +45,17 @@ const storage: StorageAdapter = {
   destroy: async (ref) => { calls.push(`st.destroy:${ref}`) },
   setAccess: async (ref, _network, isPublic) => { calls.push(`st.access:${ref}:${isPublic}`) },
 }
+const managed: ManagedDbAdapter = {
+  provision: async (ref, _network, type, name) => { calls.push(`md.provision:${ref}:${type}:${name}`) },
+  destroy: async (ref, type, name) => { calls.push(`md.destroy:${ref}:${type}:${name}`) },
+  rename: async (ref, type, from_, to) => { calls.push(`md.rename:${ref}:${type}:${from_}->${to}`) },
+}
 
 let app: ReturnType<typeof buildServer>
 beforeEach(() => {
   process.env.INSTA_OSS_STATE = join(mkdtempSync(join(tmpdir(), 'io-')), 'state.json')
   calls.length = 0
-  app = buildServer(new Engine(db, compute, storage))
+  app = buildServer(new Engine(db, compute, storage, managed))
 })
 
 const post = (url: string, payload?: unknown) => app.inject({ method: 'POST', url, payload })
@@ -304,7 +309,7 @@ test('dashboard serving: SPA fallback for non-API GETs; API routes always win', 
   mkdirSync(dist, { recursive: true })
   writeFileSync(join(dist, 'index.html'), '<html>dash</html>')
   process.env.INSTA_OSS_UI_DIST = dist
-  const ui = buildServer(new Engine(db, compute, storage))
+  const ui = buildServer(new Engine(db, compute, storage, managed))
   delete process.env.INSTA_OSS_UI_DIST
 
   expect((await ui.inject({ method: 'GET', url: '/' })).body).toContain('dash')
@@ -316,7 +321,7 @@ test('dashboard serving: SPA fallback for non-API GETs; API routes always win', 
 
 test('dashboard serving: without a build, / explains how to get the UI', async () => {
   process.env.INSTA_OSS_UI_DIST = join(tmpdir(), 'io-ui-definitely-missing')
-  const bare = buildServer(new Engine(db, compute, storage))
+  const bare = buildServer(new Engine(db, compute, storage, managed))
   delete process.env.INSTA_OSS_UI_DIST
   const r = await bare.inject({ method: 'GET', url: '/' })
   expect(r.body).toContain('build:ui')
@@ -365,7 +370,7 @@ test('a service-bound secret is injected only into its own compute group', async
     deploy: async (_r, o) => { envs[o.group] = Object.keys(o.envVars); return { url: `http://localhost:${o.hostPort ?? o.port}` } },
     destroy: async () => {},
   }
-  const local = buildServer(new Engine(db, localCompute, storage))
+  const local = buildServer(new Engine(db, localCompute, storage, managed))
   const lpost = (url: string, payload?: unknown) => local.inject({ method: 'POST', url, payload })
   const id = (await lpost('/orgs/local/projects', { name: 'bind-demo' })).json().project.id
   await lpost(`/projects/${id}/services`, { type: 'compute', name: 'api' })
@@ -641,7 +646,7 @@ test('compute volume survives a service rename (record follows, docker volume na
 
 test('an adapter without volume support rejects volume-carrying services with a clear error', async () => {
   const noVol: ComputeAdapter = { deploy: async () => ({ url: 'http://x' }), destroy: async () => {} }
-  const local = buildServer(new Engine(db, noVol, storage))
+  const local = buildServer(new Engine(db, noVol, storage, managed))
   const lpost = (url: string, payload?: unknown) => local.inject({ method: 'POST', url, payload })
   const id = (await lpost('/orgs/local/projects', { name: 'novol' })).json().project.id
   const r = await lpost(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 5 })
@@ -684,4 +689,114 @@ test('database volumeSize is per-branch and the setting clones with the branch',
   await patch(`/projects/${id}/database/settings?branch=feat`, { volumeSize: '40Gi' })
   expect((await get(`/projects/${id}/database/instance?branch=feat`)).json().volumeGib).toBe(40)
   expect((await get(`/projects/${id}/database/instance`)).json().volumeGib).toBe(20) // main untouched
+})
+
+// ---- managed databases: redis | mysql | mongodb (cloud parity, platform #235/#236) ----
+
+test('managed db add: 201 row shape the CLI renders; per-branch container; still 400 on junk types', async () => {
+  const id = await createProject()
+  const r = await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  expect(r.statusCode).toBe(201)
+  expect(r.json().service).toMatchObject({ id: 'rd-cache', type: 'redis', name: 'cache', status: 'ready', port: 6379, volume_gib: 1 })
+  expect(calls).toContain('md.provision:demo-main:redis:cache')
+
+  const services = (await get(`/projects/${id}/services`)).json().services
+  const row = services.find((s: { id: string }) => s.id === 'rd-cache')
+  expect(row).toMatchObject({ type: 'redis', port: 6379, volume_gib: 1, endpoint: 'io-demo-main-rd-cache:6379' })
+
+  expect((await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })).statusCode).toBe(409)
+  expect((await post(`/projects/${id}/services`, { type: 'kafka', name: 'x' })).statusCode).toBe(400)
+})
+
+test('managed db add is gated (service.add): 202 approval flow', async () => {
+  const id = await createProject()
+  await put(`/projects/${id}/policy/service.add`, { decision: 'approve' })
+  const r = await post(`/projects/${id}/services`, { type: 'mysql', name: 'mysql-db' })
+  expect(r.statusCode).toBe(202)
+  expect(r.json()).toMatchObject({ status: 'approval_required', action: 'service.add' })
+})
+
+test('managed db secrets: suffixed bundle + canonical aliases for the oldest per type', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache-two' })
+  await post(`/projects/${id}/services`, { type: 'mysql', name: 'mysql-db' })
+  const s = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
+  // suffixed names for every service (envSuffix: kebab -> SNAKE)
+  expect(s.REDIS_URL_CACHE).toMatch(/^redis:\/\/default:.+@io-demo-main-rd-cache:6379\/0$/)
+  expect(s.REDIS_URL_CACHE_TWO).toContain('io-demo-main-rd-cache-two:6379')
+  expect(s.MYSQL_URL_MYSQL_DB).toContain('io-demo-main-my-mysql-db:3306/app')
+  // canonical aliases follow the OLDEST service of each type
+  expect(s.REDIS_URL).toBe(s.REDIS_URL_CACHE)
+  expect(s.REDIS_PASSWORD).toBe(s.REDIS_PASSWORD_CACHE)
+  expect(s.MYSQL_URL).toBe(s.MYSQL_URL_MYSQL_DB)
+  expect(s.MYSQL_DATABASE).toBe('app')
+  // distinct passwords per service
+  expect(s.REDIS_PASSWORD_CACHE).not.toBe(s.REDIS_PASSWORD_CACHE_TWO)
+  // canonical names are reserved from user secrets
+  expect((await put(`/projects/${id}/secrets/REDIS_URL`, { value: 'x' })).statusCode).toBe(400)
+  expect((await put(`/projects/${id}/secrets/MONGODB_PASSWORD`, { value: 'x' })).statusCode).toBe(400)
+})
+
+test('branch create gives managed dbs a FRESH empty instance + fresh password (no data clone)', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  expect(calls).toContain('md.provision:demo-feat:redis:cache')
+  const main = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
+  const feat = (await get(`/projects/${id}/secrets?branch=feat`)).json().secrets
+  expect(feat.REDIS_URL).toContain('io-demo-feat-rd-cache:6379')
+  expect(feat.REDIS_PASSWORD).not.toBe(main.REDIS_PASSWORD)
+})
+
+test('compute deploys receive the managed-db bundle in env', async () => {
+  const seen: Record<string, string>[] = []
+  const capture: ComputeAdapter = {
+    deploy: async (_ref, o) => { seen.push(o.envVars); return { url: `http://localhost:${o.hostPort}` } },
+    destroy: async () => {},
+  }
+  const local = buildServer(new Engine(db, capture, storage, managed))
+  const r = await local.inject({ method: 'POST', url: '/orgs/local/projects', payload: { name: 'demo' } })
+  const pid = r.json().project.id
+  await local.inject({ method: 'POST', url: `/projects/${pid}/services`, payload: { type: 'mongodb', name: 'mongo-db' } })
+  await local.inject({ method: 'POST', url: `/projects/${pid}/deploy`, payload: { image: 'app:1', branch: 'main', port: 3000 } })
+  expect(seen[0].MONGODB_URL).toContain('io-demo-main-mo-mongo-db:27017')
+  expect(seen[0].MONGODB_URL_MONGO_DB).toBe(seen[0].MONGODB_URL)
+})
+
+test('managed db remove: destroys on every branch, drops rows + secrets; rename re-keys everything', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+
+  // rename: adapter renames per branch; id + suffixed names + canonical alias host re-key
+  const rn = await post(`/projects/${id}/services/rd-cache/rename`, { name: 'kv' })
+  expect(rn.statusCode).toBe(200)
+  expect(rn.json().service).toMatchObject({ id: 'rd-kv', name: 'kv', type: 'redis' })
+  expect(calls).toContain('md.rename:demo-main:redis:cache->kv')
+  expect(calls).toContain('md.rename:demo-feat:redis:cache->kv')
+  const s = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
+  expect(s.REDIS_URL_KV).toContain('io-demo-main-rd-kv:6379')
+  expect(s.REDIS_URL_CACHE).toBeUndefined()
+  expect(s.REDIS_URL).toBe(s.REDIS_URL_KV)
+
+  // service secret names (names only) + tree place the minted names under the service
+  const names = (await get(`/projects/${id}/services/rd-kv/secrets`)).json().secrets
+  expect(names).toContain('REDIS_URL_KV')
+  const tree = (await get(`/projects/${id}/secrets/tree`)).json()
+  const mainBranch = tree.branches.find((b: { name: string }) => b.name === 'main')
+  expect(mainBranch.services.find((x: { type: string }) => x.type === 'redis')).toMatchObject({ name: 'kv' })
+
+  // merge reports it as existing structure (data never merges)
+  const merge = await post(`/projects/${id}/branches/main/merge`, { from: 'feat' })
+  expect(merge.json().skipped).toContainEqual({ type: 'redis', name: 'kv', reason: 'exists' })
+
+  // remove sweeps every branch
+  const del = await del_(`/projects/${id}/services/rd-kv`)
+  expect(del.statusCode).toBe(200)
+  expect(calls).toContain('md.destroy:demo-main:redis:kv')
+  expect(calls).toContain('md.destroy:demo-feat:redis:kv')
+  const after = (await get(`/projects/${id}/services`)).json().services
+  expect(after.find((x: { id: string }) => x.id === 'rd-kv')).toBeUndefined()
+  expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.REDIS_URL).toBeUndefined()
 })
