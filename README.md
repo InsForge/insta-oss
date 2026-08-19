@@ -1,7 +1,7 @@
 # insta-oss
 
-The [InstaCloud](https://instacloud.com) control plane, reimplemented as a single local daemon
-on your own Docker — single-tenant, no accounts, no billing.
+An open-source, self-hostable platform for your database, object storage, and any compute
+container — branchable end to end, the most agent-native way to develop.
 
 ```
 project = a Postgres database + an S3 bucket + your app containers
@@ -15,13 +15,14 @@ branch  = a disposable, fully isolated clone of all three
 
 ## Overview
 
-insta-oss is not an emulator: it serves the same API as managed InstaCloud, backed by real
-local resources — a real Postgres per branch, a real S3 bucket, your real app containers. The
-stock `insta` CLI, the insta-mcp server, and the agent skills work against it unchanged;
-workflows built here run as-is on the cloud.
+insta-oss is a single daemon on your own Docker — single-tenant, no accounts, no billing. A
+project provisions real resources, and everything it creates is plain Docker: a standard
+Postgres container, an S3-compatible bucket, your own app images — nothing proprietary to
+migrate out of.
 
-Everything it creates is plain Docker — a standard Postgres container per branch, an
-S3-compatible bucket, your own app images — nothing proprietary to migrate out of.
+[InstaCloud](https://instacloud.com) is the corresponding hosted service from InsForge: the
+same `insta` CLI, MCP server, and agent skills drive both, so workflows move between them
+unchanged.
 
 ## What makes it different
 
@@ -71,8 +72,7 @@ curl -fsSL agents.instacloud.com | sh          # CLI + agent skills (or: npm ins
 export INSTA_API_URL=http://127.0.0.1:8080     # the CLI defaults to the cloud
 ```
 
-No `insta login` — the daemon trusts localhost. (Don't want to run it yourself?
-[Hosted InstaCloud](https://instacloud.com) is the same API with none of the ops.)
+No `insta login` — the daemon trusts localhost.
 
 ## What it looks like
 
