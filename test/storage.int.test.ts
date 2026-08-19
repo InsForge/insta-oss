@@ -55,3 +55,35 @@ test('branch credentials are scoped: a branch key cannot touch another branch bu
   // foreign bucket: denied
   await expect(rcloneAs(main.s3, ['ls', `g:${feat.bucket}`])).rejects.toThrow(/AccessDenied|Forbidden|exit/)
 })
+
+test('object ops round-trip on the host port: list → presigned GET → upload POST → delete', async () => {
+  // list sees the object rclone put there (SigV4 against 127.0.0.1:3900)
+  const listing = await engine.listServiceObjects(projectId, 'st-store', {})
+  expect(listing.objects.map((o) => o.key)).toContain('hello.txt')
+
+  // presigned GET is host-fetchable and carries the object bytes
+  const dl = await engine.presignServiceObjectDownload(projectId, 'st-store', { key: 'hello.txt' })
+  const got = await fetch(dl.url)
+  expect(got.status).toBe(200)
+  expect(await got.text()).toBe('from-main')
+
+  // presigned POST uploads straight to the bucket (policy pins type + exact size)
+  const body = 'posted-bytes'
+  const up = await engine.presignServiceObjectUpload(projectId, 'st-store', { key: 'posted.txt', contentType: 'text/plain', size: body.length })
+  const form = new FormData()
+  for (const [k, v] of Object.entries(up.fields)) form.append(k, v)
+  form.append('file', new Blob([body], { type: 'text/plain' }), 'posted.txt')
+  const posted = await fetch(up.url, { method: 'POST', body: form })
+  expect(posted.status, await posted.text().catch(() => '')).toBeLessThan(300)
+  expect(await storage.getObject('io-sttest-main', 'sttest-main', 'posted.txt')).toBe(body)
+
+  // single + bulk delete
+  expect(await engine.deleteServiceObject(projectId, 'st-store', { key: 'posted.txt' })).toEqual({ deleted: true })
+  await storage.putObject('io-sttest-main', 'sttest-main', 'b1.txt', 'x')
+  await storage.putObject('io-sttest-main', 'sttest-main', 'b2.txt', 'y')
+  const bulk = await engine.deleteServiceObjects(projectId, 'st-store', { keys: ['b1.txt', 'b2.txt'] })
+  expect(bulk.deleted).toBe(2)
+  expect(bulk.failed).toEqual([])
+  const after = await engine.listServiceObjects(projectId, 'st-store', {})
+  expect(after.objects.map((o) => o.key)).not.toContain('b1.txt')
+})

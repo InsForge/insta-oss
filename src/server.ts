@@ -429,15 +429,73 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.get('/projects/:id/runtime-health', async (_req, reply) => notYet(reply, 'bulk runtime health', 'use `insta services list` (live runtime column)'))
   app.patch('/projects/:id', async (_req, reply) => notYet(reply, 'project rename', 'container names key on the project name; recreate the project'))
   app.patch('/projects/:id/branches/:bid', async (_req, reply) => notYet(reply, 'branch rename', 'create a fresh branch and delete the old one'))
-  for (const [method, path] of [
-    ['GET', '/projects/:id/services/:sid/objects'],
-    ['GET', '/projects/:id/services/:sid/objects/download'],
-    ['POST', '/projects/:id/services/:sid/objects/upload'],
-    ['DELETE', '/projects/:id/services/:sid/objects'],
-    ['POST', '/projects/:id/services/:sid/objects/delete'],
-  ] as const) {
-    app.route({ method, url: path, handler: async (_req, reply) => notYet(reply, 'object browsing', 'point any S3 client at the creds from `insta secrets`') })
+  // ---- storage objects (platform parity: list / presigned download / presigned upload /
+  // delete / bulk delete). Gated per action class — storage.read|write|delete — so file browsing
+  // can be granted without credential reads, and writes without removal (same split as the
+  // platform). Provider (Garage) failures surface as 502, adapter without object support as 501.
+  const objErr = (reply: FastifyReply, e: unknown): FastifyReply => {
+    const m = e instanceof Error ? e.message : String(e)
+    const code = m.includes('not supported by this storage adapter') ? 501
+      : m.includes('could not reach Garage') || m.includes('Garage answered') ? 502
+      : errCode(m)
+    return reply.code(code).send({ error: m })
   }
+
+  app.get('/projects/:id/services/:sid/objects', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    const q = req.query as { branch?: string; prefix?: string; cursor?: string; limit?: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'storage.read', reply)) return reply
+    try { return await engine.listServiceObjects(id, sid, { branch: q.branch, prefix: q.prefix, cursor: q.cursor, limit: q.limit ? Number(q.limit) : undefined }) }
+    catch (e) { return objErr(reply, e) }
+  })
+
+  // Static `objects/download` wins over the parametric listing route.
+  app.get('/projects/:id/services/:sid/objects/download', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    const q = req.query as { branch?: string; key?: string; disposition?: string }
+    if (!q.key) return reply.code(400).send({ error: 'key is required' })
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'storage.read', reply)) return reply
+    const disposition = q.disposition === 'inline' ? 'inline' : 'attachment'
+    try { return await engine.presignServiceObjectDownload(id, sid, { branch: q.branch, key: q.key, disposition }) }
+    catch (e) { return objErr(reply, e) }
+  })
+
+  app.post('/projects/:id/services/:sid/objects/upload', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    const q = req.query as { branch?: string }
+    const body = (req.body ?? {}) as { key?: string; contentType?: string; size?: number }
+    if (!body.key?.trim()) return reply.code(400).send({ error: 'key is required' })
+    if (!body.contentType?.trim()) return reply.code(400).send({ error: 'contentType is required' })
+    if (typeof body.size !== 'number') return reply.code(400).send({ error: 'size (bytes) is required' })
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'storage.write', reply)) return reply
+    try { return await engine.presignServiceObjectUpload(id, sid, { branch: q.branch, key: body.key, contentType: body.contentType, size: body.size }) }
+    catch (e) { return objErr(reply, e) }
+  })
+
+  app.delete('/projects/:id/services/:sid/objects', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    const q = req.query as { branch?: string; key?: string }
+    if (!q.key) return reply.code(400).send({ error: 'key is required' })
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'storage.delete', reply)) return reply
+    try { return await engine.deleteServiceObject(id, sid, { branch: q.branch, key: q.key }) }
+    catch (e) { return objErr(reply, e) }
+  })
+
+  // POST, not DELETE: a body on DELETE is poorly supported across proxies and generators.
+  app.post('/projects/:id/services/:sid/objects/delete', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    const q = req.query as { branch?: string }
+    const { keys } = (req.body ?? {}) as { keys?: string[] }
+    if (!Array.isArray(keys) || keys.length === 0) return reply.code(400).send({ error: 'keys must hold at least one object key' })
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'storage.delete', reply)) return reply
+    try { return await engine.deleteServiceObjects(id, sid, { branch: q.branch, keys }) }
+    catch (e) { return objErr(reply, e) }
+  })
 
   app.delete('/projects/:id/services/:sid', async (req, reply) => {
     const { id, sid } = req.params as { id: string; sid: string }
