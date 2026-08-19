@@ -8,6 +8,11 @@ export const GATED_ACTIONS = ['secrets.read', 'secrets.write', 'deploy', 'projec
 export type GatedAction = (typeof GATED_ACTIONS)[number]
 export const isGatedAction = (a: string): a is GatedAction => (GATED_ACTIONS as readonly string[]).includes(a)
 
+// Managed private databases (cloud parity: platform serviceTypes.ts MANAGED_FLY_DATABASE_TYPES).
+// Locally each is one container per branch on the branch network — reachable only there, like the
+// cloud's private-tcp `.internal` hosts.
+export type ManagedDbType = 'redis' | 'mysql' | 'mongodb'
+
 export interface Project {
   id: string; name: string; status: string; createdAt: number; computeGroups?: string[]
   // Compute /data volumes by group (attach at create or any time later; grow-only; deletable —
@@ -15,6 +20,10 @@ export interface Project {
   // data survives a service rename. The recorded size is ADVISORY on the local substrate (docker
   // named volumes have no quota) — kept for contract-shape parity with the cloud.
   computeVolumes?: Record<string, { id: string; sizeGib: number }>
+  // Managed databases registered on the project (like computeGroups), materialized as one
+  // container per branch. Order = creation order; the oldest per type gets the canonical
+  // unsuffixed secret aliases (cloud spec §2.1).
+  managedServices?: Array<{ id: string; type: ManagedDbType; name: string; createdAt: number }>
 }
 
 // User-defined secret (via `insta secrets set`): project-wide when branch is null. `service`
@@ -40,6 +49,10 @@ export interface Branch {
   dbVolumeGib?: number
   // deployed app per compute group (group -> spec); desiredState = developer lifecycle intent
   apps: Record<string, { image: string; port: number; hostPort?: number; url: string; updatedAt?: number; desiredState?: 'running' | 'stopped' | 'suspended' }>
+  // per-branch managed-database credentials, keyed by service id. Only the password persists —
+  // hosts derive from the current container name at read time, so a rename never strands a URL.
+  // A branch clone mints a FRESH password over an EMPTY instance (cloud parity: no data clones).
+  managed?: Record<string, { password: string }>
 }
 
 export interface Approval {
@@ -91,6 +104,14 @@ export interface ComputeAdapter {
   state?(ref: string, group: string): Promise<string> // running|suspended|stopped|none|unknown
   // Rename a deployed group's runtime artifact (optional — `insta services rename compute`).
   rename?(ref: string, from: string, to: string): Promise<void>
+}
+
+export interface ManagedDbAdapter {
+  // One managed-database container per branch per service; `ref` identifies the branch. There is
+  // deliberately no clone method — a branch gets a fresh empty instance (cloud parity).
+  provision(ref: string, network: string, type: ManagedDbType, name: string, password: string): Promise<void>
+  destroy(ref: string, type: ManagedDbType, name: string): Promise<void>
+  rename(ref: string, type: ManagedDbType, from: string, to: string): Promise<void>
 }
 
 export interface StorageAdapter {

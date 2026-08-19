@@ -1,11 +1,12 @@
 // Project/branch lifecycle over local containers. Mirrors the platform model:
 // project → branches (main = default); branch create = provision new stack + copy data +
 // redeploy the same app image(s); compute = the user's custom image(s), one per group.
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { docker } from './docker'
+import { MANAGED_DB, CANONICAL_MANAGED_KEYS, suffixBundle, managedServiceId, managedContainerName, isManagedDbType } from './manageddb'
 import * as observe from './observe'
 import { loadState, mutate } from './state'
-import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, AuditEvent, UserSecret } from './types'
+import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, AuditEvent, UserSecret } from './types'
 
 const DEFAULT_BRANCH = 'main'
 const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
@@ -20,7 +21,7 @@ const DB_CAP = { cpuMilli: 8000, memoryMib: 8192, volumeGib: VOLUME_CAP_GIB }
 const VOLUME_MOUNT_PATH = '/data'
 
 export class Engine {
-  constructor(private db: DatabaseAdapter, private compute: ComputeAdapter, private storage: StorageAdapter) {}
+  constructor(private db: DatabaseAdapter, private compute: ComputeAdapter, private storage: StorageAdapter, private managedDb: ManagedDbAdapter) {}
 
   // Branch ref keys containers/networks: <project-slug>-<branch-name>.
   private ref(project: Project, branch: string): string { return `${slug(project.name)}-${slug(branch)}` }
@@ -44,18 +45,39 @@ export class Engine {
   private async provisionBranch(project: Project, name: string, isDefault: boolean, cloneOf: string | null): Promise<Branch> {
     const network = this.net(project, name)
     try { await docker(['network', 'create', network]) } catch { /* exists */ }
-    const { url } = await this.db.provision(this.ref(project, name), network)
+    const ref = this.ref(project, name)
+    const { url } = await this.db.provision(ref, network)
     let st: { bucket: string; env: Record<string, string> }
-    try { st = await this.storage.provision(this.ref(project, name), network) }
+    try { st = await this.storage.provision(ref, network) }
     catch (e) {
       // compensate: don't orphan the db container if storage fails
-      await this.db.destroy(this.ref(project, name)).catch(() => {})
+      await this.db.destroy(ref).catch(() => {})
+      await docker(['network', 'rm', network]).catch(() => {})
+      throw e
+    }
+    // Managed databases: every branch gets a FRESH empty instance with a fresh password — no data
+    // clones from the parent (cloud parity: platform materialize() for managed Fly databases).
+    const managed: Record<string, { password: string }> = {}
+    const provisioned: Array<{ type: ManagedDbType; name: string }> = []
+    try {
+      for (const m of project.managedServices ?? []) {
+        const password = randomBytes(32).toString('base64url')
+        await this.managedDb.provision(ref, network, m.type, m.name, password)
+        provisioned.push({ type: m.type, name: m.name })
+        managed[m.id] = { password }
+      }
+    } catch (e) {
+      // compensate: tear down the whole half-provisioned branch stack
+      for (const p of provisioned) await this.managedDb.destroy(ref, p.type, p.name).catch(() => {})
+      await this.storage.destroy(ref, network).catch(() => {})
+      await this.db.destroy(ref).catch(() => {})
       await docker(['network', 'rm', network]).catch(() => {})
       throw e
     }
     const b: Branch = {
       id: randomUUID(), projectId: project.id, name, isDefault, status: 'ready',
       network, dbUrl: url, bucket: st.bucket, s3: st.env, cloneOf, createdAt: Date.now(), apps: {},
+      ...(Object.keys(managed).length ? { managed } : {}),
     }
     mutate((s) => { s.branches[b.id] = b })
     return b
@@ -124,7 +146,9 @@ export class Engine {
     const { url } = await this.compute.deploy(this.ref(project, b.name), {
       image: opts.image, port, hostPort, network: b.network, group,
       ...(vol ? { volume: { name: `io-${this.ref(project, b.name)}-data-${vol.id}` } } : {}),
-      envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.deploySecretsFor(projectId, b.name, group) },
+      // minted credentials (db + storage + managed databases) reach every compute deploy; user
+      // secrets are scoped (project-wide + branch-unbound + bound to THIS group)
+      envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.managedSecretsFor(projectId, b), ...this.deploySecretsFor(projectId, b.name, group) },
     })
     mutate((s) => { s.branches[b.id].apps[group] = { image: opts.image, port, hostPort, url, updatedAt: Date.now() } })
     this.emit(projectId, b.name, 'resource', 'deploy', { image: opts.image, group, url })
@@ -165,7 +189,26 @@ export class Engine {
   secrets(projectId: string, branchName: string): Record<string, string> {
     const b = this.getBranchByName(projectId, branchName)
     if (!b) throw new Error(`branch "${branchName}" not found`)
-    return { DATABASE_URL: b.dbUrl, ...b.s3, ...this.userSecretsFor(projectId, branchName) }
+    return { DATABASE_URL: b.dbUrl, ...b.s3, ...this.managedSecretsFor(projectId, b), ...this.userSecretsFor(projectId, branchName) }
+  }
+
+  /** Minted managed-database credentials for a branch, on the cloud's naming contract: every
+   *  service's bundle stored SUFFIXED (`REDIS_URL_<NAME>`), and the oldest service of each type
+   *  additionally surfaces the canonical unsuffixed aliases — computed here at read time, so
+   *  removing the oldest shifts the aliases on the next read (platform spec §2.1). */
+  private managedSecretsFor(projectId: string, branch: Branch): Record<string, string> {
+    const project = this.getProject(projectId)
+    const out: Record<string, string> = {}
+    const aliasedTypes = new Set<ManagedDbType>()
+    for (const m of project?.managedServices ?? []) {
+      const cred = branch.managed?.[m.id]
+      if (!cred) continue
+      const host = managedContainerName(this.ref(project!, branch.name), m.type, m.name)
+      const bundle = MANAGED_DB[m.type].bundle(host, cred.password)
+      Object.assign(out, suffixBundle(bundle, m.name))
+      if (!aliasedTypes.has(m.type)) { aliasedTypes.add(m.type); Object.assign(out, bundle) }
+    }
+    return out
   }
 
   // ---- user-defined secrets (insta secrets set/unset) ----
@@ -190,10 +233,14 @@ export class Engine {
     return out
   }
 
-  /** Reserved = platform-minted credential names — user secrets must not clobber them. */
+  /** Reserved = platform-minted credential names — user secrets must not clobber them. Managed
+   *  types reserve their canonical keys and every suffixed form (`REDIS_URL_<NAME>` etc.),
+   *  matching the stance already taken for DATABASE_URL_/BUCKET_NAME_. */
   isReservedSecret(name: string): boolean {
-    return name === 'DATABASE_URL' || name === 'BUCKET_NAME' || name.startsWith('AWS_') ||
-      name.startsWith('DATABASE_URL_') || name.startsWith('BUCKET_NAME_')
+    if (name === 'DATABASE_URL' || name === 'BUCKET_NAME' || name.startsWith('AWS_') ||
+      name.startsWith('DATABASE_URL_') || name.startsWith('BUCKET_NAME_')) return true
+    for (const k of CANONICAL_MANAGED_KEYS) if (name === k || name.startsWith(`${k}_`)) return true
+    return false
   }
 
   setUserSecret(projectId: string, name: string, value: string, branch: string | null, service: string | null = null): void {
@@ -202,7 +249,9 @@ export class Engine {
     if (branch && !this.getBranchByName(projectId, branch)) throw new Error(`branch "${branch}" not found`)
     if (service) {
       if (!branch) throw new Error('binding a secret to a service requires a branch')
-      const valid = ['postgres/db', 'storage/store', ...this.computeGroupNames(projectId).map((g) => `compute/${g}`)]
+      const valid = ['postgres/db', 'storage/store',
+        ...this.computeGroupNames(projectId).map((g) => `compute/${g}`),
+        ...this.managedList(projectId).map((m) => `${m.type}/${m.name}`)]
       if (!valid.includes(service)) throw new Error(`service not found: ${service}`)
     }
     mutate((st) => {
@@ -237,13 +286,20 @@ export class Engine {
     return [...groups].sort()
   }
 
-  /** Resolve a stable oss service id (pg-db | st-store | cp-<group>) to its type + name. */
-  private serviceOf(projectId: string, serviceId: string): { type: 'postgres' | 'storage' | 'compute'; name: string } {
+  /** The project's registered managed databases (empty when none). */
+  private managedList(projectId: string): Array<{ id: string; type: ManagedDbType; name: string; createdAt: number }> {
+    return this.getProject(projectId)?.managedServices ?? []
+  }
+
+  /** Resolve a stable oss service id (pg-db | st-store | cp-<group> | rd/my/mo-<name>) to its type + name. */
+  private serviceOf(projectId: string, serviceId: string): { type: 'postgres' | 'storage' | 'compute' | ManagedDbType; name: string } {
     if (serviceId === 'pg-db') return { type: 'postgres', name: 'db' }
     if (serviceId === 'st-store') return { type: 'storage', name: 'store' }
     if (serviceId.startsWith('cp-') && this.computeGroupNames(projectId).includes(serviceId.slice(3))) {
       return { type: 'compute', name: serviceId.slice(3) }
     }
+    const managed = this.managedList(projectId).find((m) => m.id === serviceId)
+    if (managed) return { type: managed.type, name: managed.name }
     throw new Error('service not found')
   }
 
@@ -255,7 +311,7 @@ export class Engine {
   async services(projectId: string, branchName?: string): Promise<Array<{
     id: string; type: string; name: string; status: string; machine_count?: number; domain?: string
     runtime?: string; endpoint?: string; updated_at?: string; public?: boolean; desired_state?: string
-    volume_gib?: number | null
+    volume_gib?: number | null; port?: number
   }>> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
@@ -284,6 +340,19 @@ export class Engine {
         endpoint: branch ? `${this.s3Host(branch) ?? 'storage'}/${branch.bucket}` : undefined,
         runtime: branch ? runtimeOf(this.s3Host(branch)?.split(':')[0] ?? '') : undefined,
         updated_at: iso(branch?.createdAt) },
+      // Managed databases (redis/mysql/mongodb): one private container per branch. `port` +
+      // `volume_gib` are what the CLI renders (`tcp/6379  vol 1Gi`); the volume size is the
+      // cloud's fixed 1Gi, advisory locally like every other recorded size.
+      ...this.managedList(projectId).map((m) => {
+        const container = ref ? managedContainerName(ref, m.type, m.name) : undefined
+        return {
+          id: m.id, type: m.type, name: m.name, status: 'ready',
+          port: MANAGED_DB[m.type].port, volume_gib: MANAGED_DB[m.type].volumeGib,
+          endpoint: container ? `${container}:${MANAGED_DB[m.type].port}` : undefined,
+          runtime: container ? runtimeOf(container) : undefined,
+          updated_at: iso(m.createdAt),
+        }
+      }),
       ...[...groups].sort().map((g) => {
         const app = branch?.apps[g]
         return {
@@ -319,11 +388,20 @@ export class Engine {
         services: [
           { type: 'postgres', name: 'db', secrets: ['DATABASE_URL', ...bound(b.name, 'postgres/db')].sort() },
           { type: 'storage', name: 'store', secrets: [...Object.keys(b.s3), ...bound(b.name, 'storage/store')].sort() },
+          ...this.managedList(projectId).map((m) => ({
+            type: m.type, name: m.name,
+            secrets: [...this.mintedManagedNames(m), ...bound(b.name, `${m.type}/${m.name}`)].sort(),
+          })),
           ...groups.map((g) => ({ type: 'compute', name: g, secrets: bound(b.name, `compute/${g}`).sort() })),
         ],
         unbound: list.filter((u) => u.branch === b.name && !u.service).map((u) => u.name).sort(),
       })),
     }
+  }
+
+  /** A managed service's minted (suffixed) secret names — names only, derived from the catalog. */
+  private mintedManagedNames(m: { type: ManagedDbType; name: string }): string[] {
+    return Object.keys(suffixBundle(MANAGED_DB[m.type].bundle('h', 'p'), m.name))
   }
 
   /** A service's secret names (names only): minted credentials + user secrets bound to it. */
@@ -333,6 +411,7 @@ export class Engine {
     const bound = list.filter((u) => u.service === `${svc.type}/${svc.name}`).map((u) => u.name)
     const minted = svc.type === 'postgres' ? ['DATABASE_URL']
       : svc.type === 'storage' ? Object.keys(this.listBranches(projectId)[0]?.s3 ?? {})
+      : isManagedDbType(svc.type) ? this.mintedManagedNames({ type: svc.type, name: svc.name })
       : []
     return [...new Set([...minted, ...bound])].sort()
   }
@@ -355,6 +434,9 @@ export class Engine {
     const skipped: Array<{ type: string; name: string; reason: string }> = [
       { type: 'postgres', name: 'db', reason: 'exists' },
       { type: 'storage', name: 'store', reason: 'exists' },
+      // managed databases are project-level registrations materialized on every branch, so the
+      // target always already has them (fresh + empty — data never merges anywhere)
+      ...this.managedList(projectId).map((m) => ({ type: m.type as string, name: m.name, reason: 'exists' })),
     ]
     for (const [group, app] of Object.entries(source.apps).sort(([a], [b]) => a.localeCompare(b))) {
       if (target.apps[group]) { skipped.push({ type: 'compute', name: group, reason: 'exists' }); continue }
@@ -518,6 +600,98 @@ export class Engine {
     this.emit(projectId, null, 'resource', 'service.removed', { type: 'compute', name })
   }
 
+  // ---- managed databases (redis | mysql | mongodb — cloud parity, platform #235/#236) ----
+
+  private managedRow(m: { id: string; type: ManagedDbType; name: string }): { id: string; type: string; name: string; status: string; port: number; volume_gib: number } {
+    return { id: m.id, type: m.type, name: m.name, status: 'ready', port: MANAGED_DB[m.type].port, volume_gib: MANAGED_DB[m.type].volumeGib }
+  }
+
+  /** Add a managed database: register on the project and materialize one private container per
+   *  branch, each with a fresh password (like the cloud, where every branch gets a fresh app +
+   *  empty volume + password — data is never cloned). Cloud deviation, same as compute groups:
+   *  oss services are project-level registrations, so the service appears on EVERY branch rather
+   *  than only the one it was added on. */
+  async addManagedService(projectId: string, type: ManagedDbType, name: string): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+    if (this.managedList(projectId).some((m) => m.type === type && m.name === name)) throw new Error(`${type} service "${name}" already exists`)
+    const wouldMint = this.mintedManagedNames({ type, name })
+    const clash = (loadState().userSecrets[projectId] ?? []).find((u) => wouldMint.includes(u.name))
+    if (clash) throw new Error(`service would mint secret names already used by user secrets: ${clash.name}`)
+    const entry = { id: managedServiceId(type, name), type, name, createdAt: Date.now() }
+    const provisioned: Array<{ branch: Branch; password: string }> = []
+    try {
+      for (const b of this.listBranches(projectId)) {
+        const password = randomBytes(32).toString('base64url')
+        await this.managedDb.provision(this.ref(project, b.name), b.network, type, name, password)
+        provisioned.push({ branch: b, password })
+      }
+    } catch (e) {
+      for (const p of provisioned) await this.managedDb.destroy(this.ref(project, p.branch.name), type, name).catch(() => {})
+      throw e
+    }
+    mutate((st) => {
+      const pr = st.projects[projectId]
+      pr.managedServices = [...(pr.managedServices ?? []), entry]
+      for (const p of provisioned) (st.branches[p.branch.id].managed ??= {})[entry.id] = { password: p.password }
+    })
+    this.emit(projectId, null, 'resource', 'service.added', { type, name })
+    return this.managedRow(entry)
+  }
+
+  /** Remove a managed database: destroy its container on every branch, unregister. The data goes
+   *  with it — same irreversibility class as removing a compute service. */
+  async removeManagedService(projectId: string, serviceId: string): Promise<void> {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const m = this.managedList(projectId).find((x) => x.id === serviceId)
+    if (!m) throw new Error('service not found')
+    for (const b of this.listBranches(projectId)) {
+      await this.managedDb.destroy(this.ref(project, b.name), m.type, m.name).catch(() => {})
+      mutate((st) => { delete st.branches[b.id].managed?.[serviceId] })
+    }
+    mutate((st) => {
+      const pr = st.projects[projectId]
+      pr.managedServices = (pr.managedServices ?? []).filter((x) => x.id !== serviceId)
+    })
+    this.emit(projectId, null, 'resource', 'service.removed', { type: m.type, name: m.name })
+  }
+
+  /** Rename a managed database everywhere it appears: registration (the id embeds the name),
+   *  every branch's container (docker DNS follows), per-branch credentials (re-keyed by the new
+   *  id; the bundle re-mints on the next read with the new host + suffix), and service-bound
+   *  user secrets. Deployed compute containers keep the OLD host in their env until their next
+   *  deploy — same as the cloud, where a rename re-keys stored names but never hot-patches env. */
+  async renameManagedService(projectId: string, serviceId: string, newName: string): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const m = this.managedList(projectId).find((x) => x.id === serviceId)
+    if (!m) throw new Error('service not found')
+    if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(newName)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+    if (newName === m.name) return this.managedRow(m)
+    if (this.managedList(projectId).some((x) => x.type === m.type && x.name === newName)) throw new Error(`${m.type} service "${newName}" already exists`)
+    const newId = managedServiceId(m.type, newName)
+    for (const b of this.listBranches(projectId)) {
+      if (!b.managed?.[serviceId]) continue
+      await this.managedDb.rename(this.ref(project, b.name), m.type, m.name, newName)
+    }
+    mutate((st) => {
+      const pr = st.projects[projectId]
+      pr.managedServices = (pr.managedServices ?? []).map((x) => (x.id === serviceId ? { ...x, id: newId, name: newName } : x))
+      for (const b of Object.values(st.branches)) {
+        if (b.projectId !== projectId || !b.managed?.[serviceId]) continue
+        b.managed[newId] = b.managed[serviceId]
+        delete b.managed[serviceId]
+      }
+      for (const u of st.userSecrets[projectId] ?? []) {
+        if (u.service === `${m.type}/${m.name}`) u.service = `${m.type}/${newName}`
+      }
+    })
+    this.emit(projectId, null, 'resource', 'service.rename', { type: m.type, from: m.name, to: newName })
+    return this.managedRow({ id: newId, type: m.type, name: newName })
+  }
+
   // ---- volumes + database settings (tier-caps contract parity — platform #166–169) ----
 
   /** A compute service's /data volume (null when none) + the volume cap — GET …/volume shape. */
@@ -642,6 +816,7 @@ export class Engine {
     await this.compute.destroy(ref)
     await this.db.destroy(ref)
     await this.storage.destroy(ref, b.network)
+    for (const m of this.managedList(projectId)) await this.managedDb.destroy(ref, m.type, m.name).catch(() => {})
     try { await docker(['network', 'rm', this.net(project, b.name)]) } catch { /* gone */ }
     mutate((s) => { delete s.branches[branchId] })
     this.emit(projectId, b.name, 'resource', 'branch.deleted', {})
@@ -655,6 +830,7 @@ export class Engine {
       await this.compute.destroy(ref)
       await this.db.destroy(ref)
       await this.storage.destroy(ref, b.network)
+      for (const m of this.managedList(projectId)) await this.managedDb.destroy(ref, m.type, m.name).catch(() => {})
       try { await docker(['network', 'rm', this.net(project, b.name)]) } catch { /* gone */ }
       mutate((s) => { delete s.branches[b.id] })
     }
@@ -759,6 +935,10 @@ export class Engine {
     const resources = branches.flatMap((b) => [
       { kind: 'postgres', name: null, branchId: b.id, ref: { url: b.dbUrl }, status: 'ready' },
       { kind: 'storage', name: null, branchId: b.id, ref: { bucket: b.bucket }, status: 'ready' },
+      ...this.managedList(projectId).filter((m) => b.managed?.[m.id]).map((m) => ({
+        kind: m.type as string, name: m.name as string | null, branchId: b.id,
+        ref: { host: managedContainerName(this.ref(project, b.name), m.type, m.name), port: MANAGED_DB[m.type].port }, status: 'ready',
+      })),
       ...Object.entries(b.apps).map(([group, app]) => (
         { kind: 'compute', name: group, branchId: b.id, ref: { url: app.url, image: app.image }, status: 'ready' }
       )),

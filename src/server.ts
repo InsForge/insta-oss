@@ -9,6 +9,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify'
 import fastifyStatic from '@fastify/static'
 import type { Engine } from './engine'
 import * as govern from './govern'
+import { isManagedDbType, parseManagedServiceId } from './manageddb'
 import { isGatedAction, type Approval, type AuditEvent, type GatedAction } from './types'
 
 const LOCAL_USER = { id: 'local', email: null, name: 'local' }
@@ -253,6 +254,16 @@ export function buildServer(engine: Engine): FastifyInstance {
         return reply.code(201).send({ service })
       } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
     }
+    // Managed databases (redis | mysql | mongodb): a fresh private instance per branch, fresh
+    // credentials, no data clone — cloud parity (platform #235/#236).
+    if (isManagedDbType(body.type)) {
+      try { return reply.code(201).send({ service: await engine.addManagedService(id, body.type, body.name) }) }
+      catch (e) {
+        const m = e instanceof Error ? e.message : String(e)
+        const code = m.includes('already exists') || m.includes('already used') ? 409 : m.includes('not found') ? 404 : 400
+        return reply.code(code).send({ error: m })
+      }
+    }
     if (body.type !== 'compute') return reply.code(400).send({ error: `unknown service type: ${body.type}` })
     // volumeGib (compute only) attaches a persistent /data volume (also attachable later via
     // PUT …/volume, and deletable via DELETE …/volume — cloud parity).
@@ -310,12 +321,16 @@ export function buildServer(engine: Engine): FastifyInstance {
     const { name } = (req.body ?? {}) as { name?: string }
     if (!name) return reply.code(400).send({ error: 'name required' })
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
-    if (!sid.startsWith('cp-')) {
+    if (!sid.startsWith('cp-') && !parseManagedServiceId(sid)) {
       return reply.code(501).send({ error: 'renaming postgres/storage services is cloud-only — insta-oss provisions one fixed pair (db/store) per project' })
     }
     if (!gated(id, 'service.rename', reply)) return reply
-    try { return { service: await engine.renameComputeService(id, sid.slice(3), name) } }
-    catch (e) {
+    try {
+      const service = sid.startsWith('cp-')
+        ? await engine.renameComputeService(id, sid.slice(3), name)
+        : await engine.renameManagedService(id, sid, name)
+      return { service }
+    } catch (e) {
       const m = e instanceof Error ? e.message : String(e)
       return reply.code(m.includes('already exists') ? 409 : errCode(m)).send({ error: m })
     }
@@ -375,12 +390,15 @@ export function buildServer(engine: Engine): FastifyInstance {
 
   app.delete('/projects/:id/services/:sid', async (req, reply) => {
     const { id, sid } = req.params as { id: string; sid: string }
-    if (!sid.startsWith('cp-')) {
+    if (!sid.startsWith('cp-') && !parseManagedServiceId(sid)) {
       return reply.code(501).send({ error: 'removing postgres/storage services is cloud-only — insta-oss provisions one of each per project' })
     }
     if (!gated(id, 'service.remove', reply)) return reply
-    try { await engine.removeComputeService(id, sid.slice(3)); return {} }
-    catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
+    try {
+      if (sid.startsWith('cp-')) await engine.removeComputeService(id, sid.slice(3))
+      else await engine.removeManagedService(id, sid)
+      return {}
+    } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 
   // ---- user-defined secrets (insta secrets set/unset) ----

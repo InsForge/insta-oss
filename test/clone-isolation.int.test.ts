@@ -7,8 +7,9 @@ import { Engine } from '../src/engine'
 import { LocalPostgres } from '../src/adapters/postgres'
 import { DockerCompute } from '../src/adapters/compute'
 import { LocalGarage } from '../src/adapters/garage'
+import { LocalManagedDb } from '../src/adapters/manageddb'
 
-const engine = new Engine(new LocalPostgres(), new DockerCompute(), new LocalGarage())
+const engine = new Engine(new LocalPostgres(), new DockerCompute(), new LocalGarage(), new LocalManagedDb())
 let projectId = ''
 const pg = new LocalPostgres()
 
