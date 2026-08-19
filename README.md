@@ -8,11 +8,9 @@ project = a Postgres database + an S3 bucket + your app containers
 branch  = a disposable, fully isolated clone of all three
 ```
 
-[![CI](https://img.shields.io/github/actions/workflow/status/InsForge/insta-oss/ci.yml?branch=main&label=CI)](https://github.com/InsForge/insta-oss/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-[Quick start](#quick-start) · [Cloud parity](docs/compatibility.md) ·
-[`insta` CLI](https://github.com/InsForge/insta-cli) ·
+[Quick start](#quick-start) · [insta CLI](https://github.com/InsForge/insta-cli) ·
 [Hosted InstaCloud](https://instacloud.com) · [Discord](https://discord.com/invite/MPxwj5xVvW)
 
 ## Overview
@@ -20,9 +18,7 @@ branch  = a disposable, fully isolated clone of all three
 insta-oss is not an emulator: it serves the same API as managed InstaCloud, backed by real
 local resources — a real Postgres per branch, a real S3 bucket, your real app containers. The
 stock `insta` CLI, the insta-mcp server, and the agent skills work against it unchanged;
-workflows built here run as-is on the cloud. Cloud-only concepts — billing, org management,
-machine scaling, custom domains — return clean `501`s; the command-by-command parity tables
-are in [docs/compatibility.md](docs/compatibility.md).
+workflows built here run as-is on the cloud.
 
 Everything it creates is plain Docker. Stop the daemon and your Postgres is still Postgres,
 your bucket still speaks S3 — you lose the branching and the gates, not your data.
@@ -121,6 +117,8 @@ adapter → Docker:
   Redis/MySQL/MongoDB containers per branch). `RailwayCompute`
   (`INSTA_OSS_COMPUTE=railway`) runs compute on Railway instead — proof the seam holds.
 - **state** (`src/state.ts`) — a single JSON file, `~/.insta-oss/state.json`.
+
+Command-by-command CLI and MCP compatibility tables: [docs/compatibility.md](docs/compatibility.md).
 
 ## Dashboard
 
