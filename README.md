@@ -20,8 +20,8 @@ local resources — a real Postgres per branch, a real S3 bucket, your real app 
 stock `insta` CLI, the insta-mcp server, and the agent skills work against it unchanged;
 workflows built here run as-is on the cloud.
 
-Everything it creates is plain Docker. Stop the daemon and your Postgres is still Postgres,
-your bucket still speaks S3 — you lose the branching and the gates, not your data.
+Everything it creates is plain Docker — a standard Postgres container per branch, an
+S3-compatible bucket, your own app images — nothing proprietary to migrate out of.
 
 ## What makes it different
 
