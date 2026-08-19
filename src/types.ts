@@ -15,6 +15,10 @@ export type ManagedDbType = 'redis' | 'mysql' | 'mongodb'
 
 export interface Project {
   id: string; name: string; status: string; createdAt: number; computeGroups?: string[]
+  // Container-ref slug, FROZEN at creation (older state derives it from the name). A project
+  // rename is display-name-only, like the cloud: every resource keeps its original name, and
+  // branches created after the rename still key on the frozen slug.
+  refSlug?: string
   // Compute /data volumes by group (attach at create or any time later; grow-only; deletable —
   // the disk and its data go together, there is no detach). `id` keys the docker volume so the
   // data survives a service rename. The recorded size is ADVISORY on the local substrate (docker

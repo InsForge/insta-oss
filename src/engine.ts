@@ -23,12 +23,15 @@ const VOLUME_MOUNT_PATH = '/data'
 export class Engine {
   constructor(private db: DatabaseAdapter, private compute: ComputeAdapter, private storage: StorageAdapter, private managedDb: ManagedDbAdapter) {}
 
+  // The project's container-ref slug — frozen at creation (older state derives from the name).
+  private projectSlug(project: Project): string { return project.refSlug ?? slug(project.name) }
+
   // Branch ref keys containers/networks: <project-slug>-<branch-name>, FROZEN at provision.
   // Passing a Branch reads the stored ref (older state derives from the name — same value until
   // the branch is renamed); a string is the provision-time path, before the Branch exists.
   private ref(project: Project, branch: Branch | string): string {
     if (typeof branch !== 'string') return branch.ref ?? this.ref(project, branch.name)
-    return `${slug(project.name)}-${slug(branch)}`
+    return `${this.projectSlug(project)}-${slug(branch)}`
   }
   private net(project: Project, branch: string): string { return `io-${this.ref(project, branch)}` }
 
@@ -90,7 +93,13 @@ export class Engine {
 
   async createProject(name: string): Promise<{ project: Project; defaultBranch: Branch }> {
     if (this.listProjects().some((p) => p.name === name)) throw new Error(`project "${name}" already exists`)
-    const project: Project = { id: randomUUID(), name, status: 'ready', createdAt: Date.now() }
+    // Slugs are frozen per project and outlive renames, so a NEW project must not reuse one —
+    // its containers would collide with resources a renamed project still owns.
+    const refSlug = slug(name)
+    if (this.listProjects().some((p) => this.projectSlug(p) === refSlug)) {
+      throw new Error(`project ref "${refSlug}" already exists (a renamed project still owns its original resource names)`)
+    }
+    const project: Project = { id: randomUUID(), name, status: 'ready', createdAt: Date.now(), refSlug }
     mutate((s) => { s.projects[project.id] = project })
     try {
       const defaultBranch = await this.provisionBranch(project, DEFAULT_BRANCH, true, null)
@@ -127,6 +136,22 @@ export class Engine {
     })
     this.emit(projectId, name, 'resource', 'branch.created', { from: source.name })
     return b
+  }
+
+  /** Rename a project — DISPLAY NAME ONLY, like the cloud: every resource keeps its original
+   *  name (the ref slug froze at creation, so even branches created later stay on it). */
+  renameProject(projectId: string, name: string): { id: string; name: string; status: string } {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    if (!name.trim() || name.length > 100) throw new Error('name must be 1..100 characters')
+    if (name !== project.name && this.listProjects().some((p) => p.name === name)) throw new Error(`project "${name}" already exists`)
+    mutate((st) => {
+      // freeze the slug before the name moves (older records derive it from the name)
+      st.projects[projectId].refSlug ??= this.projectSlug(project)
+      st.projects[projectId].name = name
+    })
+    this.emit(projectId, null, 'resource', 'project.rename', { from: project.name, to: name })
+    return { id: projectId, name, status: project.status }
   }
 
   /** Rename a branch — METADATA ONLY, like the cloud: provider resources (containers, network,

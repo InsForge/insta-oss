@@ -162,10 +162,11 @@ your code, run migration files against `main`, redeploy, and delete the branch e
   (the image's real `pg_available_extensions`; `pg_stat_statements` is platform-required), and
   the console's deep-insight surface (`/database/insight`: size breakdown, per-table stats,
   vacuum health, unused indexes) — all served straight off the branch's own container.
-- **Branch rename + runtime health** — `PATCH /branches/:id` renames a branch metadata-only
-  (provider resources keep their frozen ref, exactly like the cloud); `/runtime-health` reports
-  every service's live state from one docker read in the cloud's vocabulary
-  (healthy / standby / crashed / starting / none — standby is rest, not failure).
+- **Project + branch rename, runtime health** — `PATCH /projects/:id` and `PATCH /branches/:id`
+  rename display-name-only (resources keep their ref, frozen at creation — exactly like the
+  cloud); `/runtime-health` reports every service's live state from one docker read in the
+  cloud's vocabulary (healthy / standby / crashed / starting / none — standby is rest, not
+  failure).
 - **Local dashboard** — the daemon serves a web UI at its own URL (see below): per-branch
   service table (live container status + local endpoints), environments (the project's
   branches), a pending-approvals

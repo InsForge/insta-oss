@@ -232,7 +232,7 @@ test('every cloud-only or not-yet route answers a clean 501, never a bare 404', 
     expect(r.json().error, `${method} ${url}`).toMatch(/cloud-only/)
   }
   const notYetRoutes: Array<[string, string]> = [
-    ['GET', '/projects/x/deploy-events'], ['PATCH', '/projects/x'],
+    ['GET', '/projects/x/deploy-events'],
   ]
   for (const [method, url] of notYetRoutes) {
     const r = await app.inject({ method: method as 'GET', url })
@@ -1056,4 +1056,37 @@ test('branch rename: metadata-only — resources keep their frozen ref; guards d
   const feat2 = (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === 'feat2')
   expect((await patch(`/projects/${id}/branches/${feat2.id}`, { name: 'exp' })).statusCode).toBe(409)
   expect((await patch(`/projects/${id}/branches/${feat2.id}`, { name: 'Bad Name' })).statusCode).toBe(400)
+})
+
+// ---- project rename (display-name-only, frozen ref slug — contract parity) ----
+
+test('project rename: display name only; resources AND future branches keep the frozen slug', async () => {
+  const id = await createProject() // 'demo' → frozen slug 'demo'
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+
+  const r = await patch(`/projects/${id}`, { name: 'Shop Backend' }) // any display name, like the cloud
+  expect(r.statusCode).toBe(200)
+  expect(r.json().project).toMatchObject({ id, name: 'Shop Backend' })
+  expect((await get('/orgs/local/projects')).json().projects[0].name).toBe('Shop Backend')
+
+  // existing resources keep serving under the frozen slug
+  expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.DATABASE_URL).toBe('pg://demo-main')
+  // a branch created AFTER the rename still keys on the frozen slug, not the new name
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  expect(calls).toContain('db.provision:demo-feat')
+
+  // guards: junk names 400, duplicate display name 409
+  expect((await patch(`/projects/${id}`, { name: '  ' })).statusCode).toBe(400)
+  expect((await patch(`/projects/${id}`, { name: 'x'.repeat(101) })).statusCode).toBe(400)
+  await post('/orgs/local/projects', { name: 'other' })
+  expect((await patch(`/projects/${id}`, { name: 'other' })).statusCode).toBe(409)
+})
+
+test('create-project guards frozen slugs: a renamed project still owns its original resource names', async () => {
+  const id = await createProject() // 'demo', slug frozen
+  await patch(`/projects/${id}`, { name: 'shop' })
+  // the display name 'demo' is free again, but the SLUG demo is still owned → 409, not a collision
+  const r = await post('/orgs/local/projects', { name: 'demo' })
+  expect(r.statusCode).toBe(409)
+  expect(r.json().error).toMatch(/already exists/)
 })
