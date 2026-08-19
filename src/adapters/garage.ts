@@ -1,9 +1,10 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { docker } from '../docker'
-import type { StorageAdapter } from '../types'
+import { signRequest, presignGet, presignPost, parseListObjects, parseDeleteResult, escapeXml, type S3Creds } from '../s3'
+import type { StorageAdapter, ObjectListing } from '../types'
 
 // One SHARED Garage server (io-garage) serves every project; each branch gets its own bucket
 // AND its own access key scoped to exactly that bucket — a leaked branch credential can touch
@@ -186,6 +187,62 @@ export class LocalGarage implements StorageAdapter {
       await this.garage(['key', 'delete', '--yes', id]).catch(() => { /* gone */ })
     }
     await docker(['network', 'disconnect', network, GARAGE]).catch(() => { /* not attached */ })
+  }
+
+  // ---- object operations (platform parity: `insta storage` + the console's file browser) ----
+  // The daemon runs on the HOST, and so do the CLI/browser that consume presigned URLs — so both
+  // the daemon's own S3 calls and every URL it signs go through Garage's host-published port
+  // (127.0.0.1:3900, best-effort at server start), NOT the branch-network name io-garage. SigV4
+  // signs the Host header, so the two are not interchangeable.
+  private hostCreds(env: Record<string, string>): S3Creds {
+    return {
+      accessKeyId: env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+      region: env.AWS_REGION ?? 'garage',
+      endpoint: process.env.INSTA_OSS_S3_HOST_ENDPOINT ?? `http://127.0.0.1:${S3_PORT}`,
+    }
+  }
+
+  private async s3Fetch(req: { url: string; headers: Record<string, string> }, method: string, body?: Buffer): Promise<string> {
+    let res: Response
+    try { res = await fetch(req.url, { method, headers: req.headers, body: body as BodyInit | undefined }) }
+    catch {
+      const endpoint = process.env.INSTA_OSS_S3_HOST_ENDPOINT ?? `http://127.0.0.1:${S3_PORT}`
+      throw new Error(`could not reach Garage on its host port (${endpoint}) — it is published best-effort at daemon start; free the port and restart, or set INSTA_OSS_S3_HOST_ENDPOINT`)
+    }
+    const text = await res.text()
+    if (!res.ok) throw new Error(`Garage answered ${res.status}: ${/<Message>([^<]*)<\/Message>/.exec(text)?.[1] ?? text.slice(0, 200)}`)
+    return text
+  }
+
+  async listBucketObjects(env: Record<string, string>, opts: { prefix?: string; cursor?: string; limit: number }): Promise<ObjectListing> {
+    const creds = this.hostCreds(env)
+    const query: Record<string, string> = { 'list-type': '2', 'max-keys': String(opts.limit) }
+    if (opts.prefix) query.prefix = opts.prefix
+    if (opts.cursor) query['continuation-token'] = opts.cursor
+    const xml = await this.s3Fetch(signRequest(creds, 'GET', `/${env.BUCKET_NAME}`, query, null), 'GET')
+    return parseListObjects(xml)
+  }
+
+  async presignObjectGet(env: Record<string, string>, key: string, disposition: 'attachment' | 'inline'): Promise<{ url: string; expiresAt: string }> {
+    // Short TTL: the link is handed to a browser (cloud contract: 60s).
+    return presignGet(this.hostCreds(env), `/${env.BUCKET_NAME}/${key}`, 60, { 'response-content-disposition': disposition })
+  }
+
+  async presignObjectPost(env: Record<string, string>, key: string, contentType: string, size: number): Promise<{ url: string; fields: Record<string, string>; expiresAt: string }> {
+    // Longer than a download's: an upload takes minutes, not one click (cloud contract: 300s).
+    return presignPost(this.hostCreds(env), env.BUCKET_NAME, key, contentType, size, 300)
+  }
+
+  async removeObject(env: Record<string, string>, key: string): Promise<void> {
+    await this.s3Fetch(signRequest(this.hostCreds(env), 'DELETE', `/${env.BUCKET_NAME}/${key}`, {}, null), 'DELETE')
+  }
+
+  async removeObjects(env: Record<string, string>, keys: string[]): Promise<{ deleted: number; failed: Array<{ key: string; message: string }> }> {
+    const body = Buffer.from(`<Delete>${keys.map((k) => `<Object><Key>${escapeXml(k)}</Key></Object>`).join('')}</Delete>`)
+    const md5 = createHash('md5').update(body).digest('base64') // DeleteObjects requires Content-MD5
+    const req = signRequest(this.hostCreds(env), 'POST', `/${env.BUCKET_NAME}`, { delete: '' }, body, { 'content-md5': md5 })
+    return parseDeleteResult(await this.s3Fetch(req, 'POST', body))
   }
 
   // Test helpers (also handy for debugging): put/get/list objects via rclone.

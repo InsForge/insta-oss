@@ -143,8 +143,10 @@ your code, run migration files against `main`, redeploy, and delete the branch e
 - **The secret seam** — `insta secrets` is the only way credentials leave the daemon:
   `DATABASE_URL`, `AWS_ACCESS_KEY_ID/SECRET`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION`,
   `BUCKET_NAME` — standard Postgres/S3 env vars, so apps need no insta-specific code.
-- **Governance (HITL)** — `secrets.read | deploy | project.delete | branch.delete` gate to
-  allow/deny/approve; approvals are one-shot (`approve --always` makes it permanent);
+- **Governance (HITL)** — every sensitive action gates to allow/deny/approve:
+  `secrets.read/write`, `storage.read/write/delete`, `deploy`, `project.delete`,
+  `branch.delete`, and `service.add/remove/setAccess/rename` (12 actions, same split and
+  defaults as the cloud). Approvals are one-shot (`approve --always` makes it permanent);
   per-project `policy set`.
 - **Audit timeline** — every resource + govern action lands in `insta events`; agents ingest
   findings via `POST /projects/:id/events` with dedup (observe-hook compatible).
@@ -471,7 +473,7 @@ Verified by running every registered CLI command against the daemon:
 | `login/logout` | not needed — localhost trust, no accounts |
 | `services scale/upgrade` | 501 — machine scaling / instance specs are cloud pricing concepts |
 | `compute limits/always-on` | 501 — tier caps / the scale-to-zero lever are cloud pricing concepts; local containers already stay up |
-| `storage list/get/delete` | 501 (not yet) — meanwhile, point any S3 client at the creds from `insta secrets` |
+| `storage list/get/delete` | ✅ object listing (prefix + cursor paging), presigned GET download, single delete — served from Garage's host port (:3900), gated `storage.read`/`storage.delete`; presigned-POST upload + bulk delete serve the console's file browser |
 | `regions` | ✅ the single `local` region (this machine) |
 | `usage` / `billing` | 501 — billing metering is cloud-only by design; local visibility = `manifest` + docker-backed `metrics`/`logs` |
 | `org create` / `tokens` | 501 — single-tenant |

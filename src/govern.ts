@@ -9,6 +9,11 @@ import { GATED_ACTIONS } from './types'
 const DEFAULTS: Record<GatedAction, Decision> = {
   'secrets.read': 'allow',
   'secrets.write': 'allow',
+  // Separate from secrets.* so file browsing/writes/removal can each be gated on their own —
+  // same split (and same allow defaults) as the platform.
+  'storage.read': 'allow',
+  'storage.write': 'allow',
+  'storage.delete': 'allow',
   deploy: 'allow',
   'project.delete': 'approve',
   'branch.delete': 'allow',

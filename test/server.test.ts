@@ -44,6 +44,20 @@ const storage: StorageAdapter = {
   cloneInto: async (src, dst) => { calls.push(`st.clone:${src}->${dst}`) },
   destroy: async (ref) => { calls.push(`st.destroy:${ref}`) },
   setAccess: async (ref, _network, isPublic) => { calls.push(`st.access:${ref}:${isPublic}`) },
+  listBucketObjects: async (env, o) => {
+    calls.push(`st.list:${env.BUCKET_NAME}:prefix=${o.prefix ?? ''}:limit=${o.limit}`)
+    return { objects: [{ key: 'a.txt', size: 3, lastModified: '2026-08-18T00:00:00Z', etag: '"x"' }], ...(o.cursor ? {} : { nextCursor: 'page2' }) }
+  },
+  presignObjectGet: async (env, key, disposition) => {
+    calls.push(`st.presignGet:${env.BUCKET_NAME}:${key}:${disposition}`)
+    return { url: `http://127.0.0.1:3900/${env.BUCKET_NAME}/${key}?sig`, expiresAt: '2026-08-18T00:01:00Z' }
+  },
+  presignObjectPost: async (env, key, contentType, size) => {
+    calls.push(`st.presignPost:${env.BUCKET_NAME}:${key}:${contentType}:${size}`)
+    return { url: `http://127.0.0.1:3900/${env.BUCKET_NAME}`, fields: { key, policy: 'p' }, expiresAt: '2026-08-18T00:05:00Z' }
+  },
+  removeObject: async (env, key) => { calls.push(`st.rm:${env.BUCKET_NAME}:${key}`) },
+  removeObjects: async (env, keys) => { calls.push(`st.rmN:${env.BUCKET_NAME}:${keys.join(',')}`); return { deleted: keys.length, failed: [] } },
 }
 const managed: ManagedDbAdapter = {
   provision: async (ref, _network, type, name) => { calls.push(`md.provision:${ref}:${type}:${name}`) },
@@ -207,9 +221,6 @@ test('every cloud-only or not-yet route answers a clean 501, never a bare 404', 
   const notYetRoutes: Array<[string, string]> = [
     ['GET', '/projects/x/deploy-events'], ['GET', '/projects/x/runtime-health'],
     ['PATCH', '/projects/x'], ['PATCH', '/projects/x/branches/b1'],
-    ['GET', '/projects/x/services/st-store/objects'], ['GET', '/projects/x/services/st-store/objects/download'],
-    ['POST', '/projects/x/services/st-store/objects/upload'], ['DELETE', '/projects/x/services/st-store/objects'],
-    ['POST', '/projects/x/services/st-store/objects/delete'],
   ]
   for (const [method, url] of notYetRoutes) {
     const r = await app.inject({ method: method as 'GET', url })
@@ -838,4 +849,77 @@ test('managed db remove: destroys on every branch, drops rows + secrets; rename 
   const after = (await get(`/projects/${id}/services`)).json().services
   expect(after.find((x: { id: string }) => x.id === 'rd-kv')).toBeUndefined()
   expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.REDIS_URL).toBeUndefined()
+})
+
+// ---- storage objects (platform parity: list / presign download / presign upload / delete) ----
+
+test('object list: shape + paging params + storage.read gate', async () => {
+  const id = await createProject()
+  const r = await get(`/projects/${id}/services/st-store/objects?prefix=img/&limit=5`)
+  expect(r.statusCode).toBe(200)
+  expect(r.json()).toEqual({
+    objects: [{ key: 'a.txt', size: 3, lastModified: '2026-08-18T00:00:00Z', etag: '"x"' }],
+    nextCursor: 'page2',
+  })
+  expect(calls).toContain('st.list:io-demo-main:prefix=img/:limit=5')
+
+  await put(`/projects/${id}/policy/storage.read`, { decision: 'approve' })
+  const gatedRes = await get(`/projects/${id}/services/st-store/objects`)
+  expect(gatedRes.statusCode).toBe(202)
+  expect(gatedRes.json()).toMatchObject({ status: 'approval_required', action: 'storage.read' })
+})
+
+test('object download presign: {url, expiresAt}; key required; branch-scoped creds', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  expect((await get(`/projects/${id}/services/st-store/objects/download`)).statusCode).toBe(400)
+  const r = await get(`/projects/${id}/services/st-store/objects/download?key=a.txt&branch=feat&disposition=inline`)
+  expect(r.statusCode).toBe(200)
+  expect(r.json().url).toContain('io-demo-feat/a.txt') // the FEAT bucket, not main's
+  expect(r.json().expiresAt).toBeTruthy()
+  expect(calls).toContain('st.presignGet:io-demo-feat:a.txt:inline')
+})
+
+test('object upload presign: {url, fields, expiresAt}; validates body; storage.write gate; 5GiB cap', async () => {
+  const id = await createProject()
+  expect((await post(`/projects/${id}/services/st-store/objects/upload`, { key: 'x' })).statusCode).toBe(400)
+  expect((await post(`/projects/${id}/services/st-store/objects/upload`, { key: 'x', contentType: 'text/plain', size: 6 * 1024 * 1024 * 1024 })).statusCode).toBe(400)
+  const r = await post(`/projects/${id}/services/st-store/objects/upload`, { key: 'x.txt', contentType: 'text/plain', size: 10 })
+  expect(r.statusCode).toBe(200)
+  expect(r.json().fields.key).toBe('x.txt')
+  expect(calls).toContain('st.presignPost:io-demo-main:x.txt:text/plain:10')
+
+  await put(`/projects/${id}/policy/storage.write`, { decision: 'deny' })
+  expect((await post(`/projects/${id}/services/st-store/objects/upload`, { key: 'x.txt', contentType: 'text/plain', size: 10 })).statusCode).toBe(403)
+})
+
+test('object delete: single {deleted:true} + bulk {deleted, failed}; storage.delete gate; storage-only', async () => {
+  const id = await createProject()
+  const one = await del_(`/projects/${id}/services/st-store/objects?key=a.txt`)
+  expect(one.statusCode).toBe(200)
+  expect(one.json()).toEqual({ deleted: true })
+  expect(calls).toContain('st.rm:io-demo-main:a.txt')
+
+  const bulk = await post(`/projects/${id}/services/st-store/objects/delete`, { keys: ['a.txt', 'b.txt'] })
+  expect(bulk.statusCode).toBe(200)
+  expect(bulk.json()).toEqual({ deleted: 2, failed: [] })
+  expect((await post(`/projects/${id}/services/st-store/objects/delete`, {})).statusCode).toBe(400)
+
+  // only storage services hold objects
+  expect((await get(`/projects/${id}/services/pg-db/objects`)).statusCode).toBe(400)
+
+  await put(`/projects/${id}/policy/storage.delete`, { decision: 'approve' })
+  expect((await del_(`/projects/${id}/services/st-store/objects?key=a.txt`)).statusCode).toBe(202)
+})
+
+test('object routes answer 501 when the storage adapter has no object support', async () => {
+  const bare: StorageAdapter = {
+    provision: storage.provision, cloneInto: storage.cloneInto, destroy: storage.destroy,
+  }
+  const local = buildServer(new Engine(db, compute, bare, managed))
+  const r = await local.inject({ method: 'POST', url: '/orgs/local/projects', payload: { name: 'demo' } })
+  const pid = r.json().project.id
+  const res = await local.inject({ method: 'GET', url: `/projects/${pid}/services/st-store/objects` })
+  expect(res.statusCode).toBe(501)
+  expect(res.json().error).toMatch(/not supported by this storage adapter/)
 })

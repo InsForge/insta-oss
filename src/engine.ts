@@ -6,7 +6,7 @@ import { docker } from './docker'
 import { MANAGED_DB, CANONICAL_MANAGED_KEYS, suffixBundle, managedServiceId, managedContainerName, isManagedDbType } from './manageddb'
 import * as observe from './observe'
 import { loadState, mutate } from './state'
-import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, AuditEvent, UserSecret } from './types'
+import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObjectListing, AuditEvent, UserSecret } from './types'
 
 const DEFAULT_BRANCH = 'main'
 const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
@@ -493,6 +493,63 @@ export class Engine {
     mutate((s) => { s.branches[branch.id].storagePublic = isPublic })
     this.emit(projectId, branch.name, 'resource', 'service.setAccess', { service: serviceId, public: isPublic })
     return (await this.services(projectId, branch.name)).find((x) => x.id === serviceId)
+  }
+
+  // ---- storage objects (platform parity: `insta storage list|get|delete`, console browser) ----
+
+  /** Resolve an object-operation target: a storage service id + the branch's credential env. */
+  private objectTarget(projectId: string, serviceId: string, branchName?: string): Branch {
+    const svc = this.serviceOf(projectId, serviceId)
+    if (svc.type !== 'storage') throw new Error('object operations are only supported for storage services')
+    const { branch } = this.branchOrThrow(projectId, branchName)
+    return branch
+  }
+
+  private objectOps(): Required<Pick<StorageAdapter, 'listBucketObjects' | 'presignObjectGet' | 'presignObjectPost' | 'removeObject' | 'removeObjects'>> {
+    const s = this.storage
+    if (!s.listBucketObjects || !s.presignObjectGet || !s.presignObjectPost || !s.removeObject || !s.removeObjects) {
+      throw new Error('object operations are not supported by this storage adapter')
+    }
+    return { listBucketObjects: s.listBucketObjects.bind(s), presignObjectGet: s.presignObjectGet.bind(s), presignObjectPost: s.presignObjectPost.bind(s), removeObject: s.removeObject.bind(s), removeObjects: s.removeObjects.bind(s) }
+  }
+
+  async listServiceObjects(projectId: string, serviceId: string, opts: { branch?: string; prefix?: string; cursor?: string; limit?: number }): Promise<ObjectListing> {
+    const b = this.objectTarget(projectId, serviceId, opts.branch)
+    const limit = Math.min(Math.max(opts.limit ?? 100, 1), 1000)
+    const out = await this.objectOps().listBucketObjects(b.s3, { prefix: opts.prefix, cursor: opts.cursor, limit })
+    this.emit(projectId, b.name, 'resource', 'storage.objects.list', { service: serviceId, prefix: opts.prefix ?? null })
+    return out
+  }
+
+  async presignServiceObjectDownload(projectId: string, serviceId: string, opts: { branch?: string; key: string; disposition?: 'attachment' | 'inline' }): Promise<{ url: string; expiresAt: string }> {
+    const b = this.objectTarget(projectId, serviceId, opts.branch)
+    const out = await this.objectOps().presignObjectGet(b.s3, opts.key, opts.disposition ?? 'attachment')
+    this.emit(projectId, b.name, 'resource', 'storage.objects.download', { service: serviceId, key: opts.key })
+    return out
+  }
+
+  async presignServiceObjectUpload(projectId: string, serviceId: string, opts: { branch?: string; key: string; contentType: string; size: number }): Promise<{ url: string; fields: Record<string, string>; expiresAt: string }> {
+    // S3's ceiling for a single POST Object — the signed policy makes the provider enforce it.
+    if (!Number.isInteger(opts.size) || opts.size < 0 || opts.size > 5 * 1024 * 1024 * 1024) throw new Error('size must be 0..5GiB (bytes)')
+    const b = this.objectTarget(projectId, serviceId, opts.branch)
+    const out = await this.objectOps().presignObjectPost(b.s3, opts.key, opts.contentType, opts.size)
+    this.emit(projectId, b.name, 'resource', 'storage.objects.upload', { service: serviceId, key: opts.key, size: opts.size })
+    return out
+  }
+
+  async deleteServiceObject(projectId: string, serviceId: string, opts: { branch?: string; key: string }): Promise<{ deleted: true }> {
+    const b = this.objectTarget(projectId, serviceId, opts.branch)
+    await this.objectOps().removeObject(b.s3, opts.key)
+    this.emit(projectId, b.name, 'resource', 'storage.objects.delete', { service: serviceId, key: opts.key })
+    return { deleted: true }
+  }
+
+  async deleteServiceObjects(projectId: string, serviceId: string, opts: { branch?: string; keys: string[] }): Promise<{ deleted: number; failed: Array<{ key: string; message: string }> }> {
+    if (opts.keys.length > 1000) throw new Error("keys must hold at most 1000 object keys (S3's DeleteObjects cap)")
+    const b = this.objectTarget(projectId, serviceId, opts.branch)
+    const out = await this.objectOps().removeObjects(b.s3, opts.keys)
+    this.emit(projectId, b.name, 'resource', 'storage.objects.delete', { service: serviceId, count: opts.keys.length })
+    return out
   }
 
   /** Resolve a lifecycle target: a compute service id + branch (default branch unless given). */

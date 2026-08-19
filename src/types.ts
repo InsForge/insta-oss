@@ -4,7 +4,7 @@
 // compute = redeploy.
 
 export type Decision = 'allow' | 'deny' | 'approve'
-export const GATED_ACTIONS = ['secrets.read', 'secrets.write', 'deploy', 'project.delete', 'branch.delete', 'service.add', 'service.remove', 'service.setAccess', 'service.rename'] as const
+export const GATED_ACTIONS = ['secrets.read', 'secrets.write', 'storage.read', 'storage.write', 'storage.delete', 'deploy', 'project.delete', 'branch.delete', 'service.add', 'service.remove', 'service.setAccess', 'service.rename'] as const
 export type GatedAction = (typeof GATED_ACTIONS)[number]
 export const isGatedAction = (a: string): a is GatedAction => (GATED_ACTIONS as readonly string[]).includes(a)
 
@@ -114,10 +114,20 @@ export interface ManagedDbAdapter {
   rename(ref: string, type: ManagedDbType, from: string, to: string): Promise<void>
 }
 
+export type ObjectListing = { objects: Array<{ key: string; size: number; lastModified: string; etag: string }>; nextCursor?: string }
+
 export interface StorageAdapter {
   provision(ref: string, network: string): Promise<{ bucket: string; env: Record<string, string> }>
   cloneInto(srcRef: string, dstRef: string, network: string): Promise<void>
   destroy(ref: string, network: string): Promise<void>
   // Bucket access mode (optional — `insta services set-access storage <name> public|private`).
   setAccess?(ref: string, network: string, isPublic: boolean): Promise<void>
+  // Object operations (optional — platform parity for `insta storage list|get|delete` and the
+  // console's file browser). `env` is the branch's own minted credential bundle; presigned URLs
+  // must be reachable from the HOST (CLI/browser), not just the branch network.
+  listBucketObjects?(env: Record<string, string>, opts: { prefix?: string; cursor?: string; limit: number }): Promise<ObjectListing>
+  presignObjectGet?(env: Record<string, string>, key: string, disposition: 'attachment' | 'inline'): Promise<{ url: string; expiresAt: string }>
+  presignObjectPost?(env: Record<string, string>, key: string, contentType: string, size: number): Promise<{ url: string; fields: Record<string, string>; expiresAt: string }>
+  removeObject?(env: Record<string, string>, key: string): Promise<void>
+  removeObjects?(env: Record<string, string>, keys: string[]): Promise<{ deleted: number; failed: Array<{ key: string; message: string }> }>
 }
