@@ -13,6 +13,10 @@ export const isGatedAction = (a: string): a is GatedAction => (GATED_ACTIONS as 
 // cloud's private-tcp `.internal` hosts.
 export type ManagedDbType = 'redis' | 'mysql' | 'mongodb'
 
+// What /metrics and /logs can observe: the branch database, its compute groups, or its managed
+// databases of one type — each type its own component, like the cloud (platform #243).
+export type ObservedComponent = 'db' | 'compute' | ManagedDbType
+
 export interface Project {
   id: string; name: string; status: string; createdAt: number; computeGroups?: string[]
   // Container-ref slug, FROZEN at creation (older state derives it from the name). A project

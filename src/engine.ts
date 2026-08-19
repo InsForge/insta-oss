@@ -6,7 +6,7 @@ import { docker } from './docker'
 import { MANAGED_DB, CANONICAL_MANAGED_KEYS, suffixBundle, managedServiceId, managedContainerName, isManagedDbType } from './manageddb'
 import * as observe from './observe'
 import { loadState, mutate } from './state'
-import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObjectListing, AuditEvent, UserSecret } from './types'
+import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret } from './types'
 
 const DEFAULT_BRANCH = 'main'
 const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
@@ -1086,17 +1086,25 @@ export class Engine {
     return { project, branch }
   }
 
-  /** The containers an observability request targets: the branch's pg, or its compute group(s). */
-  private observedContainers(project: Project, branch: Branch, component: 'db' | 'compute', group?: string): string[] {
+  /** The containers an observability request targets: the branch's pg, its compute group(s), or
+   *  its managed databases of one type. Each managed type is its OWN component, never folded into
+   *  'compute' (cloud parity: names are unique per type, so `group` resolves inside a type, and
+   *  the compute fan-out must not absorb database containers). */
+  private observedContainers(project: Project, branch: Branch, component: ObservedComponent, group?: string): string[] {
     const ref = this.ref(project, branch)
     if (component === 'db') return [`io-${ref}-pg`]
+    if (component !== 'compute') {
+      return this.managedList(project.id)
+        .filter((m) => m.type === component && (!group || m.name === group) && branch.managed?.[m.id])
+        .map((m) => managedContainerName(ref, m.type, m.name))
+    }
     const groups = group ? [group] : Object.keys(branch.apps).sort()
     return groups.filter((g) => branch.apps[g]).map((g) => `io-${ref}-app-${g}`)
   }
 
   /** Runtime logs via `docker logs --tail` — same LogsResult shape as the cloud (which serves
    *  compute from Fly; here BOTH components are real containers, so db logs work too). */
-  async runtimeLogs(projectId: string, opts: { component: 'db' | 'compute'; branchName?: string; group?: string; limit?: number }): Promise<observe.LogsResult> {
+  async runtimeLogs(projectId: string, opts: { component: ObservedComponent; branchName?: string; group?: string; limit?: number }): Promise<observe.LogsResult> {
     const { project, branch } = this.branchOrThrow(projectId, opts.branchName)
     const limit = Math.min(Math.max(opts.limit ?? 100, 1), 1000)
     const lines: observe.LogLine[] = []
@@ -1111,7 +1119,7 @@ export class Engine {
   }
 
   /** Point-in-time resource metrics via `docker stats --no-stream` — MetricsResult shape. */
-  async runtimeMetrics(projectId: string, opts: { component: 'db' | 'compute'; branchName?: string; group?: string }): Promise<observe.MetricsResult> {
+  async runtimeMetrics(projectId: string, opts: { component: ObservedComponent; branchName?: string; group?: string }): Promise<observe.MetricsResult> {
     const { project, branch } = this.branchOrThrow(projectId, opts.branchName)
     const names = this.observedContainers(project, branch, opts.component, opts.group)
     if (!names.length) return { source: 'docker-stats', series: [], note: 'nothing deployed on this branch' }

@@ -82,19 +82,31 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.get('/regions', async () => ({ regions: [{ slug: 'local', label: 'Local (this machine)' }] }))
   // ---- observability (docker + SQL backed; same response shapes as the cloud) ----
   const obsCode = (m: string): number => (m.includes('not found') ? 404 : 502)
-  const component = (q: { component?: string }): 'db' | 'compute' => (q.component === 'db' ? 'db' : 'compute')
+  // Each managed type is its own component, never folded into compute (cloud parity, platform
+  // #243). Absent stays the historical compute default; junk is the cloud's 400.
+  const COMPONENTS = ['db', 'compute', 'redis', 'mysql', 'mongodb'] as const
+  const component = (q: { component?: string }): (typeof COMPONENTS)[number] | null => {
+    if (q.component === undefined) return 'compute'
+    return (COMPONENTS as readonly string[]).includes(q.component) ? (q.component as (typeof COMPONENTS)[number]) : null
+  }
+  const badComponent = (reply: FastifyReply): FastifyReply =>
+    reply.code(400).send({ error: 'component must be db|compute|redis|mysql|mongodb' })
 
   app.get('/projects/:id/metrics', async (req, reply) => {
     const { id } = req.params as { id: string }
     const q = req.query as { component?: string; branch?: string; group?: string }
-    try { return await engine.runtimeMetrics(id, { component: component(q), branchName: q.branch, group: q.group }) }
+    const c = component(q)
+    if (!c) return badComponent(reply)
+    try { return await engine.runtimeMetrics(id, { component: c, branchName: q.branch, group: q.group }) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
   })
 
   app.get('/projects/:id/logs', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const q = req.query as { component?: string; branch?: string; group?: string; limit?: string }
-    try { return await engine.runtimeLogs(id, { component: component(q), branchName: q.branch, group: q.group, limit: q.limit ? Number(q.limit) : undefined }) }
+    const c = component(req.query as { component?: string })
+    if (!c) return badComponent(reply)
+    const q = req.query as { branch?: string; group?: string; limit?: string }
+    try { return await engine.runtimeLogs(id, { component: c, branchName: q.branch, group: q.group, limit: q.limit ? Number(q.limit) : undefined }) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
   })
 

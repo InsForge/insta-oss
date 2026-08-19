@@ -1092,3 +1092,30 @@ test('create-project guards frozen slugs: a renamed project still owns its origi
   expect(r.statusCode).toBe(409)
   expect(r.json().error).toMatch(/already exists/)
 })
+
+// ---- managed-db observability: component=redis|mysql|mongodb (cloud parity, platform #243) ----
+
+test('metrics/logs target managed-db containers per type; junk components 400', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  await post(`/projects/${id}/services`, { type: 'mysql', name: 'mysql-db' })
+
+  const observed: string[][] = []
+  vi.mocked(dockerFn).mockImplementation(async (args: readonly string[]) => {
+    if (args[0] === 'stats' || args[0] === 'logs') observed.push([...args])
+    return Buffer.from('')
+  })
+  await get(`/projects/${id}/metrics?component=redis`)
+  expect(observed.pop()).toContain('io-demo-main-rd-cache')
+  await get(`/projects/${id}/logs?component=mysql&group=mysql-db&limit=5`)
+  expect(observed.pop()).toContain('io-demo-main-my-mysql-db')
+  // group resolves INSIDE the type — a redis named like a compute group must not leak across
+  await get(`/projects/${id}/metrics?component=redis&group=nope`)
+  expect((await get(`/projects/${id}/metrics?component=redis&group=nope`)).json().series).toEqual([])
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+
+  const bad = await get(`/projects/${id}/metrics?component=kafka`)
+  expect(bad.statusCode).toBe(400)
+  expect(bad.json().error).toBe('component must be db|compute|redis|mysql|mongodb')
+  expect((await get(`/projects/${id}/logs?component=junk`)).statusCode).toBe(400)
+})
