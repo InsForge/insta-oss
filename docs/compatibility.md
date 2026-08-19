@@ -36,7 +36,7 @@ to work.
 ## MCP tools
 
 The insta-mcp server (`insta_*` tools) is a thin client over the same endpoints — point it at
-instad (`PLATFORM_API_URL=http://127.0.0.1:8080`, any non-empty bearer) and it works:
+the daemon (`PLATFORM_API_URL=http://127.0.0.1:8080`, any non-empty bearer) and it works:
 
 | Tools | insta-oss behavior |
 | --- | --- |

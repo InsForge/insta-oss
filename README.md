@@ -1,23 +1,58 @@
 # insta-oss
 
-insta-oss is `instad`, a local daemon that reimplements the [InstaCloud](https://instacloud.com)
-control plane on Docker — single-tenant, no accounts, no billing. Every project gets a Postgres
-database, an S3 bucket, and your app containers. Every branch is a disposable, fully isolated
-clone of all three.
+The [InstaCloud](https://instacloud.com) control plane, reimplemented as a single local daemon
+on your own Docker — single-tenant, no accounts, no billing.
 
-The stock [`insta` CLI](https://github.com/InsForge/insta-cli), the insta-mcp server, and the
-agent skills work against it unchanged; workflows built here run as-is on managed InstaCloud.
+```
+project = a Postgres database + an S3 bucket + your app containers
+branch  = a disposable, fully isolated clone of all three
+```
 
-Two ideas set it apart from a plain local stack:
+[![CI](https://img.shields.io/github/actions/workflow/status/InsForge/insta-oss/ci.yml?branch=main&label=CI)](https://github.com/InsForge/insta-oss/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-- **A branch is a whole environment, cloned.** `insta branch create` copies the database (with
-  data), copies the bucket, and redeploys every app container — in seconds, each on its own URL.
-  Break it, throw it away; the source is never touched. One task, one branch, many in parallel.
-- **Governance at the credential boundary.** The daemon is the only thing holding credentials,
-  and every sensitive action passes an allow / deny / approve gate before it touches a resource.
-  An `approve` gate parks the action until a human runs `insta approvals approve` — an agent that
-  ignores its instructions still cannot get past it. Every action lands in the `insta events`
-  audit timeline.
+[Quick start](#quick-start) · [Cloud parity](docs/compatibility.md) ·
+[`insta` CLI](https://github.com/InsForge/insta-cli) ·
+[Hosted InstaCloud](https://instacloud.com) · [Discord](https://discord.com/invite/MPxwj5xVvW)
+
+## Overview
+
+insta-oss is not an emulator: it serves the same API as managed InstaCloud, backed by real
+local resources — a real Postgres per branch, a real S3 bucket, your real app containers. The
+stock `insta` CLI, the insta-mcp server, and the agent skills work against it unchanged;
+workflows built here run as-is on the cloud. Cloud-only concepts — billing, org management,
+machine scaling, custom domains — return clean `501`s; the command-by-command parity tables
+are in [docs/compatibility.md](docs/compatibility.md).
+
+Everything it creates is plain Docker. Stop the daemon and your Postgres is still Postgres,
+your bucket still speaks S3 — you lose the branching and the gates, not your data.
+
+## What makes it different
+
+**A branch is a whole environment, cloned.** `insta branch create` copies the database (with
+data), copies the bucket, and redeploys every app container — in seconds, each branch on its
+own URL. Break it, throw it away; the source is never touched. One task, one branch, many in
+parallel.
+
+**Governance at the credential boundary.** The daemon is the only thing holding credentials,
+and every sensitive action passes an allow / deny / approve gate before it touches a resource.
+Agents propose, humans approve: a gated action parks until someone runs
+`insta approvals approve` — an agent that ignores its instructions still cannot get past it.
+Every action lands in the `insta events` audit timeline.
+
+## Features
+
+- **Deploys** — `insta deploy --image you/app` or `insta deploy ./dir` (built locally);
+  redeploy = replace, credentials injected.
+- **Secrets** — one seam: standard `DATABASE_URL` / `AWS_*` env vars, scoped
+  project → branch → service; apps need no insta-specific code.
+- **Managed databases** — private Redis / MySQL / MongoDB containers per branch.
+- **Observability** — `insta logs` / `insta metrics` per container, plus live Postgres
+  insight (connections, cache-hit, running queries, top statements).
+- **Audit timeline** — every resource and governance action in `insta events`.
+- **Dashboard** — a web UI served by the daemon itself, approvals inbox included.
+- **Agent-native** — `project create` installs the agent skills into your repo; insta-mcp
+  works against the daemon.
 
 ## Quick start
 
@@ -27,7 +62,7 @@ Prerequisites: Docker (running) and Node ≥ 22. Nothing else — no cloud accou
 git clone https://github.com/InsForge/insta-oss.git && cd insta-oss
 npm install
 npm run build:ui        # optional: the web dashboard, served by the daemon itself
-npm run dev             # instad on http://127.0.0.1:8080  (INSTA_OSS_PORT to change)
+npm run dev             # the daemon, on http://127.0.0.1:8080  (INSTA_OSS_PORT to change)
 ```
 
 First run pulls `postgres:16-alpine`, `dxflrs/garage`, and `rclone/rclone` — give it a minute.
@@ -40,9 +75,10 @@ curl -fsSL agents.instacloud.com | sh          # CLI + agent skills (or: npm ins
 export INSTA_API_URL=http://127.0.0.1:8080     # the CLI defaults to the cloud
 ```
 
-No `insta login` — the daemon trusts localhost.
+No `insta login` — the daemon trusts localhost. (Don't want to run it yourself?
+[Hosted InstaCloud](https://instacloud.com) is the same API with none of the ops.)
 
-## A session
+## What it looks like
 
 ```bash
 $ cd ~/my-app                       # the CLI links the project to your cwd
@@ -68,10 +104,7 @@ approval required for deploy — run: insta approvals approve 7c3c9b68-…
 $ insta branch delete feat          # done with the task: throw the clone away
 ```
 
-Your app just reads standard env vars (`DATABASE_URL`, `AWS_*`, `BUCKET_NAME`) — no
-insta-specific code, same code runs on the cloud. `insta deploy ./dir` builds from source
-instead of an image. `insta manifest` shows each branch's db / storage / compute;
-`insta logs` and `insta metrics` tail containers and sample CPU/memory.
+`insta manifest` shows each branch's db / storage / compute and their URLs.
 
 ## How it works
 
@@ -88,10 +121,6 @@ adapter → Docker:
   Redis/MySQL/MongoDB containers per branch). `RailwayCompute`
   (`INSTA_OSS_COMPUTE=railway`) runs compute on Railway instead — proof the seam holds.
 - **state** (`src/state.ts`) — a single JSON file, `~/.insta-oss/state.json`.
-
-Cloud-only concepts — billing, usage metering, org management, machine scaling, custom
-domains — return clean `501`s. The command-by-command CLI and MCP compatibility tables are in
-[docs/compatibility.md](docs/compatibility.md).
 
 ## Dashboard
 
