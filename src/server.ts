@@ -404,6 +404,63 @@ export function buildServer(engine: Engine): FastifyInstance {
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
   })
 
+  // ---- database management (password / databases / extensions / insight — cloud parity).
+  // Like the cloud: only the password route gates (secrets.read — it returns credentials);
+  // database + extension management is ungated. SQL failures map: exists→409, missing→404.
+  const dbErr = (reply: FastifyReply, e: unknown): FastifyReply => {
+    const m = e instanceof Error ? e.message : String(e)
+    const code = m.includes('already exists') ? 409 : m.includes('does not exist') || m.includes('not found') ? 404 : 400
+    return reply.code(code).send({ error: m })
+  }
+
+  app.post('/projects/:id/database/password', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { password } = (req.body ?? {}) as { password?: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'secrets.read', reply)) return reply
+    try { return await engine.dbSetPassword(id, password, (req.query as { branch?: string }).branch) }
+    catch (e) { return dbErr(reply, e) }
+  })
+
+  app.get('/projects/:id/database/databases', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    try { return await engine.dbListDatabases(id, (req.query as { branch?: string }).branch) }
+    catch (e) { return dbErr(reply, e) }
+  })
+
+  app.post('/projects/:id/database/databases', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { name } = (req.body ?? {}) as { name?: string }
+    if (!name) return reply.code(400).send({ error: 'name required' })
+    try { return reply.code(201).send(await engine.dbCreateDatabase(id, name, (req.query as { branch?: string }).branch)) }
+    catch (e) { return dbErr(reply, e) }
+  })
+
+  app.delete('/projects/:id/database/databases/:database', async (req, reply) => {
+    const { id, database } = req.params as { id: string; database: string }
+    try { await engine.dbDeleteDatabase(id, database, (req.query as { branch?: string }).branch); return { ok: true } }
+    catch (e) { return dbErr(reply, e) }
+  })
+
+  app.get('/projects/:id/database/extensions', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    try { return await engine.dbExtensions(id, (req.query as { branch?: string }).branch) }
+    catch (e) { return dbErr(reply, e) }
+  })
+
+  app.patch('/projects/:id/database/extensions', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const body = (req.body ?? {}) as { enable?: string[]; disable?: string[] }
+    try { return await engine.dbPatchExtensions(id, body, (req.query as { branch?: string }).branch) }
+    catch (e) { return dbErr(reply, e) }
+  })
+
+  app.get('/projects/:id/database/insight', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    try { return await engine.dbInsight(id, (req.query as { branch?: string }).branch) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
+  })
+
   // Machine scaling / instance specs are cloud pricing concepts — clean 501, never a bare 404.
   app.post('/projects/:id/services/:sid/scale', async (_req, reply) => notCloud(reply, 'machine scaling'))
   app.post('/projects/:id/services/:sid/upgrade', async (_req, reply) => notCloud(reply, 'instance spec upgrades'))

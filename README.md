@@ -157,6 +157,11 @@ your code, run migration files against `main`, redeploy, and delete the branch e
   control-plane operation log; `/database/{metrics,activity,query-stats}` run the same SQL as
   the cloud against the branch database (pg_stat_statements preloaded on new databases).
   Billing/usage metering stays cloud-only by design.
+- **Database management** — password rotation (re-mints `DATABASE_URL`), extra databases
+  (create / list / delete, primary + system databases guarded), extension install/removal
+  (the image's real `pg_available_extensions`; `pg_stat_statements` is platform-required), and
+  the console's deep-insight surface (`/database/insight`: size breakdown, per-table stats,
+  vacuum health, unused indexes) — all served straight off the branch's own container.
 - **Local dashboard** — the daemon serves a web UI at its own URL (see below): per-branch
   service table (live container status + local endpoints), environments (the project's
   branches), a pending-approvals

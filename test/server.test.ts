@@ -17,6 +17,19 @@ const db: DatabaseAdapter = {
   provision: async (ref) => { calls.push(`db.provision:${ref}`); return { url: `pg://${ref}` } },
   // Answers the observability SQL with canned JSON (order matters: metrics SQL also mentions pg_stat_activity).
   query: async (_ref, sql) => {
+    calls.push(`db.query:${sql.split(/\s+/).slice(0, 3).join(' ')}`)
+    if (sql.includes('drop database "ghost"')) throw new Error('database "ghost" does not exist')
+    if (sql.includes('pg_ls_waldir')) return JSON.stringify({
+      sizes: { databaseBytes: 9000, tablesBytes: 5000, indexesBytes: 2000, walBytes: 100 },
+      tables: [{ name: 'users', liveRows: 10, dataBytes: 4096, indexBytes: 1024, seqScans: 5, idxScans: 7 }],
+      vacuum: { totalDeadRows: 2, tables: [{ name: 'users', deadRows: 2, deadPct: 16.7, lastVacuum: null, xidAge: 55 }] },
+      unusedIndexes: [{ name: 'idx_dead', table: 'users', sizeBytes: 512, scans: 0 }],
+    })
+    if (sql.includes('pg_available_extensions')) return JSON.stringify({
+      available: [{ name: 'pg_stat_statements' }, { name: 'plpgsql' }, { name: 'vector' }],
+      enabled: ['pg_stat_statements', 'plpgsql'],
+    })
+    if (sql.includes('not datistemplate')) return JSON.stringify([{ name: 'app' }, { name: 'postgres' }])
     if (sql.includes('row_to_json')) return JSON.stringify({ total: 3, active: 1, idle: 2, max: 100, db_size_bytes: 123456, deadlocks: 0, inserted: 10, updated: 5, deleted: 1, blks_hit: 90, blks_read: 10 })
     if (sql.includes('pg_stat_statements')) return JSON.stringify([{ queryId: 'q1', query: 'select 1', calls: 3, totalMs: 9, meanMs: 3, rows: 3 }])
     if (sql.includes('pg_stat_activity')) return JSON.stringify([{ pid: 42, state: 'active', durationMs: 12.5, query: 'select 1' }])
@@ -922,4 +935,72 @@ test('object routes answer 501 when the storage adapter has no object support', 
   const res = await local.inject({ method: 'GET', url: `/projects/${pid}/services/st-store/objects` })
   expect(res.statusCode).toBe(501)
   expect(res.json().error).toMatch(/not supported by this storage adapter/)
+})
+
+// ---- database management: password / databases / extensions / insight (cloud parity) ----
+
+test('db password: rotates, re-mints DATABASE_URL, gated secrets.read', async () => {
+  const id = await createProject()
+  const r = await post(`/projects/${id}/database/password`, { password: "s3cr'et" })
+  expect(r.statusCode).toBe(200)
+  expect(r.json().password).toBe("s3cr'et")
+  expect(r.json().connString).toContain(`:${encodeURIComponent("s3cr'et")}@`)
+  expect(calls.some((c) => c.startsWith('db.query:alter user postgres'))).toBe(true)
+  // the seam now mints the rotated URL
+  const secrets = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
+  expect(secrets.DATABASE_URL).toBe(r.json().connString)
+  // omitted password = generated
+  const gen = await post(`/projects/${id}/database/password`, {})
+  expect(gen.json().password.length).toBeGreaterThan(20)
+
+  await put(`/projects/${id}/policy/secrets.read`, { decision: 'approve' })
+  expect((await post(`/projects/${id}/database/password`, {})).statusCode).toBe(202)
+})
+
+test('db databases: list with connString, create 201, delete guards primary/system, 404 on ghost', async () => {
+  const id = await createProject()
+  const list = (await get(`/projects/${id}/database/databases`)).json().databases
+  expect(list.map((d: { name: string }) => d.name)).toEqual(['app', 'postgres'])
+  expect(list[0].connString).toContain('/app')
+
+  const created = await post(`/projects/${id}/database/databases`, { name: 'analytics' })
+  expect(created.statusCode).toBe(201)
+  expect(created.json()).toMatchObject({ name: 'analytics' })
+  expect(created.json().connString).toContain('/analytics')
+  expect((await post(`/projects/${id}/database/databases`, { name: 'bad name!' })).statusCode).toBe(400)
+
+  expect((await del_(`/projects/${id}/database/databases/app`)).statusCode).toBe(400)      // primary
+  expect((await del_(`/projects/${id}/database/databases/postgres`)).statusCode).toBe(400) // system
+  expect((await del_(`/projects/${id}/database/databases/ghost`)).statusCode).toBe(404)
+  const dropped = await del_(`/projects/${id}/database/databases/analytics`)
+  expect(dropped.statusCode).toBe(200)
+  expect(dropped.json()).toEqual({ ok: true })
+  expect(calls.some((c) => c.startsWith('db.query:drop database'))).toBe(true)
+})
+
+test('db extensions: view marks required; patch enables/disables; refuses required + unknown', async () => {
+  const id = await createProject()
+  const view = (await get(`/projects/${id}/database/extensions`)).json()
+  expect(view.enabled).toEqual(['pg_stat_statements', 'plpgsql'])
+  expect(view.available.find((a: { name: string }) => a.name === 'pg_stat_statements').required).toBe(true)
+  expect(view.available.find((a: { name: string }) => a.name === 'vector').required).toBeUndefined()
+
+  const patched = await patch(`/projects/${id}/database/extensions`, { enable: ['vector'] })
+  expect(patched.statusCode).toBe(200)
+  expect(calls.some((c) => c.startsWith('db.query:create extension'))).toBe(true)
+  expect((await patch(`/projects/${id}/database/extensions`, { disable: ['pg_stat_statements'] })).statusCode).toBe(400)
+  expect((await patch(`/projects/${id}/database/extensions`, { enable: ['not-a-thing'] })).statusCode).toBe(400)
+})
+
+test('db insight: DbInsight shape — sizes, tables, vacuum (null lastVacuum omitted), unused indexes', async () => {
+  const id = await createProject()
+  const r = await get(`/projects/${id}/database/insight`)
+  expect(r.statusCode).toBe(200)
+  const insight = r.json()
+  expect(insight.collected).toBe(true)
+  expect(insight.sizes).toEqual({ databaseBytes: 9000, tablesBytes: 5000, indexesBytes: 2000, walBytes: 100 })
+  expect(insight.tables[0]).toEqual({ name: 'users', liveRows: 10, dataBytes: 4096, indexBytes: 1024, seqScans: 5, idxScans: 7 })
+  expect(insight.vacuum.totalDeadRows).toBe(2)
+  expect(insight.vacuum.tables[0]).toEqual({ name: 'users', deadRows: 2, deadPct: 16.7, xidAge: 55 }) // lastVacuum null → omitted
+  expect(insight.unusedIndexes).toEqual([{ name: 'idx_dead', table: 'users', sizeBytes: 512, scans: 0 }])
 })
