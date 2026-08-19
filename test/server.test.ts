@@ -185,6 +185,45 @@ test('cloud-only surfaces (billing/usage/tokens) return 501 with a clear message
   expect((await get('/projects/x/logs')).statusCode).toBe(404)
 })
 
+test('every cloud-only or not-yet route answers a clean 501, never a bare 404', async () => {
+  const cloudOnly: Array<[string, string]> = [
+    ['GET', '/projects/x/usage/daily'], ['GET', '/projects/x/utilisation'],
+    ['GET', '/orgs/local/members'], ['PUT', '/orgs/local/members/u1'], ['DELETE', '/orgs/local/members/u1'],
+    ['POST', '/orgs/local/invitations'], ['GET', '/orgs/local/invitations'], ['DELETE', '/orgs/local/invitations/i1'],
+    ['POST', '/invitations/accept'],
+    ['POST', '/tokens'], ['DELETE', '/tokens/t1'],
+    ['GET', '/images/inspect'],
+    ['GET', '/projects/x/services/cp-x/limits'], ['PUT', '/projects/x/services/cp-x/limits'],
+    ['PUT', '/projects/x/services/cp-x/always-on'], ['PATCH', '/projects/x/services/cp-x'],
+    ['POST', '/projects/x/compute/domain'], ['GET', '/projects/x/compute/domain'], ['DELETE', '/projects/x/compute/domain'],
+    ['POST', '/projects/x/deploy-token'],
+    ['POST', '/projects/x/backups'], ['GET', '/projects/x/backups'], ['DELETE', '/projects/x/backups/b1'], ['POST', '/projects/x/backups/b1/restore'],
+  ]
+  for (const [method, url] of cloudOnly) {
+    const r = await app.inject({ method: method as 'GET', url })
+    expect(r.statusCode, `${method} ${url}`).toBe(501)
+    expect(r.json().error, `${method} ${url}`).toMatch(/cloud-only/)
+  }
+  const notYetRoutes: Array<[string, string]> = [
+    ['GET', '/projects/x/deploy-events'], ['GET', '/projects/x/runtime-health'],
+    ['PATCH', '/projects/x'], ['PATCH', '/projects/x/branches/b1'],
+    ['GET', '/projects/x/services/st-store/objects'], ['GET', '/projects/x/services/st-store/objects/download'],
+    ['POST', '/projects/x/services/st-store/objects/upload'], ['DELETE', '/projects/x/services/st-store/objects'],
+    ['POST', '/projects/x/services/st-store/objects/delete'],
+  ]
+  for (const [method, url] of notYetRoutes) {
+    const r = await app.inject({ method: method as 'GET', url })
+    expect(r.statusCode, `${method} ${url}`).toBe(501)
+    expect(r.json().error, `${method} ${url}`).toMatch(/not implemented by insta-oss yet/)
+  }
+})
+
+test('regions returns the single local region in the CLI shape', async () => {
+  const r = await get('/regions')
+  expect(r.statusCode).toBe(200)
+  expect(r.json().regions).toEqual([{ slug: 'local', label: 'Local (this machine)' }])
+})
+
 // ---- services-model parity (Phase 1.5) ----
 
 test('services list: fixed postgres+storage + compute groups; CLI shape', async () => {
