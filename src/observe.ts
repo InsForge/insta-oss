@@ -133,3 +133,78 @@ export function toQueryStats(rowsJson: string): DbQueryStatRow[] {
 export function isExtensionUnavailable(message: string): boolean {
   return /pg_stat_statements|shared_preload_libraries|does not exist/i.test(message)
 }
+
+// ---- database management + insight (contract parity with the cloud's DbInsight/DbExtensionsView) ----
+
+export const DB_DATABASES_SQL = `select coalesce(json_agg(t), '[]'::json) from (
+  select datname as name from pg_database where not datistemplate order by datname) t`
+
+export const DB_EXTENSIONS_SQL = `select json_build_object(
+  'available', (select coalesce(json_agg(a order by a.name), '[]'::json) from (
+     select name from pg_available_extensions) a),
+  'enabled', (select coalesce(json_agg(extname order by extname), '[]'::json) from pg_extension))`
+
+export const DB_INSIGHT_SQL = `select json_build_object(
+  'sizes', json_build_object(
+     'databaseBytes', pg_database_size(current_database()),
+     'tablesBytes', coalesce((select sum(pg_table_size(relid)) from pg_stat_user_tables), 0),
+     'indexesBytes', coalesce((select sum(pg_indexes_size(relid)) from pg_stat_user_tables), 0),
+     'walBytes', coalesce((select sum(size) from pg_ls_waldir()), 0)),
+  'tables', (select coalesce(json_agg(t), '[]'::json) from (
+     select relname as name, n_live_tup as "liveRows",
+            pg_table_size(relid) as "dataBytes", pg_indexes_size(relid) as "indexBytes",
+            seq_scan as "seqScans", coalesce(idx_scan, 0) as "idxScans"
+     from pg_stat_user_tables order by pg_table_size(relid) desc limit 50) t),
+  'vacuum', json_build_object(
+     'totalDeadRows', coalesce((select sum(n_dead_tup) from pg_stat_user_tables), 0),
+     'tables', (select coalesce(json_agg(v), '[]'::json) from (
+        select s.relname as name, s.n_dead_tup as "deadRows",
+               round(100.0 * s.n_dead_tup / greatest(s.n_dead_tup + s.n_live_tup, 1), 1) as "deadPct",
+               to_char(greatest(s.last_vacuum, s.last_autovacuum) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as "lastVacuum",
+               age(c.relfrozenxid) as "xidAge"
+        from pg_stat_user_tables s join pg_class c on c.oid = s.relid
+        order by s.n_dead_tup desc limit 50) v)),
+  'unusedIndexes', (select coalesce(json_agg(u), '[]'::json) from (
+     select i.indexrelname as name, i.relname as "table", pg_relation_size(i.indexrelid) as "sizeBytes", i.idx_scan as scans
+     from pg_stat_user_indexes i join pg_index x on x.indexrelid = i.indexrelid
+     where coalesce(i.idx_scan, 0) = 0 and not x.indisunique and not x.indisprimary
+       and not exists (select 1 from pg_constraint con where con.conindid = i.indexrelid)
+     order by pg_relation_size(i.indexrelid) desc limit 50) u))`
+
+export type DbInsight = {
+  collected: boolean
+  sizes: { databaseBytes: number; tablesBytes: number; indexesBytes: number; walBytes: number }
+  tables: Array<{ name: string; liveRows: number; dataBytes: number; indexBytes: number; seqScans: number; idxScans: number }>
+  vacuum: { totalDeadRows: number; tables: Array<{ name: string; deadRows: number; deadPct: number; lastVacuum?: string; xidAge: number }> }
+  unusedIndexes: Array<{ name: string; table: string; sizeBytes: number; scans: number }>
+}
+
+export function toDbInsight(rowJson: string): DbInsight {
+  const r = JSON.parse(rowJson) as {
+    sizes: Record<string, unknown>
+    tables: Array<Record<string, unknown>>
+    vacuum: { totalDeadRows: unknown; tables: Array<Record<string, unknown>> }
+    unusedIndexes: Array<Record<string, unknown>>
+  }
+  return {
+    collected: true, // the local container answered the query, so the sections are real
+    sizes: {
+      databaseBytes: num(r.sizes.databaseBytes), tablesBytes: num(r.sizes.tablesBytes),
+      indexesBytes: num(r.sizes.indexesBytes), walBytes: num(r.sizes.walBytes),
+    },
+    tables: r.tables.map((t) => ({
+      name: String(t.name), liveRows: num(t.liveRows), dataBytes: num(t.dataBytes),
+      indexBytes: num(t.indexBytes), seqScans: num(t.seqScans), idxScans: num(t.idxScans),
+    })),
+    vacuum: {
+      totalDeadRows: num(r.vacuum.totalDeadRows),
+      tables: r.vacuum.tables.map((v) => ({
+        name: String(v.name), deadRows: num(v.deadRows), deadPct: num(v.deadPct),
+        ...(v.lastVacuum ? { lastVacuum: String(v.lastVacuum) } : {}), xidAge: num(v.xidAge),
+      })),
+    },
+    unusedIndexes: r.unusedIndexes.map((u) => ({
+      name: String(u.name), table: String(u.table), sizeBytes: num(u.sizeBytes), scans: num(u.scans),
+    })),
+  }
+}

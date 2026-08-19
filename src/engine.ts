@@ -864,6 +864,96 @@ export class Engine {
     return this.dbInstance(projectId, branchName)
   }
 
+  // ---- database management (password / databases / extensions / insight — cloud parity) ----
+
+  /** Extensions the daemon itself depends on — installed by the platform, cannot be disabled
+   *  (plpgsql is postgres's own default; pg_stat_statements backs `insta` query-stats). */
+  private static REQUIRED_EXTENSIONS = ['plpgsql', 'pg_stat_statements']
+  private static DB_NAME_RE = /^[A-Za-z0-9._-]+$/
+  private quoteIdent(name: string): string { return `"${name.replace(/"/g, '""')}"` }
+
+  /** The branch's connection URL with the database name swapped. */
+  private connStringFor(branch: Branch, database: string): string {
+    const u = new URL(branch.dbUrl)
+    return `${u.protocol}//${u.username}:${u.password}@${u.host}/${database}`
+  }
+
+  /** Set or regenerate the postgres user password; re-mints the branch's DATABASE_URL. Deployed
+   *  containers keep the old env until their next deploy — same as the cloud. */
+  async dbSetPassword(projectId: string, password: string | undefined, branchName?: string): Promise<{ connString: string; password: string }> {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    const pw = password ?? randomBytes(24).toString('base64url')
+    await this.db.query(this.ref(project, branch.name), `alter user postgres with password '${pw.replace(/'/g, "''")}'`)
+    const u = new URL(branch.dbUrl)
+    const connString = `${u.protocol}//${u.username}:${encodeURIComponent(pw)}@${u.host}${u.pathname}`
+    mutate((st) => { st.branches[branch.id].dbUrl = connString })
+    this.emit(projectId, branch.name, 'resource', 'db.password.set', { generated: !password })
+    return { connString, password: pw }
+  }
+
+  async dbListDatabases(projectId: string, branchName?: string): Promise<{ databases: Array<{ name: string; connString: string }> }> {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    const rows = JSON.parse(await this.db.query(this.ref(project, branch.name), observe.DB_DATABASES_SQL)) as Array<{ name: string }>
+    return { databases: rows.map((r) => ({ name: r.name, connString: this.connStringFor(branch, r.name) })) }
+  }
+
+  async dbCreateDatabase(projectId: string, name: string, branchName?: string): Promise<{ name: string; connString: string }> {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    if (!Engine.DB_NAME_RE.test(name)) throw new Error('database name must match ^[A-Za-z0-9._-]+$')
+    await this.db.query(this.ref(project, branch.name), `create database ${this.quoteIdent(name)}`)
+    this.emit(projectId, branch.name, 'resource', 'db.database.create', { name })
+    return { name, connString: this.connStringFor(branch, name) }
+  }
+
+  async dbDeleteDatabase(projectId: string, name: string, branchName?: string): Promise<void> {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    if (!Engine.DB_NAME_RE.test(name)) throw new Error('database name must match ^[A-Za-z0-9._-]+$')
+    // 'app' is the local substrate's fixed primary (adapters/postgres.ts DB); the URL-derived
+    // name covers adapters that mint a different primary.
+    const primary = new URL(branch.dbUrl).pathname.slice(1) || 'app'
+    if (name === primary || name === 'app' || name === 'postgres' || name.startsWith('template')) {
+      throw new Error(`cannot delete ${name === primary || name === 'app' ? 'the primary database' : 'a system database'} (${name})`)
+    }
+    // WITH (FORCE): a control plane must not be blocked by an app holding a connection open.
+    await this.db.query(this.ref(project, branch.name), `drop database ${this.quoteIdent(name)} with (force)`)
+    this.emit(projectId, branch.name, 'resource', 'db.database.delete', { name })
+  }
+
+  /** Installed + available extensions. Local postgres is full-power: `available` is the image's
+   *  real pg_available_extensions, not a curated allowlist; the daemon's own two are `required`. */
+  async dbExtensions(projectId: string, branchName?: string): Promise<{ available: Array<{ name: string; required?: boolean }>; enabled: string[] }> {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    const r = JSON.parse(await this.db.query(this.ref(project, branch.name), observe.DB_EXTENSIONS_SQL)) as { available: Array<{ name: string }>; enabled: string[] }
+    return {
+      available: r.available.map((a) => (Engine.REQUIRED_EXTENSIONS.includes(a.name) ? { name: a.name, required: true } : { name: a.name })),
+      enabled: r.enabled,
+    }
+  }
+
+  async dbPatchExtensions(projectId: string, patch: { enable?: string[]; disable?: string[] }, branchName?: string): Promise<{ available: Array<{ name: string; required?: boolean }>; enabled: string[] }> {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    const ref = this.ref(project, branch.name)
+    const view = await this.dbExtensions(projectId, branch.name)
+    const known = new Set(view.available.map((a) => a.name))
+    for (const name of [...(patch.enable ?? []), ...(patch.disable ?? [])]) {
+      if (!known.has(name)) throw new Error(`unknown extension: ${name}`)
+    }
+    for (const name of patch.disable ?? []) {
+      if (Engine.REQUIRED_EXTENSIONS.includes(name)) throw new Error(`extension ${name} is required by the platform and cannot be disabled`)
+    }
+    for (const name of patch.enable ?? []) await this.db.query(ref, `create extension if not exists ${this.quoteIdent(name)}`)
+    for (const name of patch.disable ?? []) await this.db.query(ref, `drop extension if exists ${this.quoteIdent(name)}`)
+    this.emit(projectId, branch.name, 'resource', 'db.extensions.update', { enable: patch.enable ?? [], disable: patch.disable ?? [] })
+    return this.dbExtensions(projectId, branch.name)
+  }
+
+  /** Deep database health (DbInsight shape): size breakdown, per-table stats, vacuum health,
+   *  unused indexes — same sections the cloud serves, read straight off the branch container. */
+  async dbInsight(projectId: string, branchName?: string): Promise<observe.DbInsight> {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    return observe.toDbInsight(await this.db.query(this.ref(project, branch.name), observe.DB_INSIGHT_SQL))
+  }
+
   async destroyBranch(projectId: string, branchId: string): Promise<void> {
     const project = this.getProject(projectId)
     const b = loadState().branches[branchId]
