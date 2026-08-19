@@ -125,12 +125,17 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.post('/orgs/:id/projects', async (req, reply) => {
     const { name } = (req.body ?? {}) as { name?: string }
     if (!name) return reply.code(400).send({ error: 'name required' })
-    const { project, defaultBranch } = await engine.createProject(name)
-    return reply.code(201).send({
-      project: { id: project.id, name: project.name, status: project.status },
-      defaultBranch: { id: defaultBranch.id, name: defaultBranch.name },
-      resources: [{ kind: 'postgres' }, { kind: 'storage' }, { kind: 'compute' }],
-    })
+    try {
+      const { project, defaultBranch } = await engine.createProject(name)
+      return reply.code(201).send({
+        project: { id: project.id, name: project.name, status: project.status },
+        defaultBranch: { id: defaultBranch.id, name: defaultBranch.name },
+        resources: [{ kind: 'postgres' }, { kind: 'storage' }, { kind: 'compute' }],
+      })
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      return reply.code(m.includes('already exists') ? 409 : 400).send({ error: m })
+    }
   })
 
   app.get('/orgs/:id/projects', async () => ({
@@ -483,7 +488,18 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.post('/projects/:id/backups/:bid/restore', async (_req, reply) => notCloud(reply, 'managed backups'))
   // Not-yet surfaces (real local answers exist meanwhile):
   app.get('/projects/:id/deploy-events', async (_req, reply) => notYet(reply, 'the deploy-event feed', 'use `insta events` and `insta logs`'))
-  app.patch('/projects/:id', async (_req, reply) => notYet(reply, 'project rename', 'container names key on the project name; recreate the project'))
+
+  // Project rename — display name only, like the cloud: every resource keeps its frozen slug.
+  app.patch('/projects/:id', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { name } = (req.body ?? {}) as { name?: string }
+    if (!name) return reply.code(400).send({ error: 'name required' })
+    try { return { project: engine.renameProject(id, name) } }
+    catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      return reply.code(m.includes('already exists') ? 409 : errCode(m)).send({ error: m })
+    }
+  })
 
   // Bulk runtime health: compute + postgres + managed databases from one docker read (the cloud's
   // shape; storage omitted — object storage has no runtime). 'standby' is rest, not failure.
