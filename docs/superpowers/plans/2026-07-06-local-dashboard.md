@@ -1,5 +1,10 @@
 # insta-oss — Local Dashboard Plan (Phase 6)
 
+> **Dated design archive (2026-07-06).** This records the plan as designed at the time.
+> Checkboxes and counts are not kept up to date as work ships (the dashboard has since
+> shipped and grown past this plan). Read it for the *why*; read the README and code for
+> current state.
+
 > **For agentic workers:** execute phases top-to-bottom with superpowers:executing-plans; each phase is independently shippable. Steps use `- [ ]`.
 
 **Goal:** a local web dashboard served by `instad` itself — open `http://127.0.0.1:8080` in a browser and manage projects, branches, services, logs, and governance visually. Design of record is the product mock (2026-07-06): Railway-style two-pane layout — left sidebar with project-level and branch-scoped sections, main pane per page.
