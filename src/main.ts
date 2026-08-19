@@ -1,6 +1,6 @@
 #!/usr/bin/env -S npx tsx
 // instad — the Instacloud-oss local daemon. Binds 127.0.0.1 (localhost trust; no OAuth).
-// The stock `insta` CLI defaults to http://localhost:8080, so an unconfigured CLI Just Works.
+// The stock `insta` CLI reaches it via INSTA_API_URL=http://127.0.0.1:8080 (its default is the cloud).
 import { buildServer } from './server'
 import { Engine } from './engine'
 import { LocalPostgres } from './adapters/postgres'
