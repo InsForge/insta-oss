@@ -467,9 +467,12 @@ Verified by running every registered CLI command against the daemon:
 | `policy` / `policy set` | ✅ |
 | `approvals list/approve/deny` (`--always`) | ✅ one-shot grants, same 202 flow |
 | `events` | ✅ resource + govern timeline, agent ingest with dedup |
-| `metrics` / `logs` | ✅ docker-backed (`docker stats` snapshot / `docker logs` tail — db logs included), cloud response shapes |
+| `metrics` / `logs` | ✅ docker-backed (`docker stats` snapshot / `docker logs` tail — db logs included), cloud response shapes; `logs --deploy` (deploy-event feed) → 501, use `insta events` |
 | `login/logout` | not needed — localhost trust, no accounts |
 | `services scale/upgrade` | 501 — machine scaling / instance specs are cloud pricing concepts |
+| `compute limits/always-on` | 501 — tier caps / the scale-to-zero lever are cloud pricing concepts; local containers already stay up |
+| `storage list/get/delete` | 501 (not yet) — meanwhile, point any S3 client at the creds from `insta secrets` |
+| `regions` | ✅ the single `local` region (this machine) |
 | `usage` / `billing` | 501 — billing metering is cloud-only by design; local visibility = `manifest` + docker-backed `metrics`/`logs` |
 | `org create` / `tokens` | 501 — single-tenant |
 

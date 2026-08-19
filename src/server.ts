@@ -34,6 +34,10 @@ export function buildServer(engine: Engine): FastifyInstance {
 
   const notCloud = (reply: FastifyReply, what: string) =>
     reply.code(501).send({ error: `${what} is cloud-only — insta-oss is a single-tenant local runtime` })
+  // Locally meaningful but not built yet — still a clean 501 with the local workaround, never a
+  // bare 404 the CLI would render as a mystery.
+  const notYet = (reply: FastifyReply, what: string, hint: string) =>
+    reply.code(501).send({ error: `${what} is not implemented by insta-oss yet — ${hint}` })
 
   // Gate a sensitive action; on approval_required reply 202 (the CLI understands this shape).
   const gated = (projectId: string, action: GatedAction, reply: FastifyReply): boolean => {
@@ -52,9 +56,25 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.get('/orgs', async () => ({ orgs: [LOCAL_ORG] }))
   app.post('/orgs', async (_req, reply) => notCloud(reply, 'org management'))
   app.get('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
+  app.post('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
+  app.delete('/tokens/:tid', async (_req, reply) => notCloud(reply, 'agent tokens'))
   app.get('/orgs/:id/billing', async (_req, reply) => notCloud(reply, 'billing'))
   app.get('/projects/:id/usage', async (_req, reply) => notCloud(reply, 'usage metering'))
   app.get('/orgs/:id/usage', async (_req, reply) => notCloud(reply, 'usage metering'))
+  app.get('/projects/:id/usage/daily', async (_req, reply) => notCloud(reply, 'usage metering'))
+  app.get('/projects/:id/utilisation', async (_req, reply) => notCloud(reply, 'utilisation metering'))
+  // Org membership is an account-system surface; the builtin `local` org has exactly one user.
+  app.get('/orgs/:id/members', async (_req, reply) => notCloud(reply, 'org membership'))
+  app.put('/orgs/:id/members/:uid', async (_req, reply) => notCloud(reply, 'org membership'))
+  app.delete('/orgs/:id/members/:uid', async (_req, reply) => notCloud(reply, 'org membership'))
+  app.post('/orgs/:id/invitations', async (_req, reply) => notCloud(reply, 'org invitations'))
+  app.get('/orgs/:id/invitations', async (_req, reply) => notCloud(reply, 'org invitations'))
+  app.delete('/orgs/:id/invitations/:iid', async (_req, reply) => notCloud(reply, 'org invitations'))
+  app.post('/invitations/accept', async (_req, reply) => notCloud(reply, 'org invitations'))
+  // Registry image inspection is the cloud console's helper (fans out to 3rd-party registries).
+  app.get('/images/inspect', async (_req, reply) => notCloud(reply, 'registry image inspection'))
+  // Everything is one region here: the machine the daemon runs on (CLI shape: {slug, label}).
+  app.get('/regions', async () => ({ regions: [{ slug: 'local', label: 'Local (this machine)' }] }))
   // ---- observability (docker + SQL backed; same response shapes as the cloud) ----
   const obsCode = (m: string): number => (m.includes('not found') ? 404 : 502)
   const component = (q: { component?: string }): 'db' | 'compute' => (q.component === 'db' ? 'db' : 'compute')
@@ -387,6 +407,37 @@ export function buildServer(engine: Engine): FastifyInstance {
   // Machine scaling / instance specs are cloud pricing concepts — clean 501, never a bare 404.
   app.post('/projects/:id/services/:sid/scale', async (_req, reply) => notCloud(reply, 'machine scaling'))
   app.post('/projects/:id/services/:sid/upgrade', async (_req, reply) => notCloud(reply, 'instance spec upgrades'))
+  // Same family: limits are tier caps, always-on is the scale-to-zero lever, and the service
+  // PATCH bundles both. Locally nothing scales to zero and nothing enforces a quota.
+  app.get('/projects/:id/services/:sid/limits', async (_req, reply) => notCloud(reply, 'machine limits'))
+  app.put('/projects/:id/services/:sid/limits', async (_req, reply) => notCloud(reply, 'machine limits'))
+  app.put('/projects/:id/services/:sid/always-on', async (_req, reply) => notCloud(reply, 'always-on (scale-to-zero is a cloud lever; local containers already stay up)'))
+  app.patch('/projects/:id/services/:sid', async (_req, reply) => notCloud(reply, 'service spec patching'))
+  // Cloud deploy plumbing: custom domains need real DNS + certs, deploy tokens mint Fly builder
+  // credentials (local source deploys will be `docker build`, roadmap Phase 4).
+  app.post('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
+  app.get('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
+  app.delete('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
+  app.post('/projects/:id/deploy-token', async (_req, reply) => notCloud(reply, 'deploy tokens (remote builders)'))
+  // Managed backups ride the cloud's database infra; locally the database is your container.
+  app.post('/projects/:id/backups', async (_req, reply) => notCloud(reply, 'managed backups (locally: pg_dump with the DATABASE_URL from `insta secrets`)'))
+  app.get('/projects/:id/backups', async (_req, reply) => notCloud(reply, 'managed backups (locally: pg_dump with the DATABASE_URL from `insta secrets`)'))
+  app.delete('/projects/:id/backups/:bid', async (_req, reply) => notCloud(reply, 'managed backups'))
+  app.post('/projects/:id/backups/:bid/restore', async (_req, reply) => notCloud(reply, 'managed backups'))
+  // Not-yet surfaces (real local answers exist meanwhile):
+  app.get('/projects/:id/deploy-events', async (_req, reply) => notYet(reply, 'the deploy-event feed', 'use `insta events` and `insta logs`'))
+  app.get('/projects/:id/runtime-health', async (_req, reply) => notYet(reply, 'bulk runtime health', 'use `insta services list` (live runtime column)'))
+  app.patch('/projects/:id', async (_req, reply) => notYet(reply, 'project rename', 'container names key on the project name; recreate the project'))
+  app.patch('/projects/:id/branches/:bid', async (_req, reply) => notYet(reply, 'branch rename', 'create a fresh branch and delete the old one'))
+  for (const [method, path] of [
+    ['GET', '/projects/:id/services/:sid/objects'],
+    ['GET', '/projects/:id/services/:sid/objects/download'],
+    ['POST', '/projects/:id/services/:sid/objects/upload'],
+    ['DELETE', '/projects/:id/services/:sid/objects'],
+    ['POST', '/projects/:id/services/:sid/objects/delete'],
+  ] as const) {
+    app.route({ method, url: path, handler: async (_req, reply) => notYet(reply, 'object browsing', 'point any S3 client at the creds from `insta secrets`') })
+  }
 
   app.delete('/projects/:id/services/:sid', async (req, reply) => {
     const { id, sid } = req.params as { id: string; sid: string }
@@ -441,7 +492,7 @@ export function buildServer(engine: Engine): FastifyInstance {
   // no CORS, no auth). API routes above always win; unknown non-API GETs fall back to the SPA.
   const uiDist = process.env.INSTA_OSS_UI_DIST ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'ui', 'dist')
   const isApiPath = (url: string): boolean =>
-    ['/projects', '/orgs', '/me', '/tokens', '/healthz'].some((p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`))
+    ['/projects', '/orgs', '/me', '/tokens', '/healthz', '/regions', '/images', '/invitations'].some((p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`))
   if (existsSync(join(uiDist, 'index.html'))) {
     app.register(fastifyStatic, { root: uiDist, wildcard: false })
     app.setNotFoundHandler((req, reply) => {
