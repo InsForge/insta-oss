@@ -59,6 +59,11 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.post('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
   app.delete('/tokens/:tid', async (_req, reply) => notCloud(reply, 'agent tokens'))
   app.get('/orgs/:id/billing', async (_req, reply) => notCloud(reply, 'billing'))
+  // Billing sub-surfaces too — the MCP sweep found checkout/portal falling to bare 404s.
+  app.get('/orgs/:id/billing/cycle', async (_req, reply) => notCloud(reply, 'billing'))
+  app.get('/orgs/:id/billing/overview', async (_req, reply) => notCloud(reply, 'billing'))
+  app.post('/orgs/:id/billing/checkout', async (_req, reply) => notCloud(reply, 'billing checkout (Stripe)'))
+  app.post('/orgs/:id/billing/portal', async (_req, reply) => notCloud(reply, 'the billing portal (Stripe)'))
   app.get('/projects/:id/usage', async (_req, reply) => notCloud(reply, 'usage metering'))
   app.get('/orgs/:id/usage', async (_req, reply) => notCloud(reply, 'usage metering'))
   app.get('/projects/:id/usage/daily', async (_req, reply) => notCloud(reply, 'usage metering'))

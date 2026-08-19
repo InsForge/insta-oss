@@ -225,6 +225,8 @@ test('every cloud-only or not-yet route answers a clean 501, never a bare 404', 
     ['POST', '/projects/x/compute/domain'], ['GET', '/projects/x/compute/domain'], ['DELETE', '/projects/x/compute/domain'],
     ['POST', '/projects/x/deploy-token'],
     ['POST', '/projects/x/backups'], ['GET', '/projects/x/backups'], ['DELETE', '/projects/x/backups/b1'], ['POST', '/projects/x/backups/b1/restore'],
+    ['GET', '/orgs/local/billing/cycle'], ['GET', '/orgs/local/billing/overview'],
+    ['POST', '/orgs/local/billing/checkout'], ['POST', '/orgs/local/billing/portal'],
   ]
   for (const [method, url] of cloudOnly) {
     const r = await app.inject({ method: method as 'GET', url })
