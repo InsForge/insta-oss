@@ -23,8 +23,13 @@ const VOLUME_MOUNT_PATH = '/data'
 export class Engine {
   constructor(private db: DatabaseAdapter, private compute: ComputeAdapter, private storage: StorageAdapter, private managedDb: ManagedDbAdapter) {}
 
-  // Branch ref keys containers/networks: <project-slug>-<branch-name>.
-  private ref(project: Project, branch: string): string { return `${slug(project.name)}-${slug(branch)}` }
+  // Branch ref keys containers/networks: <project-slug>-<branch-name>, FROZEN at provision.
+  // Passing a Branch reads the stored ref (older state derives from the name — same value until
+  // the branch is renamed); a string is the provision-time path, before the Branch exists.
+  private ref(project: Project, branch: Branch | string): string {
+    if (typeof branch !== 'string') return branch.ref ?? this.ref(project, branch.name)
+    return `${slug(project.name)}-${slug(branch)}`
+  }
   private net(project: Project, branch: string): string { return `io-${this.ref(project, branch)}` }
 
   emit(projectId: string, branch: string | null, source: AuditEvent['source'], kind: string, payload: unknown = {}, dedupKey: string | null = null): void {
@@ -75,7 +80,7 @@ export class Engine {
       throw e
     }
     const b: Branch = {
-      id: randomUUID(), projectId: project.id, name, isDefault, status: 'ready',
+      id: randomUUID(), projectId: project.id, name, isDefault, status: 'ready', ref,
       network, dbUrl: url, bucket: st.bucket, s3: st.env, cloneOf, createdAt: Date.now(), apps: {},
       ...(Object.keys(managed).length ? { managed } : {}),
     }
@@ -106,8 +111,8 @@ export class Engine {
     if (this.getBranchByName(projectId, name)) throw new Error(`branch "${name}" already exists`)
 
     const b = await this.provisionBranch(project, name, false, source.name)
-    await this.db.cloneInto(this.ref(project, source.name), this.ref(project, name))
-    await this.storage.cloneInto(this.ref(project, source.name), this.ref(project, name), b.network)
+    await this.db.cloneInto(this.ref(project, source), this.ref(project, name))
+    await this.storage.cloneInto(this.ref(project, source), this.ref(project, name), b.network)
     // compute = redeploy: same image, SAME listen port, allocated host mapping.
     for (const [group, app] of Object.entries(source.apps)) {
       await this.deployAllocatingPort(projectId, name, group, app)
@@ -122,6 +127,28 @@ export class Engine {
     })
     this.emit(projectId, name, 'resource', 'branch.created', { from: source.name })
     return b
+  }
+
+  /** Rename a branch — METADATA ONLY, like the cloud: provider resources (containers, network,
+   *  bucket, minted creds) keep their frozen ref. Not the default branch; lower-kebab; unique. */
+  renameBranch(projectId: string, branchId: string, newName: string): { id: string; name: string; is_default: boolean; status: string } {
+    const project = this.getProject(projectId)
+    const b = loadState().branches[branchId]
+    if (!project || !b || b.projectId !== projectId) throw new Error('branch not found')
+    if (b.isDefault) throw new Error('cannot rename the default branch')
+    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(newName)) throw new Error('branch name must be lower-kebab (a-z, 0-9, -)')
+    if (newName !== b.name && this.getBranchByName(projectId, newName)) throw new Error(`branch "${newName}" already exists`)
+    const oldName = b.name
+    mutate((st) => {
+      // freeze the ref before the name moves (older records derive it from the name)
+      st.branches[branchId].ref ??= this.ref(project, oldName)
+      st.branches[branchId].name = newName
+      // branch-scoped user secrets are keyed by branch NAME — they follow the rename
+      for (const u of st.userSecrets[projectId] ?? []) if (u.branch === oldName) u.branch = newName
+    })
+    this.emit(projectId, newName, 'resource', 'branch.rename', { from: oldName, to: newName })
+    const renamed = loadState().branches[branchId]
+    return { id: renamed.id, name: renamed.name, is_default: renamed.isDefault, status: renamed.status }
   }
 
   async deploy(projectId: string, branchName: string, opts: { image: string; port?: number; hostPort?: number; group?: string }): Promise<{ url: string; branch: string; group: string }> {
@@ -143,9 +170,9 @@ export class Engine {
     if (vol && !this.compute.supportsVolumes) {
       throw new Error(`service "${group}" has a /data volume, which this compute adapter does not support — use the docker adapter`)
     }
-    const { url } = await this.compute.deploy(this.ref(project, b.name), {
+    const { url } = await this.compute.deploy(this.ref(project, b), {
       image: opts.image, port, hostPort, network: b.network, group,
-      ...(vol ? { volume: { name: `io-${this.ref(project, b.name)}-data-${vol.id}` } } : {}),
+      ...(vol ? { volume: { name: `io-${this.ref(project, b)}-data-${vol.id}` } } : {}),
       // minted credentials (db + storage + managed databases) reach every compute deploy; user
       // secrets are scoped (project-wide + branch-unbound + bound to THIS group)
       envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.managedSecretsFor(projectId, b), ...this.deploySecretsFor(projectId, b.name, group) },
@@ -203,7 +230,7 @@ export class Engine {
     for (const m of project?.managedServices ?? []) {
       const cred = branch.managed?.[m.id]
       if (!cred) continue
-      const host = managedContainerName(this.ref(project!, branch.name), m.type, m.name)
+      const host = managedContainerName(this.ref(project!, branch), m.type, m.name)
       const bundle = MANAGED_DB[m.type].bundle(host, cred.password)
       Object.assign(out, suffixBundle(bundle, m.name))
       if (!aliasedTypes.has(m.type)) { aliasedTypes.add(m.type); Object.assign(out, bundle) }
@@ -324,7 +351,7 @@ export class Engine {
       const out = await docker(['ps', '--format', '{{.Names}}'])
       running = new Set(out.toString().trim().split('\n').filter(Boolean))
     } catch { /* docker unavailable — omit runtime rather than guess */ }
-    const ref = branch ? this.ref(project, branch.name) : undefined
+    const ref = branch ? this.ref(project, branch) : undefined
     const iso = (ms?: number): string | undefined => (ms ? new Date(ms).toISOString() : undefined)
     const runtimeOf = (container: string): string | undefined =>
       running ? (running.has(container) ? 'online' : 'stopped') : undefined
@@ -455,7 +482,7 @@ export class Engine {
   }> {
     const { branch, group } = this.computeTarget(projectId, serviceId, branchName)
     const project = this.getProject(projectId)!
-    const ref = this.ref(project, branch.name)
+    const ref = this.ref(project, branch)
     const desired = verb === 'start' ? 'running' : verb === 'stop' ? 'stopped' : 'suspended'
     let state = 'none'
     if (branch.apps[group]) {
@@ -477,7 +504,7 @@ export class Engine {
     const app = branch.apps[group]
     return {
       desiredState: app?.desiredState ?? 'running',
-      state: app ? await this.liveState(this.ref(project, branch.name), group) : 'none',
+      state: app ? await this.liveState(this.ref(project, branch), group) : 'none',
     }
   }
 
@@ -489,7 +516,7 @@ export class Engine {
     const branch = branchName ? this.getBranchByName(projectId, branchName) : this.listBranches(projectId).find((b) => b.isDefault)
     if (!branch) throw new Error(`branch "${branchName}" not found`)
     if (!this.storage.setAccess) throw new Error('access control is not supported by this storage adapter')
-    await this.storage.setAccess(this.ref(project, branch.name), branch.network, isPublic)
+    await this.storage.setAccess(this.ref(project, branch), branch.network, isPublic)
     mutate((s) => { s.branches[branch.id].storagePublic = isPublic })
     this.emit(projectId, branch.name, 'resource', 'service.setAccess', { service: serviceId, public: isPublic })
     return (await this.services(projectId, branch.name)).find((x) => x.id === serviceId)
@@ -565,6 +592,45 @@ export class Engine {
     return this.compute.state ? this.compute.state(ref, group) : Promise.resolve('unknown')
   }
 
+  /** Bulk runtime health for a branch's compute + postgres + managed databases (storage omitted
+   *  — object storage has no runtime), the cloud's shape, from ONE `docker ps -a` read. Local
+   *  mapping: running→healthy · paused, or exited on developer intent→standby · exited against a
+   *  'running' intent→crashed · restarting/created→starting · no container→none · docker
+   *  unreadable→unknown. */
+  async runtimeHealth(projectId: string, branchName?: string): Promise<{ services: Array<{ serviceId: string; status: string; machines: number; failing: number }> }> {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    const ref = this.ref(project, branch)
+    let states: Map<string, string> | null = null
+    try {
+      const out = (await docker(['ps', '-a', '--format', '{{.Names}}\t{{.State}}'])).toString()
+      states = new Map(out.trim().split('\n').filter(Boolean).map((l) => {
+        const [name, state] = l.split('\t')
+        return [name, state ?? 'unknown'] as const
+      }))
+    } catch { /* docker unreadable — every service reports unknown rather than a guess */ }
+    const health = (container: string, desired: 'running' | 'stopped' | 'suspended'): { status: string; machines: number; failing: number } => {
+      if (!states) return { status: 'unknown', machines: 0, failing: 0 }
+      const state = states.get(container)
+      if (!state) return { status: 'none', machines: 0, failing: 0 }
+      const status = state === 'running' ? 'healthy'
+        : state === 'paused' ? 'standby'
+        : state === 'restarting' || state === 'created' ? 'starting'
+        : desired === 'running' ? 'crashed' : 'standby' // exited/dead against intent = crashed
+      return { status, machines: 1, failing: status === 'crashed' ? 1 : 0 }
+    }
+    return {
+      services: [
+        { serviceId: 'pg-db', ...health(`io-${ref}-pg`, 'running') },
+        ...this.managedList(projectId).map((m) => ({ serviceId: m.id, ...health(managedContainerName(ref, m.type, m.name), 'running') })),
+        ...this.computeGroupNames(projectId).map((g) => {
+          const app = branch.apps[g]
+          if (!app) return { serviceId: `cp-${g}`, status: 'none', machines: 0, failing: 0 }
+          return { serviceId: `cp-${g}`, ...health(`io-${ref}-app-${g}`, app.desiredState ?? 'running') }
+        }),
+      ],
+    }
+  }
+
   /** Contract parity with the cloud: `services add postgres|storage` must succeed so one
    *  onboarding script runs on both. insta-oss has exactly one of each per project (auto-
    *  provisioned on create), so this is idempotent — returns the existing fixed service. */
@@ -615,7 +681,7 @@ export class Engine {
     const branches = this.listBranches(projectId)
     const deployed = branches.filter((b) => b.apps[oldName])
     if (deployed.length && !this.compute.rename) throw new Error('rename is not supported by this compute adapter')
-    for (const b of deployed) await this.compute.rename!(this.ref(project, b.name), oldName, newName)
+    for (const b of deployed) await this.compute.rename!(this.ref(project, b), oldName, newName)
     mutate((st) => {
       const pr = st.projects[projectId]
       pr.computeGroups = (pr.computeGroups ?? []).map((g) => (g === oldName ? newName : g))
@@ -645,8 +711,8 @@ export class Engine {
     const vol = project.computeVolumes?.[name]
     for (const b of this.listBranches(projectId)) {
       if (!b.apps[name]) continue
-      await docker(['rm', '-f', `io-${this.ref(project, b.name)}-app-${name}`]).catch(() => {})
-      if (vol) await docker(['volume', 'rm', '-f', `io-${this.ref(project, b.name)}-data-${vol.id}`]).catch(() => {})
+      await docker(['rm', '-f', `io-${this.ref(project, b)}-app-${name}`]).catch(() => {})
+      if (vol) await docker(['volume', 'rm', '-f', `io-${this.ref(project, b)}-data-${vol.id}`]).catch(() => {})
       mutate((st) => { delete st.branches[b.id].apps[name] })
     }
     mutate((st) => {
@@ -681,11 +747,11 @@ export class Engine {
     try {
       for (const b of this.listBranches(projectId)) {
         const password = randomBytes(32).toString('base64url')
-        await this.managedDb.provision(this.ref(project, b.name), b.network, type, name, password)
+        await this.managedDb.provision(this.ref(project, b), b.network, type, name, password)
         provisioned.push({ branch: b, password })
       }
     } catch (e) {
-      for (const p of provisioned) await this.managedDb.destroy(this.ref(project, p.branch.name), type, name).catch(() => {})
+      for (const p of provisioned) await this.managedDb.destroy(this.ref(project, p.branch), type, name).catch(() => {})
       throw e
     }
     mutate((st) => {
@@ -705,7 +771,7 @@ export class Engine {
     const m = this.managedList(projectId).find((x) => x.id === serviceId)
     if (!m) throw new Error('service not found')
     for (const b of this.listBranches(projectId)) {
-      await this.managedDb.destroy(this.ref(project, b.name), m.type, m.name).catch(() => {})
+      await this.managedDb.destroy(this.ref(project, b), m.type, m.name).catch(() => {})
       mutate((st) => { delete st.branches[b.id].managed?.[serviceId] })
     }
     mutate((st) => {
@@ -731,7 +797,7 @@ export class Engine {
     const newId = managedServiceId(m.type, newName)
     for (const b of this.listBranches(projectId)) {
       if (!b.managed?.[serviceId]) continue
-      await this.managedDb.rename(this.ref(project, b.name), m.type, m.name, newName)
+      await this.managedDb.rename(this.ref(project, b), m.type, m.name, newName)
     }
     mutate((st) => {
       const pr = st.projects[projectId]
@@ -819,7 +885,7 @@ export class Engine {
       if (app.desiredState === 'stopped' || app.desiredState === 'suspended') {
         await this.lifecycle(projectId, serviceId, app.desiredState === 'suspended' ? 'suspend' : 'stop', b.name).catch(() => {})
       }
-      await docker(['volume', 'rm', '-f', `io-${this.ref(project!, b.name)}-data-${vol.id}`]).catch(() => {})
+      await docker(['volume', 'rm', '-f', `io-${this.ref(project!, b)}-data-${vol.id}`]).catch(() => {})
     }
     this.emit(projectId, null, 'resource', 'service.volume', { service: serviceId, sizeGib: null, removed: true })
     const service = (await this.services(projectId)).find((s) => s.id === serviceId)
@@ -834,7 +900,7 @@ export class Engine {
     const gib = branch.dbVolumeGib ?? DB_VOLUME_DEFAULT_GIB
     return {
       id: 'pg-db', name: 'db', state: branch.status,
-      host: `io-${this.ref(project, branch.name)}-pg`, port: 5432,
+      host: `io-${this.ref(project, branch)}-pg`, port: 5432,
       connectionPooling: false, deletionProtection: false, scaleToZero: false,
       volumeSize: `${gib}Gi`, volumeGib: gib,
       storageSize: `${gib}Gi`, storageGiB: gib, // DEPRECATED aliases — dropped when the platform drops them
@@ -883,7 +949,7 @@ export class Engine {
   async dbSetPassword(projectId: string, password: string | undefined, branchName?: string): Promise<{ connString: string; password: string }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
     const pw = password ?? randomBytes(24).toString('base64url')
-    await this.db.query(this.ref(project, branch.name), `alter user postgres with password '${pw.replace(/'/g, "''")}'`)
+    await this.db.query(this.ref(project, branch), `alter user postgres with password '${pw.replace(/'/g, "''")}'`)
     const u = new URL(branch.dbUrl)
     const connString = `${u.protocol}//${u.username}:${encodeURIComponent(pw)}@${u.host}${u.pathname}`
     mutate((st) => { st.branches[branch.id].dbUrl = connString })
@@ -893,14 +959,14 @@ export class Engine {
 
   async dbListDatabases(projectId: string, branchName?: string): Promise<{ databases: Array<{ name: string; connString: string }> }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    const rows = JSON.parse(await this.db.query(this.ref(project, branch.name), observe.DB_DATABASES_SQL)) as Array<{ name: string }>
+    const rows = JSON.parse(await this.db.query(this.ref(project, branch), observe.DB_DATABASES_SQL)) as Array<{ name: string }>
     return { databases: rows.map((r) => ({ name: r.name, connString: this.connStringFor(branch, r.name) })) }
   }
 
   async dbCreateDatabase(projectId: string, name: string, branchName?: string): Promise<{ name: string; connString: string }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
     if (!Engine.DB_NAME_RE.test(name)) throw new Error('database name must match ^[A-Za-z0-9._-]+$')
-    await this.db.query(this.ref(project, branch.name), `create database ${this.quoteIdent(name)}`)
+    await this.db.query(this.ref(project, branch), `create database ${this.quoteIdent(name)}`)
     this.emit(projectId, branch.name, 'resource', 'db.database.create', { name })
     return { name, connString: this.connStringFor(branch, name) }
   }
@@ -915,7 +981,7 @@ export class Engine {
       throw new Error(`cannot delete ${name === primary || name === 'app' ? 'the primary database' : 'a system database'} (${name})`)
     }
     // WITH (FORCE): a control plane must not be blocked by an app holding a connection open.
-    await this.db.query(this.ref(project, branch.name), `drop database ${this.quoteIdent(name)} with (force)`)
+    await this.db.query(this.ref(project, branch), `drop database ${this.quoteIdent(name)} with (force)`)
     this.emit(projectId, branch.name, 'resource', 'db.database.delete', { name })
   }
 
@@ -923,7 +989,7 @@ export class Engine {
    *  real pg_available_extensions, not a curated allowlist; the daemon's own two are `required`. */
   async dbExtensions(projectId: string, branchName?: string): Promise<{ available: Array<{ name: string; required?: boolean }>; enabled: string[] }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    const r = JSON.parse(await this.db.query(this.ref(project, branch.name), observe.DB_EXTENSIONS_SQL)) as { available: Array<{ name: string }>; enabled: string[] }
+    const r = JSON.parse(await this.db.query(this.ref(project, branch), observe.DB_EXTENSIONS_SQL)) as { available: Array<{ name: string }>; enabled: string[] }
     return {
       available: r.available.map((a) => (Engine.REQUIRED_EXTENSIONS.includes(a.name) ? { name: a.name, required: true } : { name: a.name })),
       enabled: r.enabled,
@@ -932,7 +998,7 @@ export class Engine {
 
   async dbPatchExtensions(projectId: string, patch: { enable?: string[]; disable?: string[] }, branchName?: string): Promise<{ available: Array<{ name: string; required?: boolean }>; enabled: string[] }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    const ref = this.ref(project, branch.name)
+    const ref = this.ref(project, branch)
     const view = await this.dbExtensions(projectId, branch.name)
     const known = new Set(view.available.map((a) => a.name))
     for (const name of [...(patch.enable ?? []), ...(patch.disable ?? [])]) {
@@ -951,7 +1017,7 @@ export class Engine {
    *  unused indexes — same sections the cloud serves, read straight off the branch container. */
   async dbInsight(projectId: string, branchName?: string): Promise<observe.DbInsight> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    return observe.toDbInsight(await this.db.query(this.ref(project, branch.name), observe.DB_INSIGHT_SQL))
+    return observe.toDbInsight(await this.db.query(this.ref(project, branch), observe.DB_INSIGHT_SQL))
   }
 
   async destroyBranch(projectId: string, branchId: string): Promise<void> {
@@ -959,12 +1025,12 @@ export class Engine {
     const b = loadState().branches[branchId]
     if (!project || !b || b.projectId !== projectId) throw new Error('branch not found')
     if (b.isDefault) throw new Error('cannot delete the default branch')
-    const ref = this.ref(project, b.name)
+    const ref = this.ref(project, b)
     await this.compute.destroy(ref)
     await this.db.destroy(ref)
     await this.storage.destroy(ref, b.network)
     for (const m of this.managedList(projectId)) await this.managedDb.destroy(ref, m.type, m.name).catch(() => {})
-    try { await docker(['network', 'rm', this.net(project, b.name)]) } catch { /* gone */ }
+    try { await docker(['network', 'rm', b.network]) } catch { /* gone */ }
     mutate((s) => { delete s.branches[branchId] })
     this.emit(projectId, b.name, 'resource', 'branch.deleted', {})
   }
@@ -973,12 +1039,12 @@ export class Engine {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     for (const b of this.listBranches(projectId)) {
-      const ref = this.ref(project, b.name)
+      const ref = this.ref(project, b)
       await this.compute.destroy(ref)
       await this.db.destroy(ref)
       await this.storage.destroy(ref, b.network)
       for (const m of this.managedList(projectId)) await this.managedDb.destroy(ref, m.type, m.name).catch(() => {})
-      try { await docker(['network', 'rm', this.net(project, b.name)]) } catch { /* gone */ }
+      try { await docker(['network', 'rm', b.network]) } catch { /* gone */ }
       mutate((s) => { delete s.branches[b.id] })
     }
     mutate((s) => { delete s.projects[projectId] })
@@ -997,7 +1063,7 @@ export class Engine {
 
   /** The containers an observability request targets: the branch's pg, or its compute group(s). */
   private observedContainers(project: Project, branch: Branch, component: 'db' | 'compute', group?: string): string[] {
-    const ref = this.ref(project, branch.name)
+    const ref = this.ref(project, branch)
     if (component === 'db') return [`io-${ref}-pg`]
     const groups = group ? [group] : Object.keys(branch.apps).sort()
     return groups.filter((g) => branch.apps[g]).map((g) => `io-${ref}-app-${g}`)
@@ -1048,13 +1114,13 @@ export class Engine {
   /** Point-in-time DB metrics — runs SQL against the branch database (same query as the cloud). */
   async dbMetricsSnapshot(projectId: string, branchName?: string): Promise<observe.DbMetricsSnapshot> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    return observe.toDbMetrics(await this.db.query(this.ref(project, branch.name), observe.DB_METRICS_SQL))
+    return observe.toDbMetrics(await this.db.query(this.ref(project, branch), observe.DB_METRICS_SQL))
   }
 
   /** Currently running queries (pg_stat_activity, ≤100). */
   async dbActivity(projectId: string, branchName?: string): Promise<{ queries: observe.DbActivityRow[] }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    return { queries: observe.toDbActivity(await this.db.query(this.ref(project, branch.name), observe.DB_ACTIVITY_SQL)) }
+    return { queries: observe.toDbActivity(await this.db.query(this.ref(project, branch), observe.DB_ACTIVITY_SQL)) }
   }
 
   /** Top statements by execution time (pg_stat_statements; preloaded on newly-provisioned branch
@@ -1062,7 +1128,7 @@ export class Engine {
    *  "enabled on demand" path when the extension can't load). */
   async dbQueryStats(projectId: string, branchName: string | undefined, opts: { limit?: number; sort?: observe.QueryStatSort } = {}): Promise<observe.DbQueryStats> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    const ref = this.ref(project, branch.name)
+    const ref = this.ref(project, branch)
     try {
       await this.db.query(ref, 'create extension if not exists pg_stat_statements')
       const rows = await this.db.query(ref, observe.queryStatsSql(opts.limit ?? 20, opts.sort ?? 'total'))
@@ -1084,7 +1150,7 @@ export class Engine {
       { kind: 'storage', name: null, branchId: b.id, ref: { bucket: b.bucket }, status: 'ready' },
       ...this.managedList(projectId).filter((m) => b.managed?.[m.id]).map((m) => ({
         kind: m.type as string, name: m.name as string | null, branchId: b.id,
-        ref: { host: managedContainerName(this.ref(project, b.name), m.type, m.name), port: MANAGED_DB[m.type].port }, status: 'ready',
+        ref: { host: managedContainerName(this.ref(project, b), m.type, m.name), port: MANAGED_DB[m.type].port }, status: 'ready',
       })),
       ...Object.entries(b.apps).map(([group, app]) => (
         { kind: 'compute', name: group, branchId: b.id, ref: { url: app.url, image: app.image }, status: 'ready' }
