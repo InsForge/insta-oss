@@ -1,5 +1,10 @@
 # insta-oss — Capabilities & Roadmap Plan
 
+> **Dated design archive (2026-07-02).** This records the plan as designed at the time.
+> Checkboxes and component names are not kept up to date as work ships (e.g. `LocalMinio`
+> below became `LocalGarage`; most unchecked phases have since shipped). Read it for the
+> *why* behind decisions; read the README and code for current state.
+
 > **For agentic workers:** execute phases top-to-bottom with superpowers:executing-plans; each phase is independently shippable. Steps use `- [ ]`.
 
 **Goal:** the open-source, self-hostable Instacloud runtime — same API surface as insta-platform, on local Docker, single-tenant, no billing — so the stock `insta` CLI / MCP / skills work unchanged.
