@@ -488,6 +488,18 @@ Verified by running every registered CLI command against the daemon:
 | `usage` / `billing` | 501 — billing metering is cloud-only by design; local visibility = `manifest` + docker-backed `metrics`/`logs` |
 | `org create` / `tokens` | 501 — single-tenant |
 
+## MCP tool support
+
+The insta-mcp server (`insta_*` tools) is a thin client over the same endpoints — point it at
+instad (`PLATFORM_API_URL=http://127.0.0.1:8080`, any non-empty bearer) and it works. Verified by
+sweeping every registered tool against the daemon:
+
+| Tools | insta-oss behavior |
+| --- | --- |
+| `whoami · org_list · project_* · service_add/list/remove/access · deploy · compute_control/status · branch_* · storage_list/download_url/delete · manifest · secrets_* · metrics · logs · events · policy_get · approvals_*` | ✅ end-to-end, including the full governance flow (202 → `approvals_approve`/`deny`) |
+| `org_create · usage · billing_summary/checkout/portal · service_scale/upgrade · domain_* · deploy_events` | `not_supported`, carrying this daemon's 501 guidance verbatim (needs insta-mcp ≥ the 501-passthrough fix) |
+| `feedback` | bypasses the control plane entirely (posts to the hosted feedback service, tagged `target: oss`) |
+
 **Branching vs merging:** `branch` = a disposable isolated environment (clone).
 `insta branch merge` is **structural only** — it materializes missing services on the target;
 **data never merges back**. Schema moves at the **git level**: merge your code, run migration
