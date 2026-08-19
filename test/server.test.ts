@@ -232,8 +232,7 @@ test('every cloud-only or not-yet route answers a clean 501, never a bare 404', 
     expect(r.json().error, `${method} ${url}`).toMatch(/cloud-only/)
   }
   const notYetRoutes: Array<[string, string]> = [
-    ['GET', '/projects/x/deploy-events'], ['GET', '/projects/x/runtime-health'],
-    ['PATCH', '/projects/x'], ['PATCH', '/projects/x/branches/b1'],
+    ['GET', '/projects/x/deploy-events'], ['PATCH', '/projects/x'],
   ]
   for (const [method, url] of notYetRoutes) {
     const r = await app.inject({ method: method as 'GET', url })
@@ -1003,4 +1002,58 @@ test('db insight: DbInsight shape — sizes, tables, vacuum (null lastVacuum omi
   expect(insight.vacuum.totalDeadRows).toBe(2)
   expect(insight.vacuum.tables[0]).toEqual({ name: 'users', deadRows: 2, deadPct: 16.7, xidAge: 55 }) // lastVacuum null → omitted
   expect(insight.unusedIndexes).toEqual([{ name: 'idx_dead', table: 'users', sizeBytes: 512, scans: 0 }])
+})
+
+// ---- runtime-health + branch rename (contract parity) ----
+
+test('runtime-health: one docker read maps pg + managed + compute to the cloud vocabulary', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'web' })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', group: 'web', port: 3000 })
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'idle' }) // registered, never deployed
+
+  vi.mocked(dockerFn).mockImplementation(async (args: readonly string[]) => {
+    if (args[0] === 'ps' && args[1] === '-a') {
+      return Buffer.from('io-demo-main-pg\trunning\nio-demo-main-rd-cache\tpaused\nio-demo-main-app-web\texited\n')
+    }
+    return Buffer.from('')
+  })
+  const r = await get(`/projects/${id}/runtime-health`)
+  expect(r.statusCode).toBe(200)
+  const byId = Object.fromEntries(r.json().services.map((s: { serviceId: string }) => [s.serviceId, s]))
+  expect(byId['pg-db']).toMatchObject({ status: 'healthy', machines: 1, failing: 0 })
+  expect(byId['rd-cache']).toMatchObject({ status: 'standby', machines: 1, failing: 0 })     // paused = suspend intent
+  expect(byId['cp-web']).toMatchObject({ status: 'crashed', machines: 1, failing: 1 })       // exited against running intent
+  expect(byId['cp-idle']).toMatchObject({ status: 'none', machines: 0, failing: 0 })         // never deployed
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+})
+
+test('branch rename: metadata-only — resources keep their frozen ref; guards default/conflict', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  await put(`/projects/${id}/secrets/FEAT_ONLY`, { value: 'v', branch: 'feat' })
+  const feat = (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === 'feat')
+
+  const r = await patch(`/projects/${id}/branches/${feat.id}`, { name: 'exp' })
+  expect(r.statusCode).toBe(200)
+  expect(r.json().branch).toMatchObject({ id: feat.id, name: 'exp', is_default: false })
+
+  // the seam still mints the FROZEN ref's resources, and branch-scoped secrets followed the name
+  const secrets = (await get(`/projects/${id}/secrets?branch=exp`)).json().secrets
+  expect(secrets.DATABASE_URL).toBe('pg://demo-feat')
+  expect(secrets.FEAT_ONLY).toBe('v')
+  expect((await get(`/projects/${id}/secrets?branch=feat`)).statusCode).toBe(404) // old name gone
+
+  // deploys on the renamed branch keep landing on the frozen ref
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'exp', port: 3000 })
+  expect(calls.some((c) => c.startsWith('deploy:demo-feat:default:app:2'))).toBe(true)
+
+  // guards: default branch, name conflicts, junk names
+  const main = (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === 'main')
+  expect((await patch(`/projects/${id}/branches/${main.id}`, { name: 'other' })).statusCode).toBe(400)
+  await post(`/projects/${id}/branches`, { name: 'feat2', from: 'main' })
+  const feat2 = (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === 'feat2')
+  expect((await patch(`/projects/${id}/branches/${feat2.id}`, { name: 'exp' })).statusCode).toBe(409)
+  expect((await patch(`/projects/${id}/branches/${feat2.id}`, { name: 'Bad Name' })).statusCode).toBe(400)
 })

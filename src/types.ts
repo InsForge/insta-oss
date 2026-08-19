@@ -36,6 +36,9 @@ export interface Branch {
   name: string
   isDefault: boolean
   status: string
+  // Container/bucket ref, FROZEN at provision (older state lacks it → derived from name).
+  // A branch rename is metadata-only, like the cloud: provider resources keep their names.
+  ref?: string
   network: string
   dbUrl: string
   bucket: string

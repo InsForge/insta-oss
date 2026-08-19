@@ -483,9 +483,27 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.post('/projects/:id/backups/:bid/restore', async (_req, reply) => notCloud(reply, 'managed backups'))
   // Not-yet surfaces (real local answers exist meanwhile):
   app.get('/projects/:id/deploy-events', async (_req, reply) => notYet(reply, 'the deploy-event feed', 'use `insta events` and `insta logs`'))
-  app.get('/projects/:id/runtime-health', async (_req, reply) => notYet(reply, 'bulk runtime health', 'use `insta services list` (live runtime column)'))
   app.patch('/projects/:id', async (_req, reply) => notYet(reply, 'project rename', 'container names key on the project name; recreate the project'))
-  app.patch('/projects/:id/branches/:bid', async (_req, reply) => notYet(reply, 'branch rename', 'create a fresh branch and delete the old one'))
+
+  // Bulk runtime health: compute + postgres + managed databases from one docker read (the cloud's
+  // shape; storage omitted — object storage has no runtime). 'standby' is rest, not failure.
+  app.get('/projects/:id/runtime-health', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    try { return await engine.runtimeHealth(id, (req.query as { branch?: string }).branch) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+  })
+
+  // Branch rename — metadata only, like the cloud: provider resources keep their frozen ref.
+  app.patch('/projects/:id/branches/:bid', async (req, reply) => {
+    const { id, bid } = req.params as { id: string; bid: string }
+    const { name } = (req.body ?? {}) as { name?: string }
+    if (!name) return reply.code(400).send({ error: 'name required' })
+    try { return { branch: engine.renameBranch(id, bid, name) } }
+    catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      return reply.code(m.includes('already exists') ? 409 : errCode(m)).send({ error: m })
+    }
+  })
   // ---- storage objects (platform parity: list / presigned download / presigned upload /
   // delete / bulk delete). Gated per action class — storage.read|write|delete — so file browsing
   // can be granted without credential reads, and writes without removal (same split as the
