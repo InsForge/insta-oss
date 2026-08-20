@@ -14,14 +14,14 @@ npx tsx src/main.ts   # run the daemon locally
 
 ## Branch model
 
-- `main` is the release branch — changes land via PR.
+- `main` is the release branch: changes land via PR.
 - Day-to-day work happens on `devel` (or a feature branch) and merges into `main` by PR.
 
 ## Code map
 
 ```
 src/
-├── main.ts              entry point — checks Docker, picks adapters, binds 127.0.0.1
+├── main.ts              entry point: checks Docker, picks adapters, binds 127.0.0.1
 ├── server.ts            HTTP layer (Fastify): routes + govern gating (202 flow); cloud-only → 501
 ├── engine.ts            orchestration: project/branch lifecycle, deploy, clone, teardown
 │                        with compensation, audit events
@@ -33,13 +33,13 @@ src/
 ├── s3.ts                hand-rolled SigV4 S3 client (list, delete, presigned GET/POST)
 ├── docker.ts            the single seam to Docker: spawn the docker CLI
 └── adapters/
-    ├── postgres.ts      LocalPostgres — container per branch; clone = pg_dump → restore
-    ├── garage.ts        LocalGarage — one shared server; bucket + scoped key per branch;
+    ├── postgres.ts      LocalPostgres: container per branch; clone = pg_dump → restore
+    ├── garage.ts        LocalGarage: one shared server; bucket + scoped key per branch;
     │                    clone = rclone sync
-    ├── compute.ts       DockerCompute — your image per group; host port mapped per branch
-    ├── manageddb.ts     LocalManagedDb — redis/mysql/mongodb, one private container per
+    ├── compute.ts       DockerCompute: your image per group; host port mapped per branch
+    ├── manageddb.ts     LocalManagedDb: redis/mysql/mongodb, one private container per
     │                    branch; a clone gets a fresh empty instance
-    └── railway.ts       RailwayCompute — the same ComputeAdapter contract over Railway's API
+    └── railway.ts       RailwayCompute: the same ComputeAdapter contract over Railway's API
 
 test/
 ├── server.test.ts               API contract tests (fake adapters, no Docker, fast)
@@ -55,19 +55,19 @@ The engine never talks to Docker for resources except through the adapter contra
 
 ## Where to extend
 
-- **Different database/storage/compute backend** → implement the matching interface from
-  `types.ts` as a new file in `src/adapters/`, wire it in `main.ts`. Nothing else changes —
+- **Different database/storage/compute backend**: implement the matching interface from
+  `types.ts` as a new file in `src/adapters/`, wire it in `main.ts`. Nothing else changes:
   the engine, server, tests, and CLI are provider-agnostic (`railway.ts` is the existence
   proof).
-- **New endpoint** → don't. The surface mirrors the standard `insta` CLI
+- **New endpoint**: don't. The surface mirrors the standard `insta` CLI
   (see [docs/compatibility.md](docs/compatibility.md)); additions belong in the shared
   CLI/platform contract first.
 
 ## Guidelines
 
-- **Keep CLI parity**: the daemon implements the standard `insta` command surface — don't add
+- **Keep CLI parity**: the daemon implements the standard `insta` command surface. Don't add
   daemon-only commands or endpoints; response shapes must keep the stock CLI working unchanged.
-- **Every behavior change needs a test** — contract tests (fake adapters, fast) for API shapes,
+- **Every behavior change needs a test**: contract tests (fake adapters, fast) for API shapes,
   integration tests (real Docker) for anything touching containers or clone isolation.
 - **Never orphan resources**: provisioning failures must compensate (destroy what was created).
 - Match the existing style: small focused modules, comments only for non-obvious constraints.
