@@ -1,0 +1,36 @@
+code: openclaw
+version: 0.1.0
+maintainer: official
+sourceRepo: InsForge/insta-oss
+
+# Open question: use the official image or build from the repo. Placeholder assumes an image.
+upstream:
+  repo: openclaw/openclaw
+  pinned: pin-at-pr             # pin a real tag or digest before publishing
+  license: MIT
+
+services:
+  openclaw:
+    type: web
+    image: pin-at-pr            # placeholder that lint rejects, which is why this template is draft
+    port: 8080
+    healthcheck: /
+    volume:
+      size: 1
+    env:
+      fixed: {}
+      required:
+        MODEL_API_KEY:
+          description: "Model provider API key (Anthropic or OpenAI). Exact variable name pending upstream docs"
+        CHANNEL_TOKEN:
+          description: "Messaging channel token (WhatsApp or Telegram). Details pending upstream docs"
+
+meta:
+  name: OpenClaw
+  tagline: Self-hosted personal AI assistant, reachable from your chat apps
+  category: ai-agent
+  tags: [ai-agent, ai]
+  logo: ./logo.svg
+  draft: true                   # variables and image source unfinished, so it stays out of the index
+  links:
+    upstream: https://github.com/openclaw/openclaw

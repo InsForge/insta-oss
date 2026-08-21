@@ -1,0 +1,55 @@
+name: templates-publish
+# Registry -> catalog sync: on merge to main, PUT each changed manifest to the hosted catalog's
+# staff endpoint, which upserts by code. workflow_dispatch republishes everything.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "templates/**"
+      - ".github/workflows/templates-publish.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  publish:
+    # main only, dispatch included: run from a feature branch this job would publish unreviewed
+    # manifests using the repo's credentials, bypassing PR -> lint -> review -> merge.
+    # Republishing is always a dispatch FROM main.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: templates/package-lock.json
+      - run: npm ci
+        working-directory: templates
+      - name: Publish changed templates
+        env:
+          INSTA_PLATFORM_URL: ${{ vars.INSTA_PLATFORM_URL || 'https://api.instacloud.com' }}
+          INSTA_BOT_EMAIL: ${{ secrets.INSTA_BOT_EMAIL }}
+          INSTA_BOT_PASSWORD: ${{ secrets.INSTA_BOT_PASSWORD }}
+          INSTA_PLATFORM_STAFF_TOKEN: ${{ secrets.INSTA_PLATFORM_STAFF_TOKEN }}
+          # The pre-publish gate proves images are ANONYMOUSLY pullable, the way a deploy pulls
+          # them, so it deliberately does not use this token for that check. The token is only
+          # used afterwards, on failure, to tell "package is private" apart from "not built yet".
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          before='${{ github.event.before }}'
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ -z "$before" ] || ! git cat-file -e "$before" 2>/dev/null; then
+            # Dispatch, or a base we cannot resolve: republish every template. The endpoint upserts.
+            dirs=$(find templates -mindepth 2 -maxdepth 2 -name insta.template.yaml -exec dirname {} \; | sort)
+          else
+            codes=$(git diff --name-only "$before" "${{ github.sha }}" -- templates/ | awk -F/ 'NF>=3 {print $2}' | sort -u)
+            dirs=$(for c in $codes; do [ -f "templates/$c/insta.template.yaml" ] && echo "templates/$c"; done; true)
+          fi
+          if [ -z "$dirs" ]; then echo "no template changes to publish"; exit 0; fi
+          # shellcheck disable=SC2086
+          node templates/scripts/publish.mjs $dirs

@@ -1,0 +1,42 @@
+code: codex
+version: 0.3.0
+maintainer: official
+sourceRepo: InsForge/insta-oss
+
+upstream:
+  repo: openai/codex
+  package: "@openai/codex"
+  pinned: "0.148.0"
+  license: Apache-2.0
+
+services:
+  workspace:
+    type: web
+    image: ghcr.io/insforge/insta-oss/templates/codex:0.3.0   # built from ./Dockerfile by templates-build-images.yml
+    port: 7681
+    healthcheck: /
+    spec: 1vcpu-1gb              # created at 1GB (QA.md: "512 MB is not enough for an agent CLI")
+    volume:
+      size: 1
+    env:
+      fixed:
+        HOME: /data/home
+      required:
+        ACCESS_PASSWORD:
+          generate: secret:16
+          editable: true
+          description: "Password for the browser terminal (username: admin). Generated if left blank"
+      optional:
+        OPENAI_API_KEY:
+          description: "OpenAI API key. Leave blank and run `codex login` in the terminal instead"
+        GIT_TOKEN:
+          description: "Token for cloning private Git repositories"
+
+meta:
+  name: Codex
+  tagline: OpenAI's lightweight coding agent in a browser terminal
+  category: ai-agent
+  tags: [ai-agent, ai]
+  logo: ./logo.svg
+  links:
+    upstream: https://github.com/openai/codex

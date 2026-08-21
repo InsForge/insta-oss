@@ -1,0 +1,46 @@
+code: n8n
+version: 1.0.0
+maintainer: official
+sourceRepo: InsForge/insta-oss
+
+# Sustainable Use License: reference the official image only, and never rebuild or rebrand it.
+# Legal to confirm once before launch; this does not block the other templates.
+upstream:
+  repo: n8n-io/n8n
+  image: docker.io/n8nio/n8n
+  pinned: "2.10.2"
+  license: LicenseRef-n8n-Sustainable-Use-License
+
+generated:
+  encryption_key: secret:32
+
+services:
+  db:
+    type: postgres               # managed postgres: the platform injects DATABASE_URL (mapping verified in the POC)
+  n8n:
+    type: web
+    image: docker.io/n8nio/n8n:2.10.2
+    port: 5678
+    healthcheck: /healthz
+    volume:
+      size: 1
+    env:
+      fixed:
+        N8N_USER_FOLDER: /data   # upstream's own env; points n8n's data dir at the platform volume
+        DB_TYPE: postgresdb
+      generated:
+        N8N_ENCRYPTION_KEY: ${encryption_key}
+      platform:                  # renames platform-injected credentials for this image (resolved by the executor)
+        DB_POSTGRESDB_CONNECTION: ${{services.db.DATABASE_URL}}   # splitting this into host/user/password parts is still undecided
+      required: {}               # nothing required: n8n runs its own owner-setup wizard on first visit
+
+meta:
+  name: n8n
+  tagline: Visual workflow automation with 400+ integrations
+  category: automation
+  tags: [automation, ai]
+  logo: ./logo.svg
+  draft: true                   # v1 executor is web-only; managed postgres service type is a format follow-up
+  links:
+    upstream: https://github.com/n8n-io/n8n
+    documentation: https://docs.n8n.io

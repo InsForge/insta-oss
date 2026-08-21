@@ -1,0 +1,42 @@
+code: claude-code
+version: 0.3.0
+maintainer: official
+sourceRepo: InsForge/insta-oss
+
+upstream:
+  package: "@anthropic-ai/claude-code"
+  pinned: "2.1.235"
+  license: LicenseRef-Anthropic-Commercial-Terms
+
+services:
+  workspace:
+    type: web
+    image: ghcr.io/insforge/insta-oss/templates/claude-code:0.3.0   # built from ./Dockerfile by templates-build-images.yml
+    port: 7681
+    healthcheck: /
+    spec: 1vcpu-1gb              # created at 1GB (QA.md: "512 MB is not enough for an agent CLI")
+    volume:
+      size: 1                    # mounts at /data
+    env:
+      fixed:
+        HOME: /data/home
+      required:
+        ACCESS_PASSWORD:
+          generate: secret:16
+          editable: true
+          description: "Password for the browser terminal (username: admin). Generated if left blank"
+      optional:
+        ANTHROPIC_API_KEY:
+          description: "Anthropic API key. Leave blank and run `claude login` in the terminal instead"
+        GIT_TOKEN:
+          description: "Token for cloning private Git repositories"
+
+meta:
+  name: Claude Code
+  tagline: Anthropic's coding agent, editing files and running commands in a browser terminal
+  category: ai-agent
+  tags: [ai-agent, ai]
+  logo: ./logo.svg
+  links:
+    upstream: https://github.com/anthropics/claude-code
+    documentation: https://code.claude.com/docs

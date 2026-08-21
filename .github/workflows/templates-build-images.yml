@@ -1,0 +1,53 @@
+name: templates-build-images
+# Prebuild the workspace images so those templates are image-type for the deploy executor
+# (a deploy pulls in seconds instead of building for minutes).
+on:
+  push:
+    branches: [main, devel, "feat/**"]
+    paths:
+      - "templates/claude-code/**"
+      - "templates/codex/**"
+      - "templates/pi/**"
+      - ".github/workflows/templates-build-images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        template: [claude-code, codex, pi]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: version
+        run: echo "version=$(grep '^version:' templates/${{ matrix.template }}/insta.template.yaml | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      # Canonical version tags (the ones manifests reference) publish ONLY from main. A branch
+      # must never overwrite the artifact a published template pulls, so branch builds get sha-
+      # and branch-scoped tags instead, which is enough to test a manifest before it merges.
+      # Kept push-triggered rather than pull_request: a fork PR gets a read-only GITHUB_TOKEN and
+      # could not push a package anyway.
+      - id: tags
+        env:
+          IMAGE: ghcr.io/insforge/insta-oss/templates/${{ matrix.template }}
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "tags=$IMAGE:${{ steps.version.outputs.version }},$IMAGE:sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=$IMAGE:sha-${{ github.sha }},$IMAGE:branch-$(echo '${{ github.ref_name }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/build-push-action@v6
+        with:
+          context: templates/${{ matrix.template }}
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          platforms: linux/amd64

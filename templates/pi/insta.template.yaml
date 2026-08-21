@@ -1,0 +1,42 @@
+code: pi
+version: 0.3.0
+maintainer: official
+sourceRepo: InsForge/insta-oss
+
+upstream:
+  repo: earendil-works/pi
+  package: "@earendil-works/pi-coding-agent"
+  pinned: "0.84.2"
+  license: MIT
+
+services:
+  workspace:
+    type: web
+    image: ghcr.io/insforge/insta-oss/templates/pi:0.3.0   # built from ./Dockerfile by templates-build-images.yml
+    port: 7681
+    healthcheck: /
+    spec: 1vcpu-1gb              # created at 1GB (QA.md: "512 MB is not enough for an agent CLI")
+    volume:
+      size: 1
+    env:
+      fixed:
+        HOME: /data/home
+      required:
+        ACCESS_PASSWORD:
+          generate: secret:16
+          editable: true
+          description: "Password for the browser terminal (username: admin). Generated if left blank"
+      optional:
+        ANTHROPIC_API_KEY:
+          description: "Anthropic API key. Pi accepts keys from several providers, configurable in the terminal"
+        GIT_TOKEN:
+          description: "Token for cloning private Git repositories"
+
+meta:
+  name: Pi Coding Agent
+  tagline: Coding agent CLI with session history and a browser terminal
+  category: ai-agent
+  tags: [ai-agent, ai]
+  logo: ./logo.svg              # pi.dev's own mark; adapts to dark mode via prefers-color-scheme
+  links:
+    upstream: https://github.com/earendil-works/pi
