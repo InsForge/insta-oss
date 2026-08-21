@@ -44,6 +44,28 @@ for (const dir of dirs) {
     err(dir, `meta.logo points at ${logoRef}, which does not exist`);
   }
 
+  // README images: publish.mjs rewrites relative targets into absolute CDN URLs pinned to the
+  // commit, so a missing or escaping asset would only surface as a broken image on the gallery.
+  // Catch it here instead.
+  const readme = join(root, dir, "README.md");
+  if (existsSync(readme)) {
+    const text = readFileSync(readme, "utf8");
+    const targets = [
+      ...text.matchAll(/!\[[^\]]*\]\(([^)\s]+)/g),
+      ...text.matchAll(/<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gi),
+    ].map((mt) => mt[1]);
+    for (const t of targets) {
+      if (/^([a-z][a-z0-9+.-]*:|\/\/|\/|#)/i.test(t)) continue; // absolute, left alone at publish
+      const rel = t.replace(/^\.\//, "").split(/[?#]/)[0];
+      if (!rel) continue;
+      if (rel.split("/").includes("..")) {
+        err(dir, `README image '${t}' points outside the template directory; keep assets beside the manifest`);
+      } else if (!existsSync(join(root, dir, rel))) {
+        err(dir, `README image '${t}' does not exist in the template directory`);
+      }
+    }
+  }
+
   const declared = new Set();
   for (const [name, svc] of Object.entries(m?.services ?? {})) {
     for (const group of ["required", "optional"]) for (const k of Object.keys(svc.env?.[group] ?? {})) declared.add(k);

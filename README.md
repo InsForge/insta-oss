@@ -160,11 +160,21 @@ docker volume rm io-garage-meta io-garage-data         # the shared storage serv
 rm -rf ~/.insta-oss                                    # daemon state
 ```
 
+## Templates
+
+A template is one folder in [`templates/`](templates/) describing an app someone can deploy in a
+single command: a manifest pinning the image and declaring its variables, plus a README and a logo.
+The published ones show up in the [gallery](https://instacloud.com/templates).
+
+Adding one is a single pull request here. [templates/README.md](templates/README.md) has the
+layout, and [templates/AGENTS.md](templates/AGENTS.md) has the rules CI enforces.
+
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the code map and the rules every change follows.
-Provider adapters are the best entry point: implement one interface from `src/types.ts` as a
-new file in `src/adapters/`, wire it in `src/main.ts`, and nothing else changes.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the code map and the rules every change follows. Two
+good entry points: a provider adapter (implement one interface from `src/types.ts` as a new file in
+`src/adapters/`, wire it in `src/main.ts`, and nothing else changes), or a
+[template](templates/README.md), which needs no knowledge of the daemon at all.
 
 ## Community
 

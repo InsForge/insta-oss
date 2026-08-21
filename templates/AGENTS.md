@@ -21,6 +21,13 @@ IS the template code. Copying the closest existing template is the fastest way t
 - `logo.svg`: the template's mark, and a **hard requirement for a publishable template**. CI
   rejects a non-draft template without one. Declare the path as `meta.logo: ./logo.svg` and CI
   checks that it resolves. Details and the reasoning are under [Logos](#logos).
+- Screenshots and any other README assets: keep them in your own template directory and reference
+  them with **relative** paths, such as `![](./screenshot.png)`. The README is published to the
+  gallery as text, where a relative path would resolve against the gallery's own origin and 404, so
+  the publish step rewrites relative targets into absolute URLs pinned to the publishing commit:
+  images through the same CDN as the logo, and links to the GitHub page a reader can browse. Two
+  rules follow, both enforced by CI: a referenced asset must exist, and an image may not point
+  outside its own template directory, because nothing outside it is the template's to ship.
 
 ## Hard rules (CI rejects violations)
 

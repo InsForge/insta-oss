@@ -4,7 +4,7 @@
 // idle), else a static INSTA_PLATFORM_STAFF_TOKEN. INSTA_PLATFORM_URL is always required.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, relative, resolve as resolvePath, sep } from "node:path";
 import yaml from "js-yaml";
 
 const url = process.env.INSTA_PLATFORM_URL?.replace(/\/+$/, "");
@@ -49,10 +49,13 @@ for (const dir of dirs) {
   // things a manifest cannot carry itself. readme is a file, and logoUrl has to be absolute
   // because a relative ./logo.svg means nothing to the catalog. Unknown fields are ignored by
   // older catalog versions, so sending them is safe before the receiving side ships.
+  let body;
+  try { body = JSON.stringify({ manifest: text, readme: readmeOf(dir), logoUrl: logoUrlOf(dir, m) }); }
+  catch (e) { failures++; console.error(`✗ ${code}: ${e.message}`); continue; }
   const res = await fetch(`${url}/admin/templates/${code}`, {
     method: "PUT",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ manifest: text, readme: readmeOf(dir), logoUrl: logoUrlOf(dir, m) }),
+    body,
   });
   if (res.ok) { console.log(`✓ ${code}: published ${m.code}@${m.version}`); }
   else { failures++; console.error(`✗ ${code}: HTTP ${res.status}. ${(await res.text()).slice(0, 500)}`); }
@@ -61,7 +64,53 @@ process.exit(failures ? 1 : 0);
 
 function readmeOf(dir) {
   const p = join(dir, "README.md");
-  return existsSync(p) ? readFileSync(p, "utf8") : undefined;
+  if (!existsSync(p)) return undefined;
+  return absolutizeReadme(readFileSync(p, "utf8"), dir);
+}
+
+// A README is authored for GitHub, where `![](./shot.png)` resolves against the repo. The catalog
+// serves the same text on another origin, where that path would resolve against THAT site and 404.
+// So every relative target becomes absolute here, pinned to the publishing commit: images through
+// the same jsDelivr CDN as the logo, links to the GitHub page a reader can actually browse.
+function absolutizeReadme(text, dir) {
+  const repo = process.env.GITHUB_REPOSITORY ?? "InsForge/insta-oss";
+  const sha = process.env.GITHUB_SHA ?? gitHead();
+  if (!sha) return text; // no commit to pin to: publish the text unchanged rather than guess
+  const cdn = (p) => `https://cdn.jsdelivr.net/gh/${repo}@${sha}/${p}`;
+  const blob = (p) => `https://github.com/${repo}/blob/${sha}/${p}`;
+  // Everything is computed in repo-relative terms, so this works whether the caller passed
+  // `templates/hermes` or an absolute path.
+  const dirInRepo = relative(repoRoot(), resolvePath(dir)).split(sep).join("/");
+
+  const resolve = (target, isImage) => {
+    // Absolute, protocol-relative, root-relative, anchor-only and mail targets are left alone.
+    if (/^([a-z][a-z0-9+.-]*:|\/\/|\/|#)/i.test(target)) return null;
+    const [, path, suffix = ""] = /^([^?#]*)([?#].*)?$/.exec(target);
+    if (!path) return null;
+    const stack = dirInRepo ? dirInRepo.split("/") : [];
+    for (const part of path.split("/")) {
+      if (part === "" || part === ".") continue;
+      if (part === "..") {
+        if (!stack.length) throw new Error(`README target '${target}' escapes the repository`);
+        stack.pop();
+      } else stack.push(part);
+    }
+    const resolved = stack.join("/");
+    // An image must live in its own template directory: nothing outside it is the template's to ship.
+    if (isImage && !resolved.startsWith(`${dirInRepo}/`)) {
+      throw new Error(`README image '${target}' points outside the template directory; keep assets in ${dirInRepo}/`);
+    }
+    return (isImage ? cdn(resolved) : blob(resolved)) + suffix;
+  };
+
+  let out = text;
+  // Markdown images, then markdown links (the negative lookbehind keeps images out of the link pass).
+  out = out.replace(/(!\[[^\]]*\]\()([^)\s]+)/g, (m, head, target) => head + (resolve(target, true) ?? target));
+  out = out.replace(/(^|[^!])(\[[^\]]*\]\()([^)\s]+)/g, (m, pre, head, target) => pre + head + (resolve(target, false) ?? target));
+  // Inline HTML images.
+  out = out.replace(/(<img\b[^>]*?\bsrc\s*=\s*)(["'])([^"']+)\2/gi,
+    (m, head, q, target) => head + q + (resolve(target, true) ?? target) + q);
+  return out;
 }
 
 // The logo is served from jsDelivr's CDN, pinned to the commit being published: immutable for
@@ -82,6 +131,11 @@ function logoUrlOf(dir, m) {
 function gitHead() {
   try { return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); }
   catch { return undefined; }
+}
+
+function repoRoot() {
+  try { return execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim(); }
+  catch { return process.cwd(); }
 }
 
 // Gate: every ghcr image the manifest references must exist before the PUT.
