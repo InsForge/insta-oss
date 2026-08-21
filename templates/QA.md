@@ -73,3 +73,11 @@ hosted platform runs server-side, so it is the quickest way to check a template 
    (Anthropic is not among them), while documenting no environment variable names at all.
    Declaring them would let a deploy pass with a key the agent may never read. If you can confirm
    the upstream variable names, that is a welcome pull request.
+
+7. **512 MB is not enough for an agent CLI, so the workspace templates declare a size.** Every
+   compute service is created at 1 vCPU / 512 MB by default, and the agent CLIs are close to
+   unusable there. Raising the size after a deploy is not a fix either: it rebuilds the machine and
+   kills the terminal session the user is sitting in, which for a template whose whole product is
+   an interactive terminal is worse than starting small. `claude-code`, `codex` and `pi` therefore
+   declare `spec: 1vcpu-1gb`, which the platform honours at creation, so no resize happens at all.
+   The valid names come from the platform's own catalog; `npm run lint` mirrors the list.
