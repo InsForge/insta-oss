@@ -1,0 +1,37 @@
+name: templates-lint
+on:
+  pull_request:
+    paths:
+      - "templates/**"
+      - ".github/workflows/templates-lint.yml"
+  push:
+    branches: [main, devel]
+    paths:
+      - "templates/**"
+      - ".github/workflows/templates-lint.yml"
+permissions:
+  contents: read
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: templates
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the version-bump guard diffs against the base ref
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: templates/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      # Lives here rather than in its own workflow: it reuses this job's checkout and npm ci
+      # (js-yaml, to read `version` and the draft flag on both revisions), and PRs are where the
+      # block belongs. A missing bump must be caught before merge, not after the image is gone.
+      - name: Require a version bump on changed templates
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: npm run version-guard --silent -- "$BASE_SHA"

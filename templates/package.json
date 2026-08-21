@@ -1,0 +1,14 @@
+{
+  "name": "insta-templates",
+  "description": "Tooling for the template registry in this directory: lint, version guard, publish, and a local executor. Not published to npm.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "node scripts/deploy.mjs",
+    "lint": "node scripts/lint.mjs",
+    "version-guard": "node scripts/version-guard.mjs"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}

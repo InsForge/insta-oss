@@ -1,0 +1,33 @@
+code: 9router
+version: 1.0.0
+maintainer: official
+sourceRepo: InsForge/insta-oss
+
+upstream:
+  repo: decolua/9router
+  image: docker.io/decolua/9router
+  pinned: "0.5.55"              # never latest: Railway's version floats on it and drifts on every restart
+  license: MIT
+
+services:
+  router:
+    type: web
+    image: docker.io/decolua/9router:0.5.55
+    port: 20128
+    healthcheck: /
+    volume:
+      size: 1                    # upstream writes provider keys to /app/data, not the volume. See QA.md finding 7
+    env:
+      fixed: {}
+      required: {}               # nothing required: provider keys are configured inside the app
+      optional: {}
+
+meta:
+  name: 9Router
+  tagline: Self-hosted LLM router with fallback across 40+ providers
+  category: llm
+  tags: [llm, ai]
+  logo: ./logo.png              # 500x500, real transparency; see the attribution table in ../README.md
+  draft: true                   # /data mount is root-owned, app runs non-root -> EACCES; needs platform mount-ownership support
+  links:
+    upstream: https://github.com/decolua/9router
