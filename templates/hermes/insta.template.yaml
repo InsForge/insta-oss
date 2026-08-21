@@ -37,7 +37,7 @@ services:
         TELEGRAM_ALLOWED_USERS:
           description: "Comma-separated Telegram usernames allowed to use the bot"
 
-# No provider oneOf: OPENROUTER_API_KEY is required, and upstream's own provider env names are undocumented (see QA.md finding 8)
+# No provider oneOf: OPENROUTER_API_KEY is required, and upstream documents no provider env names (QA.md: "no provider `oneOf` constraint")
 
 meta:
   name: Hermes Agent

@@ -37,7 +37,9 @@ jobs:
           INSTA_BOT_EMAIL: ${{ secrets.INSTA_BOT_EMAIL }}
           INSTA_BOT_PASSWORD: ${{ secrets.INSTA_BOT_PASSWORD }}
           INSTA_PLATFORM_STAFF_TOKEN: ${{ secrets.INSTA_PLATFORM_STAFF_TOKEN }}
-          # For the pre-publish image-existence gate (a private package needs a pull token).
+          # The pre-publish gate proves images are ANONYMOUSLY pullable, the way a deploy pulls
+          # them, so it deliberately does not use this token for that check. The token is only
+          # used afterwards, on failure, to tell "package is private" apart from "not built yet".
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           before='${{ github.event.before }}'

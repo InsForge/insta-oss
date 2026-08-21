@@ -3,9 +3,10 @@
 // Auth: login-per-run via INSTA_BOT_EMAIL/INSTA_BOT_PASSWORD (preferred: sessions expire when
 // idle), else a static INSTA_PLATFORM_STAFF_TOKEN. INSTA_PLATFORM_URL is always required.
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, join, relative, resolve as resolvePath, sep } from "node:path";
 import yaml from "js-yaml";
+import { ghcrGateMessage, parseGhcrRef, rewriteReadme } from "./publish-lib.mjs";
 
 const url = process.env.INSTA_PLATFORM_URL?.replace(/\/+$/, "");
 if (!url) fail("INSTA_PLATFORM_URL must be set");
@@ -68,49 +69,18 @@ function readmeOf(dir) {
   return absolutizeReadme(readFileSync(p, "utf8"), dir);
 }
 
-// A README is authored for GitHub, where `![](./shot.png)` resolves against the repo. The catalog
-// serves the same text on another origin, where that path would resolve against THAT site and 404.
-// So every relative target becomes absolute here, pinned to the publishing commit: images through
-// the same jsDelivr CDN as the logo, links to the GitHub page a reader can actually browse.
 function absolutizeReadme(text, dir) {
   const repo = process.env.GITHUB_REPOSITORY ?? "InsForge/insta-oss";
   const sha = process.env.GITHUB_SHA ?? gitHead();
   if (!sha) return text; // no commit to pin to: publish the text unchanged rather than guess
-  const cdn = (p) => `https://cdn.jsdelivr.net/gh/${repo}@${sha}/${p}`;
-  const blob = (p) => `https://github.com/${repo}/blob/${sha}/${p}`;
-  // Everything is computed in repo-relative terms, so this works whether the caller passed
-  // `templates/hermes` or an absolute path.
-  const dirInRepo = relative(repoRoot(), resolvePath(dir)).split(sep).join("/");
-
-  const resolve = (target, isImage) => {
-    // Absolute, protocol-relative, root-relative, anchor-only and mail targets are left alone.
-    if (/^([a-z][a-z0-9+.-]*:|\/\/|\/|#)/i.test(target)) return null;
-    const [, path, suffix = ""] = /^([^?#]*)([?#].*)?$/.exec(target);
-    if (!path) return null;
-    const stack = dirInRepo ? dirInRepo.split("/") : [];
-    for (const part of path.split("/")) {
-      if (part === "" || part === ".") continue;
-      if (part === "..") {
-        if (!stack.length) throw new Error(`README target '${target}' escapes the repository`);
-        stack.pop();
-      } else stack.push(part);
-    }
-    const resolved = stack.join("/");
-    // An image must live in its own template directory: nothing outside it is the template's to ship.
-    if (isImage && !resolved.startsWith(`${dirInRepo}/`)) {
-      throw new Error(`README image '${target}' points outside the template directory; keep assets in ${dirInRepo}/`);
-    }
-    return (isImage ? cdn(resolved) : blob(resolved)) + suffix;
+  const root = repoRoot();
+  // Repo-relative terms throughout, so this works whether the caller passed `templates/hermes`
+  // or an absolute path.
+  const dirInRepo = relative(root, resolvePath(dir)).split(sep).join("/");
+  const isDirectory = (p) => {
+    try { return statSync(join(root, p)).isDirectory(); } catch { return false; }
   };
-
-  let out = text;
-  // Markdown images, then markdown links (the negative lookbehind keeps images out of the link pass).
-  out = out.replace(/(!\[[^\]]*\]\()([^)\s]+)/g, (m, head, target) => head + (resolve(target, true) ?? target));
-  out = out.replace(/(^|[^!])(\[[^\]]*\]\()([^)\s]+)/g, (m, pre, head, target) => pre + head + (resolve(target, false) ?? target));
-  // Inline HTML images.
-  out = out.replace(/(<img\b[^>]*?\bsrc\s*=\s*)(["'])([^"']+)\2/gi,
-    (m, head, q, target) => head + q + (resolve(target, true) ?? target) + q);
-  return out;
+  return rewriteReadme(text, { dirInRepo, repo, sha, isDirectory });
 }
 
 // The logo is served from jsDelivr's CDN, pinned to the commit being published: immutable for
@@ -138,36 +108,36 @@ function repoRoot() {
   catch { return process.cwd(); }
 }
 
-// Gate: every ghcr image the manifest references must exist before the PUT.
+// Gate: every ghcr image a manifest references must be ANONYMOUSLY pullable before the PUT.
+//
+// Anonymous is the whole point. A template deploy pulls with no credentials, and a new ghcr package
+// is private by default, so a gate that authenticated with GHCR_TOKEN would happily green-light an
+// image nobody else can fetch: the catalog entry would publish and every deploy of it would fail on
+// the pull, until someone remembered to flip the package public. So the probe runs exactly as the
+// puller does. GHCR_TOKEN is still used, but only afterwards, to tell "private" apart from
+// "not built yet" in the failure message.
 async function assertGhcrImages(m) {
   for (const [name, svc] of Object.entries(m.services ?? {})) {
-    const ref = String(svc?.image ?? "");
-    if (!ref.startsWith("ghcr.io/")) continue;
-    const path = ref.slice("ghcr.io/".length);
-    const cut = path.includes("@") ? path.indexOf("@") : (path.lastIndexOf(":") > path.lastIndexOf("/") ? path.lastIndexOf(":") : -1);
-    const repo = cut >= 0 ? path.slice(0, cut) : path;
-    const tag = cut >= 0 ? path.slice(cut + 1) : "latest";
-    // `repo` keeps its slashes: ghcr's API is /v2/<owner>/<name>/manifests/<tag> and <name> may
-    // itself be multi-segment (insta-oss/templates/<code>).
-    const status = await ghcrTagStatus(repo, tag);
-    if (status !== 0) {
-      const why = status === 401 || status === 403
-        ? `HTTP ${status}: the package is PRIVATE or the token lacks read:packages. Make the ghcr package public (org → Packages → Package settings → Change visibility), or check the workflow's packages: read + GHCR_TOKEN`
-        // ghcr answers 404 (not 403) for a package the caller may not see, so a persistent 404 is
-        // either "not built yet" or "private and this token cannot read it": name both.
-        : `HTTP ${status}: either not published yet (wait for templates-build-images, then rerun publish via workflow_dispatch, which upserts), or the package exists but is not visible to this token: check that the ghcr package is public (org → Packages → Package settings → Change visibility) and that GHCR_TOKEN carries read:packages`;
-      throw new Error(`services.${name}: ${ref} did not resolve on ghcr (${why})`);
-    }
+    const parsed = parseGhcrRef(svc?.image);
+    if (!parsed) continue; // not a ghcr image: an upstream public registry, nothing for us to gate
+    const { repo, tag } = parsed;
+    const anon = await ghcrManifestStatus(repo, tag, { authenticated: false });
+    if (anon === 0) continue;
+
+    // Classify, so the operator is told which of the two problems they have.
+    const auth = process.env.GHCR_TOKEN ? await ghcrManifestStatus(repo, tag, { authenticated: true, attempts: 1 }) : null;
+    throw new Error(ghcrGateMessage({ name, ref: String(svc.image), anon, auth }));
   }
 }
 
-// 0 when the tag resolves, else the last HTTP status seen. Polling exists for publish propagation
-// (404 while the build finishes); 401/403 is a credentials/visibility verdict that will not
-// self-heal, so it returns at once instead of burning the whole retry budget.
-async function ghcrTagStatus(repo, tag) {
+// 0 when the manifest resolves, else the last HTTP status seen. Polling exists for publish
+// propagation (404 while the image build finishes); 401/403 is a visibility verdict that will not
+// self-heal, so it returns at once rather than burning the whole retry budget.
+async function ghcrManifestStatus(repo, tag, { authenticated, attempts = GHCR_ATTEMPTS }) {
+  const label = authenticated ? "authenticated" : "anonymous";
   let last = 0;
-  for (let i = 1; i <= GHCR_ATTEMPTS; i++) {
-    const token = await ghcrPullToken(repo);
+  for (let i = 1; i <= attempts; i++) {
+    const token = await ghcrPullToken(repo, authenticated);
     if (typeof token === "number") last = token; // the token endpoint itself refused
     else {
       const res = await fetch(`https://ghcr.io/v2/${repo}/manifests/${encodeURIComponent(tag)}`, {
@@ -181,20 +151,21 @@ async function ghcrTagStatus(repo, tag) {
       last = res.status;
     }
     if (last === 401 || last === 403) return last;
-    if (i < GHCR_ATTEMPTS) {
-      console.log(`  … ${repo}:${tag} not resolvable yet (HTTP ${last}): retry ${i}/${GHCR_ATTEMPTS - 1} in ${GHCR_DELAY_MS / 1000}s`);
+    if (i < attempts) {
+      console.log(`  … ${repo}:${tag} not ${label}ly pullable yet (HTTP ${last}): retry ${i}/${attempts - 1} in ${GHCR_DELAY_MS / 1000}s`);
       await new Promise((r) => setTimeout(r, GHCR_DELAY_MS));
     }
   }
   return last;
 }
 
-// The pull token, or the HTTP status when the token endpoint refuses, which is what a private
-// package with no/insufficient credentials looks like. Anonymous suffices for public packages;
-// GHCR_TOKEN (a GitHub token with read:packages) is needed for private ones.
-async function ghcrPullToken(repo) {
+// A pull token, or the HTTP status when the token endpoint refuses (which is what a private package
+// looks like to an anonymous caller). Anonymous requests carry no credentials at all, deliberately.
+async function ghcrPullToken(repo, authenticated) {
   const headers = {};
-  if (process.env.GHCR_TOKEN) headers.authorization = `Basic ${Buffer.from(`x-token:${process.env.GHCR_TOKEN}`).toString("base64")}`;
+  if (authenticated && process.env.GHCR_TOKEN) {
+    headers.authorization = `Basic ${Buffer.from(`x-token:${process.env.GHCR_TOKEN}`).toString("base64")}`;
+  }
   const res = await fetch(`https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull`, { headers });
   if (!res.ok) return res.status;
   return (await res.json()).token;

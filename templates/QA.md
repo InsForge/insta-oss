@@ -11,7 +11,7 @@ hosted platform runs server-side, so it is the quickest way to check a template 
 | `claude-code` | yes | 401 unauthenticated, 200 authenticated | `ACCESS_PASSWORD` generated when omitted | `/data` survives update and rollback, byte-identical | ttyd terminal verified in a browser. A cold first build can exceed the platform's health-check window; the platform rolls back and a retry with a warm cache passes |
 | `codex` | yes | 401, auth-gated | `ACCESS_PASSWORD` generated | same volume mechanism as `claude-code` | `@openai/codex` installs and builds clean |
 | `pi` | yes | 401, auth-gated | `ACCESS_PASSWORD` generated | same volume mechanism | `@earendil-works/pi-coding-agent` installs and builds clean |
-| `9router` | yes | 200 | no required variables, so a deploy needs no input | **no, see finding 4** | **draft.** The volume mount is root-owned and the app runs non-root, so no manifest setting can write to `/data`. Port 20128 is correct (it is the image's exposed port); the failure is not a port mismatch |
+| `9router` | yes | 200 | no required variables, so a deploy needs no input | **no, see "cannot use the platform volume"** | **draft.** The volume mount is root-owned and the app runs non-root, so no manifest setting can write to `/data`. Port 20128 is correct (it is the image's exposed port); the failure is not a port mismatch |
 | `hermes` | not yet | | | | Full QA needs a real `OPENROUTER_API_KEY` and Telegram tokens. Deploy and health check can be smoke-tested with placeholders |
 | `deepseek-hermes` | not yet | | | | Same as `hermes` |
 | `n8n` | not yet | | | | **draft.** It declares a managed `postgres` service, and the current executor deploys web services only |
@@ -65,7 +65,8 @@ hosted platform runs server-side, so it is the quickest way to check a template 
 
    Both are enforced by `scripts/lint.mjs` now, so this class of error fails on the pull request.
 
-6. **`hermes` has no provider `oneOf` constraint, on purpose.** The obvious fix for finding 5 was
+6. **`hermes` has no provider `oneOf` constraint, on purpose.** The obvious fix for the parser
+   rejections above was
    to declare the two missing keys as optional, and that would have been a guess. The constraint
    was self-contradictory anyway, because `OPENROUTER_API_KEY` is required and a required variable
    is resolved before constraints are checked, so the alternatives were unreachable. Upstream says

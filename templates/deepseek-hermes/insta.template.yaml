@@ -27,7 +27,7 @@ services:
         HERMES_DASHBOARD: "1"
         HERMES_DASHBOARD_HOST: 0.0.0.0
         HERMES_DASHBOARD_PORT: "8080"
-        HERMES_DEFAULT_MODEL: deepseek/deepseek-chat   # unconfirmed: upstream documents no env names (QA.md finding 8)
+        HERMES_DEFAULT_MODEL: deepseek/deepseek-chat   # unconfirmed: upstream documents no env names (QA.md: "no provider `oneOf` constraint")
       generated:
         HERMES_GATEWAY_TOKEN: ${gateway_token}
       required:

@@ -16,7 +16,7 @@ services:
     port: 20128
     healthcheck: /
     volume:
-      size: 1                    # upstream writes provider keys to /app/data, not the volume. See QA.md finding 7
+      size: 1                    # upstream writes provider keys to /app/data, not the volume (QA.md: "cannot use the platform volume")
     env:
       fixed: {}
       required: {}               # nothing required: provider keys are configured inside the app

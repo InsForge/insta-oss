@@ -15,7 +15,7 @@ services:
     image: ghcr.io/insforge/insta-oss/templates/pi:0.3.0   # built from ./Dockerfile by templates-build-images.yml
     port: 7681
     healthcheck: /
-    spec: 1vcpu-1gb              # created at 1GB: the 512MB default is unusable for an agent CLI (QA.md finding 7)
+    spec: 1vcpu-1gb              # created at 1GB (QA.md: "512 MB is not enough for an agent CLI")
     volume:
       size: 1
     env:
