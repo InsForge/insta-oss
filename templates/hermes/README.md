@@ -7,7 +7,7 @@ Autonomous AI agent from Nous Research, driven from Telegram.
 This template runs [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research.
 Hermes is an autonomous agent: you send it a task over Telegram, and it works on it with its own
 tools rather than answering a single prompt. The template wraps the upstream image with a start
-command — upstream's default process is an interactive terminal UI that exits without a TTY — and
+command (upstream's default process is an interactive terminal UI that exits without a TTY) and
 runs the messaging gateway with the web dashboard beside it, state on a persistent volume.
 
 The dashboard is what the service URL serves; Telegram is how you give the agent work.
@@ -29,7 +29,7 @@ The dashboard is what the service URL serves; Telegram is how you give the agent
 - An [OpenRouter API key](https://openrouter.ai/keys). The agent calls models through OpenRouter.
 - A Telegram bot token, created with [@BotFather](https://t.me/BotFather): send `/newbot`, pick a
   name and a username ending in `bot`, and it replies with the token.
-- The Telegram usernames allowed to use the bot — yours is under Settings in any Telegram client,
+- The Telegram usernames allowed to use the bot. Yours is under Settings in any Telegram client,
   **without** the leading `@`. Comma-separate several. Without this the bot has no authorised users.
 
 ## Configuration

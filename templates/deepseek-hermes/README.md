@@ -6,8 +6,8 @@ Hermes Agent preconfigured for DeepSeek models.
 
 This is the [Hermes Agent](../hermes/) template with DeepSeek as the default model. It runs the
 same image, wrapped with the same start command, with `HERMES_DEFAULT_MODEL` set to
-`deepseek/deepseek-chat` so you do not have to pick a model after deploying. Everything else —
-the Telegram interface, the dashboard, the persistent state — is identical.
+`deepseek/deepseek-chat` so you do not have to pick a model after deploying. Everything else,
+the Telegram interface, the dashboard and the persistent state, is identical.
 
 Pick this one if you want DeepSeek; pick plain Hermes Agent if you want to choose the model
 yourself.
@@ -29,7 +29,7 @@ yourself.
   OpenRouter, so this is the only provider key you need.
 - A Telegram bot token, created with [@BotFather](https://t.me/BotFather): send `/newbot`, pick a
   name and a username ending in `bot`, and it replies with the token.
-- The Telegram usernames allowed to use the bot — yours is under Settings in any Telegram client,
+- The Telegram usernames allowed to use the bot. Yours is under Settings in any Telegram client,
   **without** the leading `@`. Comma-separate several. Without this the bot has no authorised users.
 
 ## Configuration

@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Unreachable through the platform: the manifest declares `generate: secret:16`, and
+# resolveVariables treats an empty string as not-provided, so a value is always minted.
+# This guards a hand-rolled `docker run` that forgot it.
 : "${ACCESS_PASSWORD:?ACCESS_PASSWORD is required}"
 export HERMES_HOME="${HERMES_HOME:-/data/.hermes}"
 mkdir -p "$HERMES_HOME"
