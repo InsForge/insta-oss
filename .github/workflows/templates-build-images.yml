@@ -8,6 +8,8 @@ on:
       - "templates/claude-code/**"
       - "templates/codex/**"
       - "templates/pi/**"
+      - "templates/hermes/**"
+      - "templates/deepseek-hermes/**"
       - ".github/workflows/templates-build-images.yml"
   workflow_dispatch:
 
@@ -20,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        template: [claude-code, codex, pi]
+        template: [claude-code, codex, pi, hermes, deepseek-hermes]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3

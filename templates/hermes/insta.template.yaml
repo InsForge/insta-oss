@@ -1,5 +1,5 @@
 code: hermes
-version: 1.0.2
+version: 1.1.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -16,7 +16,7 @@ generated:
 services:
   hermes:
     type: web
-    image: docker.io/nousresearch/hermes-agent:v2026.8.16
+    image: ghcr.io/insforge/insta-oss/templates/hermes:1.1.0   # built from ./Dockerfile by templates-build-images.yml
     port: 8080
     healthcheck: /api/status
     volume:
@@ -24,12 +24,14 @@ services:
     env:
       fixed:
         HERMES_HOME: /data/.hermes
-        HERMES_DASHBOARD: "1"
-        HERMES_DASHBOARD_HOST: 0.0.0.0
         HERMES_DASHBOARD_PORT: "8080"
       generated:
         HERMES_GATEWAY_TOKEN: ${gateway_token}
       required:
+        ACCESS_PASSWORD:
+          description: "Password for the web dashboard (username: admin). Generated if left blank"
+          generate: secret:16
+          editable: true
         OPENROUTER_API_KEY:
           description: "OpenRouter API key the agent uses for model calls (openrouter.ai/keys)"
         TELEGRAM_BOT_TOKEN:
