@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, join, relative, resolve as resolvePath, sep } from "node:path";
 import yaml from "js-yaml";
-import { ghcrGateMessage, parseGhcrRef, rewriteReadme } from "./publish-lib.mjs";
+import { ghcrGateMessage, ghcrRetryVerdict, parseGhcrRef, rewriteReadme } from "./publish-lib.mjs";
 
 const url = process.env.INSTA_PLATFORM_URL?.replace(/\/+$/, "");
 if (!url) fail("INSTA_PLATFORM_URL must be set");
@@ -150,7 +150,17 @@ async function ghcrManifestStatus(repo, tag, { authenticated, attempts = GHCR_AT
       if (res.ok) return 0;
       last = res.status;
     }
-    if (last === 401 || last === 403) return last;
+    if (last === 401 || last === 403) {
+      // Not necessarily a visibility verdict: an anonymous caller gets 403 for a
+      // package that has not been pushed yet too. Ask the authenticated probe
+      // before spending the verdict, or a still-building image reads as private
+      // and the whole retry budget goes unused.
+      const auth =
+        !authenticated && process.env.GHCR_TOKEN
+          ? await ghcrManifestStatus(repo, tag, { authenticated: true, attempts: 1 })
+          : null;
+      if (ghcrRetryVerdict({ anon: last, auth }) === "fatal") return last;
+    }
     if (i < attempts) {
       console.log(`  … ${repo}:${tag} not ${label}ly pullable yet (HTTP ${last}): retry ${i}/${attempts - 1} in ${GHCR_DELAY_MS / 1000}s`);
       await new Promise((r) => setTimeout(r, GHCR_DELAY_MS));

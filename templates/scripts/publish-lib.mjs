@@ -22,6 +22,33 @@ export function parseGhcrRef(ref) {
 }
 
 /**
+ * Whether an anonymous 401/403 from ghcr is worth waiting out.
+ *
+ * ghcr answers 403 to an ANONYMOUS caller both for a package that does not exist
+ * yet and for one that exists but is private, so the status alone cannot tell
+ * "the image build has not pushed it" from "someone has to flip visibility".
+ * The authenticated probe separates them: 404 means it is not there, anything
+ * that resolves means it is there and hidden.
+ *
+ * Getting this wrong is why every merge that bumped an image version failed and
+ * needed a manual re-run: templates-build-images runs on the same push and takes
+ * minutes, so publish always saw the anonymous 403 of a package still being
+ * built, called it private, and gave up without using its retry budget.
+ *
+ * `retry` when there is no authenticated answer (no GHCR_TOKEN): the budget is
+ * bounded, and failing a build that would have succeeded costs more than
+ * spending it.
+ *
+ * @param {{anon: number, auth: number|null|undefined}} o
+ * @returns {"retry"|"fatal"}
+ */
+export function ghcrRetryVerdict({ anon, auth }) {
+  if (anon !== 401 && anon !== 403) return "retry";
+  if (auth === null || auth === undefined) return "retry";
+  return auth === 404 ? "retry" : "fatal";
+}
+
+/**
  * The failure message for an image that is not anonymously pullable.
  *
  * Anonymous is what matters: a template deploy pulls with no credentials. The authenticated probe
