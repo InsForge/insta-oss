@@ -8,6 +8,8 @@ on:
       - "templates/claude-code/**"
       - "templates/codex/**"
       - "templates/pi/**"
+      - "templates/hermes/**"
+      - "templates/deepseek-hermes/**"
       - ".github/workflows/templates-build-images.yml"
   workflow_dispatch:
 
