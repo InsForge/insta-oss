@@ -121,12 +121,21 @@ describe('ghcrRetryVerdict', () => {
   it('gives up when the image exists but is hidden', () => {
     // 0 is this script's "resolved" status, so an authenticated hit means private.
     expect(ghcrRetryVerdict({ anon: 403, auth: 0 })).toBe('fatal')
-    expect(ghcrRetryVerdict({ anon: 403, auth: 200 })).toBe('fatal')
+    expect(ghcrRetryVerdict({ anon: 401, auth: 0 })).toBe('fatal')
   })
 
   it('waits when nothing authenticated an answer', () => {
     expect(ghcrRetryVerdict({ anon: 403, auth: null })).toBe('retry')
     expect(ghcrRetryVerdict({ anon: 403, auth: undefined })).toBe('retry')
+  })
+
+  it('waits when the authenticated probe itself failed to classify', () => {
+    // An expired or under-scoped token, or ghcr rate limiting, proves nothing
+    // about visibility; only a probe that resolves does.
+    expect(ghcrRetryVerdict({ anon: 403, auth: 401 })).toBe('retry')
+    expect(ghcrRetryVerdict({ anon: 403, auth: 403 })).toBe('retry')
+    expect(ghcrRetryVerdict({ anon: 403, auth: 429 })).toBe('retry')
+    expect(ghcrRetryVerdict({ anon: 403, auth: 500 })).toBe('retry')
   })
 
   it('leaves every other status to the caller loop', () => {

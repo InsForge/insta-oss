@@ -131,8 +131,8 @@ async function assertGhcrImages(m) {
 }
 
 // 0 when the manifest resolves, else the last HTTP status seen. Polling exists for publish
-// propagation (404 while the image build finishes); 401/403 is a visibility verdict that will not
-// self-heal, so it returns at once rather than burning the whole retry budget.
+// propagation (404 while the image build finishes); 401/403 returns at once only when the
+// authenticated probe proves it is a visibility verdict, which will not self-heal.
 async function ghcrManifestStatus(repo, tag, { authenticated, attempts = GHCR_ATTEMPTS }) {
   const label = authenticated ? "authenticated" : "anonymous";
   let last = 0;
