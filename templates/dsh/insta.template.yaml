@@ -45,10 +45,9 @@ meta:
   tagline: Plugin-composed coding agent with a browser UI
   category: ai-agent
   tags: [ai-agent, ai]
-  # Draft for three reasons, all recorded in NOTES.md: no logo has been sourced, the image has
-  # never been built, and no deploy has been QA'd. Upstream is also a self-declared developer
-  # preview promising compatibility-breaking changes.
-  draft: true
+  # DeepSeek's own mark, for DeepSeek's own project: descriptive use of the kind their
+  # BRAND_GUIDELINES.md permits, unlike branding a third-party agent with it.
+  logo: ./logo.svg
   links:
     upstream: https://github.com/deepseek-ai/deepseek-harness
     documentation: https://github.com/deepseek-ai/deepseek-harness#readme
