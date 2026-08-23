@@ -44,7 +44,7 @@ because an RGBA file can still be fully opaque.
 | `codex` | `logo.svg` 3.7 KB | yes (vector) | fixed (blue gradient, white glyph) | OpenAI's Codex mark |
 | `pi` | `logo.svg` 618 B | yes (vector) | **adapts** via `prefers-color-scheme` | <https://pi.dev/logo-auto.svg> |
 | `hermes` | `logo.png` 400x400 | **no, opaque black** | fixed | The NousResearch GitHub org avatar (`avatars.githubusercontent.com/u/134168893`). Upstream publishes no transparent product mark: its site and repo carry only a character illustration, a text-glyph favicon, and a 48x48 site icon. A card should put a neutral tile behind this one |
-| `deepseek-hermes` | `logo.svg` 2.1 KB | yes (vector) | fixed `#5786FE` | DeepSeek's mark. Template delisted 2026-08-22, superseded by `dsh` |
+| `deepseek-hermes` | `logo.svg` 2.0 KB | yes (vector) | fixed `#5786FE` | DeepSeek's mark. Template delisted 2026-08-22, superseded by `dsh` |
 | `dsh` | `logo.svg` 2.0 KB | yes (vector) | fixed `#5786FE` | DeepSeek's mark, on DeepSeek's own project. The same file the delisted `deepseek-hermes` carried, where it was the weaker case: branding someone else's agent. Upstream's `BRAND_GUIDELINES.md` asks projects not to imply endorsement, which naming their own harness does not |
 | `n8n` | `logo.svg` 1.6 KB | yes (vector) | fixed `#EA4B71` | n8n's brand mark |
 | `openclaw` | `logo.svg` 4.6 KB | yes (vector) | fixed; includes a near-black `#050810` element | OpenClaw's mark |

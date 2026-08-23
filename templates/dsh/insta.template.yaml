@@ -24,7 +24,10 @@ services:
       fixed:
         HOME: /data/home
         DSH_HOME: /data/dsh              # single root: settings, credentials, sessions, storages, profiles
-        DSH_TELEMETRY_DISABLED: "1"      # session telemetry ships off; this is upstream's hard switch
+        # Belt to DSH_TELEMETRY_MODE, which already defaults to DISABLED: any non-empty value here
+        # disables the session-telemetry row outright. Export only, per dsh-anonymous-user-id:
+        # it does not suppress feedback acknowledgement or the DeepSeek provider header.
+        DSH_TELEMETRY_DISABLED: "1"
       required:
         ACCESS_PASSWORD:
           generate: secret:16
@@ -37,8 +40,6 @@ services:
           description: "DeepSeek endpoint override, for a gateway or compatible proxy. Defaults to https://api.deepseek.com"
         DSH_PERMISSION_MODE:
           description: "Agent file boundary: read-only, workspace-write (default), or danger-full-access. Widen it only if the container sandbox is unavailable"
-        GIT_TOKEN:
-          description: "Token for cloning private Git repositories"
 
 meta:
   name: DeepSeek Harness

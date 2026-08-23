@@ -51,6 +51,8 @@ meta:
   # the image's built-in default, Claude Opus over OpenRouter, at 218x the output price of the
   # model the name promises. Superseded by templates/dsh, DeepSeek's own agent harness. Kept
   # rather than deleted so the code stays reserved and the history stays readable.
+  # This flag only makes publish.mjs skip the template, so it stops republishing rather than
+  # delisting. The catalog row itself was flipped to published:false out of band.
   draft: true
   links:
     upstream: https://github.com/NousResearch/hermes-agent

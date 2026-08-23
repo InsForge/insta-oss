@@ -2,10 +2,10 @@
 
 DeepSeek's plugin-composed coding agent, with its browser UI behind an auth gate.
 
-> **This template is a draft and is not in the gallery yet.** Three things are outstanding: no
-> logo has been sourced from upstream, the image has never been built, and no deploy has been
-> QA'd. Upstream also describes itself as a developer preview and warns that there will be
-> compatibility-breaking changes, so a published version needs someone tracking its releases.
+> **This one needs a maintainer watching upstream.** DeepSeek Harness describes itself as a
+> developer preview and says there will be compatibility-breaking changes, and the version pinned
+> here is a release candidate whose transitive dependency ranges float. Treat a version bump as a
+> change that needs re-testing, not as a routine edit.
 
 ## Overview
 
@@ -39,11 +39,23 @@ all, and the Models page renders "settings are unavailable in this browser" with
 and no error logged. Upstream gives up there on the premise that a remote browser could not reach
 those RPCs anyway, which is no longer true once the proxy normalizes `Host`, so the build rewrites
 that one expression to a constant. It changes what the UI offers, not what the API allows: the
-same RPCs are reachable through the gate either way, HTTP basic auth remains the one real
-authentication layer in front of them, and the server's own refusal of cross-site requests is
-left alone. The build asserts the upstream expression appears exactly once before rewriting it, so
-a version bump that restructures it fails the image build instead of quietly shipping a dead
-Models page.
+same RPCs are reachable through the gate either way, the gate in front of them is unchanged, and
+the server's own refusal of cross-site requests is left alone. The build asserts the upstream
+expression appears exactly once before rewriting it, so a version bump that restructures it fails
+the image build instead of quietly shipping a dead Models page.
+
+**Why the gate hands out a cookie.** The UI receives everything the agent does over two
+WebSockets, `/api/events.host` and `/api/events.mux`. `new WebSocket()` takes no headers, so a
+browser can only authenticate that handshake with credentials its own network stack attaches, and
+nothing requires an engine to reuse its HTTP auth cache there. Measured with a page holding valid
+basic credentials, Chromium and Firefox attach them to the handshake and WebKit sends none. Where
+they are not attached both handshakes answer 401, the client retries them forever, and the agent's
+output never reaches the page, even though the page itself and every RPC on it are authenticated
+normally. So the gate mints a cookie on the authenticated responses that do not already carry one,
+and accepts it in place of the password on a WebSocket handshake and nowhere else. Its value is a
+digest of `ACCESS_PASSWORD`, so rotating the password invalidates every cookie issued under the
+old one, and it is `HttpOnly` and `SameSite=Strict`, so no script can read it and it is never
+attached to a cross-site request. Ordinary requests are unaffected: they still need the password.
 
 ## What you get by hosting it
 
@@ -71,11 +83,15 @@ Models page.
 | `DEEPSEEK_API_KEY` | no | The key the agent uses for model calls and for its `web_search` tool. Leave blank to store one from the Models page instead. |
 | `DEEPSEEK_BASE_URL` | no | Points the DeepSeek adapter at a gateway or compatible proxy. Defaults to `https://api.deepseek.com`. |
 | `DSH_PERMISSION_MODE` | no | The agent's file boundary: `read-only`, `workspace-write` (the default), or `danger-full-access`. You should not need to widen it: the sandbox runs through bubblewrap, which the image installs for exactly this reason. |
-| `GIT_TOKEN` | no | Token for cloning private Git repositories. |
+
+There is deliberately no `GIT_TOKEN`. Earlier revisions of this template advertised one, but
+nothing in the harness reads that name, so it configured nothing. To clone a private repository,
+give the agent a URL carrying the token, or write a credential helper under `/data/home`.
 
 Set by the template, not by you: `DSH_HOME=/data/dsh` and `HOME=/data/home` (put all harness
-state on the volume), and `DSH_TELEMETRY_DISABLED=1` (upstream ships session telemetry off by
-default; this is its documented hard switch).
+state on the volume), and `DSH_TELEMETRY_DISABLED=1`. Session telemetry is already off by default
+(`DSH_TELEMETRY_MODE` defaults to `DISABLED`); this disables the row outright. It stops telemetry
+export only, and does not suppress feedback acknowledgement or the DeepSeek provider header.
 
 One thing to know about `DEEPSEEK_API_KEY`: the harness resolves credentials from the process
 environment first, and that layer is deliberately read-only, so a key supplied as a template

@@ -9,7 +9,6 @@ on:
       - "templates/codex/**"
       - "templates/pi/**"
       - "templates/hermes/**"
-      - "templates/deepseek-hermes/**"
       - "templates/dsh/**"
       - ".github/workflows/templates-build-images.yml"
   workflow_dispatch:
@@ -22,8 +21,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      # deepseek-hermes is retired and deliberately absent: `draft: true` exempts it from
+      # version-guard.mjs, so leaving it here would republish deepseek-hermes:1.1.0 unbumped
+      # on the next edit to any template in this matrix.
       matrix:
-        template: [claude-code, codex, pi, hermes, deepseek-hermes, dsh]
+        template: [claude-code, codex, pi, hermes, dsh]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
