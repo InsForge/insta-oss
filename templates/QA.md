@@ -109,9 +109,25 @@ hosted platform runs server-side, so it is the quickest way to check a template 
    after every boot. The two look identical until you restart a machine that has already been used,
    which is what the measurement above does.
 
-   Each entrypoint now warms the global package tree in the background before `exec ttyd`. It reads
-   the whole tree rather than the resolved binary because the three differ in shape: only
-   `claude-code` has its big file at `command -v`, `codex` hides a 251 MB vendor binary behind a
-   7 KB shim, and `pi` has no single large file at all. It is backgrounded because a synchronous
-   read would push the first response past the platform's health-check window, and a template that
-   fails that check is rolled back (finding 3's neighbour: a cold first build already does this).
+   **The cause is the device, and no template can fix it.** The number that settles it involves no
+   CLI at all: on a cold-booted machine, reading that one file is
+
+   ```
+   time cat .../claude-code/bin/claude.exe > /dev/null
+   ->  real 37.429s   user 0.008s   sys 0.384s
+   ```
+
+   37.0s of I/O wait for 331 MB, so **roughly 9 MB/s**. No claude, no ttyd, no network, no
+   credential: just a read. That exonerates the image build, `npm install -g`, the terminal and all
+   three CLIs, and it means every service with a large image pays this on every boot, not only these.
+
+   **A boot-time prewarm was written, deployed and measured, and it does NOT work.** The idea was to
+   read the tree in the background before `exec ttyd` so the cost lands while the user is still
+   opening the URL. Deployed on a branch image and cold-booted, the first `claude --version` was
+   still ~28s. The reason is arithmetic: the prewarm reads through the same 9 MB/s device, so it
+   needs ~37s itself and merely contends with the command it was meant to help. Do not re-try this
+   without first fixing the throughput; the approach is sound only against a fast device.
+
+   What is genuinely left: `alwaysOn: true` matters more than it looks, since every stop charges the
+   cost again, and scale-to-zero would be miserable for these templates. The throughput itself
+   belongs to the platform, not here.
