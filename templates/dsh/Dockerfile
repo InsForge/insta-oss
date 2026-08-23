@@ -3,10 +3,14 @@ FROM node:24-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba32756
 
 # nginx: the auth gate and the only thing that faces the network, because the harness web UI
 # ships no authentication of its own. openssl hashes the password for nginx at boot.
+# bubblewrap is load-bearing, not optional: the harness runs every shell command through a
+# sandbox and falls back to failing closed when it has no runner. Its Landlock runner probes
+# "unusable" on Fly's kernel (verified in a deployed container on 6.12.91-fly), which leaves
+# bwrap as the only one that works there. Without it the agent cannot run a single command.
 # git, curl and procps are for the agent's own shell work. ripgrep is NOT installed: the
 # harness bundles its own through @vscode/ripgrep.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        bash git ca-certificates curl procps nginx-light openssl \
+        bash git ca-certificates curl procps nginx-light openssl bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 
 # pnpm is how `dsh plugin add` installs plugins into a profile, which is the whole point of a

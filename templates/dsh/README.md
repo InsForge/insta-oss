@@ -55,7 +55,7 @@ credential and model-discovery calls to a loopback origin and would otherwise an
 | `ACCESS_PASSWORD` | yes | HTTP basic-auth password for the UI, username `admin`. Generated (16 chars) when left blank; editable afterwards. |
 | `DEEPSEEK_API_KEY` | no | The key the agent uses for model calls and for its `web_search` tool. Leave blank to store one from the Models page instead. |
 | `DEEPSEEK_BASE_URL` | no | Points the DeepSeek adapter at a gateway or compatible proxy. Defaults to `https://api.deepseek.com`. |
-| `DSH_PERMISSION_MODE` | no | The agent's file boundary: `read-only`, `workspace-write` (the default), or `danger-full-access`. Only widen it if the container's sandbox turns out to be unavailable. |
+| `DSH_PERMISSION_MODE` | no | The agent's file boundary: `read-only`, `workspace-write` (the default), or `danger-full-access`. You should not need to widen it: the sandbox runs through bubblewrap, which the image installs for exactly this reason. |
 | `GIT_TOKEN` | no | Token for cloning private Git repositories. |
 
 Set by the template, not by you: `DSH_HOME=/data/dsh` and `HOME=/data/home` (put all harness
