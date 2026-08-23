@@ -55,7 +55,11 @@ normally. So the gate mints a cookie on the authenticated responses that do not 
 and accepts it in place of the password on a WebSocket handshake and nowhere else. Its value is a
 digest of `ACCESS_PASSWORD`, so rotating the password invalidates every cookie issued under the
 old one, and it is `HttpOnly` and `SameSite=Strict`, so no script can read it and it is never
-attached to a cross-site request. Ordinary requests are unaffected: they still need the password.
+attached to a cross-site request. `SameSite` is scoped to the site rather than the host, though,
+and a sibling deployment here is another tenant under the same domain, so its page counts as
+same-site: the gate therefore refuses any handshake whose `Origin` is not this host, which covers
+both the cookie and the basic credentials a browser attaches from its own auth cache. Ordinary
+requests are unaffected: they still need the password.
 
 ## What you get by hosting it
 
