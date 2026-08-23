@@ -44,7 +44,8 @@ because an RGBA file can still be fully opaque.
 | `codex` | `logo.svg` 3.7 KB | yes (vector) | fixed (blue gradient, white glyph) | OpenAI's Codex mark |
 | `pi` | `logo.svg` 618 B | yes (vector) | **adapts** via `prefers-color-scheme` | <https://pi.dev/logo-auto.svg> |
 | `hermes` | `logo.png` 400x400 | **no, opaque black** | fixed | The NousResearch GitHub org avatar (`avatars.githubusercontent.com/u/134168893`). Upstream publishes no transparent product mark: its site and repo carry only a character illustration, a text-glyph favicon, and a 48x48 site icon. A card should put a neutral tile behind this one |
-| `deepseek-hermes` | `logo.svg` 2.1 KB | yes (vector) | fixed `#5786FE` | DeepSeek's mark |
+| `deepseek-hermes` | `logo.svg` 2.1 KB | yes (vector) | fixed `#5786FE` | DeepSeek's mark. Template delisted 2026-08-22, superseded by `dsh` |
+| `dsh` | none yet | n/a | n/a | **Open, and the reason this template is still `draft`.** Upstream ships a `BRAND_GUIDELINES.md` asking projects not to use official brand materials in ways that suggest endorsement, so taking the DeepSeek mark for a third-party one-click deploy is a human decision, not a fetch |
 | `n8n` | `logo.svg` 1.6 KB | yes (vector) | fixed `#EA4B71` | n8n's brand mark |
 | `openclaw` | `logo.svg` 4.6 KB | yes (vector) | fixed; includes a near-black `#050810` element | OpenClaw's mark |
 | `9router` | `logo.png` 500x500 | yes (corner alpha 0) | fixed orange `#F34E21` | 9router's own mark, taken from the copy at `i.imgur.com/yjb5HvR.png`. Upstream's repo PNG (`images/9router.png`) is a 2940x2594 screenshot of the app, not this mark, so that copy is the only place the asset is available. Please do not "correct" this row to the repo URL |

@@ -46,6 +46,12 @@ meta:
   category: ai-agent
   tags: [ai-agent, ai]
   logo: ./logo.svg
+  # Delisted 2026-08-22. HERMES_DEFAULT_MODEL is not a name upstream reads (zero hits in its own
+  # source and docs), so the one line that made this a DeepSeek variant did nothing: deploys ran
+  # the image's built-in default, Claude Opus over OpenRouter, at 218x the output price of the
+  # model the name promises. Superseded by templates/dsh, DeepSeek's own agent harness. Kept
+  # rather than deleted so the code stays reserved and the history stays readable.
+  draft: true
   links:
     upstream: https://github.com/NousResearch/hermes-agent
     documentation: https://hermes-agent.nousresearch.com/docs/

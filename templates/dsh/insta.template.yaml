@@ -1,0 +1,54 @@
+code: dsh
+version: 0.1.0
+maintainer: official
+sourceRepo: InsForge/insta-oss
+
+# Code is `dsh`, not `deepseek-harness`: upstream's BRAND_GUIDELINES.md asks projects not to
+# put the "DeepSeek Harness" trademark in a project name and recommends the DSH abbreviation.
+upstream:
+  repo: deepseek-ai/deepseek-harness
+  package: "@deepseek-ai/dsh"
+  pinned: "0.1.1-rc.2"
+  license: MIT
+
+services:
+  harness:
+    type: web
+    image: ghcr.io/insforge/insta-oss/templates/dsh:0.1.0   # built from ./Dockerfile by templates-build-images.yml
+    port: 8080
+    healthcheck: /             # nginx answers 401 unauthenticated, which counts as healthy
+    spec: 1vcpu-1gb            # measured 188 MB at boot peak before any model turn (QA.md: "512 MB is not enough for an agent CLI")
+    volume:
+      size: 1                  # mounts at /data
+    env:
+      fixed:
+        HOME: /data/home
+        DSH_HOME: /data/dsh              # single root: settings, credentials, sessions, storages, profiles
+        DSH_TELEMETRY_DISABLED: "1"      # session telemetry ships off; this is upstream's hard switch
+      required:
+        ACCESS_PASSWORD:
+          generate: secret:16
+          editable: true
+          description: "Password for the web UI (username: admin). Generated if left blank"
+      optional:
+        DEEPSEEK_API_KEY:
+          description: "DeepSeek API key (platform.deepseek.com). Leave blank to store it from the UI's Models page instead"
+        DEEPSEEK_BASE_URL:
+          description: "DeepSeek endpoint override, for a gateway or compatible proxy. Defaults to https://api.deepseek.com"
+        DSH_PERMISSION_MODE:
+          description: "Agent file boundary: read-only, workspace-write (default), or danger-full-access. Widen it only if the container sandbox is unavailable"
+        GIT_TOKEN:
+          description: "Token for cloning private Git repositories"
+
+meta:
+  name: DeepSeek Harness
+  tagline: Plugin-composed coding agent with a browser UI
+  category: ai-agent
+  tags: [ai-agent, ai]
+  # Draft for three reasons, all recorded in NOTES.md: no logo has been sourced, the image has
+  # never been built, and no deploy has been QA'd. Upstream is also a self-declared developer
+  # preview promising compatibility-breaking changes.
+  draft: true
+  links:
+    upstream: https://github.com/deepseek-ai/deepseek-harness
+    documentation: https://github.com/deepseek-ai/deepseek-harness#readme
