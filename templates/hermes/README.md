@@ -1,5 +1,7 @@
 # Hermes Agent
 
+[![Deploy on InstaCloud](https://www.instacloud.com/deploy-badge.svg)](https://www.instacloud.com/templates/hermes)
+
 Autonomous AI agent from Nous Research, driven from Telegram.
 
 ## Overview

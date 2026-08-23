@@ -17,7 +17,10 @@ IS the template code. Copying the closest existing template is the fastest way t
   get by hosting it, what you need before deploying, Configuration (a row per variable saying what
   it does and where the value comes from), After deploy (how to actually start using it), and
   Links (upstream, the image or package, the license). A draft template opens with a note saying
-  why it is draft.
+  why it is draft. A published template puts the deploy badge on the line under its h1, linking
+  to its gallery page:
+  `[![Deploy on InstaCloud](https://www.instacloud.com/deploy-badge.svg)](https://www.instacloud.com/templates/<code>)`.
+  A draft omits the badge, because its gallery page does not exist until it publishes.
 - `logo.svg`: the template's mark, and a **hard requirement for a publishable template**. CI
   rejects a non-draft template without one. Declare the path as `meta.logo: ./logo.svg` and CI
   checks that it resolves. Details and the reasoning are under [Logos](#logos).

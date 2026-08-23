@@ -1,5 +1,7 @@
 # DeepSeek Hermes
 
+[![Deploy on InstaCloud](https://www.instacloud.com/deploy-badge.svg)](https://www.instacloud.com/templates/deepseek-hermes)
+
 Hermes Agent preconfigured for DeepSeek models.
 
 ## Overview

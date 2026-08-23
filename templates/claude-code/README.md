@@ -1,5 +1,7 @@
 # Claude Code
 
+[![Deploy on InstaCloud](https://www.instacloud.com/deploy-badge.svg)](https://www.instacloud.com/templates/claude-code)
+
 Anthropic's coding agent: edits files, runs commands, browser terminal.
 
 ## Overview

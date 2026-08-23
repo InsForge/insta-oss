@@ -1,5 +1,7 @@
 # Pi Coding Agent
 
+[![Deploy on InstaCloud](https://www.instacloud.com/deploy-badge.svg)](https://www.instacloud.com/templates/pi)
+
 Coding agent CLI with session history and a browser terminal.
 
 ## Overview

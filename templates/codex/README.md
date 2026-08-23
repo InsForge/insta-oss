@@ -1,5 +1,7 @@
 # Codex
 
+[![Deploy on InstaCloud](https://www.instacloud.com/deploy-badge.svg)](https://www.instacloud.com/templates/codex)
+
 OpenAI's lightweight coding agent in a browser terminal.
 
 ## Overview
