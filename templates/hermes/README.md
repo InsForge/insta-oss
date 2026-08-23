@@ -29,8 +29,9 @@ The dashboard is what the service URL serves; Telegram is how you give the agent
 - An [OpenRouter API key](https://openrouter.ai/keys). The agent calls models through OpenRouter.
 - A Telegram bot token, created with [@BotFather](https://t.me/BotFather): send `/newbot`, pick a
   name and a username ending in `bot`, and it replies with the token.
-- The Telegram usernames allowed to use the bot. Yours is under Settings in any Telegram client,
-  **without** the leading `@`. Comma-separate several. Without this the bot has no authorised users.
+- The **numeric** Telegram user IDs allowed to use the bot, not @usernames. Message
+  [@userinfobot](https://t.me/userinfobot) and it replies with yours. Comma-separate several.
+  A username here does not match anything, and the bot silently ignores you.
 
 ## Configuration
 
@@ -39,7 +40,7 @@ The dashboard is what the service URL serves; Telegram is how you give the agent
 | `ACCESS_PASSWORD` | generated | Dashboard password for `admin`; blank mints one. |
 | `OPENROUTER_API_KEY` | yes | Key the agent uses for model calls. Get one at <https://openrouter.ai/keys>. |
 | `TELEGRAM_BOT_TOKEN` | yes | Token for the bot that receives your tasks. Create the bot with @BotFather. |
-| `TELEGRAM_ALLOWED_USERS` | yes | Comma-separated Telegram usernames allowed to use the bot. |
+| `TELEGRAM_ALLOWED_USERS` | yes | Comma-separated **numeric** Telegram user IDs allowed to use the bot. Not @usernames: the adapter compares the user id and never reads the username. Get yours from @userinfobot. |
 | `HERMES_GATEWAY_TOKEN` | generated | Generated 64-character token; you do not set this. |
 
 Set by the template, not by you: `HERMES_HOME=/data/.hermes` (state on the volume) and
@@ -49,7 +50,7 @@ Set by the template, not by you: `HERMES_HOME=/data/.hermes` (state on the volum
 
 1. Wait for the health check on `/api/status` to pass, then open the service URL to reach the
    dashboard.
-2. Open Telegram and message your bot from one of the usernames in `TELEGRAM_ALLOWED_USERS`.
+2. Open Telegram and message your bot from one of the user IDs in `TELEGRAM_ALLOWED_USERS`.
    Messages from anyone else are ignored.
 3. Give the agent a task in the chat. Progress and history are visible in the dashboard.
 4. State lives under `/data/.hermes`, so restarts and redeploys keep the agent's memory. Deleting

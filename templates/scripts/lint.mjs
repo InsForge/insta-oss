@@ -86,6 +86,10 @@ for (const dir of dirs) {
     if (svc.spec !== undefined && !COMPUTE_SPECS.includes(String(svc.spec))) {
       err(dir, `${name}: unknown compute spec '${svc.spec}' (one of: ${COMPUTE_SPECS.join(", ")})`);
     }
+    // Same message the platform uses. Catches the shape only: a misspelled key is silent on both sides.
+    if (svc.alwaysOn !== undefined && typeof svc.alwaysOn !== "boolean") {
+      err(dir, `${name}: alwaysOn must be a boolean`);
+    }
     // rule 2: required vars need description (unless generated)
     for (const [k, spec] of Object.entries(svc.env?.required ?? {})) {
       if (!spec?.generate && !spec?.description) err(dir, `required var ${k} needs a description`);
