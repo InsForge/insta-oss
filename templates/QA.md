@@ -97,8 +97,8 @@ hosted platform runs server-side, so it is the quickest way to check a template 
    ```
 
    `--version` touches no network, no credential and no session, so 27.8s of I/O wait is the cost
-   of reading a 331 MB native binary off the device at roughly 12 MB/s. Warm, the same command is
-   0.2s. Five plausible explanations were each killed by measurement first: doubling to `2vcpu-2gb`
+   of reading a 331 MB native binary off a device that turned out to serve about 9 MB/s. Warm, the
+   same command is 0.16s. Five plausible explanations were each killed by measurement first: doubling to `2vcpu-2gb`
    changed nothing (the bottleneck is throughput, not compute); `HOME` on local disk instead of the
    volume changed nothing (the binary lives on the image rootfs); `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
    `DISABLE_AUTOUPDATER`, `DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING` together changed nothing
