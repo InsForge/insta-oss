@@ -57,8 +57,10 @@ digest of `ACCESS_PASSWORD`, so rotating the password invalidates every cookie i
 old one, and it is `HttpOnly` and `SameSite=Strict`, so no script can read it and it is never
 attached to a cross-site request. `SameSite` is scoped to the site rather than the host, though,
 and a sibling deployment here is another tenant under the same domain, so its page counts as
-same-site: the gate therefore refuses any handshake whose `Origin` is not this host, which covers
-both the cookie and the basic credentials a browser attaches from its own auth cache. Ordinary
+same-site. Cookies ignore ports too, so a second app on another port of one hostname is the same
+case again. The gate therefore refuses any handshake whose `Origin` is not this deployment's own,
+port included, which covers both the cookie and the basic credentials a browser attaches from its
+own auth cache. Ordinary
 requests are unaffected: they still need the password.
 
 ## What you get by hosting it
