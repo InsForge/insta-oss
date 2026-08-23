@@ -29,7 +29,6 @@ gives you the same environment.
 - Nothing mandatory. The access password is generated for you if you leave it blank.
 - Optionally, an [Anthropic API key](https://console.anthropic.com/): otherwise you sign in from
   inside the terminal with `claude login`, which is the normal path for a Claude subscription.
-- Optionally, a Git token if you plan to clone private repositories.
 
 ## Configuration
 

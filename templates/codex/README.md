@@ -28,7 +28,6 @@ same environment.
 - Nothing mandatory. The access password is generated for you if you leave it blank.
 - Optionally, an [OpenAI API key](https://platform.openai.com/api-keys): otherwise you sign in
   from inside the terminal with `codex login`.
-- Optionally, a Git token if you plan to clone private repositories.
 
 ## Configuration
 

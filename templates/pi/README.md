@@ -29,7 +29,6 @@ restart gives you the same environment.
 - Nothing mandatory. The access password is generated for you if you leave it blank.
 - A model provider key if you want it present from the first boot. Pi accepts keys from several
   providers, and they can also be configured from inside the terminal.
-- Optionally, a Git token if you plan to clone private repositories.
 
 ## Configuration
 
