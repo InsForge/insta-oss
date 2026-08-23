@@ -15,6 +15,7 @@ cd "$HOME"
 # In the background, and before ttyd rather than after: reading it synchronously would push the
 # first response past the platform's health-check window, and a template that fails its health
 # check gets rolled back (QA.md). tar reads every byte with one process and writes nothing.
+# Leaves one zombie: ttyd is PID 1 and does not reap. Costs a PID slot, nothing else.
 ( tar -cf /dev/null -C "$(npm root -g)" . 2>/dev/null & )
 
 exec ttyd -p 7681 -W -c "admin:${ACCESS_PASSWORD:?ACCESS_PASSWORD is required}" bash

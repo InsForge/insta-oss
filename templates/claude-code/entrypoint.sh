@@ -16,6 +16,7 @@ cd "$HOME"
 # The whole global tree, not the resolved binary: codex's `command -v` target is a 7 KB shim in
 # front of a 251 MB vendor binary, and pi has no single large file at all. tar reads every byte
 # with one process and writes nothing.
+# Leaves one zombie: ttyd is PID 1 and does not reap. Costs a PID slot, nothing else.
 ( tar -cf /dev/null -C "$(npm root -g)" . 2>/dev/null & )
 
 exec ttyd -p 7681 -W -c "admin:${ACCESS_PASSWORD:?ACCESS_PASSWORD is required}" bash

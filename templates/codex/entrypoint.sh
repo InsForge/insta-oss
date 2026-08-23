@@ -15,6 +15,7 @@ cd "$HOME"
 #
 # The whole global tree rather than one path, because the large files are vendored several levels
 # down. tar reads every byte with one process and writes nothing.
+# Leaves one zombie: ttyd is PID 1 and does not reap. Costs a PID slot, nothing else.
 ( tar -cf /dev/null -C "$(npm root -g)" . 2>/dev/null & )
 
 exec ttyd -p 7681 -W -c "admin:${ACCESS_PASSWORD:?ACCESS_PASSWORD is required}" bash
