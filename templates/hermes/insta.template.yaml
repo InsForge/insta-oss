@@ -1,5 +1,5 @@
 code: hermes
-version: 1.2.0
+version: 1.2.1
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -16,7 +16,7 @@ generated:
 services:
   hermes:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/hermes:1.2.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/hermes:1.2.1   # built from ./Dockerfile by templates-build-images.yml
     port: 8080
     healthcheck: /api/status
     # Headroom, not a crash fix: 331 MB of 459 MB and pressure "elevated" while idle at 512 MB.
@@ -52,7 +52,7 @@ meta:
   tagline: Autonomous AI agent from Nous Research, driven from Telegram
   category: ai-agent
   tags: [ai-agent, ai]
-  logo: ./logo.png
+  logo: ./logo.png              # 512x512, real transparency; see the attribution table in ../README.md
   links:
     upstream: https://github.com/NousResearch/hermes-agent
     documentation: https://hermes-agent.nousresearch.com/docs/

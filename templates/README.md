@@ -43,7 +43,7 @@ because an RGBA file can still be fully opaque.
 | `claude-code` | `logo.svg` 2.5 KB | yes (vector) | fixed `#D97757` | Anthropic's Claude Code mark |
 | `codex` | `logo.svg` 3.7 KB | yes (vector) | fixed (blue gradient, white glyph) | OpenAI's Codex mark |
 | `pi` | `logo.svg` 618 B | yes (vector) | **adapts** via `prefers-color-scheme` | <https://pi.dev/logo-auto.svg> |
-| `hermes` | `logo.png` 400x400 | **no, opaque black** | fixed | The NousResearch GitHub org avatar (`avatars.githubusercontent.com/u/134168893`). Upstream publishes no transparent product mark: its site and repo carry only a character illustration, a text-glyph favicon, and a 48x48 site icon. A card should put a neutral tile behind this one |
+| `hermes` | `logo.png` 512x512 | yes (corner alpha 0) | fixed light plate | Upstream's own app icon, `apps/desktop/assets/icon.png` at 1024x1024, downscaled. This row used to name the NousResearch GitHub org avatar and claim upstream published no transparent mark; that icon disproves it. No vector option: upstream's only SVG is a bare `⚕` glyph in the default font, which the rules below reject. Stored greyscale+alpha, halving the bytes for a max difference of 3/255 on a single pixel. The white plate is part of the artwork, not a background: the character's face is the plate showing through, so cutting it out would erase the face |
 | `deepseek-hermes` | `logo.svg` 2.1 KB | yes (vector) | fixed `#5786FE` | DeepSeek's mark |
 | `n8n` | `logo.svg` 1.6 KB | yes (vector) | fixed `#EA4B71` | n8n's brand mark |
 | `openclaw` | `logo.svg` 4.6 KB | yes (vector) | fixed; includes a near-black `#050810` element | OpenClaw's mark |
