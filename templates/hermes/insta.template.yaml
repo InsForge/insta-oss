@@ -19,10 +19,10 @@ services:
     image: ghcr.io/insforge/insta-oss/templates/hermes:1.2.0   # built from ./Dockerfile by templates-build-images.yml
     port: 8080
     healthcheck: /api/status
-    # Top of the ladder, and still inside the free ceiling (4 vCPU / 4 GB).
-    # Born-at 1 vCPU / 512 MB is not enough: the dashboard plus the agent runs
-    # out of memory and stops answering, which the health gate cannot see.
+    # Headroom, not a crash fix: 331 MB of 459 MB and pressure "elevated" while idle at 512 MB.
     spec: 2vcpu-2gb
+    # Telegram arrives on an OUTBOUND long poll, so an idle machine stops and nothing can wake it.
+    alwaysOn: true
     volume:
       size: 1
     env:
@@ -41,9 +41,11 @@ services:
         TELEGRAM_BOT_TOKEN:
           description: "Telegram bot token, created with @BotFather"
         TELEGRAM_ALLOWED_USERS:
-          description: "Comma-separated Telegram usernames allowed to use the bot"
+          # The adapter compares user ids and never reads usernames; the old wording silently locked owners out.
+          description: "Comma-separated numeric Telegram user IDs allowed to use the bot (not @usernames; get yours from @userinfobot)"
 
-# No provider oneOf: OPENROUTER_API_KEY is required, and upstream documents no provider env names (QA.md: "no provider `oneOf` constraint")
+# No provider oneOf: OPENROUTER_API_KEY is simply required. Upstream DOES document ~30 provider env
+# names (this note used to claim otherwise); pinning a model needs `hermes config set model.default`.
 
 meta:
   name: Hermes Agent
