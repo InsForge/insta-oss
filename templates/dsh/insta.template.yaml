@@ -27,6 +27,8 @@ services:
         # Belt to DSH_TELEMETRY_MODE, which already defaults to DISABLED: any non-empty value here
         # disables the session-telemetry row outright. Export only, per dsh-anonymous-user-id:
         # it does not suppress feedback acknowledgement or the DeepSeek provider header.
+        # Both live in the bundled node_modules, not the package root: dsh-base/cordis.patch.yml
+        # reads MODE, and profile-boot-*.js resolveTelemetryPatch applies the disable.
         DSH_TELEMETRY_DISABLED: "1"
       required:
         ACCESS_PASSWORD:
