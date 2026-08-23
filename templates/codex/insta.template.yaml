@@ -1,5 +1,5 @@
 code: codex
-version: 0.4.0
+version: 0.5.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -10,9 +10,11 @@ upstream:
   license: Apache-2.0
 
 services:
-  workspace:
+  # Named for the template, not "workspace": three templates sharing one service name collided on
+  # the same branch, the second overwriting the first (QA.md finding 1).
+  codex:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/codex:0.4.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/codex:0.5.0   # built from ./Dockerfile by templates-build-images.yml
     port: 7681
     healthcheck: /
     spec: 1vcpu-1gb              # created at 1GB (QA.md: "512 MB is not enough for an agent CLI")

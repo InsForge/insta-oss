@@ -19,10 +19,14 @@ hosted platform runs server-side, so it is the quickest way to check a template 
 
 ## Findings
 
-1. **Two templates on one branch can collide on a service name.** `codex` and `pi` both declare a
+1. **Two templates on one branch can collide on a service name.** `codex` and `pi` both declared a
    service called `workspace`, so deploying both onto the same branch made the second overwrite the
    first: same service group, same URL. This is why a template deploy defaults to a fresh branch.
    Give a service a name that reads naturally for your template rather than copying `workspace`.
+   **Fixed at 0.5.0**: `claude-code`, `codex` and `pi` now name their service after the template, so
+   the three no longer collide. The name is also what the console shows, which is why a deploy of
+   `claude-code` used to present itself as "workspace". Services already deployed keep the old name;
+   renaming one is not something a template version can do.
 
 2. **Canonical image tags publish only from `main`.** `templates-build-images.yml` pushes
    `sha-*` and `branch-*` tags from a branch, and the version tag the manifest references only on
@@ -82,3 +86,32 @@ hosted platform runs server-side, so it is the quickest way to check a template 
    an interactive terminal is worse than starting small. `claude-code`, `codex` and `pi` therefore
    declare `spec: 1vcpu-1gb`, which the platform honours at creation, so no resize happens at all.
    The valid names come from the platform's own catalog; `npm run lint` mirrors the list.
+
+8. **The first CLI run after every boot costs ~28s, and it is I/O, not the CLI.** A user reported
+   that typing `claude` in a fresh deployment took at least 30 seconds, and that later runs were
+   instant. Measured on a live 1vcpu-1gb deployment, stopped and started so the page cache was cold
+   while `$HOME` on the volume already held the CLI's config:
+
+   ```
+   time claude --version   ->  real 28.321s   user 0.235s   sys 0.284s
+   ```
+
+   `--version` touches no network, no credential and no session, so 27.8s of I/O wait is the cost
+   of reading a 331 MB native binary off the device at roughly 12 MB/s. Warm, the same command is
+   0.2s. Five plausible explanations were each killed by measurement first: doubling to `2vcpu-2gb`
+   changed nothing (the bottleneck is throughput, not compute); `HOME` on local disk instead of the
+   volume changed nothing (the binary lives on the image rootfs); `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
+   `DISABLE_AUTOUPDATER`, `DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING` together changed nothing
+   (it is not network); the machine never scaled to zero (`alwaysOn` holds, and the lifecycle log
+   shows no stop); and memory never came under pressure (peak 377 MB of 1024 MB, zero swap).
+
+   The distinction that took longest to see: this is **not** a one-time first-ever cost, it recurs
+   after every boot. The two look identical until you restart a machine that has already been used,
+   which is what the measurement above does.
+
+   Each entrypoint now warms the global package tree in the background before `exec ttyd`. It reads
+   the whole tree rather than the resolved binary because the three differ in shape: only
+   `claude-code` has its big file at `command -v`, `codex` hides a 251 MB vendor binary behind a
+   7 KB shim, and `pi` has no single large file at all. It is backgrounded because a synchronous
+   read would push the first response past the platform's health-check window, and a template that
+   fails that check is rolled back (finding 3's neighbour: a cold first build already does this).
