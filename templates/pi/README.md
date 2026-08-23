@@ -29,7 +29,6 @@ restart gives you the same environment.
 - Nothing mandatory. The access password is generated for you if you leave it blank.
 - A model provider key if you want it present from the first boot. Pi accepts keys from several
   providers, and they can also be configured from inside the terminal.
-- Optionally, a Git token if you plan to clone private repositories.
 
 ## Configuration
 
@@ -37,7 +36,6 @@ restart gives you the same environment.
 |---|---|---|
 | `ACCESS_PASSWORD` | yes | HTTP basic-auth password for the terminal, username `admin`. Generated (16 chars) when left blank; editable afterwards. |
 | `ANTHROPIC_API_KEY` | no | Model provider key available to the CLI at startup. Pi accepts keys from several providers, configurable in the terminal. |
-| `GIT_TOKEN` | no | Token for cloning private Git repositories. |
 
 Set by the template, not by you: `HOME=/data/home` (puts your home directory on the volume).
 
