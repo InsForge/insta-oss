@@ -39,13 +39,17 @@ RUN npm install -g @deepseek-ai/dsh@${DSH_VERSION}
 # credentials.set are reachable through the gate either way, so the basic-auth gate stays the one
 # real authentication layer, and the server's own rejection of cross-site requests is untouched.
 # Asserted rather than best-effort: the pattern must appear exactly once, so a version bump that
-# restructures it fails the build here instead of shipping a silently dead Models page.
+# restructures it fails the build here instead of shipping a silently dead Models page. Counted
+# with `grep -oF` rather than `grep -cF` because -c counts matching LINES: if a future release
+# ships this file minified with the guard twice on one physical line, a line count would still
+# read 1 and the rewrite would silently miss the second copy.
 RUN set -eu; \
     f="$(find "$(npm root -g)" -type f -path '*dsh-client-connection/lib/client.js' -print -quit)"; \
     test -n "$f"; \
     needle='isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname),'; \
-    test "$(grep -cF "$needle" "$f")" = 1; \
-    sed -i "s#$needle#isLoopback: true,#" "$f"; \
+    test "$(grep -oF "$needle" "$f" | wc -l)" -eq 1; \
+    sed -i "s#$needle#isLoopback: true,#g" "$f"; \
+    test "$(grep -oF "$needle" "$f" | wc -l)" -eq 0; \
     grep -qF 'isLoopback: true,' "$f"; \
     echo "relaxed the client-side loopback guard in $f"
 
