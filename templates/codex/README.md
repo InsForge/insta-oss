@@ -36,7 +36,6 @@ same environment.
 |---|---|---|
 | `ACCESS_PASSWORD` | yes | HTTP basic-auth password for the terminal, username `admin`. Generated (16 chars) when left blank; editable afterwards. |
 | `OPENAI_API_KEY` | no | Authenticates the CLI without an interactive login. Leave blank to run `codex login` in the terminal instead. |
-| `GIT_TOKEN` | no | Token for cloning private Git repositories. |
 
 Set by the template, not by you: `HOME=/data/home` (puts your home directory on the volume).
 

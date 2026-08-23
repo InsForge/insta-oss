@@ -1,5 +1,5 @@
 code: pi
-version: 0.3.0
+version: 0.4.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -12,10 +12,12 @@ upstream:
 services:
   workspace:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/pi:0.3.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/pi:0.4.0   # built from ./Dockerfile by templates-build-images.yml
     port: 7681
     healthcheck: /
     spec: 1vcpu-1gb              # created at 1GB (QA.md: "512 MB is not enough for an agent CLI")
+    # A volume makes scale-to-zero a cold boot, not a resume (24.5s measured).
+    alwaysOn: true
     volume:
       size: 1
     env:
@@ -29,8 +31,6 @@ services:
       optional:
         ANTHROPIC_API_KEY:
           description: "Anthropic API key. Pi accepts keys from several providers, configurable in the terminal"
-        GIT_TOKEN:
-          description: "Token for cloning private Git repositories"
 
 meta:
   name: Pi Coding Agent

@@ -37,7 +37,6 @@ restart gives you the same environment.
 |---|---|---|
 | `ACCESS_PASSWORD` | yes | HTTP basic-auth password for the terminal, username `admin`. Generated (16 chars) when left blank; editable afterwards. |
 | `ANTHROPIC_API_KEY` | no | Model provider key available to the CLI at startup. Pi accepts keys from several providers, configurable in the terminal. |
-| `GIT_TOKEN` | no | Token for cloning private Git repositories. |
 
 Set by the template, not by you: `HOME=/data/home` (puts your home directory on the volume).
 
