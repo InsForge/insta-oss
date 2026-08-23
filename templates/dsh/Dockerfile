@@ -23,6 +23,32 @@ RUN npm install -g pnpm@${PNPM_VERSION}
 ARG DSH_VERSION=0.1.1-rc.2
 RUN npm install -g @deepseek-ai/dsh@${DSH_VERSION}
 
+# Without this the Settings -> Models page is dead behind a public hostname, and the cause is in
+# the browser rather than in the proxy. dsh-client-connection derives `isLoopback` from the PAGE's
+# own location.hostname, and dsh-client-ui-settings then builds its settings mirror in "memory"
+# mode whenever that is false. In memory mode both `ensure()` and `load()` return an already
+# resolved promise on their first line, so the mirror stays frozen at its constructed
+# {status:"unavailable", view:undefined, error:null} and `settings.describe` is never sent at all.
+# The Models pane reads that empty snapshot and renders "settings are unavailable in this browser"
+# with no request made and no console error, which is why the failure looks like nothing happening.
+# Upstream's premise for giving up is that a remote browser could not use those RPCs anyway,
+# because the server pins the 15 privileged methods to a loopback Host. This image already
+# satisfies that server-side fence with the Host rewrite in nginx.conf, so the client-side guard is
+# the only thing still refusing, and it refuses on a premise that no longer holds here.
+# This changes what the UI is willing to offer, not what the API allows: settings.describe and
+# credentials.set are reachable through the gate either way, so the basic-auth gate stays the one
+# real authentication layer, and the server's own rejection of cross-site requests is untouched.
+# Asserted rather than best-effort: the pattern must appear exactly once, so a version bump that
+# restructures it fails the build here instead of shipping a silently dead Models page.
+RUN set -eu; \
+    f="$(find "$(npm root -g)" -type f -path '*dsh-client-connection/lib/client.js' -print -quit)"; \
+    test -n "$f"; \
+    needle='isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname),'; \
+    test "$(grep -cF "$needle" "$f")" = 1; \
+    sed -i "s#$needle#isLoopback: true,#" "$f"; \
+    grep -qF 'isLoopback: true,' "$f"; \
+    echo "relaxed the client-side loopback guard in $f"
+
 # The grep and glob tools resolve ripgrep from an optional per-platform package, and a missing
 # optional dependency is silent at install and only fails when the model calls the tool. Fail
 # the build instead. `dsh --version` separately proves the bin and its 450+ deps load at all.

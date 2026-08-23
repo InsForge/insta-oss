@@ -30,6 +30,21 @@ and `Origin` headers to the loopback authority, because the harness pins its set
 credential and model-discovery calls to a loopback origin and would otherwise answer them with
 403 from behind a public hostname.
 
+**Why the image relaxes one client-side check.** Rewriting those headers is only half of what the
+Settings and Models pages need, because the harness applies the same loopback test twice. The
+server pins its 15 privileged RPCs to a loopback `Host`, which the rewrite above satisfies, and
+the browser bundle separately reads the page's own `location.hostname`. When that is not loopback
+the settings mirror is built in a memory-only mode where it never sends `settings.describe` at
+all, and the Models page renders "settings are unavailable in this browser" with no request made
+and no error logged. Upstream gives up there on the premise that a remote browser could not reach
+those RPCs anyway, which is no longer true once the proxy normalizes `Host`, so the build rewrites
+that one expression to a constant. It changes what the UI offers, not what the API allows: the
+same RPCs are reachable through the gate either way, HTTP basic auth remains the one real
+authentication layer in front of them, and the server's own refusal of cross-site requests is
+left alone. The build asserts the upstream expression appears exactly once before rewriting it, so
+a version bump that restructures it fails the image build instead of quietly shipping a dead
+Models page.
+
 ## What you get by hosting it
 
 - An HTTPS URL for the harness UI, gated by HTTP basic auth, with no port forwarding or tunnel.
