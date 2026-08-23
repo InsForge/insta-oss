@@ -66,7 +66,13 @@ dsh_pid=$!
 
 # Both halves are fatal. Backgrounding nginx under `exec dsh` used to mean a dead nginx left the
 # container up with an unreachable URL, which reads as a mystery timeout instead of a failure.
-trap 'kill -TERM "$nginx_pid" "$dsh_pid" 2>/dev/null || true' TERM INT
+stopping=""
+trap 'stopping=1; kill -TERM "$nginx_pid" "$dsh_pid" 2>/dev/null || true' TERM INT
 wait -n || true
+
+# A signal is an orderly stop, so only a child dying on its own is a failure.
+if [[ -n "$stopping" ]]; then
+    exit 0
+fi
 echo "entrypoint: nginx or dsh exited, stopping the container" >&2
 exit 1

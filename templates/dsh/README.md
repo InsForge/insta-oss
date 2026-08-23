@@ -5,7 +5,8 @@ DeepSeek's plugin-composed coding agent, with its browser UI behind an auth gate
 > **This one needs a maintainer watching upstream.** DeepSeek Harness describes itself as a
 > developer preview and says there will be compatibility-breaking changes, and the version pinned
 > here is a release candidate whose transitive dependency ranges float. Treat a version bump as a
-> change that needs re-testing, not as a routine edit.
+> change that needs re-testing, not as a routine edit: `gate-assertions.mjs` in this directory is
+> that re-test, and the image build asserts the env names and the client patch it depends on.
 
 ## Overview
 
@@ -60,8 +61,13 @@ and a sibling deployment here is another tenant under the same domain, so its pa
 same-site. Cookies ignore ports too, so a second app on another port of one hostname is the same
 case again. The gate therefore refuses any handshake whose `Origin` is not this deployment's own,
 port included, which covers both the cookie and the basic credentials a browser attaches from its
-own auth cache. Ordinary
-requests are unaffected: they still need the password.
+own auth cache. Ordinary requests are unaffected: they still need the password.
+
+The agent runs as root in its own container, so the shell commands the model chooses can read the
+gate's password file and the cookie token derived from it, even though the entrypoint unsets
+`ACCESS_PASSWORD` before starting anything. Neither grants the agent more than it already has
+inside that container, but they outlive the session that read them, so rotating `ACCESS_PASSWORD`
+is the recovery path after any suspected compromise of the agent.
 
 ## What you get by hosting it
 

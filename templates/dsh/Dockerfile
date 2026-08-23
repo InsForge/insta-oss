@@ -49,12 +49,20 @@ RUN set -eu; \
 
 # Every env name this template sets or documents, asserted against the tree that reads them.
 # GIT_TOKEN was advertised for four commits and read by nothing; this is how that stops recurring.
-# Markdown is excluded so a name surviving only in a changelog cannot pass.
+# JSON is excluded alongside Markdown: a name surviving only in a package manifest is not a read.
+# Rooted at the dsh package because npm nests this tree; nothing else sits under the global root.
+# The two names upstream takes straight off process.env are asserted in that form, which is what
+# separates a consumed name from a mentioned one. The rest reach it through a string constant
+# (`BASE_URL_ENV = "DEEPSEEK_BASE_URL"`), so the bare name is the only thing there is to match.
 RUN set -eu; \
     root="$(npm root -g)/@deepseek-ai/dsh"; \
     for v in DSH_HOME DSH_TELEMETRY_DISABLED DSH_PERMISSION_MODE DEEPSEEK_API_KEY DEEPSEEK_BASE_URL; do \
-        grep -rqF --include='*.js' --include='*.yml' --include='*.json' "$v" "$root" \
+        grep -rqF --include='*.js' --include='*.yml' "$v" "$root" \
             || { echo "env name $v is read by nothing in dsh ${DSH_VERSION}"; exit 1; }; \
+    done; \
+    for v in DSH_TELEMETRY_DISABLED DSH_PERMISSION_MODE; do \
+        grep -rqF --include='*.js' --include='*.yml' "process.env.$v" "$root" \
+            || { echo "env name $v is no longer read off process.env in dsh ${DSH_VERSION}"; exit 1; }; \
     done; \
     echo "all documented env names are read by dsh ${DSH_VERSION}"
 

@@ -83,3 +83,14 @@ hosted platform runs server-side, so it is the quickest way to check a template 
    an interactive terminal is worse than starting small. `claude-code`, `codex` and `pi` therefore
    declare `spec: 1vcpu-1gb`, which the platform honours at creation, so no resize happens at all.
    The valid names come from the platform's own catalog; `npm run lint` mirrors the list.
+
+8. **A `healthcheck` in front of an auth gate reports the gate, not the app.** `dsh` puts nginx in
+   front of the harness, and `healthcheck: /` is satisfied by nginx's unauthenticated 401 alone
+   (`scripts/deploy.mjs` accepts any status under 500). So the deploy goes green as soon as nginx
+   binds, while authenticated requests still 502 for the 40 to 50 seconds the harness takes to
+   start listening, and a rollback cannot protect against a harness that never comes up at all.
+   Making it real needs an unauthenticated location that only answers once the app is listening,
+   for example a `location = /_up` with `auth_basic off` proxying upstream. The tradeoff is that
+   this serves the SPA shell to anyone who asks, with every RPC still behind the gate, so it is a
+   judgement rather than a free fix, and it changes what gates a deploy. Left as it is for now;
+   anyone touching the health contract should know the current one only proves nginx is up.
