@@ -2,10 +2,25 @@
 
 Visual workflow automation with 400+ integrations.
 
-> **Draft, not published.** This template declares a managed `postgres` service, and the current
-> platform template executor deploys web services only, so publishing it is rejected. It will be
-> published once the managed-database service type is
-> supported in a template manifest.
+> **Draft, not published.** The image deploys and n8n serves, but two things keep it out of the
+> catalog, both measured on prod on 2026-08-24 against `n8nio/n8n:2.36.5`.
+>
+> 1. **The managed database cannot be wired from a manifest.** n8n reads its database as five
+>    separate variables (`DB_POSTGRESDB_HOST`, `PORT`, `DATABASE`, `USER`, `PASSWORD`) and reads no
+>    connection-string variable at all: grepping the shipped image for one returns nothing but a
+>    docs link. A managed postgres mints exactly one credential, `DATABASE_URL`, and
+>    `env.platform` can only rename a minted credential, never split it. So the `db` service below
+>    provisions and binds correctly, and n8n still cannot reach it. The fix belongs in the
+>    platform, which already splits `redis`, `mysql` and `mongodb` into host/user/password keys and
+>    leaves postgres as the only type that is URL-only. Wiring the parts by hand proved the rest
+>    works: n8n created its 132 tables and ran 246 migrations against the managed instance.
+> 2. **The first deploy does not fit the health-check budget.** A first deploy gets 60s to answer
+>    on its port. Pulling this image took 51s and n8n then needed 17s to bind, so the deploy failed
+>    twice and the machine was destroyed both times. A redeploy over a live machine gets a larger
+>    budget and succeeds, which is not a path a first-time user has.
+>
+> Neither is fixable from this directory, and neither is a reason to wrap the image: n8n is
+> fair-code, and this registry references the official image rather than rebuilding it.
 
 ## Overview
 
@@ -14,16 +29,16 @@ connecting apps and APIs, and drop into code only where you need it. Upstream de
 fair-code workflow automation with native AI capabilities and 400+ integrations.
 
 This template deploys the official upstream image unchanged, alongside a managed PostgreSQL
-database for n8n's own storage, and points n8n's data directory at a persistent volume.
+database for n8n's own storage, and points n8n's user folder at a persistent volume.
 
 ## What you get by hosting it
 
 - An HTTPS URL for the n8n editor, with no port forwarding or tunnel to manage.
-- A managed PostgreSQL database, with its connection string injected by the platform rather than
-  configured by hand.
-- A 1 GiB volume mounted at `/data`, with `N8N_USER_FOLDER` pointed at it.
-- The encryption key generated for you (32 chars) and stored as a managed secret. n8n uses it to
-  encrypt stored credentials, so it must not change between deploys.
+- A managed PostgreSQL database, provisioned and health-gated before n8n deploys.
+- A 1 GiB volume mounted at `/data`, with `N8N_USER_FOLDER` pointed at it, so the settings file
+  and any community nodes you install survive a redeploy.
+- The encryption key generated for you and stored as a managed secret. n8n uses it to encrypt
+  stored credentials, so it must not change between deploys.
 - Your workflows and credentials on infrastructure you control, rather than a hosted tier.
 
 ## What you need before deploying
@@ -37,11 +52,16 @@ database for n8n's own storage, and points n8n's data directory at a persistent 
 
 | Variable | Required | What it does |
 |---|---|---|
-| `N8N_ENCRYPTION_KEY` | generated | Generated 32-character key that n8n uses to encrypt stored credentials. You do not set this, and it must stay stable across deploys. |
-| `DB_POSTGRESDB_CONNECTION` | injected | The managed database's connection string, supplied by the platform. |
+| `N8N_ENCRYPTION_KEY` | generated | 32-character key n8n uses to encrypt stored credentials. You do not set it, and it must stay stable across deploys. |
+| `DATABASE_URL` | injected | The managed database's connection string, bound from the `db` service. n8n does not read it: see the draft note. |
 
-Set by the template, not by you: `N8N_USER_FOLDER=/data` (data on the volume) and
-`DB_TYPE=postgresdb`.
+Set by the template, not by you: `N8N_USER_FOLDER=/data` (user folder on the volume),
+`DB_TYPE=postgresdb`, `N8N_PORT=5678`, `N8N_LISTEN_ADDRESS=0.0.0.0`, `N8N_PROXY_HOPS=1`, and
+`N8N_WEBHOOK_URL` / `N8N_EDITOR_BASE_URL` resolved to the service's own HTTPS URL so webhook and
+editor links come out right.
+
+The compute size is pinned to `2vcpu-2gb`: n8n sits at roughly 557 MB resident while idle, so the
+512 MB and 1 GB sizes leave no room for a workflow run.
 
 ## After deploy
 
@@ -49,8 +69,8 @@ Set by the template, not by you: `N8N_USER_FOLDER=/data` (data on the volume) an
 2. Create the owner account. This is the admin login for the instance: there is no default
    password to change.
 3. Build a workflow, or import one from n8n's template library.
-4. Workflow data lives in the managed PostgreSQL database; files under `/data` are on the volume.
-   Both survive restarts and redeploys.
+4. Workflow data lives in the database; the settings file and community nodes live under `/data`
+   on the volume. Both survive restarts and redeploys.
 
 ## Licensing
 
@@ -63,5 +83,5 @@ fair-code upstreams. Read the upstream license before using it commercially.
 
 - Documentation: <https://docs.n8n.io>
 - Upstream: <https://github.com/n8n-io/n8n>
-- Image: `docker.io/n8nio/n8n`, pinned to `2.10.2`
+- Image: `docker.io/n8nio/n8n`, pinned to `2.36.5`
 - License: Sustainable Use License (see <https://github.com/n8n-io/n8n/blob/master/LICENSE.md>).
