@@ -3,8 +3,8 @@
 Visual workflow automation with 400+ integrations.
 
 > **Draft, not published.** This template declares a managed `postgres` service, and the current
-> platform template executor deploys web services only, so publishing it is rejected. See
-> the `n8n` row in [QA.md](../QA.md). It will be published once the managed-database service type is
+> platform template executor deploys web services only, so publishing it is rejected. It will be
+> published once the managed-database service type is
 > supported in a template manifest.
 
 ## Overview

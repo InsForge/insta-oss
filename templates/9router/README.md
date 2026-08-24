@@ -4,8 +4,7 @@ Self-hosted LLM router with fallback across 40+ providers.
 
 > **Draft, not published.** This template is not in the catalog yet. The container runs, but it
 > cannot persist its data on this platform: the volume is mounted root-owned at `/data` while the
-> app runs as a non-root user, so nothing it writes lands on the volume. Details and the full
-> evidence are in [QA.md](../QA.md) under "cannot use the platform volume". That issue is the only thing
+> app runs as a non-root user, so nothing it writes lands on the volume. That is the only thing
 > keeping this template out of the catalog; the fix belongs in the platform.
 
 ## Overview
@@ -43,7 +42,7 @@ the app's own interface after deploy. The service listens on port 20128 and is h
 3. Point your tools at the service URL as their OpenAI-compatible base URL.
 4. **Persistence caveat while this template is draft:** configuration written by the app does not
    currently land on the volume, so it will not survive a restart. This is the reason the template
-   is not published: see [QA.md](../QA.md) under "cannot use the platform volume".
+   is not published.
 
 ## Links
 

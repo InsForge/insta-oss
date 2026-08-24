@@ -41,24 +41,44 @@ for (const dir of dirs) {
   const code = basename(dir.replace(/\/+$/, ""));
   const text = readFileSync(join(dir, "insta.template.yaml"), "utf8");
   const m = yaml.load(text);
-  if (m?.meta?.draft === true) { console.log(`~ ${code}: draft, skipped`); continue; }
   if (m?.code !== code) { failures++; console.error(`✗ ${code}: manifest code '${m?.code}' != folder name`); continue; }
+  // A draft used to be `continue`, which withdrew nothing: the catalog kept serving whatever was
+  // published last, and someone had to remember to flip `published` by hand. deepseek-hermes was
+  // withdrawn that way. So a draft now DELISTS, but only if the catalog is actually serving it:
+  // the GET is the discriminator, because 9router/n8n/openclaw are drafts that were never
+  // published, and PUTting them would create rows for half-finished manifests the catalog
+  // validates on receipt.
+  let delisting = false;
+  if (m?.meta?.draft === true) {
+    const live = await fetch(`${url}/templates/${code}`); // public read; 404 = nothing to withdraw
+    if (!live.ok) { console.log(`~ ${code}: draft, not in the catalog`); continue; }
+    delisting = true;
+  }
   // Never publish a manifest whose ghcr image doesn't exist yet (merge can outrun the build).
-  try { await assertGhcrImages(m); }
-  catch (e) { failures++; console.error(`✗ ${code}: ${e.message}`); continue; }
+  // Not asserted when withdrawing: taking a template down must not depend on an image being
+  // pullable, and a retired template's tag is exactly the one nobody is rebuilding.
+  if (!delisting) {
+    try { await assertGhcrImages(m); }
+    catch (e) { failures++; console.error(`✗ ${code}: ${e.message}`); continue; }
+  }
   // Body: manifest is the raw YAML text (the catalog parses and normalizes it), plus the two
   // things a manifest cannot carry itself. readme is a file, and logoUrl has to be absolute
   // because a relative ./logo.svg means nothing to the catalog. Unknown fields are ignored by
   // older catalog versions, so sending them is safe before the receiving side ships.
   let body;
-  try { body = JSON.stringify({ manifest: text, readme: readmeOf(dir), logoUrl: logoUrlOf(dir, m) }); }
+  try {
+    body = JSON.stringify({
+      manifest: text, readme: readmeOf(dir), logoUrl: logoUrlOf(dir, m),
+      ...(delisting ? { published: false } : {}),
+    });
+  }
   catch (e) { failures++; console.error(`✗ ${code}: ${e.message}`); continue; }
   const res = await fetch(`${url}/admin/templates/${code}`, {
     method: "PUT",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body,
   });
-  if (res.ok) { console.log(`✓ ${code}: published ${m.code}@${m.version}`); }
+  if (res.ok) { console.log(`✓ ${code}: ${delisting ? "delisted" : `published ${m.code}@${m.version}`}`); }
   else { failures++; console.error(`✗ ${code}: HTTP ${res.status}. ${(await res.text()).slice(0, 500)}`); }
 }
 process.exit(failures ? 1 : 0);

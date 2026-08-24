@@ -86,8 +86,8 @@ describe('rewriteReadme', () => {
 
   it('links files with blob and directories with tree', () => {
     const isDirectory = (p) => p === 'templates/hermes'
-    const out = rewrite('[doc](../QA.md) [dir](../hermes/) [dir2](../hermes)', isDirectory)
-    expect(out).toContain(`https://github.com/${REPO}/blob/${SHA}/templates/QA.md`)
+    const out = rewrite('[doc](../AGENTS.md) [dir](../hermes/) [dir2](../hermes)', isDirectory)
+    expect(out).toContain(`https://github.com/${REPO}/blob/${SHA}/templates/AGENTS.md`)
     // A trailing slash is a directory even when the caller cannot stat it...
     expect(out).toContain(`https://github.com/${REPO}/tree/${SHA}/templates/hermes)`)
     // ...and so is a path isDirectory() recognises, which is the deepseek-hermes -> hermes case.

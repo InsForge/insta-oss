@@ -6,3 +6,8 @@ dist/
 postcss.config.mjs
 ui/node_modules/
 ui/dist/
+
+# InstaCloud: agent skills installed by `npx skills add` (regenerable, not source)
+.claude/skills/
+.agents/skills/
+.github/skills/
