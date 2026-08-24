@@ -54,9 +54,23 @@ queue mode, and it does not scale to more than one worker. n8n also supports Pos
 this template does not use: n8n reads its database as five separate `DB_POSTGRESDB_*` variables
 and no connection string, so a managed database cannot be wired to it from a manifest today.
 
+**Still a draft, and the reason is not in this manifest.** A first deploy has 60 seconds to answer
+on its port, and that clock starts before the image is pulled. This image is about 2 GB, and
+create-plus-pull measured 47 seconds, leaving 13 for an app that needs around 17. Three of six cold
+deploys failed, and the machine is destroyed each time, so a retry is another first deploy on the
+same 60 seconds: it only succeeds when the host happens to hold the image already. Tracked as
+`InsForge/insta-platform#270`.
+
+**It bills continuously.** `alwaysOn: true` is what keeps schedule triggers and webhooks working,
+since a stopped machine runs neither, but it means the service is never idle-stopped and is charged
+from deploy until you delete it.
+
 ## After deploy
 
-1. Open the service URL. n8n shows its owner-setup screen on first visit.
+1. Open the service URL **immediately**. n8n shows its owner-setup screen on first visit, and it is
+   unauthenticated until someone completes it: **the first visitor becomes the owner**, of an
+   instance that can run arbitrary code and will hold your third-party credentials. Do not share
+   the URL before you have claimed it.
 2. Create the owner account. This is the admin login for the instance: there is no default
    password to change.
 3. Build a workflow, or import one from n8n's template library.
