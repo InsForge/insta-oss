@@ -86,7 +86,7 @@ for (const dir of dirs) {
       // this line is typed by hand. Drift means publishing a manifest that points at a tag no
       // build ever pushed, which surfaces as publish.mjs polling for ten minutes and failing, or
       // worse as a deploy pulling a stale version that does exist.
-      const self = ref.startsWith(`${SELF_IMAGE_PREFIX}`) ? ref.slice(SELF_IMAGE_PREFIX.length) : null;
+      const self = ref.startsWith(SELF_IMAGE_PREFIX) ? ref.slice(SELF_IMAGE_PREFIX.length) : null;
       if (self && !self.includes("@")) {
         const [imageCode, tag] = [self.split(":")[0], self.split(":")[1]];
         if (imageCode !== dir) err(dir, `${name}: image is ${SELF_IMAGE_PREFIX}${imageCode}, which is another template's`);

@@ -23,6 +23,9 @@ permissions:
 jobs:
   discover:
     runs-on: ubuntu-latest
+    # Reads git and nothing else; the registry write belongs to `build`.
+    permissions:
+      contents: read
     outputs:
       templates: ${{ steps.pick.outputs.templates }}
     steps:
@@ -42,8 +45,10 @@ jobs:
              || ! git cat-file -e "$before" 2>/dev/null; then
             # Dispatch, or a base we cannot resolve (first push, force-push): build everything.
             codes=$(buildable)
-          elif git diff --name-only "$before" "${{ github.sha }}" \
-                 -- .github/workflows/templates-build-images.yml | grep -q .; then
+          # Captured rather than piped into `grep -q`: grep exits at the first match and can
+          # SIGPIPE git, which pipefail would then read as a failed test.
+          elif [ -n "$(git diff --name-only "$before" "${{ github.sha }}" \
+                        -- .github/workflows/templates-build-images.yml)" ]; then
             # This file changed: rebuild everything, since the change may be to how they build.
             codes=$(buildable)
           else
@@ -54,7 +59,10 @@ jobs:
               | awk -F/ 'NF>=3 && $3 != "README.md" {print $2}' | sort -u)
             codes=$(comm -12 <(printf '%s\n' "$changed") <(buildable))
           fi
-          json=$(printf '%s\n' "$codes" | grep -v '^$' | jq -R . | jq -sc .)
+          # awk 'NF', not `grep -v '^$'`: grep exits 1 when it selects nothing, and under
+          # `set -euo pipefail` that kills the step on exactly the "nothing to build" case this
+          # job exists to produce. awk drops blank lines and still exits 0.
+          json=$(printf '%s\n' "$codes" | awk 'NF' | jq -R . | jq -sc .)
           echo "templates=$json" >> "$GITHUB_OUTPUT"
           echo "building: $json"
 
