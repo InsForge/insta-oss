@@ -1,5 +1,5 @@
 code: claude-code
-version: 0.4.0
+version: 0.5.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -9,11 +9,15 @@ upstream:
   license: LicenseRef-Anthropic-Commercial-Terms
 
 services:
-  workspace:
+  # Named for the template, not "workspace": three templates sharing one service name collided on
+  # the same branch, the second overwriting the first (QA.md finding 1).
+  claude-code:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/claude-code:0.4.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/claude-code:0.5.0   # built from ./Dockerfile by templates-build-images.yml
     port: 7681
     healthcheck: /
+    # Stays at 1 GB: 2vcpu-2gb was tried on a live deployment against a ~30s first-response
+    # complaint and made no difference, so the cost is not memory or core count.
     spec: 1vcpu-1gb              # created at 1GB (QA.md: "512 MB is not enough for an agent CLI")
     # A volume makes scale-to-zero a cold boot, not a resume (24.5s measured).
     alwaysOn: true
