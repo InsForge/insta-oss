@@ -1,5 +1,5 @@
 code: n8n
-version: 1.0.0
+version: 1.1.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -14,8 +14,6 @@ generated:
   encryption_key: secret:32
 
 services:
-  db:
-    type: postgres
   n8n:
     type: web
     image: docker.io/n8nio/n8n:2.36.5
@@ -25,6 +23,7 @@ services:
     spec: 2vcpu-2gb
     # Schedule and polling triggers fire from inside the process, so an idle machine never wakes.
     alwaysOn: true
+    # n8n defaults to SQLite, and N8N_USER_FOLDER below puts that file on this volume.
     volume:
       size: 1
     env:
@@ -35,12 +34,8 @@ services:
         N8N_PROXY_HOPS: "1"
         N8N_WEBHOOK_URL: ${services.n8n.url}
         N8N_EDITOR_BASE_URL: ${services.n8n.url}
-        DB_TYPE: postgresdb
       generated:
         N8N_ENCRYPTION_KEY: ${encryption_key}
-      platform:
-        # Bound and delivered, but n8n reads no connection-string variable: see the README.
-        DATABASE_URL: ${{services.db.DATABASE_URL}}
 
 meta:
   name: n8n
@@ -48,7 +43,6 @@ meta:
   category: automation
   tags: [automation, ai]
   logo: ./logo.svg
-  draft: true
   links:
     upstream: https://github.com/n8n-io/n8n
     documentation: https://docs.n8n.io
