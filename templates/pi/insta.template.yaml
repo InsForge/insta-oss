@@ -36,10 +36,10 @@ services:
         ADMIN_PASSWORD:
           default: "123456"
           editable: true
-          description: "Password for the browser terminal sign-in. This default is the same for every deploy — change it before sharing the URL"
+          description: "Password for the browser terminal sign-in. This default is the same for every deploy; change it before sharing the URL"
       # Pi reads a provider key straight from the environment and picks the model accordingly; its
       # own env-api-keys.js recognises 37 providers across 35 variables. These three are the ones
-      # worth a form field. Any one is enough, and none is fine too — a key can be added later from
+      # worth a form field. Any one is enough, and none is fine too: a key can be added later from
       # inside the terminal, and the rest still work as plain service variables.
       optional:
         ANTHROPIC_API_KEY:

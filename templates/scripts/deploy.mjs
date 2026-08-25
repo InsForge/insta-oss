@@ -8,6 +8,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import yaml from "js-yaml";
+import { valueSource } from "./variables-lib.mjs";
 
 const args = process.argv.slice(2);
 const dir = resolve(args[0] ?? ".");
@@ -39,10 +40,15 @@ for (const [name, spec] of Object.entries(manifest.generated ?? {})) {
 step(2, `generated ${Object.keys(generated).length} value(s)`);
 
 // [3/8] create services
+// Deliberately WITHOUT --image. The platform deploys the image the moment a compute service names
+// one (services.ts: `if (service.image) runComputeImage(...)`), which here is two steps before the
+// variables exist, so any template whose entrypoint requires one crash-loops on that first boot:
+// `insta services add ... --image claude-code:0.5.0` fails with "never answered on port 7681"
+// against main today, and did so before this branch. Step 6 owns the deploy, after step 5 has
+// written the variables, and it passes the same --image.
 for (const [name, svc] of services) {
   const cmd = ["services", "add", "compute", name, "--branch", branch, "--port", String(svc.port ?? 8080)];
   if (svc.volume?.size) cmd.push("--volume", String(svc.volume.size));
-  if (svc.image) cmd.push("--image", svc.image);
   try {
     insta(cmd);
   } catch (e) {
@@ -65,12 +71,18 @@ for (const [name, svc] of services) {
     if (!(key in generated)) fail(`env.generated.${k} references undeclared generator '${key}'`);
     env[k] = generated[key];
   }
-  for (const [k, spec] of Object.entries(svc.env?.required ?? {})) {
-    if (sets[k]) env[k] = sets[k];
-    else if (spec?.generate) env[k] = genValue(spec.generate);
-    else fail(`required variable ${k} missing: pass --set ${k}=...  (${spec?.description ?? ""})`);
+  // valueSource carries the platform's order (provided -> generate -> default). Required and
+  // optional differ only in what happens when nothing resolves: the first stops the run, the
+  // second stays unset.
+  for (const [group, required] of [["required", true], ["optional", false]]) {
+    for (const [k, spec] of Object.entries(svc.env?.[group] ?? {})) {
+      const source = valueSource(spec, sets[k]);
+      if (source === "provided") env[k] = sets[k];
+      else if (source === "generate") env[k] = genValue(spec.generate);
+      else if (source === "default") env[k] = String(spec.default);
+      else if (required) fail(`required variable ${k} missing: pass --set ${k}=...  (${spec?.description ?? ""})`);
+    }
   }
-  for (const k of Object.keys(svc.env?.optional ?? {})) if (sets[k]) env[k] = sets[k];
   // attribution stamp (design doc: template@version + deployment_id, recorded
   // on the service; platform field pending: prototype stamps via env)
   env.TEMPLATE_CODE = manifest.code;
@@ -114,8 +126,16 @@ step(7, "health checks passed");
 // [8/8] report
 step(8, "done\n");
 for (const [name] of services) log(`  ${name}: ${urls[name]}`);
-const pw = Object.entries(services[0][1].env?.required ?? {}).find(([, s]) => s?.generate);
-if (pw && !sets[pw[0]]) log(`  ${pw[0]} (generated, shown once): see secrets store: insta run --branch ${branch} -- printenv ${pw[0]}`);
+// Every required variable the caller did NOT supply got its value from somewhere the caller cannot
+// see, so name each one and where to read it back. Keyed on the spec rather than only on
+// `generate:`, because a template whose credentials come from `default:` needs this line most: the
+// run would otherwise finish without ever mentioning how to sign in.
+for (const [k, spec] of Object.entries(services[0][1].env?.required ?? {})) {
+  const source = valueSource(spec, sets[k]);
+  if (source === "provided" || source === null) continue;
+  const label = source === "generate" ? "generated" : "template default";
+  log(`  ${k} (${label}): insta run --branch ${branch} -- printenv ${k}`);
+}
 log(`  attribution: ${manifest.code}@${manifest.version}  deployment ${deploymentId}`);
 
 // helpers

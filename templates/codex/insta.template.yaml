@@ -36,7 +36,7 @@ services:
         ADMIN_PASSWORD:
           default: "123456"
           editable: true
-          description: "Password for the browser terminal sign-in. This default is the same for every deploy — change it before sharing the URL"
+          description: "Password for the browser terminal sign-in. This default is the same for every deploy; change it before sharing the URL"
       optional:
         OPENAI_API_KEY:
           description: "OpenAI API key. Leave blank and run `codex login` in the terminal instead"

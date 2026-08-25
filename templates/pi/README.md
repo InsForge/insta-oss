@@ -20,7 +20,9 @@ restart gives you the same environment.
 - An HTTPS URL for the terminal, with no port forwarding or tunnel to manage.
 - A 1 GiB volume mounted at `/data`. `HOME` is set to `/data/home`, so session history, CLI config
   and any repositories you clone survive restarts, redeploys and version upgrades.
-- The terminal credentials stored as managed secrets rather than baked into the image.
+- The terminal credentials kept as service variables rather than baked into the image, so you can
+  change them later without rebuilding anything. They are stored, not hidden: both are visible in
+  the deploy form and in the service's variables.
 - Deploys are health-gated: a container that does not answer is rolled back to the last healthy
   image instead of leaving you with a dead URL.
 
@@ -29,17 +31,21 @@ restart gives you the same environment.
 - Nothing mandatory. The sign-in comes prefilled as `admin` / `123456`, which you can change on the
   deploy form.
 - A model provider key if you want it present from the first boot. Any one of the three below is
-  enough, and none is also fine — you can add a key from inside the terminal instead.
+  enough, and none is also fine: you can add a key from inside the terminal instead.
 
 ## Configuration
 
 | Variable | Required | What it does |
 |---|---|---|
-| `ADMIN_USERNAME` | yes | HTTP basic-auth username for the terminal. Defaults to `admin`. |
-| `ADMIN_PASSWORD` | yes | HTTP basic-auth password for the terminal. Defaults to `123456`. |
+| `ADMIN_USERNAME` | prefilled | HTTP basic-auth username for the terminal. Arrives as `admin`; editable. |
+| `ADMIN_PASSWORD` | prefilled | HTTP basic-auth password for the terminal. Arrives as `123456`; editable, and must not be left blank. |
 | `ANTHROPIC_API_KEY` | no | Anthropic key, for Claude models. |
 | `OPENAI_API_KEY` | no | OpenAI key, for GPT models. |
 | `OPENROUTER_API_KEY` | no | OpenRouter key, for whichever model you route to. |
+
+`prefilled` means the deploy form starts with a value, so there is nothing you must supply, but the
+field cannot be emptied: the container refuses to start without `ADMIN_PASSWORD` and the deploy
+then fails.
 
 Pi reads a provider key straight from the environment and picks its model accordingly. It recognises
 more than thirty providers (Gemini, DeepSeek, Groq, Mistral, Kimi and so on); the three above are
@@ -49,7 +55,7 @@ or configured from inside the terminal.
 Set by the template, not by you: `HOME=/data/home` (puts your home directory on the volume).
 
 **Change the password before you share the URL.** The default is the same for every deployment, and
-what it protects is a root shell that can run anything and holds whatever API keys you gave it — so
+what it protects is a root shell that can run anything and holds whatever API keys you gave it, so
 anyone who learns the URL and leaves the default in place has all of that. Both fields are editable
 at deploy time and afterwards, from the service's variables.
 

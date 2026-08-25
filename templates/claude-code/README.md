@@ -20,7 +20,9 @@ gives you the same environment.
 - An HTTPS URL for the terminal, with no port forwarding or tunnel to manage.
 - A 1 GiB volume mounted at `/data`. `HOME` is set to `/data/home`, so your CLI login, shell
   history, and any repositories you clone survive restarts, redeploys, and version upgrades.
-- The terminal credentials stored as managed secrets rather than baked into the image.
+- The terminal credentials kept as service variables rather than baked into the image, so you can
+  change them later without rebuilding anything. They are stored, not hidden: both are visible in
+  the deploy form and in the service's variables.
 - Deploys are health-gated: a container that does not answer is rolled back to the last healthy
   image instead of leaving you with a dead URL.
 
@@ -35,14 +37,18 @@ gives you the same environment.
 
 | Variable | Required | What it does |
 |---|---|---|
-| `ADMIN_USERNAME` | yes | HTTP basic-auth username for the terminal. Defaults to `admin`. |
-| `ADMIN_PASSWORD` | yes | HTTP basic-auth password for the terminal. Defaults to `123456`. |
+| `ADMIN_USERNAME` | prefilled | HTTP basic-auth username for the terminal. Arrives as `admin`; editable. |
+| `ADMIN_PASSWORD` | prefilled | HTTP basic-auth password for the terminal. Arrives as `123456`; editable, and must not be left blank. |
 | `ANTHROPIC_API_KEY` | no | Authenticates the CLI without an interactive login. Leave blank to run `claude login` in the terminal instead. |
+
+`prefilled` means the deploy form starts with a value, so there is nothing you must supply, but the
+field cannot be emptied: the container refuses to start without `ADMIN_PASSWORD` and the deploy
+then fails.
 
 Set by the template, not by you: `HOME=/data/home` (puts your home directory on the volume).
 
 **Change the password before you share the URL.** The default is the same for every deployment, and
-what it protects is a root shell that can run anything and holds whatever API keys you gave it — so
+what it protects is a root shell that can run anything and holds whatever API keys you gave it, so
 anyone who learns the URL and leaves the default in place has all of that. Both fields are editable
 at deploy time and afterwards, from the service's variables.
 

@@ -58,8 +58,10 @@ nothing.
 ```bash
 npm install
 INSTA_LINK_DIR=<a dir linked to your project> npm run deploy -- claude-code --branch my-branch
-# pass required variables with --set KEY=value; password-type variables are
-# generated for you when omitted.
+# pass variables with --set KEY=value. Anything you omit resolves the way the
+# platform resolves it: a declared generator mints a value, otherwise the
+# manifest's default applies, and only a variable with neither stops the run.
+# The summary at the end names every value you did not supply yourself.
 ```
 
 `deploy.mjs` drives the standard `insta` CLI end to end: create services, run generators, write
