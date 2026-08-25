@@ -41,11 +41,18 @@ step(2, `generated ${Object.keys(generated).length} value(s)`);
 
 // [3/8] create services
 // Deliberately WITHOUT --image. The platform deploys the image the moment a compute service names
-// one (services.ts: `if (service.image) runComputeImage(...)`), which here is two steps before the
-// variables exist, so any template whose entrypoint requires one crash-loops on that first boot:
-// `insta services add ... --image claude-code:0.5.0` fails with "never answered on port 7681"
-// against main today, and did so before this branch. Step 6 owns the deploy, after step 5 has
-// written the variables, and it passes the same --image.
+// one (services.ts, since insta-platform 9966f46 "services add --image runs the image at
+// creation", 2026-07-20), which here is two steps before the variables exist, so any template
+// whose entrypoint requires one crash-loops on that first boot.
+//
+// This script was written a MONTH AFTER that platform change (28fa4b3, 2026-08-21) and carried
+// --image from its first line, so `npm run deploy -- claude-code` has never once worked. Verified
+// against main: 0.5.0 with ACCESS_PASSWORD fails identically, "never answered on port 7681 ...
+// exit code 1". It went unnoticed because the real deploy paths use the platform's own executor,
+// which creates the service with NO image and deploys as a later step, and the only template run
+// through here since (n8n) boots from an upstream image needing no variable.
+//
+// Step 6 owns the deploy now, after step 5 has written the variables, and passes the same --image.
 for (const [name, svc] of services) {
   const cmd = ["services", "add", "compute", name, "--branch", branch, "--port", String(svc.port ?? 8080)];
   if (svc.volume?.size) cmd.push("--volume", String(svc.volume.size));
