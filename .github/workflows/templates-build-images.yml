@@ -1,14 +1,18 @@
 name: templates-build-images
 # Prebuild the workspace images so those templates are image-type for the deploy executor
 # (a deploy pulls in seconds instead of building for minutes).
+#
+# The matrix is DISCOVERED, not listed. A fixed list rebuilt every template whenever any one of
+# them changed, and on main each job re-pushed its own canonical :<version> tag — so editing
+# claude-code overwrote the published hermes image with a fresh build whose base image and apt/npm
+# layers had moved on. That is precisely the drift version-guard exists to prevent, arriving
+# through the workflow instead of through a manifest. It also meant a new template with a
+# Dockerfile silently went unbuilt until someone remembered two lists.
 on:
   push:
     branches: [main, devel, "feat/**"]
     paths:
-      - "templates/claude-code/**"
-      - "templates/codex/**"
-      - "templates/pi/**"
-      - "templates/hermes/**"
+      - "templates/**"
       - ".github/workflows/templates-build-images.yml"
   workflow_dispatch:
 
@@ -17,11 +21,58 @@ permissions:
   packages: write
 
 jobs:
+  discover:
+    runs-on: ubuntu-latest
+    # Reads git and nothing else; the registry write belongs to `build`.
+    permissions:
+      contents: read
+    outputs:
+      templates: ${{ steps.pick.outputs.templates }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: pick
+        run: |
+          set -euo pipefail
+          # Buildable = has a Dockerfile. The rest reference an upstream image directly.
+          buildable() {
+            find templates -mindepth 2 -maxdepth 2 -name Dockerfile -exec dirname {} \; \
+              | xargs -n1 basename | sort -u
+          }
+          before='${{ github.event.before }}'
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ -z "$before" ] \
+             || ! git cat-file -e "$before" 2>/dev/null; then
+            # Dispatch, or a base we cannot resolve (first push, force-push): build everything.
+            codes=$(buildable)
+          # Captured rather than piped into `grep -q`: grep exits at the first match and can
+          # SIGPIPE git, which pipefail would then read as a failed test.
+          elif [ -n "$(git diff --name-only "$before" "${{ github.sha }}" \
+                        -- .github/workflows/templates-build-images.yml)" ]; then
+            # This file changed: rebuild everything, since the change may be to how they build.
+            codes=$(buildable)
+          else
+            # Only templates whose IMAGE could have changed. A README is published from the repo by
+            # templates-publish and copied into no image, so rebuilding for one would re-push an
+            # identical tag over a published one for nothing.
+            changed=$(git diff --name-only "$before" "${{ github.sha }}" -- templates/ \
+              | awk -F/ 'NF>=3 && $3 != "README.md" {print $2}' | sort -u)
+            codes=$(comm -12 <(printf '%s\n' "$changed") <(buildable))
+          fi
+          # awk 'NF', not `grep -v '^$'`: grep exits 1 when it selects nothing, and under
+          # `set -euo pipefail` that kills the step on exactly the "nothing to build" case this
+          # job exists to produce. awk drops blank lines and still exits 0.
+          json=$(printf '%s\n' "$codes" | awk 'NF' | jq -R . | jq -sc .)
+          echo "templates=$json" >> "$GITHUB_OUTPUT"
+          echo "building: $json"
+
   build:
+    needs: discover
+    if: needs.discover.outputs.templates != '[]'
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        template: [claude-code, codex, pi, hermes]
+        template: ${{ fromJson(needs.discover.outputs.templates) }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
