@@ -36,6 +36,15 @@ if (url && !origins.includes(url)) {
   controlUi.dangerouslyAllowHostHeaderOriginFallback = true;
 }
 
+// Mobile QR pairing needs an advertised public URL: behind the platform proxy the gateway can
+// only infer LAN/tailnet IPs, so device-pair setup codes fail without an explicit publicUrl.
+if (url) {
+  const devicePair = (((cfg.plugins ??= {}).entries ??= {})["device-pair"] ??= {});
+  // An entry without enabled:true disables the bundled plugin outright.
+  devicePair.enabled ??= true;
+  (devicePair.config ??= {}).publicUrl ||= url;
+}
+
 mkdirSync(dirname(path), { recursive: true });
 writeFileSync(path, JSON.stringify(cfg, null, 2) + "\n");
 console.log(`[template] control UI origin ready (${url ? url : "host-header fallback"})`);
