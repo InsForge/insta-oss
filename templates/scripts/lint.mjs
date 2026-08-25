@@ -4,6 +4,7 @@ import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
+import { FIXED_REF_RE, checkFixedRef } from "./manifest-refs.mjs";
 
 // Template dirs live beside this script's parent (templates/<code>/): runs from any cwd.
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -74,6 +75,17 @@ for (const dir of dirs) {
   const declared = new Set();
   for (const [name, svc] of Object.entries(m?.services ?? {})) {
     for (const group of ["required", "optional"]) for (const k of Object.keys(svc.env?.[group] ?? {})) declared.add(k);
+    // Same bargain as COMPUTE_SPECS above: the platform is the authority, and this check exists so
+    // a typo fails on the pull request instead of asynchronously, mid-run, on every by-code deploy
+    // after merge. Runs before the postgres skip below, because the platform checks every service.
+    for (const [k, value] of Object.entries(svc.env?.fixed ?? {})) {
+      for (const mt of String(value).matchAll(FIXED_REF_RE)) {
+        const verdict = checkFixedRef(mt[1], {
+          at: `${name}: env.fixed.${k}`, envName: k, services: m?.services ?? {}, generated: m?.generated ?? {},
+        });
+        if (verdict.error) err(dir, verdict.error);
+      }
+    }
     if (svc.type === "postgres") continue; // managed service: platform injects credentials
     // rule 1: image must be pinned (tag or digest), never latest/tagless
     if (!svc.image && !svc.build) err(dir, `${name}: needs image or build`);
