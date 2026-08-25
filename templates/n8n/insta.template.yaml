@@ -43,12 +43,6 @@ meta:
   category: automation
   tags: [automation, ai]
   logo: ./logo.svg
-  # Held back on the platform's first-deploy budget, not on anything in this manifest. A first
-  # deploy has 60s to answer on its port and the clock starts before the image is pulled; this
-  # 2 GB image measured 47s of create-plus-pull, so 3 of 6 cold deploys failed and the machine
-  # was destroyed each time. A retry is another FIRST deploy on the same 60s, so it only passes
-  # when the host happens to have the image warm. Undraft once insta-platform#270 lands.
-  draft: true
   links:
     upstream: https://github.com/n8n-io/n8n
     documentation: https://docs.n8n.io

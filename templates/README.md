@@ -29,8 +29,16 @@ scripts/
 ```
 
 A service may declare `spec: <name>` (for example `1vcpu-1gb`) to be created at that compute size
-instead of the platform default, and `volume: { size: N }` for a persistent disk mounted at
-`/data`. See [AGENTS.md](AGENTS.md) for the field rules.
+instead of the platform default, `volume: { size: N }` for a persistent disk mounted at `/data`,
+and `alwaysOn: true` to keep the machine from being idle-stopped. Always-on bills continuously, so
+declare it only when the app must run without an inbound request to wake it — n8n's schedule and
+polling triggers fire from inside the process, which is exactly that case.
+
+A value under `env.fixed` may interpolate another service's address as `${services.<name>.url}` or
+`${services.<name>.host}`, resolved before anything deploys, including a service's own address. A
+**managed database is different**: it has no URL, and its credentials arrive under `env.platform`
+as `${{services.<name>.<KEY>}}` — note the doubled braces. The two are not interchangeable, and
+each is rejected in the other's place. See [AGENTS.md](AGENTS.md) for the field rules.
 
 ## Logo attribution
 

@@ -8,6 +8,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import yaml from "js-yaml";
+import { FIXED_REF_RE, checkFixedRef } from "./manifest-refs.mjs";
 
 const args = process.argv.slice(2);
 const dir = resolve(args[0] ?? ".");
@@ -53,13 +54,24 @@ for (const [name, svc] of services) {
 step(3, "services created");
 
 // [4/8] resolve cross-service refs (all services now have addresses)
-// prototype: internal hostnames not yet exposed by platform: placeholder pass.
-step(4, "cross-service refs resolved (none declared)");
+// `services add` assigns the domain, so every address is known BEFORE anything deploys — the same
+// ordering the platform uses, where computeAppUrl derives the URL from the allocated app name
+// rather than looking one up after the fact.
+const listRaw = insta(["services", "list", "--branch", branch, "--json"]);
+// Slice from the first `[`: an update-available banner on stdout would otherwise fail the parse.
+const addr = new Map(
+  JSON.parse(listRaw.slice(listRaw.indexOf("[")))
+    .filter((s) => s.domain)
+    .map((s) => [s.name, { url: `https://${s.domain}`, host: s.domain }]),
+);
+step(4, `resolved addresses for ${addr.size} service(s)`);
 
 // [5/8] assemble + write variables
 const deploymentId = randomUUID();
 for (const [name, svc] of services) {
-  const env = { ...(svc.env?.fixed ?? {}) };
+  const env = Object.fromEntries(
+    Object.entries(svc.env?.fixed ?? {}).map(([k, v]) => [k, resolveFixed(String(v), `${name}: env.fixed.${k}`, k)]),
+  );
   for (const [k, ref] of Object.entries(svc.env?.generated ?? {})) {
     const key = String(ref).replace(/^\$\{(.+)\}$/, "$1");
     if (!(key in generated)) fail(`env.generated.${k} references undeclared generator '${key}'`);
@@ -152,6 +164,18 @@ function insta(cmdArgs) {
     if (e.stdout) e.stdout = redact(e.stdout);
     throw e;
   }
+}
+// An unresolvable ref FAILS here rather than being written through: a literal `${...}` reaching the
+// app is the worse outcome, because n8n would boot fine and hand out webhook links nobody can call.
+function resolveFixed(value, at, envName) {
+  return value.replace(FIXED_REF_RE, (_whole, inner) => {
+    const v = checkFixedRef(inner, { at, envName, services: manifest.services ?? {}, generated: manifest.generated ?? {} });
+    if (v.error) fail(v.error);
+    const a = addr.get(v.service);
+    // Reachable only if the platform allocated no domain for a service the rule considers valid.
+    if (!a) fail(`${at}: service '${v.service}' has no address allocated`);
+    return a[v.prop];
+  });
 }
 function genValue(spec) {
   const m = String(spec).match(/^secret:(\d+)$/);

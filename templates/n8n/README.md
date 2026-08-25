@@ -54,12 +54,10 @@ queue mode, and it does not scale to more than one worker. n8n also supports Pos
 this template does not use: n8n reads its database as five separate `DB_POSTGRESDB_*` variables
 and no connection string, so a managed database cannot be wired to it from a manifest today.
 
-**Still a draft, and the reason is not in this manifest.** A first deploy has 60 seconds to answer
-on its port, and that clock starts before the image is pulled. This image is about 2 GB, and
-create-plus-pull measured 47 seconds, leaving 13 for an app that needs around 17. Three of six cold
-deploys failed, and the machine is destroyed each time, so a retry is another first deploy on the
-same 60 seconds: it only succeeds when the host happens to hold the image already. Tracked as
-`InsForge/insta-platform#270`.
+**The volume is the only copy.** Workflows, encrypted credentials and execution history all live on
+that one 1 GiB volume, and nothing here snapshots or replicates it. Export anything you would mind
+losing — n8n's own **Download** on a workflow, or the whole set from the workflow list — and keep a
+copy of `N8N_ENCRYPTION_KEY`, since exported credentials are unreadable without it.
 
 **It bills continuously.** `alwaysOn: true` is what keeps schedule triggers and webhooks working,
 since a stopped machine runs neither, but it means the service is never idle-stopped and is charged

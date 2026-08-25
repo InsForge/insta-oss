@@ -43,6 +43,13 @@ IS the template code. Copying the closest existing template is the fastest way t
 7. `spec:` must name a compute size the platform offers (`1vcpu-256mb`, `1vcpu-512mb`, `1vcpu-1gb`,
    `2vcpu-1gb`, `2vcpu-2gb`). `npm run lint` mirrors that list; the platform is the authority.
 8. Never commit `index.json`. CI generates it.
+9. A `${...}` inside an `env.fixed` value may only be `${services.<name>.url}` or
+   `${services.<name>.host}`, naming a service the manifest declares that is not a managed
+   database. A managed database has no address: its credentials belong under `env.platform` as
+   `${{services.<name>.<KEY>}}`, with doubled braces, and putting that form in `fixed` is rejected.
+   So is a generator ref, even a declared one — composed into a fixed string it is stored only as
+   the final value, so a retry could not recover it and would silently rotate the secret. Declare
+   the variable under `env.generated` instead. `npm run lint` mirrors the platform's check.
 
 ## Logos
 
