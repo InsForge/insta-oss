@@ -1,5 +1,5 @@
 code: claude-code
-version: 0.5.0
+version: 0.6.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -13,7 +13,7 @@ services:
   # the same branch, the second overwriting the first (QA.md finding 1).
   claude-code:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/claude-code:0.5.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/claude-code:0.6.0   # built from ./Dockerfile by templates-build-images.yml
     port: 7681
     healthcheck: /
     # Stays at 1 GB: 2vcpu-2gb was tried on a live deployment against a ~30s first-response
@@ -27,10 +27,17 @@ services:
       fixed:
         HOME: /data/home
       required:
-        ACCESS_PASSWORD:
-          generate: secret:16
+        # Defaults, not generators: the resolution order is provided -> generate -> default, so a
+        # `generate:` here would always win and the default could never be seen. These are meant to
+        # be read and changed on the deploy form, which is the point.
+        ADMIN_USERNAME:
+          default: admin
           editable: true
-          description: "Password for the browser terminal (username: admin). Generated if left blank"
+          description: "Username for the browser terminal sign-in"
+        ADMIN_PASSWORD:
+          default: "123456"
+          editable: true
+          description: "Password for the browser terminal sign-in. This default is the same for every deploy — change it before sharing the URL"
       optional:
         ANTHROPIC_API_KEY:
           description: "Anthropic API key. Leave blank and run `claude login` in the terminal instead"
