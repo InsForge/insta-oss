@@ -1,0 +1,43 @@
+code: codex-ubuntu
+version: 0.1.0
+maintainer: official
+sourceRepo: InsForge/insta-oss
+
+upstream:
+  repo: openai/codex
+  package: "@openai/codex"
+  pinned: "0.148.0"
+  license: Apache-2.0
+
+services:
+  # Named for the template so it cannot collide with another workspace service on the same branch.
+  codex-ubuntu:
+    type: web
+    image: ghcr.io/insforge/insta-oss/templates/codex-ubuntu:0.1.0   # built from ./Dockerfile by templates-build-images.yml
+    port: 7681
+    healthcheck: /
+    spec: 2vcpu-2gb
+    # A volume makes scale-to-zero a cold boot, not a resume (24.5s measured).
+    alwaysOn: true
+    volume:
+      size: 5
+    env:
+      fixed:
+        HOME: /data/home
+      required:
+        ACCESS_PASSWORD:
+          generate: secret:16
+          editable: true
+          description: "Password for the browser terminal (username: admin). Generated if left blank"
+      optional:
+        OPENAI_API_KEY:
+          description: "OpenAI API key. Leave blank and run `codex login` in the terminal instead"
+
+meta:
+  name: Codex Ubuntu
+  tagline: Codex workspace on Ubuntu 24.04 with extra capacity
+  category: ai-agent
+  tags: [ai-agent, ai]
+  logo: ./logo.svg
+  links:
+    upstream: https://github.com/openai/codex

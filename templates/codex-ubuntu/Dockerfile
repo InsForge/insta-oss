@@ -1,0 +1,31 @@
+# Ubuntu 24.04 LTS base pinned by multi-platform OCI index digest: tags float.
+FROM ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        bash git ca-certificates curl ripgrep procps nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# ttyd: browser terminal over HTTPS (same approach as Railway's pi template)
+ARG TTYD_VERSION=1.7.7
+# Pinned checksums of the ttyd 1.7.7 release binaries: a tampered or swapped asset fails the build.
+ARG TTYD_SHA256_X86_64=8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55
+ARG TTYD_SHA256_AARCH64=b38acadd89d1d396a0f5649aa52c539edbad07f4bc7348b27b4f4b7219dd4165
+RUN arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) ttyd_arch=x86_64;  ttyd_sha="$TTYD_SHA256_X86_64" ;; \
+        arm64) ttyd_arch=aarch64; ttyd_sha="$TTYD_SHA256_AARCH64" ;; \
+        *)     echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${ttyd_arch}" \
+        -o /usr/local/bin/ttyd \
+    && echo "${ttyd_sha}  /usr/local/bin/ttyd" | sha256sum -c - \
+    && chmod +x /usr/local/bin/ttyd
+
+# upstream pin: keep in sync with insta.template.yaml (upstream.pinned)
+RUN npm install -g @openai/codex@0.148.0
+
+ENV HOME=/data/home
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+EXPOSE 7681
+CMD ["/entrypoint.sh"]
