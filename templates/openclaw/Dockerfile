@@ -7,4 +7,5 @@ FROM ghcr.io/openclaw/openclaw:latest@sha256:2f5ce8848a1a69b3c460622e566cb9395da
 # the Control UI origin allowlist with the public URL. Upstream's ENTRYPOINT stays.
 COPY --chmod=0755 entrypoint.sh /entrypoint.sh
 COPY seed-origin.mjs /seed-origin.mjs
+COPY approve-devices.mjs /approve-devices.mjs
 CMD ["/entrypoint.sh"]

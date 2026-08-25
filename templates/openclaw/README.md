@@ -50,7 +50,11 @@ and an idle machine would never wake for an incoming message.
 ## After deploy
 
 1. Open `https://<your-service-url>/openclaw`.
-2. Connect with the gateway token: `insta secrets --print` shows `OPENCLAW_GATEWAY_TOKEN`.
+2. Connect with the gateway token: `insta secrets --print` shows `OPENCLAW_GATEWAY_TOKEN`. The
+   first connection triggers upstream's one-time device pairing; the image approves
+   token-authenticated devices itself within ~15 s (upstream expects `openclaw devices approve`
+   on the gateway host, and the platform has no shell into the machine), so if the first
+   Connect reports pairing, simply retry it.
 3. Follow the onboarding to add a model provider key and connect a channel (Telegram is the
    fastest: just a bot token).
 
