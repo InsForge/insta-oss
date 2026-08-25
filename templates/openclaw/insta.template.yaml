@@ -29,6 +29,8 @@ services:
       fixed:
         OPENCLAW_STATE_DIR: /data/.openclaw
         OPENCLAW_WORKSPACE_DIR: /data/workspace
+        # entrypoint.sh seeds this into gateway.controlUi.allowedOrigins before start.
+        OPENCLAW_PUBLIC_URL: ${services.openclaw.url}
         NODE_OPTIONS: --max-old-space-size=1536
       generated:
         OPENCLAW_GATEWAY_TOKEN: ${gateway_token}

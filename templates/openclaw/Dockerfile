@@ -3,5 +3,8 @@ FROM ghcr.io/openclaw/openclaw:latest@sha256:2f5ce8848a1a69b3c460622e566cb9395da
 
 # Upstream's CMD is `gateway` alone: on a fresh volume with no openclaw.json it exits before
 # binding, and it listens on loopback where the platform proxy cannot reach it. The manifest
-# has no command override, so this image carries the flags. Upstream's ENTRYPOINT stays.
-CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured", "--port", "8080", "--bind", "lan"]
+# has no command override, so this image carries the flags — plus a prestart step that seeds
+# the Control UI origin allowlist with the public URL. Upstream's ENTRYPOINT stays.
+COPY --chmod=0755 entrypoint.sh /entrypoint.sh
+COPY seed-origin.mjs /seed-origin.mjs
+CMD ["/entrypoint.sh"]
