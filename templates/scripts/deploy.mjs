@@ -146,14 +146,20 @@ step(7, "health checks passed");
 step(8, "done\n");
 for (const [name] of services) log(`  ${name}: ${urls[name]}`);
 // Every required variable the caller did NOT supply got its value from somewhere the caller cannot
-// see, so name each one and where to read it back. Keyed on the spec rather than only on
-// `generate:`, because a template whose credentials come from `default:` needs this line most: the
-// run would otherwise finish without ever mentioning how to sign in.
-for (const [k, spec] of Object.entries(services[0][1].env?.required ?? {})) {
-  const source = valueSource(spec, sets[k]);
-  if (source === "provided" || source === null) continue;
-  const label = source === "generate" ? "generated" : "template default";
-  log(`  ${k} (${label}): insta run --branch ${branch} -- printenv ${k}`);
+// see, so name each one and where to read it back. Every service, not just the first: a template
+// can generate a credential on any of them, and this used to read `services[0]` while claiming to
+// name each one. Keyed on the spec rather than only on `generate:`, so a `default:` is reported
+// too. Deduped because the bundle `insta run` injects is per-branch, not per-service, so one line
+// answers a name however many services declare it.
+const reported = new Set();
+for (const [, svc] of services) {
+  for (const [k, spec] of Object.entries(svc.env?.required ?? {})) {
+    const source = valueSource(spec, sets[k]);
+    if (source === "provided" || source === null || reported.has(k)) continue;
+    reported.add(k);
+    const label = source === "generate" ? "generated" : "template default";
+    log(`  ${k} (${label}): insta run --branch ${branch} -- printenv ${k}`);
+  }
 }
 log(`  attribution: ${manifest.code}@${manifest.version}  deployment ${deploymentId}`);
 

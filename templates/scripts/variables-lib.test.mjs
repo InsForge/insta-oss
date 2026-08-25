@@ -2,7 +2,8 @@
 //
 // Two things had no coverage and both had already broken once. The resolution order drifted, so
 // `npm run deploy` stopped working for every template declaring a `default:` while the platform
-// deployed them fine. And a rename that touches the manifest but not the entrypoint (or two of
+// deployed them fine -- no manifest declares one today, but the executor and the platform still
+// have to agree about it. And a rename that touches the manifest but not the entrypoint (or two of
 // three sibling templates) produces a container that starts and can never be signed into, with no
 // error anywhere: ttyd answers 401, and the health check reads 401 as alive.
 import { describe, it, expect } from 'vitest';
@@ -32,8 +33,8 @@ describe('valueSource: the platform resolution order', () => {
   });
 
   it('prefers a generator over a default', () => {
-    // Why ADMIN_PASSWORD carries no generator: with one, the default would be unreachable.
-    expect(valueSource({ generate: 'secret:16', default: '123456' }, undefined)).toBe('generate');
+    // The reason a spec should never carry both: the default is then dead text no one can reach.
+    expect(valueSource({ generate: 'secret:16', default: 'd' }, undefined)).toBe('generate');
   });
 
   it('falls back to the default', () => {
@@ -56,27 +57,34 @@ function demands(manifest) {
   return out.sort();
 }
 
-describe('what a bare local deploy still demands', () => {
-  // NOT "every required variable resolves": hermes and openclaw genuinely require a Telegram bot
-  // token and a model key, which nothing can invent. The property that matters is narrower.
-  it.each(['claude-code', 'codex', 'pi'])('%s demands nothing', (dir) => {
-    // The exact regression: `INSTA_LINK_DIR=... npm run deploy -- claude-code --branch b`, the
-    // command templates/README.md documents, aborted at step 5 once these declared `default:`
-    // and the executor knew only provided -> generate.
-    expect(demands(templates.find((t) => t.dir === dir).manifest)).toEqual([]);
-  });
-
-  it('resolves the terminal credentials to the documented pair', () => {
-    for (const dir of ['claude-code', 'codex', 'pi']) {
-      const svc = Object.values(templates.find((t) => t.dir === dir).manifest.services)[0];
-      expect([svc.env.required.ADMIN_USERNAME.default, svc.env.required.ADMIN_PASSWORD.default])
-        .toEqual(['admin', '123456']);
+describe('the terminal templates ship no credential of their own', () => {
+  // What this locks down is a security property, not a convenience one. These three publish a root
+  // shell over HTTP basic auth, so a `default:` here would be one password shared by every
+  // deployment in the world, and a `generate:` would be a password the operator never sees. The
+  // manifests declare both variables required with neither, which is what makes the console render
+  // two empty fields it will not let you submit blank.
+  it.each(['claude-code', 'codex', 'pi'])('%s makes the operator supply both', (dir) => {
+    const svc = Object.values(templates.find((t) => t.dir === dir).manifest.services)[0];
+    for (const k of ['ADMIN_USERNAME', 'ADMIN_PASSWORD']) {
+      // null = nothing to fall back on. The platform answers MissingTemplateVariables; the console
+      // blocks submit. Re-adding a default or a generator flips this and fails here.
+      expect(valueSource(svc.env.required[k], undefined), `${k} must have no fallback`).toBeNull();
+      expect(valueSource(svc.env.required[k], 'typed'), `${k} must accept a value`).toBe('provided');
     }
   });
 
-  it('leaves a template that truly needs input asking for it', () => {
-    // hermes is the counter-case, and the reason the assertion above is scoped rather than global.
-    expect(demands(templates.find((t) => t.dir === 'hermes').manifest).length).toBeGreaterThan(0);
+  it.each(['claude-code', 'codex', 'pi'])('%s demands those two and nothing else', (dir) => {
+    // Scoped both ways on purpose: a fourth required variable would be a new thing to type on the
+    // deploy form, and dropping one would mean a credential came back from somewhere.
+    expect(demands(templates.find((t) => t.dir === dir).manifest))
+      .toEqual(['ADMIN_PASSWORD', 'ADMIN_USERNAME']);
+  });
+
+  it('still resolves a template whose secret is generated', () => {
+    // hermes keeps `generate: secret:16` on ACCESS_PASSWORD, which is fine there and is what keeps
+    // the generate branch of valueSource exercised against a real manifest rather than a literal.
+    const svc = Object.values(templates.find((t) => t.dir === 'hermes').manifest.services)[0];
+    expect(valueSource(svc.env.required.ACCESS_PASSWORD, undefined)).toBe('generate');
   });
 });
 

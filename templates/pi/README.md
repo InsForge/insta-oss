@@ -21,15 +21,16 @@ restart gives you the same environment.
 - A 1 GiB volume mounted at `/data`. `HOME` is set to `/data/home`, so session history, CLI config
   and any repositories you clone survive restarts, redeploys and version upgrades.
 - The terminal credentials kept as service variables rather than baked into the image, so you can
-  change them later without rebuilding anything. They are stored, not hidden: both are visible in
-  the deploy form and in the service's variables.
+  change them later without rebuilding anything. They are yours, not ours: the template ships no
+  credential of its own, and both values are visible in the deploy form and in the service's
+  variables.
 - Deploys are health-gated: a container that does not answer is rolled back to the last healthy
   image instead of leaving you with a dead URL.
 
 ## What you need before deploying
 
-- Nothing mandatory. The sign-in comes prefilled as `admin` / `123456`, which you can change on the
-  deploy form.
+- A username and a password of your choosing for the terminal sign-in. There is no default: the
+  deploy form starts with both fields empty and will not submit until you fill them.
 - A model provider key if you want it present from the first boot. Any one of the three below is
   enough, and none is also fine: you can add a key from inside the terminal instead.
 
@@ -37,15 +38,16 @@ restart gives you the same environment.
 
 | Variable | Required | What it does |
 |---|---|---|
-| `ADMIN_USERNAME` | prefilled | HTTP basic-auth username for the terminal. Arrives as `admin`; editable. |
-| `ADMIN_PASSWORD` | prefilled | HTTP basic-auth password for the terminal. Arrives as `123456`; editable, and must not be left blank. |
+| `ADMIN_USERNAME` | yes | HTTP basic-auth username for the terminal. You choose it. |
+| `ADMIN_PASSWORD` | yes | HTTP basic-auth password for the terminal. You choose it. |
 | `ANTHROPIC_API_KEY` | no | Anthropic key, for Claude models. |
 | `OPENAI_API_KEY` | no | OpenAI key, for GPT models. |
 | `OPENROUTER_API_KEY` | no | OpenRouter key, for whichever model you route to. |
 
-`prefilled` means the deploy form starts with a value, so there is nothing you must supply, but the
-field cannot be emptied: the container refuses to start without `ADMIN_PASSWORD` and the deploy
-then fails.
+Both credentials are required and neither has a default, so the deploy form starts empty and refuses
+to submit until you supply them. Together they must stay under 186 bytes (`username:password`):
+past that, ttyd 1.7.7 starts normally and then answers 401 to everyone including you, so the
+entrypoint stops the container instead of leaving you with an unreachable terminal.
 
 Pi reads a provider key straight from the environment and picks its model accordingly. It recognises
 more than thirty providers (Gemini, DeepSeek, Groq, Mistral, Kimi and so on); the three above are
@@ -54,15 +56,14 @@ or configured from inside the terminal.
 
 Set by the template, not by you: `HOME=/data/home` (puts your home directory on the volume).
 
-**Change the password before you share the URL.** The default is the same for every deployment, and
-what it protects is a root shell that can run anything and holds whatever API keys you gave it, so
-anyone who learns the URL and leaves the default in place has all of that. Both fields are editable
-at deploy time and afterwards, from the service's variables.
+**Pick the password like it guards a shell, because it does.** What it protects is a root shell that
+can run anything and holds whatever API keys you gave it, so whoever has the URL and this password
+has all of that. Both fields can be changed later from the service's variables.
 
 ## After deploy
 
 1. Open the service URL. The browser asks for HTTP basic auth: the `ADMIN_USERNAME` and
-   `ADMIN_PASSWORD` you deployed with (`admin` / `123456` unless you changed them).
+   `ADMIN_PASSWORD` you deployed with.
 2. You land in a `bash` shell in `/data/home`.
 3. Run `pi`. Configure a model provider key if you did not set one as a variable.
 4. Configuration and session history persist. Because `HOME` is on the volume, `~` survives

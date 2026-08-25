@@ -2,10 +2,10 @@
 set -e
 mkdir -p "$HOME"
 cd "$HOME"
-# The username falls back to `admin` so the image still runs when pulled without the manifest.
-# The password gets no fallback on purpose: an unauthenticated root shell must never be reachable,
-# so an unset or empty ADMIN_PASSWORD fails the container instead.
-CRED="${ADMIN_USERNAME:-admin}:${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}"
+# Neither gets a fallback on purpose. The manifest declares both required with no default, so the
+# platform always supplies them; a missing one means the image was started some other way, and
+# inventing `admin` there would hand a root shell to whoever finds the URL.
+CRED="${ADMIN_USERNAME:?ADMIN_USERNAME is required}:${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}"
 # ttyd 1.7.7 quietly stops matching the credential once "user:pass" passes 186 bytes. It starts
 # normally and then answers 401 to everyone, the owner included, logging nothing; the health check
 # reads that 401 as alive, so the deploy reports success and the terminal is unreachable for good.
