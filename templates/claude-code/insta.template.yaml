@@ -1,5 +1,5 @@
 code: claude-code
-version: 0.6.0
+version: 0.6.1
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -13,7 +13,7 @@ services:
   # the same branch, the second overwriting the first (QA.md finding 1).
   claude-code:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/claude-code:0.6.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/claude-code:0.6.1   # built from ./Dockerfile by templates-build-images.yml
     port: 7681
     healthcheck: /
     # Stays at 1 GB: 2vcpu-2gb was tried on a live deployment against a ~30s first-response
