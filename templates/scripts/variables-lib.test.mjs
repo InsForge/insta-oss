@@ -95,7 +95,7 @@ describe('every variable an entrypoint reads is declared by its manifest', () =>
     // Guards the guard: if entrypoints move or get renamed, the cases below would silently
     // become an empty suite that passes forever. hermes ships one too, still on the pre-0.6.0
     // ACCESS_PASSWORD, which is exactly the divergence this check should keep honest.
-    expect(withEntrypoint.map((t) => t.dir).sort()).toEqual(['claude-code', 'codex', 'dsh', 'hermes', 'pi']);
+    expect(withEntrypoint.map((t) => t.dir).sort()).toEqual(['9router', 'claude-code', 'codex', 'dsh', 'hermes', 'pi']);
   });
 
   it.each(withEntrypoint)('$dir', ({ dir, manifest }) => {
