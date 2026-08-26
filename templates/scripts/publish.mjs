@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, join, relative, resolve as resolvePath, sep } from "node:path";
 import yaml from "js-yaml";
-import { ghcrGateMessage, parseGhcrRef, rewriteReadme } from "./publish-lib.mjs";
+import { ghcrGateMessage, ghcrRetryVerdict, parseGhcrRef, rewriteReadme } from "./publish-lib.mjs";
 
 const url = process.env.INSTA_PLATFORM_URL?.replace(/\/+$/, "");
 if (!url) fail("INSTA_PLATFORM_URL must be set");
@@ -41,24 +41,44 @@ for (const dir of dirs) {
   const code = basename(dir.replace(/\/+$/, ""));
   const text = readFileSync(join(dir, "insta.template.yaml"), "utf8");
   const m = yaml.load(text);
-  if (m?.meta?.draft === true) { console.log(`~ ${code}: draft, skipped`); continue; }
   if (m?.code !== code) { failures++; console.error(`✗ ${code}: manifest code '${m?.code}' != folder name`); continue; }
+  // A draft used to be `continue`, which withdrew nothing: the catalog kept serving whatever was
+  // published last, and someone had to remember to flip `published` by hand. deepseek-hermes was
+  // withdrawn that way. So a draft now DELISTS, but only if the catalog is actually serving it:
+  // the GET is the discriminator, because 9router/n8n/openclaw are drafts that were never
+  // published, and PUTting them would create rows for half-finished manifests the catalog
+  // validates on receipt.
+  let delisting = false;
+  if (m?.meta?.draft === true) {
+    const live = await fetch(`${url}/templates/${code}`); // public read; 404 = nothing to withdraw
+    if (!live.ok) { console.log(`~ ${code}: draft, not in the catalog`); continue; }
+    delisting = true;
+  }
   // Never publish a manifest whose ghcr image doesn't exist yet (merge can outrun the build).
-  try { await assertGhcrImages(m); }
-  catch (e) { failures++; console.error(`✗ ${code}: ${e.message}`); continue; }
+  // Not asserted when withdrawing: taking a template down must not depend on an image being
+  // pullable, and a retired template's tag is exactly the one nobody is rebuilding.
+  if (!delisting) {
+    try { await assertGhcrImages(m); }
+    catch (e) { failures++; console.error(`✗ ${code}: ${e.message}`); continue; }
+  }
   // Body: manifest is the raw YAML text (the catalog parses and normalizes it), plus the two
   // things a manifest cannot carry itself. readme is a file, and logoUrl has to be absolute
   // because a relative ./logo.svg means nothing to the catalog. Unknown fields are ignored by
   // older catalog versions, so sending them is safe before the receiving side ships.
   let body;
-  try { body = JSON.stringify({ manifest: text, readme: readmeOf(dir), logoUrl: logoUrlOf(dir, m) }); }
+  try {
+    body = JSON.stringify({
+      manifest: text, readme: readmeOf(dir), logoUrl: logoUrlOf(dir, m),
+      ...(delisting ? { published: false } : {}),
+    });
+  }
   catch (e) { failures++; console.error(`✗ ${code}: ${e.message}`); continue; }
   const res = await fetch(`${url}/admin/templates/${code}`, {
     method: "PUT",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body,
   });
-  if (res.ok) { console.log(`✓ ${code}: published ${m.code}@${m.version}`); }
+  if (res.ok) { console.log(`✓ ${code}: ${delisting ? "delisted" : `published ${m.code}@${m.version}`}`); }
   else { failures++; console.error(`✗ ${code}: HTTP ${res.status}. ${(await res.text()).slice(0, 500)}`); }
 }
 process.exit(failures ? 1 : 0);
@@ -131,8 +151,8 @@ async function assertGhcrImages(m) {
 }
 
 // 0 when the manifest resolves, else the last HTTP status seen. Polling exists for publish
-// propagation (404 while the image build finishes); 401/403 is a visibility verdict that will not
-// self-heal, so it returns at once rather than burning the whole retry budget.
+// propagation (404 while the image build finishes); 401/403 returns at once only when the
+// authenticated probe proves it is a visibility verdict, which will not self-heal.
 async function ghcrManifestStatus(repo, tag, { authenticated, attempts = GHCR_ATTEMPTS }) {
   const label = authenticated ? "authenticated" : "anonymous";
   let last = 0;
@@ -150,7 +170,17 @@ async function ghcrManifestStatus(repo, tag, { authenticated, attempts = GHCR_AT
       if (res.ok) return 0;
       last = res.status;
     }
-    if (last === 401 || last === 403) return last;
+    if (last === 401 || last === 403) {
+      // Not necessarily a visibility verdict: an anonymous caller gets 403 for a
+      // package that has not been pushed yet too. Ask the authenticated probe
+      // before spending the verdict, or a still-building image reads as private
+      // and the whole retry budget goes unused.
+      const auth =
+        !authenticated && process.env.GHCR_TOKEN
+          ? await ghcrManifestStatus(repo, tag, { authenticated: true, attempts: 1 })
+          : null;
+      if (ghcrRetryVerdict({ anon: last, auth }) === "fatal") return last;
+    }
     if (i < attempts) {
       console.log(`  … ${repo}:${tag} not ${label}ly pullable yet (HTTP ${last}): retry ${i}/${attempts - 1} in ${GHCR_DELAY_MS / 1000}s`);
       await new Promise((r) => setTimeout(r, GHCR_DELAY_MS));

@@ -54,8 +54,8 @@ they are not attached both handshakes answer 401, the client retries them foreve
 output never reaches the page, even though the page itself and every RPC on it are authenticated
 normally. So the gate mints a cookie on the authenticated responses that do not already carry one,
 and accepts it in place of the password on a WebSocket handshake and nowhere else. Its value is a
-digest of `ACCESS_PASSWORD`, so rotating the password invalidates every cookie issued under the
-old one, and it is `HttpOnly` and `SameSite=Strict`, so no script can read it and it is never
+digest of the admin credentials, so rotating either one invalidates every cookie issued under the
+old pair, and it is `HttpOnly` and `SameSite=Strict`, so no script can read it and it is never
 attached to a cross-site request. `SameSite` is scoped to the site rather than the host, though,
 and a sibling deployment here is another tenant under the same domain, so its page counts as
 same-site. Cookies ignore ports too, so a second app on another port of one hostname is the same
@@ -65,9 +65,9 @@ own auth cache. Ordinary requests are unaffected: they still need the password.
 
 The agent runs as root in its own container, so the shell commands the model chooses can read the
 gate's password file and the cookie token derived from it, even though the entrypoint unsets
-`ACCESS_PASSWORD` before starting anything. Neither grants the agent more than it already has
-inside that container, but they outlive the session that read them, so rotating `ACCESS_PASSWORD`
-is the recovery path after any suspected compromise of the agent.
+`ADMIN_USERNAME` and `ADMIN_PASSWORD` before starting anything. Neither grants the agent more than
+it already has inside that container, but they outlive the session that read them, so rotating
+`ADMIN_PASSWORD` is the recovery path after any suspected compromise of the agent.
 
 ## What you get by hosting it
 
@@ -91,7 +91,8 @@ is the recovery path after any suspected compromise of the agent.
 
 | Variable | Required | What it does |
 |---|---|---|
-| `ACCESS_PASSWORD` | yes | HTTP basic-auth password for the UI, username `admin`. Generated (16 chars) when left blank; editable afterwards. |
+| `ADMIN_USERNAME` | yes | HTTP basic-auth username for the UI. You pick it at deploy; it may not contain a colon. |
+| `ADMIN_PASSWORD` | yes | HTTP basic-auth password for the UI. You pick it at deploy; nothing is generated for you, because this credential fronts an agent that runs shell commands. |
 | `DEEPSEEK_API_KEY` | no | The key the agent uses for model calls and for its `web_search` tool. Leave blank to store one from the Models page instead. |
 | `DEEPSEEK_BASE_URL` | no | Points the DeepSeek adapter at a gateway or compatible proxy. Defaults to `https://api.deepseek.com`. |
 | `DSH_PERMISSION_MODE` | no | The agent's file boundary: `read-only`, `workspace-write` (the default), or `danger-full-access`. You should not need to widen it: the sandbox runs through bubblewrap, which the image installs for exactly this reason. |
@@ -113,8 +114,8 @@ key you store then lives in `$DSH_HOME/.credentials.yaml` on the volume.
 
 ## After deploy
 
-1. Open the service URL. The browser asks for HTTP basic auth: username `admin`, password
-   `ACCESS_PASSWORD`. If it was generated, read it from the service's variables.
+1. Open the service URL. The browser asks for HTTP basic auth: the `ADMIN_USERNAME` and
+   `ADMIN_PASSWORD` you chose at deploy.
 2. You land in the harness UI with no sessions yet. Start one; it opens with the `standard` agent
    preset, which is the full coding agent.
 3. If you left `DEEPSEEK_API_KEY` blank, open Settings and then Models, and store your key

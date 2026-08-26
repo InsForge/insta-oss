@@ -3,8 +3,16 @@
 # htpasswd, and the platform's `healthcheck: /` reads the resulting blanket 401 as healthy.
 set -euo pipefail
 
-# Unreachable through the platform, which always mints a value. Guards a hand-rolled docker run.
-: "${ACCESS_PASSWORD:?ACCESS_PASSWORD is required}"
+# No fallback on purpose: the manifest declares both required with no default, so the platform
+# always supplies them; inventing one here would hand the agent to whoever finds the URL.
+: "${ADMIN_USERNAME:?ADMIN_USERNAME is required}"
+: "${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}"
+
+# htpasswd's field separator; a username carrying one would smuggle in a second, empty credential.
+case "$ADMIN_USERNAME" in *:*|*$'\n'*)
+    echo "entrypoint: refusing to start, ADMIN_USERNAME may not contain a colon or newline" >&2
+    exit 1
+esac
 
 export HOME="${HOME:-/data/home}"
 export DSH_HOME="${DSH_HOME:-/data/dsh}"
@@ -13,23 +21,25 @@ export DSH_HOME="${DSH_HOME:-/data/dsh}"
 # indexed by under $DSH_HOME, so moving it between boots orphans the history.
 mkdir -p "$HOME" "$DSH_HOME" /data/workspace /run/dsh
 
-# Regenerated every boot so rotating ACCESS_PASSWORD takes effect on restart.
-# On stdin, not argv, to keep the password out of the process list.
-printf '%s' "$ACCESS_PASSWORD" | openssl passwd -apr1 -stdin \
-    | sed 's|^|admin:|' > /run/dsh/htpasswd
+# Regenerated every boot so rotating the credentials takes effect on restart.
+# On stdin, not argv, to keep the password out of the process list. printf, not sed: the
+# username is operator-chosen, and sed would reparse its metacharacters.
+PASSWORD_HASH="$(printf '%s' "$ADMIN_PASSWORD" | openssl passwd -apr1 -stdin)"
+printf '%s:%s\n' "$ADMIN_USERNAME" "$PASSWORD_HASH" > /run/dsh/htpasswd
 chown root:www-data /run/dsh/htpasswd
 chmod 640 /run/dsh/htpasswd
 
 # Belt to pipefail's braces: a truncated hash would gate nothing and still look like a file.
-if ! grep -q '^admin:\$apr1\$' /run/dsh/htpasswd; then
-    echo "entrypoint: refusing to start, htpasswd does not hold an apr1 hash" >&2
+if [ "$(cut -d: -f1 /run/dsh/htpasswd)" != "$ADMIN_USERNAME" ] || ! grep -q ':\$apr1\$' /run/dsh/htpasswd; then
+    echo "entrypoint: refusing to start, htpasswd does not hold the user and an apr1 hash" >&2
     exit 1
 fi
+unset PASSWORD_HASH
 
 # The credential nginx accepts on a WebSocket handshake, for the reason nginx.conf gives: no
 # header can be set on `new WebSocket()`, and not every engine attaches the basic credentials.
-# Derived from the password, so a cookie survives a restart and dies when the password rotates.
-GATE_TOKEN="$(printf 'dsh-gate-cookie-v1:%s' "$ACCESS_PASSWORD" | openssl dgst -sha256 -r | cut -d' ' -f1)"
+# Derived from both credentials, so a cookie survives a restart and dies when either rotates.
+GATE_TOKEN="$(printf 'dsh-gate-cookie-v1:%s:%s' "$ADMIN_USERNAME" "$ADMIN_PASSWORD" | openssl dgst -sha256 -r | cut -d' ' -f1)"
 
 # Fail closed: an empty token would land as an empty map key, which is what $gate_upgrade holds
 # for every ordinary request, and would read as "no password required" for the whole site.
@@ -48,8 +58,8 @@ if grep -q '__DSH_GATE_TOKEN__' /run/dsh/nginx.conf; then
 fi
 
 # Neither process needs the plaintext from here on, and dsh runs shell commands the model chooses,
-# so anything it spawns would otherwise inherit the gate password.
-unset ACCESS_PASSWORD
+# so anything it spawns would otherwise inherit the gate credentials.
+unset ADMIN_USERNAME ADMIN_PASSWORD
 
 # Checked before it is started, so a config nginx will not load exits with nginx's own message
 # rather than leaving dsh running behind a dead port.

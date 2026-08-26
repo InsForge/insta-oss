@@ -3,8 +3,8 @@
 // the pinned upstream is a release candidate whose transitive ranges float, so that is a
 // scheduled event rather than a hypothetical. This is what to run.
 //
-//   ACCESS_PASSWORD=... node gate-assertions.mjs http://127.0.0.1:8080
-//   ACCESS_PASSWORD=... node gate-assertions.mjs https://your-deployment.example.com
+//   ADMIN_USERNAME=... ADMIN_PASSWORD=... node gate-assertions.mjs http://127.0.0.1:8080
+//   ADMIN_USERNAME=... ADMIN_PASSWORD=... node gate-assertions.mjs https://your-deployment.example.com
 //
 // Needs the harness actually serving behind the gate, not just nginx: an authenticated request
 // answers 502 until dsh is listening, which the health check does not catch (QA.md finding 8).
@@ -14,9 +14,10 @@ import { connect as tlsConnect } from "node:tls";
 import { createHash } from "node:crypto";
 
 const BASE = process.argv[2];
-const PASSWORD = process.env.ACCESS_PASSWORD;
-if (!BASE || !PASSWORD) {
-  console.error("usage: ACCESS_PASSWORD=... node gate-assertions.mjs <base-url>");
+const USERNAME = process.env.ADMIN_USERNAME;
+const PASSWORD = process.env.ADMIN_PASSWORD;
+if (!BASE || !USERNAME || !PASSWORD) {
+  console.error("usage: ADMIN_USERNAME=... ADMIN_PASSWORD=... node gate-assertions.mjs <base-url>");
   process.exit(2);
 }
 const url = new URL(BASE);
@@ -26,10 +27,10 @@ const PORT = Number(url.port || (TLS ? 443 : 80));
 const AUTHORITY = url.port ? `${HOST}:${url.port}` : HOST;
 const SELF = `${url.protocol}//${AUTHORITY}`;
 
-const BASIC = "Basic " + Buffer.from(`admin:${PASSWORD}`).toString("base64");
-const WRONG = "Basic " + Buffer.from("admin:definitely-not-it").toString("base64");
+const BASIC = "Basic " + Buffer.from(`${USERNAME}:${PASSWORD}`).toString("base64");
+const WRONG = "Basic " + Buffer.from(`${USERNAME}:definitely-not-it`).toString("base64");
 // Must match the derivation in entrypoint.sh, which is the contract being asserted.
-const TOKEN = createHash("sha256").update(`dsh-gate-cookie-v1:${PASSWORD}`).digest("hex");
+const TOKEN = createHash("sha256").update(`dsh-gate-cookie-v1:${USERNAME}:${PASSWORD}`).digest("hex");
 const COOKIE = `dsh_gate=${TOKEN}`;
 const FORGED = "dsh_gate=" + "f".repeat(64);
 const FOREIGN = "https://sibling.example.com";

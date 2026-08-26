@@ -29,8 +29,16 @@ scripts/
 ```
 
 A service may declare `spec: <name>` (for example `1vcpu-1gb`) to be created at that compute size
-instead of the platform default, and `volume: { size: N }` for a persistent disk mounted at
-`/data`. See [AGENTS.md](AGENTS.md) for the field rules.
+instead of the platform default, `volume: { size: N }` for a persistent disk mounted at `/data`,
+and `alwaysOn: true` to keep the machine from being idle-stopped. Always-on bills continuously, so
+declare it only when the app must run without an inbound request to wake it — n8n's schedule and
+polling triggers fire from inside the process, which is exactly that case.
+
+A value under `env.fixed` may interpolate another service's address as `${services.<name>.url}` or
+`${services.<name>.host}`, resolved before anything deploys, including a service's own address. A
+**managed database is different**: it has no URL, and its credentials arrive under `env.platform`
+as `${{services.<name>.<KEY>}}` — note the doubled braces. The two are not interchangeable, and
+each is rejected in the other's place. See [AGENTS.md](AGENTS.md) for the field rules.
 
 ## Logo attribution
 
@@ -43,8 +51,7 @@ because an RGBA file can still be fully opaque.
 | `claude-code` | `logo.svg` 2.5 KB | yes (vector) | fixed `#D97757` | Anthropic's Claude Code mark |
 | `codex` | `logo.svg` 3.7 KB | yes (vector) | fixed (blue gradient, white glyph) | OpenAI's Codex mark |
 | `pi` | `logo.svg` 618 B | yes (vector) | **adapts** via `prefers-color-scheme` | <https://pi.dev/logo-auto.svg> |
-| `hermes` | `logo.png` 400x400 | **no, opaque black** | fixed | The NousResearch GitHub org avatar (`avatars.githubusercontent.com/u/134168893`). Upstream publishes no transparent product mark: its site and repo carry only a character illustration, a text-glyph favicon, and a 48x48 site icon. A card should put a neutral tile behind this one |
-| `deepseek-hermes` | `logo.svg` 2.0 KB | yes (vector) | fixed `#5786FE` | DeepSeek's mark. Template delisted 2026-08-22, superseded by `dsh` |
+| `hermes` | `logo.png` 512x512 | yes (corner alpha 0) | fixed light plate | Upstream's own app icon, `apps/desktop/assets/icon.png` at 1024x1024, downscaled. This row used to name the NousResearch GitHub org avatar and claim upstream published no transparent mark; that icon disproves it. No vector option: upstream's only SVG is a bare `⚕` glyph in the default font, which the rules below reject. Stored greyscale+alpha, halving the bytes for a max difference of 3/255 on a single pixel. The white plate is part of the artwork, not a background: the character's face is the plate showing through, so cutting it out would erase the face |
 | `dsh` | `logo.svg` 2.0 KB | yes (vector) | fixed `#5786FE` | DeepSeek's mark, on DeepSeek's own project. The same file the delisted `deepseek-hermes` carried, where it was the weaker case: branding someone else's agent. Upstream's `BRAND_GUIDELINES.md` asks projects not to imply endorsement, which naming their own harness does not |
 | `n8n` | `logo.svg` 1.6 KB | yes (vector) | fixed `#EA4B71` | n8n's brand mark |
 | `openclaw` | `logo.svg` 4.6 KB | yes (vector) | fixed; includes a near-black `#050810` element | OpenClaw's mark |
@@ -59,9 +66,15 @@ nothing.
 
 ```bash
 npm install
-INSTA_LINK_DIR=<a dir linked to your project> npm run deploy -- claude-code --branch my-branch
-# pass required variables with --set KEY=value; password-type variables are
-# generated for you when omitted.
+INSTA_LINK_DIR=<a dir linked to your project> npm run deploy -- claude-code --branch my-branch \
+  --set ADMIN_USERNAME=you --set ADMIN_PASSWORD=<pick one>
+# pass variables with --set KEY=value. Anything you omit resolves the way the
+# platform resolves it: a declared generator mints a value, otherwise the
+# manifest's default applies, and only a variable with neither stops the run.
+# The terminal templates declare neither for their credentials on purpose, so
+# those two --set flags are not optional -- omit one and the run stops at step 5
+# naming it, exactly as the deploy form refuses to submit with the field empty.
+# The summary at the end names every value you did not supply yourself.
 ```
 
 `deploy.mjs` drives the standard `insta` CLI end to end: create services, run generators, write

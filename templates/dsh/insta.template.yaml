@@ -12,12 +12,16 @@ upstream:
   license: MIT
 
 services:
-  harness:
+  # Named for the template, not "harness": three templates sharing one service name collided on
+  # the same branch, the second overwriting the first (QA.md finding 1).
+  dsh:
     type: web
     image: ghcr.io/insforge/insta-oss/templates/dsh:0.1.0   # built from ./Dockerfile by templates-build-images.yml
     port: 8080
     healthcheck: /             # nginx answers 401 unauthenticated, which counts as healthy
     spec: 1vcpu-1gb            # measured 188 MB at boot peak before any model turn (QA.md: "512 MB is not enough for an agent CLI")
+    # A volume makes scale-to-zero a cold boot, not a resume; same tradeoff as the other agent UIs.
+    alwaysOn: true
     volume:
       size: 1                  # mounts at /data
     env:
@@ -31,10 +35,13 @@ services:
         # reads MODE, and profile-boot-*.js resolveTelemetryPatch applies the disable.
         DSH_TELEMETRY_DISABLED: "1"
       required:
-        ACCESS_PASSWORD:
-          generate: secret:16
-          editable: true
-          description: "Password for the web UI (username: admin). Generated if left blank"
+        # Neither a `default:` nor a `generate:`, matching the other agent UIs: this service runs
+        # shell commands the model chooses, so the operator picks the credential, nothing falls back.
+        # No 186-byte cap here: that limit is ttyd's; nginx basic auth has no such edge.
+        ADMIN_USERNAME:
+          description: "Username for the web UI sign-in. Pick your own; it may not contain a colon"
+        ADMIN_PASSWORD:
+          description: "Password for the web UI sign-in. Pick a strong one: it is all that stands between the URL and an agent that runs shell commands"
       optional:
         DEEPSEEK_API_KEY:
           description: "DeepSeek API key (platform.deepseek.com). Leave blank to store it from the UI's Models page instead"

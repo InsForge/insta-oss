@@ -23,12 +23,25 @@ try { git(["cat-file", "-e", `${base}^{commit}`]); }
 catch { console.log(`~ base ref '${base}' not available: version-bump guard skipped`); process.exit(0); }
 
 const changed = git(["diff", "--name-only", base, "--", prefix]).split("\n").filter(Boolean);
-const codes = [...new Set(
-  changed
-    .map((p) => relative(prefix, p).split("/"))
-    .filter((seg) => seg.length > 1 && seg[0] !== "scripts")
-    .map((seg) => seg[0]),
-)].sort();
+
+// code -> the paths that changed under it, relative to the template directory.
+const byCode = new Map();
+for (const p of changed) {
+  const seg = relative(prefix, p).split("/");
+  if (seg.length < 2 || seg[0] === "scripts") continue;
+  const code = seg[0];
+  if (!byCode.has(code)) byCode.set(code, []);
+  byCode.get(code).push(seg.slice(1).join("/"));
+}
+const codes = [...byCode.keys()].sort();
+
+// The bump exists to stop a rebuild overwriting a published image tag, so it is owed only by a
+// change the image or the manifest can see. README.md is neither: no Dockerfile copies it, and the
+// catalog takes it from `readme` on every publish, upserted by code, so it reaches users without a
+// version moving. Requiring a bump for a typo fix also cost every running instance an
+// "update available" marker pointing at an identical image.
+const DOC_ONLY = new Set(["README.md"]);
+const isDocOnly = (code) => byCode.get(code).every((p) => DOC_ONLY.has(p));
 
 let failures = 0;
 for (const code of codes) {
@@ -36,6 +49,7 @@ for (const code of codes) {
   if (!existsSync(file)) { console.log(`~ ${code}: no manifest in the working tree (deleted): skipped`); continue; }
   const m = yaml.load(readFileSync(file, "utf8"));
   if (m?.meta?.draft === true) { console.log(`~ ${code}: draft: bump not required`); continue; }
+  if (isDocOnly(code)) { console.log(`~ ${code}: documentation only: bump not required`); continue; }
 
   let baseManifest;
   try { baseManifest = yaml.load(git(["show", `${base}:${prefix}/${code}/insta.template.yaml`])); }

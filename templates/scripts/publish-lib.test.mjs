@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ghcrGateMessage, parseGhcrRef, rewriteReadme } from './publish-lib.mjs'
+import { ghcrGateMessage, ghcrRetryVerdict, parseGhcrRef, rewriteReadme } from './publish-lib.mjs'
 
 const SHA = 'a'.repeat(40)
 const REPO = 'InsForge/insta-oss'
@@ -86,8 +86,8 @@ describe('rewriteReadme', () => {
 
   it('links files with blob and directories with tree', () => {
     const isDirectory = (p) => p === 'templates/hermes'
-    const out = rewrite('[doc](../QA.md) [dir](../hermes/) [dir2](../hermes)', isDirectory)
-    expect(out).toContain(`https://github.com/${REPO}/blob/${SHA}/templates/QA.md`)
+    const out = rewrite('[doc](../AGENTS.md) [dir](../hermes/) [dir2](../hermes)', isDirectory)
+    expect(out).toContain(`https://github.com/${REPO}/blob/${SHA}/templates/AGENTS.md`)
     // A trailing slash is a directory even when the caller cannot stat it...
     expect(out).toContain(`https://github.com/${REPO}/tree/${SHA}/templates/hermes)`)
     // ...and so is a path isDirectory() recognises, which is the deepseek-hermes -> hermes case.
@@ -106,5 +106,40 @@ describe('rewriteReadme', () => {
   it('publishes the text unchanged when there is nothing to rewrite', () => {
     const text = '# Title\n\nPlain prose with `code` and a list:\n\n- one\n- two\n'
     expect(rewrite(text)).toBe(text)
+  })
+})
+
+// The bug this encodes: publish and templates-build-images run on the same push,
+// so publish reliably sees the anonymous 403 of a package the build has not
+// pushed yet. Reading that as "private" is what failed every image-bumping merge.
+describe('ghcrRetryVerdict', () => {
+  it('waits when the authenticated probe says the image is not there yet', () => {
+    expect(ghcrRetryVerdict({ anon: 403, auth: 404 })).toBe('retry')
+    expect(ghcrRetryVerdict({ anon: 401, auth: 404 })).toBe('retry')
+  })
+
+  it('gives up when the image exists but is hidden', () => {
+    // 0 is this script's "resolved" status, so an authenticated hit means private.
+    expect(ghcrRetryVerdict({ anon: 403, auth: 0 })).toBe('fatal')
+    expect(ghcrRetryVerdict({ anon: 401, auth: 0 })).toBe('fatal')
+  })
+
+  it('waits when nothing authenticated an answer', () => {
+    expect(ghcrRetryVerdict({ anon: 403, auth: null })).toBe('retry')
+    expect(ghcrRetryVerdict({ anon: 403, auth: undefined })).toBe('retry')
+  })
+
+  it('waits when the authenticated probe itself failed to classify', () => {
+    // An expired or under-scoped token, or ghcr rate limiting, proves nothing
+    // about visibility; only a probe that resolves does.
+    expect(ghcrRetryVerdict({ anon: 403, auth: 401 })).toBe('retry')
+    expect(ghcrRetryVerdict({ anon: 403, auth: 403 })).toBe('retry')
+    expect(ghcrRetryVerdict({ anon: 403, auth: 429 })).toBe('retry')
+    expect(ghcrRetryVerdict({ anon: 403, auth: 500 })).toBe('retry')
+  })
+
+  it('leaves every other status to the caller loop', () => {
+    expect(ghcrRetryVerdict({ anon: 404, auth: 0 })).toBe('retry')
+    expect(ghcrRetryVerdict({ anon: 500, auth: null })).toBe('retry')
   })
 })

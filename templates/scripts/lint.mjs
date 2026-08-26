@@ -4,6 +4,7 @@ import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
+import { FIXED_REF_RE, checkFixedRef } from "./manifest-refs.mjs";
 
 // Template dirs live beside this script's parent (templates/<code>/): runs from any cwd.
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -18,6 +19,8 @@ const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 // Mirror of the platform's compute catalog. The platform is the authority; this copy exists so a
 // typo fails on the pull request instead of on the publish run after merge.
 const COMPUTE_SPECS = ["1vcpu-256mb", "1vcpu-512mb", "1vcpu-1gb", "2vcpu-1gb", "2vcpu-2gb"];
+// Images this repo builds for itself; templates-build-images derives their tag from `version:`.
+const SELF_IMAGE_PREFIX = "ghcr.io/insforge/insta-oss/templates/";
 const dirs = readdirSync(root).filter((d) => !NON_TEMPLATE.has(d) && statSync(join(root, d)).isDirectory());
 for (const dir of dirs) {
   const before = failures;
@@ -72,6 +75,17 @@ for (const dir of dirs) {
   const declared = new Set();
   for (const [name, svc] of Object.entries(m?.services ?? {})) {
     for (const group of ["required", "optional"]) for (const k of Object.keys(svc.env?.[group] ?? {})) declared.add(k);
+    // Same bargain as COMPUTE_SPECS above: the platform is the authority, and this check exists so
+    // a typo fails on the pull request instead of asynchronously, mid-run, on every by-code deploy
+    // after merge. Runs before the postgres skip below, because the platform checks every service.
+    for (const [k, value] of Object.entries(svc.env?.fixed ?? {})) {
+      for (const mt of String(value).matchAll(FIXED_REF_RE)) {
+        const verdict = checkFixedRef(mt[1], {
+          at: `${name}: env.fixed.${k}`, envName: k, services: m?.services ?? {}, generated: m?.generated ?? {},
+        });
+        if (verdict.error) err(dir, verdict.error);
+      }
+    }
     if (svc.type === "postgres") continue; // managed service: platform injects credentials
     // rule 1: image must be pinned (tag or digest), never latest/tagless
     if (!svc.image && !svc.build) err(dir, `${name}: needs image or build`);
@@ -80,11 +94,25 @@ for (const dir of dirs) {
     if (svc.image && !draft) {
       const ref = String(svc.image);
       if (!/[@:]/.test(ref.split("/").pop()) || /:latest$/.test(ref)) err(dir, `${name}: image must pin a tag or digest (got '${ref}')`);
+      // An image we build ourselves is tagged from `version:` by templates-build-images, while
+      // this line is typed by hand. Drift means publishing a manifest that points at a tag no
+      // build ever pushed, which surfaces as publish.mjs polling for ten minutes and failing, or
+      // worse as a deploy pulling a stale version that does exist.
+      const self = ref.startsWith(SELF_IMAGE_PREFIX) ? ref.slice(SELF_IMAGE_PREFIX.length) : null;
+      if (self && !self.includes("@")) {
+        const [imageCode, tag] = [self.split(":")[0], self.split(":")[1]];
+        if (imageCode !== dir) err(dir, `${name}: image is ${SELF_IMAGE_PREFIX}${imageCode}, which is another template's`);
+        else if (tag !== String(m.version)) err(dir, `${name}: image tag '${tag}' != version '${m.version}': the build tags from version:, so nothing would push '${tag}'`);
+      }
     }
     if (svc.build && !existsSync(join(root, dir, svc.build.replace(/^\.\//, "")))) err(dir, `${name}: build file ${svc.build} not found`);
     if (svc.type === "web" && !svc.healthcheck) err(dir, `${name}: web service needs healthcheck`);
     if (svc.spec !== undefined && !COMPUTE_SPECS.includes(String(svc.spec))) {
       err(dir, `${name}: unknown compute spec '${svc.spec}' (one of: ${COMPUTE_SPECS.join(", ")})`);
+    }
+    // Same message the platform uses. Catches the shape only: a misspelled key is silent on both sides.
+    if (svc.alwaysOn !== undefined && typeof svc.alwaysOn !== "boolean") {
+      err(dir, `${name}: alwaysOn must be a boolean`);
     }
     // rule 2: required vars need description (unless generated)
     for (const [k, spec] of Object.entries(svc.env?.required ?? {})) {

@@ -8,6 +8,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import yaml from "js-yaml";
+import { valueSource } from "./variables-lib.mjs";
+import { FIXED_REF_RE, checkFixedRef } from "./manifest-refs.mjs";
 
 const args = process.argv.slice(2);
 const dir = resolve(args[0] ?? ".");
@@ -39,10 +41,22 @@ for (const [name, spec] of Object.entries(manifest.generated ?? {})) {
 step(2, `generated ${Object.keys(generated).length} value(s)`);
 
 // [3/8] create services
+// Deliberately WITHOUT --image. The platform deploys the image the moment a compute service names
+// one (services.ts, since insta-platform 9966f46 "services add --image runs the image at
+// creation", 2026-07-20), which here is two steps before the variables exist, so any template
+// whose entrypoint requires one crash-loops on that first boot.
+//
+// This script was written a MONTH AFTER that platform change (28fa4b3, 2026-08-21) and carried
+// --image from its first line, so `npm run deploy -- claude-code` has never once worked. Verified
+// against main: 0.5.0 with ACCESS_PASSWORD fails identically, "never answered on port 7681 ...
+// exit code 1". It went unnoticed because the real deploy paths use the platform's own executor,
+// which creates the service with NO image and deploys as a later step, and the only template run
+// through here since (n8n) boots from an upstream image needing no variable.
+//
+// Step 6 owns the deploy now, after step 5 has written the variables, and passes the same --image.
 for (const [name, svc] of services) {
   const cmd = ["services", "add", "compute", name, "--branch", branch, "--port", String(svc.port ?? 8080)];
   if (svc.volume?.size) cmd.push("--volume", String(svc.volume.size));
-  if (svc.image) cmd.push("--image", svc.image);
   try {
     insta(cmd);
   } catch (e) {
@@ -53,24 +67,41 @@ for (const [name, svc] of services) {
 step(3, "services created");
 
 // [4/8] resolve cross-service refs (all services now have addresses)
-// prototype: internal hostnames not yet exposed by platform: placeholder pass.
-step(4, "cross-service refs resolved (none declared)");
+// `services add` assigns the domain, so every address is known BEFORE anything deploys — the same
+// ordering the platform uses, where computeAppUrl derives the URL from the allocated app name
+// rather than looking one up after the fact.
+const listRaw = insta(["services", "list", "--branch", branch, "--json"]);
+// Slice from the first `[`: an update-available banner on stdout would otherwise fail the parse.
+const addr = new Map(
+  JSON.parse(listRaw.slice(listRaw.indexOf("[")))
+    .filter((s) => s.domain)
+    .map((s) => [s.name, { url: `https://${s.domain}`, host: s.domain }]),
+);
+step(4, `resolved addresses for ${addr.size} service(s)`);
 
 // [5/8] assemble + write variables
 const deploymentId = randomUUID();
 for (const [name, svc] of services) {
-  const env = { ...(svc.env?.fixed ?? {}) };
+  const env = Object.fromEntries(
+    Object.entries(svc.env?.fixed ?? {}).map(([k, v]) => [k, resolveFixed(String(v), `${name}: env.fixed.${k}`, k)]),
+  );
   for (const [k, ref] of Object.entries(svc.env?.generated ?? {})) {
     const key = String(ref).replace(/^\$\{(.+)\}$/, "$1");
     if (!(key in generated)) fail(`env.generated.${k} references undeclared generator '${key}'`);
     env[k] = generated[key];
   }
-  for (const [k, spec] of Object.entries(svc.env?.required ?? {})) {
-    if (sets[k]) env[k] = sets[k];
-    else if (spec?.generate) env[k] = genValue(spec.generate);
-    else fail(`required variable ${k} missing: pass --set ${k}=...  (${spec?.description ?? ""})`);
+  // valueSource carries the platform's order (provided -> generate -> default). Required and
+  // optional differ only in what happens when nothing resolves: the first stops the run, the
+  // second stays unset.
+  for (const [group, required] of [["required", true], ["optional", false]]) {
+    for (const [k, spec] of Object.entries(svc.env?.[group] ?? {})) {
+      const source = valueSource(spec, sets[k]);
+      if (source === "provided") env[k] = sets[k];
+      else if (source === "generate") env[k] = genValue(spec.generate);
+      else if (source === "default") env[k] = String(spec.default);
+      else if (required) fail(`required variable ${k} missing: pass --set ${k}=...  (${spec?.description ?? ""})`);
+    }
   }
-  for (const k of Object.keys(svc.env?.optional ?? {})) if (sets[k]) env[k] = sets[k];
   // attribution stamp (design doc: template@version + deployment_id, recorded
   // on the service; platform field pending: prototype stamps via env)
   env.TEMPLATE_CODE = manifest.code;
@@ -114,8 +145,22 @@ step(7, "health checks passed");
 // [8/8] report
 step(8, "done\n");
 for (const [name] of services) log(`  ${name}: ${urls[name]}`);
-const pw = Object.entries(services[0][1].env?.required ?? {}).find(([, s]) => s?.generate);
-if (pw && !sets[pw[0]]) log(`  ${pw[0]} (generated, shown once): see secrets store: insta run --branch ${branch} -- printenv ${pw[0]}`);
+// Every required variable the caller did NOT supply got its value from somewhere the caller cannot
+// see, so name each one and where to read it back. Every service, not just the first: a template
+// can generate a credential on any of them, and this used to read `services[0]` while claiming to
+// name each one. Keyed on the spec rather than only on `generate:`, so a `default:` is reported
+// too. Deduped because the bundle `insta run` injects is per-branch, not per-service, so one line
+// answers a name however many services declare it.
+const reported = new Set();
+for (const [, svc] of services) {
+  for (const [k, spec] of Object.entries(svc.env?.required ?? {})) {
+    const source = valueSource(spec, sets[k]);
+    if (source === "provided" || source === null || reported.has(k)) continue;
+    reported.add(k);
+    const label = source === "generate" ? "generated" : "template default";
+    log(`  ${k} (${label}): insta run --branch ${branch} -- printenv ${k}`);
+  }
+}
 log(`  attribution: ${manifest.code}@${manifest.version}  deployment ${deploymentId}`);
 
 // helpers
@@ -152,6 +197,18 @@ function insta(cmdArgs) {
     if (e.stdout) e.stdout = redact(e.stdout);
     throw e;
   }
+}
+// An unresolvable ref FAILS here rather than being written through: a literal `${...}` reaching the
+// app is the worse outcome, because n8n would boot fine and hand out webhook links nobody can call.
+function resolveFixed(value, at, envName) {
+  return value.replace(FIXED_REF_RE, (_whole, inner) => {
+    const v = checkFixedRef(inner, { at, envName, services: manifest.services ?? {}, generated: manifest.generated ?? {} });
+    if (v.error) fail(v.error);
+    const a = addr.get(v.service);
+    // Reachable only if the platform allocated no domain for a service the rule considers valid.
+    if (!a) fail(`${at}: service '${v.service}' has no address allocated`);
+    return a[v.prop];
+  });
 }
 function genValue(spec) {
   const m = String(spec).match(/^secret:(\d+)$/);
