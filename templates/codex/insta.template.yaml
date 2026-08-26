@@ -1,5 +1,5 @@
 code: codex
-version: 0.5.0
+version: 0.6.1
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -14,7 +14,7 @@ services:
   # the same branch, the second overwriting the first (QA.md finding 1).
   codex:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/codex:0.5.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/codex:0.6.1   # built from ./Dockerfile by templates-build-images.yml
     port: 7681
     healthcheck: /
     spec: 1vcpu-1gb              # created at 1GB (QA.md: "512 MB is not enough for an agent CLI")
@@ -26,10 +26,14 @@ services:
       fixed:
         HOME: /data/home
       required:
-        ACCESS_PASSWORD:
-          generate: secret:16
-          editable: true
-          description: "Password for the browser terminal (username: admin). Generated if left blank"
+        # Neither a `default:` nor a `generate:`, so the deploy form shows two empty required fields
+        # and cannot be submitted until the operator fills them. That is deliberate: this service is
+        # a root shell in a browser, and a credential shipped in this file would be the same one on
+        # every deploy in the world. Nothing here can be left to a fallback.
+        ADMIN_USERNAME:
+          description: "Username for the browser terminal sign-in"
+        ADMIN_PASSWORD:
+          description: "Password for the browser terminal sign-in"
       optional:
         OPENAI_API_KEY:
           description: "OpenAI API key. Leave blank and run `codex login` in the terminal instead"

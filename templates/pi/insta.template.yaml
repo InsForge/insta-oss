@@ -1,5 +1,5 @@
 code: pi
-version: 0.5.0
+version: 0.6.1
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -14,7 +14,7 @@ services:
   # the same branch, the second overwriting the first (QA.md finding 1).
   pi:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/pi:0.5.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/pi:0.6.1   # built from ./Dockerfile by templates-build-images.yml
     port: 7681
     healthcheck: /
     spec: 1vcpu-1gb              # created at 1GB (QA.md: "512 MB is not enough for an agent CLI")
@@ -26,13 +26,25 @@ services:
       fixed:
         HOME: /data/home
       required:
-        ACCESS_PASSWORD:
-          generate: secret:16
-          editable: true
-          description: "Password for the browser terminal (username: admin). Generated if left blank"
+        # Neither a `default:` nor a `generate:`, so the deploy form shows two empty required fields
+        # and cannot be submitted until the operator fills them. That is deliberate: this service is
+        # a root shell in a browser, and a credential shipped in this file would be the same one on
+        # every deploy in the world. Nothing here can be left to a fallback.
+        ADMIN_USERNAME:
+          description: "Username for the browser terminal sign-in"
+        ADMIN_PASSWORD:
+          description: "Password for the browser terminal sign-in"
+      # Pi reads a provider key straight from the environment and picks the model accordingly; its
+      # own env-api-keys.js recognises 37 providers across 35 variables. These three are the ones
+      # worth a form field. Any one is enough, and none is fine too: a key can be added later from
+      # inside the terminal, and the rest still work as plain service variables.
       optional:
         ANTHROPIC_API_KEY:
-          description: "Anthropic API key. Pi accepts keys from several providers, configurable in the terminal"
+          description: "Anthropic API key, for Claude models"
+        OPENAI_API_KEY:
+          description: "OpenAI API key, for GPT models"
+        OPENROUTER_API_KEY:
+          description: "OpenRouter API key, for whichever model you route to"
 
 meta:
   name: Pi Coding Agent
