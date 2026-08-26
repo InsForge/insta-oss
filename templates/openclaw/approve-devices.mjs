@@ -19,8 +19,16 @@ const tick = () => {
     const out = JSON.parse(run(["devices", "list", "--json"]));
     for (const p of out?.pending ?? []) {
       if (!p?.requestId) continue;
+      // Only fresh Control UI pairings: no node roles, no repair/upgrade of an existing device —
+      // those stay manual, and a stuck browser can always pair again as a new device.
+      if (p.isRepair) continue;
+      const roles = p.roles ?? (p.role ? [p.role] : []);
+      if (roles.some((r) => r !== "operator")) continue;
+      if (p.clientId && p.clientId !== "openclaw-control-ui") continue;
       run(["devices", "approve", p.requestId, "--json"]);
-      console.log(`[template] approved control-ui device ${p.requestId}`);
+      console.log(
+        `[template] approved control-ui device ${p.requestId} (${p.displayName ?? p.clientId ?? "unnamed"} from ${p.remoteIp ?? "unknown ip"})`,
+      );
     }
   } catch {
     // Gateway not up yet, or a transient CLI failure — the next tick retries.

@@ -38,11 +38,13 @@ if (url && !origins.includes(url)) {
 
 // Mobile QR pairing needs an advertised public URL: behind the platform proxy the gateway can
 // only infer LAN/tailnet IPs, so device-pair setup codes fail without an explicit publicUrl.
+// Assigned, not defaulted: a branch clone boots with the parent's persisted config, and its QR
+// links must target this environment's URL, which is exactly what OPENCLAW_PUBLIC_URL carries.
 if (url) {
   const devicePair = (((cfg.plugins ??= {}).entries ??= {})["device-pair"] ??= {});
   // An entry without enabled:true disables the bundled plugin outright.
   devicePair.enabled ??= true;
-  (devicePair.config ??= {}).publicUrl ||= url;
+  (devicePair.config ??= {}).publicUrl = url;
 }
 
 mkdirSync(dirname(path), { recursive: true });
