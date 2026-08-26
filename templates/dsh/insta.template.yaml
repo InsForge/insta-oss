@@ -1,0 +1,63 @@
+code: dsh
+version: 0.1.0
+maintainer: official
+sourceRepo: InsForge/insta-oss
+
+# Code is `dsh`, not `deepseek-harness`: upstream's BRAND_GUIDELINES.md asks projects not to
+# put the "DeepSeek Harness" trademark in a project name and recommends the DSH abbreviation.
+upstream:
+  repo: deepseek-ai/deepseek-harness
+  package: "@deepseek-ai/dsh"
+  pinned: "0.1.1-rc.2"
+  license: MIT
+
+services:
+  # Named for the template, not "harness": three templates sharing one service name collided on
+  # the same branch, the second overwriting the first (QA.md finding 1).
+  dsh:
+    type: web
+    image: ghcr.io/insforge/insta-oss/templates/dsh:0.1.0   # built from ./Dockerfile by templates-build-images.yml
+    port: 8080
+    healthcheck: /             # nginx answers 401 unauthenticated, which counts as healthy
+    spec: 1vcpu-1gb            # measured 188 MB at boot peak before any model turn (QA.md: "512 MB is not enough for an agent CLI")
+    # A volume makes scale-to-zero a cold boot, not a resume; same tradeoff as the other agent UIs.
+    alwaysOn: true
+    volume:
+      size: 1                  # mounts at /data
+    env:
+      fixed:
+        HOME: /data/home
+        DSH_HOME: /data/dsh              # single root: settings, credentials, sessions, storages, profiles
+        # Belt to DSH_TELEMETRY_MODE, which already defaults to DISABLED: any non-empty value here
+        # disables the session-telemetry row outright. Export only, per dsh-anonymous-user-id:
+        # it does not suppress feedback acknowledgement or the DeepSeek provider header.
+        # Both live in the bundled node_modules, not the package root: dsh-base/cordis.patch.yml
+        # reads MODE, and profile-boot-*.js resolveTelemetryPatch applies the disable.
+        DSH_TELEMETRY_DISABLED: "1"
+      required:
+        # Neither a `default:` nor a `generate:`, matching the other agent UIs: this service runs
+        # shell commands the model chooses, so the operator picks the credential, nothing falls back.
+        # No 186-byte cap here: that limit is ttyd's; nginx basic auth has no such edge.
+        ADMIN_USERNAME:
+          description: "Username for the web UI sign-in. Pick your own; it may not contain a colon"
+        ADMIN_PASSWORD:
+          description: "Password for the web UI sign-in. Pick a strong one: it is all that stands between the URL and an agent that runs shell commands"
+      optional:
+        DEEPSEEK_API_KEY:
+          description: "DeepSeek API key (platform.deepseek.com). Leave blank to store it from the UI's Models page instead"
+        DEEPSEEK_BASE_URL:
+          description: "DeepSeek endpoint override, for a gateway or compatible proxy. Defaults to https://api.deepseek.com"
+        DSH_PERMISSION_MODE:
+          description: "Agent file boundary: read-only, workspace-write (default), or danger-full-access. Widen it only if the container sandbox is unavailable"
+
+meta:
+  name: DeepSeek Harness
+  tagline: Plugin-composed coding agent with a browser UI
+  category: ai-agent
+  tags: [ai-agent, ai]
+  # DeepSeek's own mark, for DeepSeek's own project: descriptive use of the kind their
+  # BRAND_GUIDELINES.md permits, unlike branding a third-party agent with it.
+  logo: ./logo.svg
+  links:
+    upstream: https://github.com/deepseek-ai/deepseek-harness
+    documentation: https://github.com/deepseek-ai/deepseek-harness#readme
