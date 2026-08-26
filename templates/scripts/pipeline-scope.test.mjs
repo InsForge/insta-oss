@@ -79,7 +79,7 @@ describe('discover: which templates a push rebuilds', () => {
   it('builds every buildable template on workflow_dispatch', () => {
     const out = discover({ event: 'workflow_dispatch' });
     expect(out.ok).toBe(true);
-    expect(JSON.parse(out.json)).toEqual(['claude-code', 'codex', 'hermes', 'pi']);
+    expect(JSON.parse(out.json)).toEqual(['claude-code', 'codex', 'dsh', 'hermes', 'pi']);
   });
 
   it('builds everything when the workflow itself changed', () => {
