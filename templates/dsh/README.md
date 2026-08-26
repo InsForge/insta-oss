@@ -75,7 +75,8 @@ it already has inside that container, but they outlive the session that read the
 - A 1 GiB volume mounted at `/data`. `DSH_HOME` is `/data/dsh` and `HOME` is `/data/home`, so
   settings, stored credentials, session history, installed plugins and your files survive
   restarts, redeploys and version upgrades.
-- The access password stored as a managed secret rather than baked into the image.
+- The sign-in credentials kept as service variables rather than baked into the image, so you can
+  change them later without rebuilding anything.
 - 1 vCPU and 1 GiB of memory, declared by the template so the machine is created at that size
   rather than resized later.
 - Deploys are health-gated: a container that does not answer is rolled back to the last healthy
@@ -83,7 +84,8 @@ it already has inside that container, but they outlive the session that read the
 
 ## What you need before deploying
 
-- Nothing mandatory. The access password is generated for you if you leave it blank.
+- A username and a password of your choosing for the UI sign-in. There is no default: the deploy
+  form starts with both fields empty and will not submit until you fill them.
 - Optionally, a [DeepSeek API key](https://platform.deepseek.com/). You can also leave it blank
   and store one from the UI's Models page after deploy, which keeps it editable in the UI.
 
