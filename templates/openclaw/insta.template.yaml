@@ -29,6 +29,9 @@ services:
       fixed:
         OPENCLAW_STATE_DIR: /data/.openclaw
         OPENCLAW_WORKSPACE_DIR: /data/workspace
+        # The auth-profile master key lands at $XDG_CONFIG_HOME/openclaw, deliberately outside the
+        # state dir; on the volume it survives redeploys, or UI-entered credentials stop decrypting.
+        XDG_CONFIG_HOME: /data/.config
         # entrypoint.sh seeds this into gateway.controlUi.allowedOrigins before start.
         OPENCLAW_PUBLIC_URL: ${services.openclaw.url}
         NODE_OPTIONS: --max-old-space-size=1536

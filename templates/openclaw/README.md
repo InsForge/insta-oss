@@ -42,6 +42,9 @@ and a manifest cannot override a container command, so a wrapper image carries t
 
 Set by the template, not by you: `OPENCLAW_STATE_DIR=/data/.openclaw` and
 `OPENCLAW_WORKSPACE_DIR=/data/workspace` (state and workspace on the volume),
+`XDG_CONFIG_HOME=/data/.config` (the auth-profile encryption key lives under it, deliberately
+outside the state dir, and must survive redeploys or credentials entered in the Control UI stop
+decrypting),
 `OPENCLAW_PUBLIC_URL` resolved to the service's own HTTPS URL (the image's entrypoint appends it
 to `gateway.controlUi.allowedOrigins` before start, or the gateway would reject the Control UI's
 browser connection), and `NODE_OPTIONS=--max-old-space-size=1536` (heap capped under the 2 GB
