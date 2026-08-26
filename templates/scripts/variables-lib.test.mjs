@@ -58,12 +58,12 @@ function demands(manifest) {
 }
 
 describe('the terminal templates ship no credential of their own', () => {
-  // What this locks down is a security property, not a convenience one. These three publish a root
-  // shell over HTTP basic auth, so a `default:` here would be one password shared by every
-  // deployment in the world, and a `generate:` would be a password the operator never sees. The
-  // manifests declare both variables required with neither, which is what makes the console render
-  // two empty fields it will not let you submit blank.
-  it.each(['claude-code', 'codex', 'pi'])('%s makes the operator supply both', (dir) => {
+  // What this locks down is a security property, not a convenience one. Each of these publishes a
+  // root shell (or an agent that runs one) over HTTP basic auth, so a `default:` here would be one
+  // password shared by every deployment in the world, and a `generate:` would be a password the
+  // operator never sees. The manifests declare both variables required with neither, which is what
+  // makes the console render two empty fields it will not let you submit blank.
+  it.each(['claude-code', 'codex', 'dsh', 'pi'])('%s makes the operator supply both', (dir) => {
     const svc = Object.values(templates.find((t) => t.dir === dir).manifest.services)[0];
     for (const k of ['ADMIN_USERNAME', 'ADMIN_PASSWORD']) {
       // null = nothing to fall back on. The platform answers MissingTemplateVariables; the console
@@ -73,7 +73,7 @@ describe('the terminal templates ship no credential of their own', () => {
     }
   });
 
-  it.each(['claude-code', 'codex', 'pi'])('%s demands those two and nothing else', (dir) => {
+  it.each(['claude-code', 'codex', 'dsh', 'pi'])('%s demands those two and nothing else', (dir) => {
     // Scoped both ways on purpose: a fourth required variable would be a new thing to type on the
     // deploy form, and dropping one would mean a credential came back from somewhere.
     expect(demands(templates.find((t) => t.dir === dir).manifest))
@@ -95,7 +95,7 @@ describe('every variable an entrypoint reads is declared by its manifest', () =>
     // Guards the guard: if entrypoints move or get renamed, the cases below would silently
     // become an empty suite that passes forever. hermes ships one too, still on the pre-0.6.0
     // ACCESS_PASSWORD, which is exactly the divergence this check should keep honest.
-    expect(withEntrypoint.map((t) => t.dir).sort()).toEqual(['9router', 'claude-code', 'codex', 'hermes', 'pi']);
+    expect(withEntrypoint.map((t) => t.dir).sort()).toEqual(['9router', 'claude-code', 'codex', 'dsh', 'hermes', 'pi']);
   });
 
   it.each(withEntrypoint)('$dir', ({ dir, manifest }) => {
