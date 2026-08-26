@@ -1,5 +1,5 @@
 code: 9router
-version: 1.0.0
+version: 1.1.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -12,15 +12,19 @@ upstream:
 services:
   router:
     type: web
-    image: docker.io/decolua/9router:0.5.55
+    image: ghcr.io/insforge/insta-oss/templates/9router:1.1.0   # built from ./Dockerfile by templates-build-images.yml
     port: 20128
-    healthcheck: /
+    healthcheck: /api/health    # / is a 307 redirect chain and never satisfies the deploy health gate
     volume:
-      size: 1                    # upstream writes provider keys to /app/data, not the volume (QA.md: "cannot use the platform volume")
+      size: 1                   # DATA_DIR points provider keys, accounts, and jwt-secret at it
     env:
-      fixed: {}
-      required: {}               # nothing required: provider keys are configured inside the app
-      optional: {}
+      fixed:
+        DATA_DIR: /data
+      required:
+        INITIAL_PASSWORD:
+          # Deliberately not generated: this is the password the user types on every dashboard
+          # login, and the app refuses its built-in default (123456) on remote logins outright.
+          description: "Dashboard login password. The app rejects its built-in default on remote logins, so this must be set here"
 
 meta:
   name: 9Router
@@ -28,6 +32,5 @@ meta:
   category: llm
   tags: [llm, ai]
   logo: ./logo.png              # 500x500, real transparency; see the attribution table in ../README.md
-  draft: true                   # /data mount is root-owned, app runs non-root -> EACCES; needs platform mount-ownership support
   links:
     upstream: https://github.com/decolua/9router
