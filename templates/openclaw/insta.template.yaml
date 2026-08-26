@@ -3,27 +3,40 @@ version: 0.1.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
-# Open question: use the official image or build from the repo. Placeholder assumes an image.
+# Wraps the official image only to replace the CMD (see ./Dockerfile); everything else is stock.
 upstream:
   repo: openclaw/openclaw
-  pinned: pin-at-pr             # pin a real tag or digest before publishing
+  image: ghcr.io/openclaw/openclaw
+  pinned: "latest@sha256:2f5ce8848a1a69b3c460622e566cb9395da9fd18d7ef7b038cd8e2c4f195decf"
   license: MIT
+
+generated:
+  gateway_token: secret:32
 
 services:
   openclaw:
     type: web
-    image: pin-at-pr            # placeholder that lint rejects, which is why this template is draft
+    image: ghcr.io/insforge/insta-oss/templates/openclaw:0.1.0   # built from ./Dockerfile by templates-build-images.yml
     port: 8080
-    healthcheck: /
+    healthcheck: /startupz
+    # Mirrors upstream's fly.toml sizing: 2 vCPU / 2 GB with the node heap capped below the ceiling.
+    spec: 2vcpu-2gb
+    # Channel connections (Telegram, Discord, ...) run inside the process; an idle machine never wakes for them.
+    alwaysOn: true
     volume:
       size: 1
     env:
-      fixed: {}
-      required:
-        MODEL_API_KEY:
-          description: "Model provider API key (Anthropic or OpenAI). Exact variable name pending upstream docs"
-        CHANNEL_TOKEN:
-          description: "Messaging channel token (WhatsApp or Telegram). Details pending upstream docs"
+      fixed:
+        OPENCLAW_STATE_DIR: /data/.openclaw
+        OPENCLAW_WORKSPACE_DIR: /data/workspace
+        # The auth-profile master key lands at $XDG_CONFIG_HOME/openclaw, deliberately outside the
+        # state dir; on the volume it survives redeploys, or UI-entered credentials stop decrypting.
+        XDG_CONFIG_HOME: /data/.config
+        # entrypoint.sh seeds this into gateway.controlUi.allowedOrigins before start.
+        OPENCLAW_PUBLIC_URL: ${services.openclaw.url}
+        NODE_OPTIONS: --max-old-space-size=1536
+      generated:
+        OPENCLAW_GATEWAY_TOKEN: ${gateway_token}
 
 meta:
   name: OpenClaw
@@ -31,6 +44,6 @@ meta:
   category: ai-agent
   tags: [ai-agent, ai]
   logo: ./logo.svg
-  draft: true                   # variables and image source unfinished, so it stays out of the index
+  draft: true
   links:
     upstream: https://github.com/openclaw/openclaw

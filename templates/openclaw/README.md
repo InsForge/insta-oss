@@ -2,47 +2,68 @@
 
 Self-hosted personal AI assistant, reachable from your chat apps.
 
-> **Draft, not deployable yet.** This template is a placeholder: its image reference is
-> `pin-at-pr`, not a real tag, and the variable names below are provisional. The registry lint
-> rejects the placeholder image, which is why the template is marked draft and stays out of the
-> catalog. It needs a pinned image (or a decision to build from the upstream repo) and variable
-> names confirmed against upstream's documentation before it can be published.
+> **Draft.** The template deploys and has been verified end to end; it stays out of the catalog
+> while the publish decision is pending — the upstream pin rides `latest` by digest because
+> upstream's dated image tags have stalled, and listing it is a separate call.
 
 ## Overview
 
 [OpenClaw](https://github.com/openclaw/openclaw) is a personal AI assistant you run yourself.
 Upstream describes it as your own personal AI assistant, on any OS and any platform, with your data
-staying yours. You reach it from a messaging channel rather than a web chat window.
+staying yours. You reach it from a messaging channel (Telegram, Discord, WhatsApp, ...) or from its
+web Control UI rather than a hosted chat window.
+
+This template runs the official upstream image with only its start command replaced (see
+`./Dockerfile`): the stock command exits on an unconfigured fresh volume and binds loopback only,
+and a manifest cannot override a container command, so a wrapper image carries the
+`--allow-unconfigured --port 8080 --bind lan` flags instead. Everything inside is stock upstream.
 
 ## What you get by hosting it
 
-- An assistant that runs continuously, rather than only while your machine is on.
-- Your model provider key and channel token held as managed secrets.
-- A 1 GiB volume mounted at `/data` for assistant state.
+- An assistant gateway that runs continuously, rather than only while your machine is on.
+- An HTTPS URL for the Control UI at `/openclaw`, where you configure model providers and connect
+  channels after deploy — no deploy-time keys needed.
+- A gateway auth token generated for you and stored as a managed secret.
+- A 1 GiB volume mounted at `/data` holding `openclaw.json`, auth profiles, channel and session
+  state (`OPENCLAW_STATE_DIR=/data/.openclaw`) and the agent workspace
+  (`OPENCLAW_WORKSPACE_DIR=/data/workspace`), so all of it survives restarts and redeploys.
 
 ## What you need before deploying
 
-- A model provider API key (Anthropic or OpenAI).
-- A messaging channel token for the channel you want to use (WhatsApp or Telegram).
-
-Both are provisional: the exact variable names come from upstream's documentation and are not
-finalised in this template yet.
+- Nothing. The template declares no required variables.
+- A model provider key (Anthropic or OpenAI) and any channel tokens are entered after deploy in
+  the Control UI's onboarding, not as deploy variables.
 
 ## Configuration
 
 | Variable | Required | What it does |
 |---|---|---|
-| `MODEL_API_KEY` | yes | Model provider API key (Anthropic or OpenAI). Exact variable name pending upstream docs. |
-| `CHANNEL_TOKEN` | yes | Messaging channel token (WhatsApp or Telegram). Details pending upstream docs. |
+| `OPENCLAW_GATEWAY_TOKEN` | generated | Admin secret for the gateway and Control UI. You do not set it; read it with `insta secrets --print` when the UI asks you to connect. |
 
-The service is declared on port 8080 with a health check on `/`. These, like the image reference,
-are provisional until the template is finalised.
+Set by the template, not by you: `OPENCLAW_STATE_DIR=/data/.openclaw` and
+`OPENCLAW_WORKSPACE_DIR=/data/workspace` (state and workspace on the volume),
+`XDG_CONFIG_HOME=/data/.config` (the auth-profile encryption key lives under it, deliberately
+outside the state dir, and must survive redeploys or credentials entered in the Control UI stop
+decrypting),
+`OPENCLAW_PUBLIC_URL` resolved to the service's own HTTPS URL (the image's entrypoint appends it
+to `gateway.controlUi.allowedOrigins` before start, or the gateway would reject the Control UI's
+browser connection), and `NODE_OPTIONS=--max-old-space-size=1536` (heap capped under the 2 GB
+machine, mirroring upstream's own fly.toml).
+
+The compute size is pinned to `2vcpu-2gb`, matching upstream's fly.toml sizing. The service is
+always-on, because channel connections (for example a Telegram long-poll) live inside the process
+and an idle machine would never wake for an incoming message.
 
 ## After deploy
 
-Not applicable yet: the template cannot be deployed while its image is a placeholder. Once it is
-pinned, the flow will be: open the service URL to confirm it is running, connect your messaging
-channel with `CHANNEL_TOKEN`, then message the assistant from that channel.
+1. Open `https://<your-service-url>/openclaw`.
+2. Connect with the gateway token: `insta secrets --print` shows `OPENCLAW_GATEWAY_TOKEN`. The
+   first connection triggers upstream's one-time device pairing; the image approves
+   token-authenticated devices itself within ~15 s (upstream expects `openclaw devices approve`
+   on the gateway host, and the platform has no shell into the machine), so if the first
+   Connect reports pairing, simply retry it.
+3. Follow the onboarding to add a model provider key and connect a channel (Telegram is the
+   fastest: just a bot token).
 
 ## Links
 
