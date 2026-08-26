@@ -46,9 +46,10 @@ const check = (name, want, got) => {
   else failed++;
 };
 // For a decision this gate owns while the answer after it is upstream's to change.
+// A real status only: a probe that errors or times out must not read as "not 401".
 const checkNot = (name, unwanted, got) => {
-  const ok = String(unwanted) !== String(got);
-  console.log(`  ${ok ? "PASS" : "FAIL"}  ${name} -> ${got}${ok ? "" : `   (must not be ${unwanted})`}`);
+  const ok = Number.isInteger(got) && String(unwanted) !== String(got);
+  console.log(`  ${ok ? "PASS" : "FAIL"}  ${name} -> ${got}${ok ? "" : `   (must be a status other than ${unwanted})`}`);
   if (ok) passed++;
   else failed++;
 };
