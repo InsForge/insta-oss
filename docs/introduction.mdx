@@ -1,6 +1,6 @@
 ---
 title: "Introduction"
-description: "What InstaCloud is, what a project and a branch are, and where to start."
+description: "What InstaCloud is and where to start."
 ---
 
 InstaCloud gives every project a Postgres database, an S3-compatible bucket, and any number of compute services — and lets you clone all three into an isolated branch in seconds. The same `insta` CLI, MCP server, and agent skill drive the hosted service and the open-source runtime you can run on your own Docker.
@@ -18,10 +18,10 @@ branch  = a disposable, fully isolated clone of all three
   <Card title="Quickstart" icon="rocket" href="/quickstart">
     Install the CLI, create a project, deploy, branch.
   </Card>
-  <Card title="Set up your agent" icon="robot" href="/agent-setup">
+  <Card title="Set up your agent" icon="robot" href="/agents/setup">
     Claude Code, Cursor, Codex — one command.
   </Card>
-  <Card title="Self-host" icon="server" href="/self-host-quickstart">
+  <Card title="Self-host" icon="server" href="/self-hosting/install">
     Run the same stack on your own Docker.
   </Card>
 </CardGroup>
@@ -29,7 +29,7 @@ branch  = a disposable, fully isolated clone of all three
 ## What you get
 
 <CardGroup cols={2}>
-  <Card title="Branchable environments" icon="code-branch" href="/concepts/branches">
+  <Card title="Branchable environments" icon="code-branch" href="/projects/branches">
     Database with data, bucket, and every service — cloned per branch, on its own URL.
   </Card>
   <Card title="Serverless Postgres" icon="database" href="/postgres/overview">
@@ -41,10 +41,10 @@ branch  = a disposable, fully isolated clone of all three
   <Card title="Object storage" icon="box-archive" href="/storage/overview">
     An S3-compatible bucket per branch, forked with the branch.
   </Card>
-  <Card title="One credential seam" icon="key" href="/concepts/secrets">
+  <Card title="One credential seam" icon="key" href="/deploy/deployments/secrets">
     Standard `DATABASE_URL` and `AWS_*` variables, scoped project → branch → service.
   </Card>
-  <Card title="Governance" icon="shield-check" href="/concepts/governance">
+  <Card title="Governance" icon="shield-check" href="/governance/overview">
     Allow, deny, or require approval for every sensitive action. Agents propose, humans approve.
   </Card>
 </CardGroup>

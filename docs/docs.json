@@ -46,26 +46,79 @@
         "tab": "Documentation",
         "groups": [
           {
-            "group": "Get started",
+            "group": "Overview",
             "pages": [
               "introduction",
               "quickstart",
-              "self-host-quickstart",
-              "agent-setup",
-              "comparison"
+              "the-basics",
+              "for-agents",
+              "best-practices",
+              "production-checklist"
             ]
           },
           {
-            "group": "Concepts",
+            "group": "Platform",
             "pages": [
-              "concepts/projects",
-              "concepts/branches",
-              "concepts/services",
-              "concepts/secrets",
-              "concepts/deploys",
-              "concepts/governance",
-              "concepts/environments",
-              "concepts/organizations"
+              "platform/how-it-works",
+              "platform/compare/railway",
+              "platform/compare/fly",
+              "platform/migrate/railway",
+              "platform/migrate/fly"
+            ]
+          },
+          {
+            "group": "Pricing",
+            "pages": [
+              "pricing/plans",
+              "pricing/understanding-your-bill",
+              "pricing/cost-control",
+              "pricing/faq"
+            ]
+          },
+          {
+            "group": "Agents",
+            "pages": [
+              "agents/overview",
+              "agents/setup",
+              "agents/mcp-server",
+              "agents/skills",
+              "agents/claude-code",
+              "agents/cursor",
+              "agents/codex",
+              "agents/other-agents",
+              "agents/branch-per-task",
+              "agents/human-in-the-loop",
+              "agents/observe"
+            ]
+          },
+          {
+            "group": "Projects & branches",
+            "pages": [
+              "projects/overview",
+              "projects/branches",
+              "projects/environments",
+              "projects/manifest"
+            ]
+          },
+          {
+            "group": "Build & deploy",
+            "pages": [
+              "deploy/overview",
+              "deploy/services",
+              "deploy/builds/detection",
+              "deploy/builds/dockerfile",
+              "deploy/builds/images",
+              "deploy/builds/monorepo",
+              "deploy/deployments/ports",
+              "deploy/deployments/secrets",
+              "deploy/deployments/regions",
+              "deploy/deployments/websockets",
+              "deploy/deployments/deploy-events",
+              "deploy/github/overview",
+              "deploy/github/pull-request-environments",
+              "deploy/troubleshooting/no-start-command",
+              "deploy/troubleshooting/failed-to-respond",
+              "deploy/troubleshooting/build-failures"
             ]
           },
           {
@@ -83,36 +136,47 @@
             ]
           },
           {
-            "group": "Compute",
-            "pages": [
-              "compute/overview",
-              "compute/deploy",
-              "compute/ports-and-workers",
-              "compute/volumes",
-              "compute/sleep-and-wake",
-              "compute/networking",
-              "compute/custom-domains",
-              "compute/logs-and-metrics",
-              "compute/limits-and-scaling"
-            ]
-          },
-          {
-            "group": "Storage",
+            "group": "Data & storage",
             "pages": [
               "storage/overview",
               "storage/access",
-              "storage/objects"
+              "storage/objects",
+              "storage/volumes"
             ]
           },
           {
-            "group": "Agents",
+            "group": "Compute",
             "pages": [
-              "agents/overview",
-              "agents/mcp-server",
-              "agents/skills",
-              "agents/branch-per-task",
-              "agents/human-in-the-loop",
-              "agents/observe"
+              "compute/overview",
+              "compute/sleep-and-wake",
+              "compute/limits-and-scaling",
+              "compute/workers"
+            ]
+          },
+          {
+            "group": "Networking",
+            "pages": [
+              "networking/overview",
+              "networking/custom-domains",
+              "networking/troubleshooting/ssl"
+            ]
+          },
+          {
+            "group": "Observability",
+            "pages": [
+              "observability/logs",
+              "observability/metrics",
+              "observability/events"
+            ]
+          },
+          {
+            "group": "Governance & access",
+            "pages": [
+              "governance/overview",
+              "governance/approvals",
+              "governance/organizations",
+              "governance/api-tokens",
+              "governance/login"
             ]
           },
           {
@@ -128,15 +192,34 @@
             ]
           },
           {
+            "group": "Frameworks",
+            "pages": [
+              "frameworks/overview",
+              "frameworks/nextjs",
+              "frameworks/nuxt",
+              "frameworks/vite",
+              "frameworks/remix",
+              "frameworks/astro",
+              "frameworks/express",
+              "frameworks/django",
+              "frameworks/flask",
+              "frameworks/fastapi",
+              "frameworks/deno",
+              "frameworks/go",
+              "frameworks/rust",
+              "frameworks/java",
+              "frameworks/php",
+              "frameworks/rails",
+              "frameworks/elixir"
+            ]
+          },
+          {
             "group": "Guides",
             "pages": [
-              "guides/github-deploys",
-              "guides/frameworks",
-              "guides/claude-code",
-              "guides/cursor-and-codex",
               "guides/parallel-agents",
-              "guides/migrate",
-              "guides/ci"
+              "guides/ci",
+              "guides/lock-down-production",
+              "guides/rotate-credentials"
             ]
           }
         ]
@@ -147,12 +230,38 @@
           {
             "group": "Reference",
             "pages": [
-              "reference/cli",
+              "reference/cli/overview",
+              "reference/cli/login",
+              "reference/cli/logout",
+              "reference/cli/status",
+              "reference/cli/env",
+              "reference/cli/org",
+              "reference/cli/project",
+              "reference/cli/branch",
+              "reference/cli/services",
+              "reference/cli/secrets",
+              "reference/cli/run",
+              "reference/cli/deploy",
+              "reference/cli/compute",
+              "reference/cli/db",
+              "reference/cli/manifest",
+              "reference/cli/regions",
+              "reference/cli/metrics",
+              "reference/cli/logs",
+              "reference/cli/events",
+              "reference/cli/usage",
+              "reference/cli/billing",
+              "reference/cli/policy",
+              "reference/cli/approvals",
+              "reference/cli/observe",
+              "reference/cli/setup",
+              "reference/cli/mcp",
+              "reference/cli/upgrade",
               "reference/mcp-tools",
+              "reference/api/overview",
               "reference/environment-variables",
               "reference/gated-actions",
-              "reference/plans-and-limits",
-              "reference/regions",
+              "reference/limits",
               "reference/errors",
               "reference/faq"
             ]
@@ -203,7 +312,15 @@
     },
     {
       "source": "/concepts/projects-and-branches",
-      "destination": "/concepts/branches"
+      "destination": "/projects/branches"
+    },
+    {
+      "source": "/concepts/governance",
+      "destination": "/governance/overview"
+    },
+    {
+      "source": "/concepts/secrets",
+      "destination": "/deploy/deployments/secrets"
     },
     {
       "source": "/reference/architecture",
@@ -212,6 +329,10 @@
     {
       "source": "/reference/compatibility",
       "destination": "/self-hosting/compatibility"
+    },
+    {
+      "source": "/reference/cli",
+      "destination": "/reference/cli/overview"
     }
   ]
 }
