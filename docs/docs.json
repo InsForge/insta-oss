@@ -21,6 +21,10 @@
     "light": "/logo/light.svg",
     "dark": "/logo/dark.svg"
   },
+  "banner": {
+    "content": "InstaCloud docs are in early access — many pages are still being written. Missing something? [Open an issue](https://github.com/InsForge/insta-oss/issues).",
+    "dismissible": true
+  },
   "seo": {
     "metatags": {
       "og:site_name": "InstaCloud Docs"
@@ -37,8 +41,13 @@
       "chatgpt",
       "claude",
       "cursor",
-      "vscode"
+      "vscode",
+      "mcp"
     ]
+  },
+  "feedback": {
+    "thumbsRating": true,
+    "suggestEdit": true
   },
   "navigation": {
     "tabs": [
@@ -54,7 +63,8 @@
               "for-agents",
               "best-practices",
               "production-checklist"
-            ]
+            ],
+            "icon": "rocket"
           },
           {
             "group": "Platform",
@@ -64,7 +74,8 @@
               "platform/compare/fly",
               "platform/migrate/railway",
               "platform/migrate/fly"
-            ]
+            ],
+            "icon": "layer-group"
           },
           {
             "group": "Pricing",
@@ -73,7 +84,8 @@
               "pricing/understanding-your-bill",
               "pricing/cost-control",
               "pricing/faq"
-            ]
+            ],
+            "icon": "credit-card"
           },
           {
             "group": "Agents",
@@ -89,7 +101,8 @@
               "agents/branch-per-task",
               "agents/human-in-the-loop",
               "agents/observe"
-            ]
+            ],
+            "icon": "robot"
           },
           {
             "group": "Projects & branches",
@@ -98,7 +111,8 @@
               "projects/branches",
               "projects/environments",
               "projects/manifest"
-            ]
+            ],
+            "icon": "code-branch"
           },
           {
             "group": "Build & deploy",
@@ -119,7 +133,8 @@
               "deploy/troubleshooting/no-start-command",
               "deploy/troubleshooting/failed-to-respond",
               "deploy/troubleshooting/build-failures"
-            ]
+            ],
+            "icon": "hammer"
           },
           {
             "group": "Postgres",
@@ -133,7 +148,8 @@
               "postgres/backups",
               "postgres/extensions",
               "postgres/observability"
-            ]
+            ],
+            "icon": "database"
           },
           {
             "group": "Data & storage",
@@ -142,7 +158,8 @@
               "storage/access",
               "storage/objects",
               "storage/volumes"
-            ]
+            ],
+            "icon": "box-archive"
           },
           {
             "group": "Compute",
@@ -151,7 +168,8 @@
               "compute/sleep-and-wake",
               "compute/limits-and-scaling",
               "compute/workers"
-            ]
+            ],
+            "icon": "microchip"
           },
           {
             "group": "Networking",
@@ -159,7 +177,8 @@
               "networking/overview",
               "networking/custom-domains",
               "networking/troubleshooting/ssl"
-            ]
+            ],
+            "icon": "globe"
           },
           {
             "group": "Observability",
@@ -167,7 +186,8 @@
               "observability/logs",
               "observability/metrics",
               "observability/events"
-            ]
+            ],
+            "icon": "chart-line"
           },
           {
             "group": "Governance & access",
@@ -177,7 +197,8 @@
               "governance/organizations",
               "governance/api-tokens",
               "governance/login"
-            ]
+            ],
+            "icon": "shield-check"
           },
           {
             "group": "Self-hosting",
@@ -189,7 +210,8 @@
               "self-hosting/adapters",
               "self-hosting/managed-databases",
               "self-hosting/compatibility"
-            ]
+            ],
+            "icon": "server"
           },
           {
             "group": "Frameworks",
@@ -211,7 +233,8 @@
               "frameworks/php",
               "frameworks/rails",
               "frameworks/elixir"
-            ]
+            ],
+            "icon": "cubes"
           },
           {
             "group": "Guides",
@@ -220,9 +243,11 @@
               "guides/ci",
               "guides/lock-down-production",
               "guides/rotate-credentials"
-            ]
+            ],
+            "icon": "book-open"
           }
-        ]
+        ],
+        "icon": "book-open"
       },
       {
         "tab": "Reference",
@@ -264,9 +289,11 @@
               "reference/limits",
               "reference/errors",
               "reference/faq"
-            ]
+            ],
+            "icon": "book"
           }
-        ]
+        ],
+        "icon": "code"
       }
     ],
     "global": {
