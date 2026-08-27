@@ -1,6 +1,6 @@
 ---
-title: Architecture
-description: CLI/MCP/dashboard → HTTP server → engine → adapter → Docker.
+title: "Architecture"
+description: "CLI/MCP/dashboard \u2192 HTTP server \u2192 engine \u2192 adapter \u2192 Docker."
 ---
 
 - **engine** (`src/engine.ts`): project and branch lifecycle, from provision through clone (`pg_dump` → restore, `rclone sync`, app redeploys) to teardown with compensation on failure.

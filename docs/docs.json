@@ -49,23 +49,112 @@
             "group": "Get started",
             "pages": [
               "introduction",
-              "getting-started/self-host",
-              "getting-started/first-project"
+              "quickstart",
+              "self-host-quickstart",
+              "agent-setup",
+              "comparison"
             ]
           },
           {
             "group": "Concepts",
             "pages": [
-              "concepts/projects-and-branches",
+              "concepts/projects",
+              "concepts/branches",
+              "concepts/services",
+              "concepts/secrets",
+              "concepts/deploys",
               "concepts/governance",
-              "concepts/secrets"
+              "concepts/environments",
+              "concepts/organizations"
             ]
           },
           {
+            "group": "Postgres",
+            "pages": [
+              "postgres/overview",
+              "postgres/connect",
+              "postgres/branching",
+              "postgres/scale-to-zero",
+              "postgres/sizing",
+              "postgres/databases-and-roles",
+              "postgres/backups",
+              "postgres/extensions",
+              "postgres/observability"
+            ]
+          },
+          {
+            "group": "Compute",
+            "pages": [
+              "compute/overview",
+              "compute/deploy",
+              "compute/ports-and-workers",
+              "compute/volumes",
+              "compute/sleep-and-wake",
+              "compute/networking",
+              "compute/custom-domains",
+              "compute/logs-and-metrics",
+              "compute/limits-and-scaling"
+            ]
+          },
+          {
+            "group": "Storage",
+            "pages": [
+              "storage/overview",
+              "storage/access",
+              "storage/objects"
+            ]
+          },
+          {
+            "group": "Agents",
+            "pages": [
+              "agents/overview",
+              "agents/mcp-server",
+              "agents/skills",
+              "agents/branch-per-task",
+              "agents/human-in-the-loop",
+              "agents/observe"
+            ]
+          },
+          {
+            "group": "Self-hosting",
+            "pages": [
+              "self-hosting/overview",
+              "self-hosting/install",
+              "self-hosting/configuration",
+              "self-hosting/architecture",
+              "self-hosting/adapters",
+              "self-hosting/managed-databases",
+              "self-hosting/compatibility"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/github-deploys",
+              "guides/frameworks",
+              "guides/claude-code",
+              "guides/cursor-and-codex",
+              "guides/parallel-agents",
+              "guides/migrate",
+              "guides/ci"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
             "group": "Reference",
             "pages": [
-              "reference/compatibility",
-              "reference/architecture"
+              "reference/cli",
+              "reference/mcp-tools",
+              "reference/environment-variables",
+              "reference/gated-actions",
+              "reference/plans-and-limits",
+              "reference/regions",
+              "reference/errors",
+              "reference/faq"
             ]
           }
         ]
@@ -102,5 +191,27 @@
       "x": "https://x.com/InsForge_dev",
       "github": "https://github.com/InsForge/insta-oss"
     }
-  }
+  },
+  "redirects": [
+    {
+      "source": "/getting-started/self-host",
+      "destination": "/self-hosting/install"
+    },
+    {
+      "source": "/getting-started/first-project",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/concepts/projects-and-branches",
+      "destination": "/concepts/branches"
+    },
+    {
+      "source": "/reference/architecture",
+      "destination": "/self-hosting/architecture"
+    },
+    {
+      "source": "/reference/compatibility",
+      "destination": "/self-hosting/compatibility"
+    }
+  ]
 }

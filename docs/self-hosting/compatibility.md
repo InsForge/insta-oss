@@ -1,6 +1,6 @@
 ---
-title: CLI & MCP compatibility
-description: Command-by-command behavior of insta-oss against the standard insta surface.
+title: "CLI & MCP compatibility"
+description: "Command-by-command behavior of insta-oss against the standard insta surface."
 ---
 
 insta-oss implements the standard `insta` command surface: no daemon-only commands. This page
