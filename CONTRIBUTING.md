@@ -60,7 +60,7 @@ The engine never talks to Docker for resources except through the adapter contra
   the engine, server, tests, and CLI are provider-agnostic (`railway.ts` is the existence
   proof).
 - **New endpoint**: don't. The surface mirrors the standard `insta` CLI
-  (see [docs/compatibility.md](docs/compatibility.md)); additions belong in the shared
+  (see [docs/reference/compatibility.md](docs/reference/compatibility.md)); additions belong in the shared
   CLI/platform contract first.
 
 ## Guidelines
@@ -75,3 +75,8 @@ The engine never talks to Docker for resources except through the adapter contra
 ## Reporting issues
 
 Include: OS, Docker + Node versions, the daemon log, and the failing `insta` command.
+
+## Docs and plans
+
+- `docs/` is the Mintlify source for https://docs.instacloud.com. Navigation lives in `docs/docs.json`; a page missing from it still builds (reachable by URL, searchable) but does not appear in the sidebar, so list every page you add. Preview with `cd docs && npx mint dev`.
+- Internal planning notes live in `plans/`, not under `docs/`.

@@ -1,0 +1,26 @@
+---
+title: Introduction
+description: A branchable platform for your database, object storage, and compute — hosted or self-hosted.
+---
+
+```
+project = a Postgres database + an S3 bucket + your app containers
+branch  = a disposable, fully isolated clone of all three
+```
+
+InstaCloud is the hosted service. **insta-oss** is the open-source, self-hostable runtime: a single daemon on your own Docker, single-tenant, no accounts, no billing. The same `insta` CLI, MCP server, and agent skills drive both, so workflows move between them unchanged.
+
+<CardGroup cols={2}>
+  <Card title="Self-host in 2 minutes" icon="server" href="/getting-started/self-host">
+    Docker + Node ≥ 22. No cloud account, no API keys.
+  </Card>
+  <Card title="Your first project" icon="rocket" href="/getting-started/first-project">
+    Create, deploy, branch, approve, throw away.
+  </Card>
+  <Card title="Projects & branches" icon="code-branch" href="/concepts/projects-and-branches">
+    Why a branch is a whole environment, cloned.
+  </Card>
+  <Card title="Governance" icon="shield-check" href="/concepts/governance">
+    Agents propose, humans approve.
+  </Card>
+</CardGroup>

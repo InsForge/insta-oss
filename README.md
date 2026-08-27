@@ -68,7 +68,7 @@ State lives in `~/.insta-oss/`.
 In another terminal, install the CLI and point it at the daemon:
 
 ```bash
-curl -fsSL agents.instacloud.com | sh          # CLI + agent skills (or: npm install -g insta)
+curl -fsSL https://agents.instacloud.com | sh          # CLI + agent skills (or: npm install -g insta)
 export INSTA_API_URL=http://127.0.0.1:8080     # the CLI defaults to the cloud
 ```
 
@@ -119,7 +119,7 @@ adapter → Docker:
   (`INSTA_OSS_COMPUTE=railway`) runs compute on Railway instead; proof the seam holds.
 - **state** (`src/state.ts`): a single JSON file, `~/.insta-oss/state.json`.
 
-Command-by-command CLI and MCP compatibility tables: [docs/compatibility.md](docs/compatibility.md).
+Command-by-command CLI and MCP compatibility tables: [docs/reference/compatibility.md](docs/reference/compatibility.md).
 
 ## Dashboard
 

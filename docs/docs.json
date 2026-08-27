@@ -1,0 +1,106 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "InstaCloud Docs",
+  "colors": {
+    "primary": "#07C983",
+    "light": "#4ADE80",
+    "dark": "#059669"
+  },
+  "appearance": {
+    "default": "dark"
+  },
+  "styling": {
+    "eyebrows": "section"
+  },
+  "favicon": {
+    "light": "/favicon.svg",
+    "dark": "/favicon-dark.svg"
+  },
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "seo": {
+    "metatags": {
+      "og:site_name": "InstaCloud Docs"
+    },
+    "indexing": "navigable"
+  },
+  "search": {
+    "prompt": "Search InstaCloud docs..."
+  },
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "chatgpt",
+      "claude",
+      "cursor",
+      "vscode"
+    ]
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "introduction",
+              "getting-started/self-host",
+              "getting-started/first-project"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/projects-and-branches",
+              "concepts/governance",
+              "concepts/secrets"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/compatibility",
+              "reference/architecture"
+            ]
+          }
+        ]
+      }
+    ],
+    "global": {
+      "anchors": [
+        {
+          "anchor": "InstaCloud (hosted)",
+          "href": "https://instacloud.com",
+          "icon": "cloud"
+        },
+        {
+          "anchor": "GitHub",
+          "href": "https://github.com/InsForge/insta-oss",
+          "icon": "github"
+        },
+        {
+          "anchor": "Discord",
+          "href": "https://discord.com/invite/MPxwj5xVvW",
+          "icon": "discord"
+        }
+      ]
+    }
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/InsForge/insta-oss"
+    }
+  },
+  "footer": {
+    "socials": {
+      "x": "https://x.com/InsForge_dev",
+      "github": "https://github.com/InsForge/insta-oss"
+    }
+  }
+}
