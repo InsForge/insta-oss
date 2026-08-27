@@ -28,7 +28,7 @@ to work.
 | `approvals list/approve/deny` (`--always`) | ✅ one-shot grants, same 202 flow |
 | `events` | ✅ resource + govern timeline, agent ingest with dedup |
 | `metrics` / `logs` | ✅ docker-backed (`docker stats` snapshot / `docker logs` tail, db logs included), cloud response shapes; targets `db\|compute\|redis\|mysql\|mongodb`; `logs --deploy` (deploy-event feed) → 501, use `insta events` |
-| `storage list/get/delete` | ✅ object listing (prefix + cursor paging), presigned GET download, single delete; served from Garage's host port (:3900), gated `storage.read`/`storage.delete`; presigned-POST upload + bulk delete serve the console's file browser |
+| `storage list/get/delete` (daemon HTTP routes; no `insta storage` CLI command is registered yet — the console file browser and MCP use them) | ✅ object listing (prefix + cursor paging), presigned GET download, single delete; served from Garage's host port (:3900), gated `storage.read`/`storage.delete`; presigned-POST upload + bulk delete serve the console's file browser |
 | `regions` | ✅ the single `local` region (this machine) |
 | `login/logout` | not needed: localhost trust, no accounts |
 | `services scale/upgrade` | 501: machine scaling / instance specs are cloud pricing concepts |
