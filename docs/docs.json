@@ -27,7 +27,8 @@
   },
   "seo": {
     "metatags": {
-      "og:site_name": "InstaCloud Docs"
+      "og:site_name": "InstaCloud Docs — the agent-native cloud",
+      "description": "InstaCloud is the agent-native cloud: Postgres, storage, and compute that branch per task, with credentials that never leave the platform and humans in the approval loop."
     },
     "indexing": "navigable"
   },
@@ -67,6 +68,23 @@
             "icon": "rocket"
           },
           {
+            "group": "Agents",
+            "pages": [
+              "agents/overview",
+              "agents/setup",
+              "agents/mcp-server",
+              "agents/skills",
+              "agents/claude-code",
+              "agents/cursor",
+              "agents/codex",
+              "agents/other-agents",
+              "agents/branch-per-task",
+              "agents/human-in-the-loop",
+              "agents/observe"
+            ],
+            "icon": "robot"
+          },
+          {
             "group": "Platform",
             "pages": [
               "platform/how-it-works",
@@ -86,23 +104,6 @@
               "pricing/faq"
             ],
             "icon": "credit-card"
-          },
-          {
-            "group": "Agents",
-            "pages": [
-              "agents/overview",
-              "agents/setup",
-              "agents/mcp-server",
-              "agents/skills",
-              "agents/claude-code",
-              "agents/cursor",
-              "agents/codex",
-              "agents/other-agents",
-              "agents/branch-per-task",
-              "agents/human-in-the-loop",
-              "agents/observe"
-            ],
-            "icon": "robot"
           },
           {
             "group": "Projects & branches",

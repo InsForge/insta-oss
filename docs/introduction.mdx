@@ -1,16 +1,16 @@
 ---
 title: "Introduction"
-description: "What InstaCloud is and where to start."
+description: "InstaCloud is the agent-native cloud: branchable Postgres, storage, and compute with credentials that never leave the platform."
 ---
 
-InstaCloud gives every project a Postgres database, an S3-compatible bucket, and any number of compute services — and lets you clone all three into an isolated branch in seconds. The same `insta` CLI, MCP server, and agent skill drive the hosted service and the open-source runtime you can run on your own Docker.
+InstaCloud is the agent-native cloud. Every project gets a Postgres database, an S3-compatible bucket, and any number of compute services — and any of them can be cloned into an isolated branch in seconds, so each task, each agent, each pull request gets its own environment. Credentials never leave the platform, every sensitive action can require a human approval, and the same `insta` CLI, MCP server, and agent skill drive both the hosted service and the open-source runtime you can run on your own Docker.
 
 ```
 project = a Postgres database + an S3 bucket + your app containers
 branch  = a disposable, fully isolated clone of all three
 ```
 
-{/* TODO: one more paragraph — who this is for (developers + coding agents) and the "one branch per task" idea. */}
+Built for developers who work with coding agents — and for the agents themselves: an agent gets a branch, does its work against real infrastructure, and hands the result back for review without ever holding a production credential.
 
 ## Get started
 
@@ -23,6 +23,20 @@ branch  = a disposable, fully isolated clone of all three
   </Card>
   <Card title="Self-host" icon="server" href="/self-hosting/install">
     Run the same stack on your own Docker.
+  </Card>
+</CardGroup>
+
+## Built for agents
+
+<CardGroup cols={3}>
+  <Card title="MCP server" icon="plug" href="/agents/mcp-server">
+    Every operation as an `insta_*` tool.
+  </Card>
+  <Card title="Agent skill" icon="book" href="/agents/skills">
+    The `insta` skill for Claude Code, Cursor, Codex, and more.
+  </Card>
+  <Card title="One branch per task" icon="layer-group" href="/agents/branch-per-task">
+    Run agents in parallel without them touching each other.
   </Card>
 </CardGroup>
 
@@ -46,20 +60,6 @@ branch  = a disposable, fully isolated clone of all three
   </Card>
   <Card title="Governance" icon="shield-check" href="/governance/overview">
     Allow, deny, or require approval for every sensitive action. Agents propose, humans approve.
-  </Card>
-</CardGroup>
-
-## Built for agents
-
-<CardGroup cols={3}>
-  <Card title="MCP server" icon="plug" href="/agents/mcp-server">
-    Every operation as an `insta_*` tool.
-  </Card>
-  <Card title="Agent skill" icon="book" href="/agents/skills">
-    The `insta` skill for Claude Code, Cursor, Codex, and more.
-  </Card>
-  <Card title="One branch per task" icon="layer-group" href="/agents/branch-per-task">
-    Run agents in parallel without them touching each other.
   </Card>
 </CardGroup>
 
