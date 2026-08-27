@@ -14,7 +14,7 @@ The dashboard is what the service URL serves; Telegram is how you give the agent
 
 ## What you get by hosting it
 
-- An HTTPS URL for the Hermes dashboard, behind a password (username `admin`), with no port
+- An HTTPS URL for the Hermes dashboard, behind a username and password you choose, with no port
   forwarding or tunnel to manage. Upstream refuses to expose the dashboard without one.
 - A 1 GiB volume mounted at `/data`, with `HERMES_HOME` pointed at `/data/.hermes` so the agent's
   state survives restarts and redeploys.
@@ -26,6 +26,9 @@ The dashboard is what the service URL serves; Telegram is how you give the agent
 
 ## What you need before deploying
 
+- A username and a password of your choosing for the dashboard sign-in. There is no default and
+  nothing is generated: the deploy form starts with both fields empty and will not submit until you
+  fill them. A password the platform minted would be one it could never show you again.
 - An [OpenRouter API key](https://openrouter.ai/keys). The agent calls models through OpenRouter.
 - A Telegram bot token, created with [@BotFather](https://t.me/BotFather): send `/newbot`, pick a
   name and a username ending in `bot`, and it replies with the token.
@@ -37,7 +40,8 @@ The dashboard is what the service URL serves; Telegram is how you give the agent
 
 | Variable | Required | What it does |
 |---|---|---|
-| `ACCESS_PASSWORD` | generated | Dashboard password for `admin`; blank mints one. |
+| `ADMIN_USERNAME` | yes | Sign-in username for the dashboard. You choose it; it may not start with a dash. |
+| `ADMIN_PASSWORD` | yes | Sign-in password for the dashboard. You choose it. |
 | `OPENROUTER_API_KEY` | yes | Key the agent uses for model calls. Get one at <https://openrouter.ai/keys>. |
 | `TELEGRAM_BOT_TOKEN` | yes | Token for the bot that receives your tasks. Create the bot with @BotFather. |
 | `TELEGRAM_ALLOWED_USERS` | yes | Comma-separated **numeric** Telegram user IDs allowed to use the bot. Not @usernames: the adapter compares the user id and never reads the username. Get yours from @userinfobot. |
@@ -48,8 +52,8 @@ Set by the template, not by you: `HERMES_HOME=/data/.hermes` (state on the volum
 
 ## After deploy
 
-1. Wait for the health check on `/api/status` to pass, then open the service URL to reach the
-   dashboard.
+1. Wait for the health check on `/api/status` to pass, then open the service URL. The browser asks
+   for HTTP basic auth: the `ADMIN_USERNAME` and `ADMIN_PASSWORD` you deployed with.
 2. Open Telegram and message your bot from one of the user IDs in `TELEGRAM_ALLOWED_USERS`.
    Messages from anyone else are ignored.
 3. Give the agent a task in the chat. Progress and history are visible in the dashboard.
