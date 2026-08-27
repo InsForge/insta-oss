@@ -2,10 +2,6 @@
 
 Self-hosted personal AI assistant, reachable from your chat apps.
 
-> **Draft.** The template deploys and has been verified end to end; it stays out of the catalog
-> while the publish decision is pending — the upstream pin rides `latest` by digest because
-> upstream's dated image tags have stalled, and listing it is a separate call.
-
 ## Overview
 
 [OpenClaw](https://github.com/openclaw/openclaw) is a personal AI assistant you run yourself.
