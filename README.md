@@ -68,7 +68,7 @@ State lives in `~/.insta-oss/`.
 In another terminal, install the CLI and point it at the daemon:
 
 ```bash
-curl -fsSL agents.instacloud.com | sh          # CLI + agent skills (or: npm install -g insta)
+curl -fsSL https://agents.instacloud.com | sh          # CLI + agent skills (or: npm install -g insta)
 export INSTA_API_URL=http://127.0.0.1:8080     # the CLI defaults to the cloud
 ```
 

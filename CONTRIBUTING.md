@@ -75,3 +75,8 @@ The engine never talks to Docker for resources except through the adapter contra
 ## Reporting issues
 
 Include: OS, Docker + Node versions, the daemon log, and the failing `insta` command.
+
+## Docs and plans
+
+- `docs/` is the Mintlify source for https://docs.instacloud.com. Navigation lives in `docs/docs.json`; a page missing from it still builds (reachable by URL, searchable) but does not appear in the sidebar, so list every page you add. Preview with `cd docs && npx mint dev`.
+- Internal planning notes live in `plans/`, not under `docs/`.
