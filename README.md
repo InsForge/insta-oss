@@ -119,7 +119,7 @@ adapter → Docker:
   (`INSTA_OSS_COMPUTE=railway`) runs compute on Railway instead; proof the seam holds.
 - **state** (`src/state.ts`): a single JSON file, `~/.insta-oss/state.json`.
 
-Command-by-command CLI and MCP compatibility tables: [docs/compatibility.md](docs/compatibility.md).
+Command-by-command CLI and MCP compatibility tables: [docs/reference/compatibility.md](docs/reference/compatibility.md).
 
 ## Dashboard
 
