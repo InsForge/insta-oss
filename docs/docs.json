@@ -21,9 +21,14 @@
     "light": "/logo/light.svg",
     "dark": "/logo/dark.svg"
   },
+  "banner": {
+    "content": "InstaCloud docs are in early access — many pages are still being written. Missing something? [Open an issue](https://github.com/InsForge/insta-oss/issues).",
+    "dismissible": true
+  },
   "seo": {
     "metatags": {
-      "og:site_name": "InstaCloud Docs"
+      "og:site_name": "InstaCloud Docs — the agent-native cloud",
+      "description": "InstaCloud is the agent-native cloud: Postgres, storage, and compute that branch per task, with one gated seam for credentials and humans in the approval loop."
     },
     "indexing": "navigable"
   },
@@ -37,8 +42,13 @@
       "chatgpt",
       "claude",
       "cursor",
-      "vscode"
+      "vscode",
+      "mcp"
     ]
+  },
+  "feedback": {
+    "thumbsRating": true,
+    "suggestEdit": true
   },
   "navigation": {
     "tabs": [
@@ -46,29 +56,245 @@
         "tab": "Documentation",
         "groups": [
           {
-            "group": "Get started",
+            "group": "Overview",
             "pages": [
               "introduction",
-              "getting-started/self-host",
-              "getting-started/first-project"
-            ]
+              "quickstart",
+              "the-basics",
+              "for-agents",
+              "best-practices",
+              "production-checklist"
+            ],
+            "icon": "rocket"
           },
           {
-            "group": "Concepts",
+            "group": "Agents",
             "pages": [
-              "concepts/projects-and-branches",
-              "concepts/governance",
-              "concepts/secrets"
-            ]
+              "agents/overview",
+              "agents/setup",
+              "agents/mcp-server",
+              "agents/skills",
+              "agents/claude-code",
+              "agents/cursor",
+              "agents/codex",
+              "agents/other-agents",
+              "agents/branch-per-task",
+              "agents/human-in-the-loop",
+              "agents/observe"
+            ],
+            "icon": "robot"
           },
+          {
+            "group": "Platform",
+            "pages": [
+              "platform/how-it-works",
+              "platform/compare/railway",
+              "platform/compare/fly",
+              "platform/migrate/railway",
+              "platform/migrate/fly"
+            ],
+            "icon": "layer-group"
+          },
+          {
+            "group": "Pricing",
+            "pages": [
+              "pricing/plans",
+              "pricing/understanding-your-bill",
+              "pricing/cost-control",
+              "pricing/faq"
+            ],
+            "icon": "credit-card"
+          },
+          {
+            "group": "Projects & branches",
+            "pages": [
+              "projects/overview",
+              "projects/branches",
+              "projects/environments",
+              "projects/manifest"
+            ],
+            "icon": "code-branch"
+          },
+          {
+            "group": "Build & deploy",
+            "pages": [
+              "deploy/overview",
+              "deploy/services",
+              "deploy/builds/detection",
+              "deploy/builds/dockerfile",
+              "deploy/builds/images",
+              "deploy/builds/monorepo",
+              "deploy/deployments/ports",
+              "deploy/deployments/secrets",
+              "deploy/deployments/regions",
+              "deploy/deployments/websockets",
+              "deploy/deployments/deploy-events",
+              "deploy/github/overview",
+              "deploy/github/pull-request-environments",
+              "deploy/troubleshooting/no-start-command",
+              "deploy/troubleshooting/failed-to-respond",
+              "deploy/troubleshooting/build-failures"
+            ],
+            "icon": "hammer"
+          },
+          {
+            "group": "Postgres",
+            "pages": [
+              "postgres/overview",
+              "postgres/connect",
+              "postgres/branching",
+              "postgres/scale-to-zero",
+              "postgres/sizing",
+              "postgres/databases-and-roles",
+              "postgres/backups",
+              "postgres/extensions",
+              "postgres/observability"
+            ],
+            "icon": "database"
+          },
+          {
+            "group": "Data & storage",
+            "pages": [
+              "storage/overview",
+              "storage/access",
+              "storage/objects",
+              "storage/volumes"
+            ],
+            "icon": "box-archive"
+          },
+          {
+            "group": "Compute",
+            "pages": [
+              "compute/overview",
+              "compute/sleep-and-wake",
+              "compute/limits-and-scaling",
+              "compute/workers"
+            ],
+            "icon": "microchip"
+          },
+          {
+            "group": "Networking",
+            "pages": [
+              "networking/overview",
+              "networking/custom-domains",
+              "networking/troubleshooting/ssl"
+            ],
+            "icon": "globe"
+          },
+          {
+            "group": "Observability",
+            "pages": [
+              "observability/logs",
+              "observability/metrics",
+              "observability/events"
+            ],
+            "icon": "chart-line"
+          },
+          {
+            "group": "Governance & access",
+            "pages": [
+              "governance/overview",
+              "governance/approvals",
+              "governance/organizations",
+              "governance/api-tokens",
+              "governance/login"
+            ],
+            "icon": "shield-check"
+          },
+          {
+            "group": "Self-hosting",
+            "pages": [
+              "self-hosting/overview",
+              "self-hosting/install",
+              "self-hosting/configuration",
+              "self-hosting/architecture",
+              "self-hosting/adapters",
+              "self-hosting/managed-databases",
+              "self-hosting/compatibility"
+            ],
+            "icon": "server"
+          },
+          {
+            "group": "Frameworks",
+            "pages": [
+              "frameworks/overview",
+              "frameworks/nextjs",
+              "frameworks/nuxt",
+              "frameworks/vite",
+              "frameworks/remix",
+              "frameworks/astro",
+              "frameworks/express",
+              "frameworks/django",
+              "frameworks/flask",
+              "frameworks/fastapi",
+              "frameworks/deno",
+              "frameworks/go",
+              "frameworks/rust",
+              "frameworks/java",
+              "frameworks/php",
+              "frameworks/rails",
+              "frameworks/elixir"
+            ],
+            "icon": "cubes"
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/parallel-agents",
+              "guides/ci",
+              "guides/lock-down-production",
+              "guides/rotate-credentials"
+            ],
+            "icon": "book-open"
+          }
+        ],
+        "icon": "book-open"
+      },
+      {
+        "tab": "Reference",
+        "groups": [
           {
             "group": "Reference",
             "pages": [
-              "reference/compatibility",
-              "reference/architecture"
-            ]
+              "reference/cli/overview",
+              "reference/cli/login",
+              "reference/cli/logout",
+              "reference/cli/status",
+              "reference/cli/env",
+              "reference/cli/org",
+              "reference/cli/project",
+              "reference/cli/branch",
+              "reference/cli/services",
+              "reference/cli/secrets",
+              "reference/cli/run",
+              "reference/cli/deploy",
+              "reference/cli/compute",
+              "reference/cli/db",
+              "reference/cli/manifest",
+              "reference/cli/regions",
+              "reference/cli/metrics",
+              "reference/cli/logs",
+              "reference/cli/events",
+              "reference/cli/usage",
+              "reference/cli/billing",
+              "reference/cli/policy",
+              "reference/cli/approvals",
+              "reference/cli/observe",
+              "reference/cli/setup",
+              "reference/cli/mcp",
+              "reference/cli/upgrade",
+              "reference/mcp-tools",
+              "reference/api/overview",
+              "reference/environment-variables",
+              "reference/gated-actions",
+              "reference/limits",
+              "reference/errors",
+              "reference/faq"
+            ],
+            "icon": "book"
           }
-        ]
+        ],
+        "icon": "code"
       }
     ],
     "global": {
@@ -102,5 +328,39 @@
       "x": "https://x.com/InsForge_dev",
       "github": "https://github.com/InsForge/insta-oss"
     }
-  }
+  },
+  "redirects": [
+    {
+      "source": "/getting-started/self-host",
+      "destination": "/self-hosting/install"
+    },
+    {
+      "source": "/getting-started/first-project",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/concepts/projects-and-branches",
+      "destination": "/projects/branches"
+    },
+    {
+      "source": "/concepts/governance",
+      "destination": "/governance/overview"
+    },
+    {
+      "source": "/concepts/secrets",
+      "destination": "/deploy/deployments/secrets"
+    },
+    {
+      "source": "/reference/architecture",
+      "destination": "/self-hosting/architecture"
+    },
+    {
+      "source": "/reference/compatibility",
+      "destination": "/self-hosting/compatibility"
+    },
+    {
+      "source": "/reference/cli",
+      "destination": "/reference/cli/overview"
+    }
+  ]
 }

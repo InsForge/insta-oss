@@ -1,26 +1,75 @@
 ---
-title: Introduction
-description: A branchable platform for your database, object storage, and compute — hosted or self-hosted.
+title: "Introduction"
+description: "InstaCloud is the agent-native cloud: branchable Postgres, storage, and compute with one gated seam for credentials."
 ---
+
+InstaCloud is the agent-native cloud. Every project gets a Postgres database, an S3-compatible bucket, and any number of compute services — and any of them can be cloned into an isolated branch in seconds, so each task, each agent, each pull request gets its own environment. Credentials flow through one seam you can gate, every sensitive action can require a human approval, and the same `insta` CLI, MCP server, and agent skill drive both the hosted service and the open-source runtime you can run on your own Docker.
 
 ```
 project = a Postgres database + an S3 bucket + your app containers
 branch  = a disposable, fully isolated clone of all three
 ```
 
-InstaCloud is the hosted service. **insta-oss** is the open-source, self-hostable runtime: a single daemon on your own Docker, single-tenant, no accounts, no billing. The same `insta` CLI, MCP server, and agent skills drive both, so workflows move between them unchanged.
+Built for developers who work with coding agents — and for the agents themselves: an agent gets a branch, does its work against real infrastructure, and hands the result back for review — with production credentials injected at run time rather than pasted into a prompt.
 
-<CardGroup cols={2}>
-  <Card title="Self-host in 2 minutes" icon="server" href="/getting-started/self-host">
-    Docker + Node ≥ 22. No cloud account, no API keys.
+## Get started
+
+<CardGroup cols={3}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install the CLI, create a project, deploy, branch.
   </Card>
-  <Card title="Your first project" icon="rocket" href="/getting-started/first-project">
-    Create, deploy, branch, approve, throw away.
+  <Card title="Set up your agent" icon="robot" href="/agents/setup">
+    Claude Code, Cursor, Codex — one command.
   </Card>
-  <Card title="Projects & branches" icon="code-branch" href="/concepts/projects-and-branches">
-    Why a branch is a whole environment, cloned.
-  </Card>
-  <Card title="Governance" icon="shield-check" href="/concepts/governance">
-    Agents propose, humans approve.
+  <Card title="Self-host" icon="server" href="/self-hosting/install">
+    Run the same stack on your own Docker.
   </Card>
 </CardGroup>
+
+## Built for agents
+
+<CardGroup cols={3}>
+  <Card title="MCP server" icon="plug" href="/agents/mcp-server">
+    Every operation as an `insta_*` tool.
+  </Card>
+  <Card title="Agent skill" icon="book" href="/agents/skills">
+    The `insta` skill for Claude Code, Cursor, Codex, and more.
+  </Card>
+  <Card title="One branch per task" icon="layer-group" href="/agents/branch-per-task">
+    Run agents in parallel without them touching each other.
+  </Card>
+</CardGroup>
+
+## What you get
+
+<CardGroup cols={2}>
+  <Card title="Branchable environments" icon="code-branch" href="/projects/branches">
+    Database with data, bucket, and every service — cloned per branch, on its own URL.
+  </Card>
+  <Card title="Serverless Postgres" icon="database" href="/postgres/overview">
+    A real, isolated Postgres server per project that scales to zero and branches in seconds.
+  </Card>
+  <Card title="MicroVM compute" icon="microchip" href="/compute/overview">
+    Any container — web app, worker, or database — sleeping when idle, waking in seconds.
+  </Card>
+  <Card title="Object storage" icon="box-archive" href="/storage/overview">
+    An S3-compatible bucket per branch, forked with the branch.
+  </Card>
+  <Card title="One credential seam" icon="key" href="/deploy/deployments/secrets">
+    Standard `DATABASE_URL` and `AWS_*` variables, scoped project → branch → service.
+  </Card>
+  <Card title="Governance" icon="shield-check" href="/governance/overview">
+    Allow, deny, or require approval for every sensitive action. Agents propose, humans approve.
+  </Card>
+</CardGroup>
+
+## Hosted or self-hosted
+
+| | InstaCloud | insta-oss |
+| --- | --- | --- |
+| Where it runs | Managed, multi-region | Your Docker |
+| Accounts and billing | Yes | None — single tenant |
+| CLI, MCP, skills | Same | Same |
+| Cloud-only features | Orgs, GitHub deploys, custom domains, backups, usage | Returns `501` with guidance |
+
+See [CLI & MCP compatibility](/self-hosting/compatibility) for the command-by-command list.
