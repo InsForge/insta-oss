@@ -60,7 +60,7 @@ The engine never talks to Docker for resources except through the adapter contra
   the engine, server, tests, and CLI are provider-agnostic (`railway.ts` is the existence
   proof).
 - **New endpoint**: don't. The surface mirrors the standard `insta` CLI
-  (see [docs/compatibility.md](docs/compatibility.md)); additions belong in the shared
+  (see [docs/reference/compatibility.md](docs/reference/compatibility.md)); additions belong in the shared
   CLI/platform contract first.
 
 ## Guidelines
