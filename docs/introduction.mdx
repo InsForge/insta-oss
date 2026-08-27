@@ -1,16 +1,16 @@
 ---
 title: "Introduction"
-description: "InstaCloud is the agent-native cloud: branchable Postgres, storage, and compute with credentials that never leave the platform."
+description: "InstaCloud is the agent-native cloud: branchable Postgres, storage, and compute with one gated seam for credentials."
 ---
 
-InstaCloud is the agent-native cloud. Every project gets a Postgres database, an S3-compatible bucket, and any number of compute services — and any of them can be cloned into an isolated branch in seconds, so each task, each agent, each pull request gets its own environment. Credentials never leave the platform, every sensitive action can require a human approval, and the same `insta` CLI, MCP server, and agent skill drive both the hosted service and the open-source runtime you can run on your own Docker.
+InstaCloud is the agent-native cloud. Every project gets a Postgres database, an S3-compatible bucket, and any number of compute services — and any of them can be cloned into an isolated branch in seconds, so each task, each agent, each pull request gets its own environment. Credentials flow through one seam you can gate, every sensitive action can require a human approval, and the same `insta` CLI, MCP server, and agent skill drive both the hosted service and the open-source runtime you can run on your own Docker.
 
 ```
 project = a Postgres database + an S3 bucket + your app containers
 branch  = a disposable, fully isolated clone of all three
 ```
 
-Built for developers who work with coding agents — and for the agents themselves: an agent gets a branch, does its work against real infrastructure, and hands the result back for review without ever holding a production credential.
+Built for developers who work with coding agents — and for the agents themselves: an agent gets a branch, does its work against real infrastructure, and hands the result back for review — with production credentials injected at run time rather than pasted into a prompt.
 
 ## Get started
 

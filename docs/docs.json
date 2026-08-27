@@ -28,7 +28,7 @@
   "seo": {
     "metatags": {
       "og:site_name": "InstaCloud Docs — the agent-native cloud",
-      "description": "InstaCloud is the agent-native cloud: Postgres, storage, and compute that branch per task, with credentials that never leave the platform and humans in the approval loop."
+      "description": "InstaCloud is the agent-native cloud: Postgres, storage, and compute that branch per task, with one gated seam for credentials and humans in the approval loop."
     },
     "indexing": "navigable"
   },
