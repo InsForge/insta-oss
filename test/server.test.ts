@@ -520,13 +520,30 @@ test('compute restart REDEPLOYS the recorded image (fresh env), and refuses a st
 
 // A deploy must not clear the standing lifecycle intent: `stop` then a redeploy leaves the service
 // stopped on the platform, and restart makes the window reachable from an operation that just
-// checked that intent.
-test('a redeploy preserves desired lifecycle intent', async () => {
+// checked that intent. The container has to honour it too — a preserved intent the container
+// contradicts is a row that lies, which is worse than the clobber it replaced.
+test('a redeploy preserves desired lifecycle intent AND the container honours it', async () => {
   const id = await createProject()
   await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
   await post(`/projects/${id}/services/cp-default/stop`)
+  calls.length = 0
   await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000 })
   expect((await get(`/projects/${id}/services/cp-default/state`)).json().desiredState).toBe('stopped')
+  expect(calls).toContain('compute.stop:demo-main:default')   // the new container did not stay up
+  expect(calls.some((c) => c.startsWith('deploy:'))).toBe(true)
+})
+
+// The exact verb, not a coarser one: oss allows a suspended volume-bearing service, so a redeploy
+// of a SUSPENDED service must land back on suspend rather than being rewritten to stop.
+test('a redeploy of a suspended service re-suspends rather than stopping it', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await post(`/projects/${id}/services/cp-default/suspend`)
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000 })
+  expect((await get(`/projects/${id}/services/cp-default/state`)).json().desiredState).toBe('suspended')
+  expect(calls).toContain('compute.suspend:demo-main:default')
+  expect(calls).not.toContain('compute.stop:demo-main:default')
 })
 
 // Restart reaches engine.deploy(), which re-mints DATABASE_URL, the S3 bundle and every bound

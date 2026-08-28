@@ -207,6 +207,17 @@ export class Engine {
     // the deploy's own state write — and `restart` makes that reachable from an operation that
     // checked the intent moments earlier. Matches the platform, whose desired_state survives a deploy.
     mutate((s) => { s.branches[b.id].apps[group] = { ...s.branches[b.id].apps[group], image: opts.image, port, hostPort, url, updatedAt: Date.now() } })
+    // ...and the container has to HONOUR that intent, or preserving it just makes the row lie:
+    // DockerCompute.deploy always `docker run`s the replacement, so a service the user stopped would
+    // come back up while the row still read `stopped`. Re-assert on the container only — the state
+    // is already right and must not be rewritten, and the EXACT verb matters (oss allows a suspended
+    // volume-bearing service, so suspend must not be coarsened to stop). Best-effort, like the
+    // adapter ops in lifecycle(): the deploy itself has already succeeded.
+    const standing = prior?.desiredState
+    if (standing === 'stopped' || standing === 'suspended') {
+      const op = standing === 'suspended' ? this.compute.suspend : this.compute.stop
+      await op?.call(this.compute, this.ref(project, b), group).catch(() => { /* best-effort */ })
+    }
     this.emit(projectId, b.name, 'resource', 'deploy', { image: opts.image, group, url })
     return { url, branch: b.name, group }
   }
