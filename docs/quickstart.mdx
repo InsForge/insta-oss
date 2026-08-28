@@ -9,7 +9,7 @@ This guide takes an existing app from your machine to a deployed service with an
 
 - An InstaCloud account — sign up at [console.instacloud.com](https://console.instacloud.com)
 - A Dockerfile in the app you want to deploy (source deploys build from it)
-- Node.js 18+ if you install through npm; the shell installer has no dependencies
+- Node.js 18+ for the npm install path; the shell installer is a native binary for macOS and Linux
 
 ## Install the CLI
 
@@ -25,7 +25,7 @@ npm install -g insta
 
 </CodeGroup>
 
-The shell installer also sets up agent skills for any coding agents on your machine. If you only want the CLI, use npm.
+The shell installer (macOS/Linux) also sets up agent skills for any coding agents on your machine. On Windows, or if you only want the CLI, use npm.
 
 ## Log in
 
@@ -60,9 +60,21 @@ insta services add postgres db
 insta services add compute app
 ```
 
-Available service types: `postgres`, `storage`, `compute`, `redis`, `mysql`, `mongodb` — up to 5 of each per project. Each service exposes its connection details as secrets: the first Postgres gets `DATABASE_URL`, later ones get `DATABASE_URL_<NAME>`.
+Available service types: `postgres`, `storage`, `compute`, `redis`, `mysql`, `mongodb` — up to 5 of each per project.
 
-Pull the connection details into a local `.env` (added to `.gitignore` automatically):
+Each service exposes credentials as a bindable source, not as loose environment variables. Give your compute service the database connection string:
+
+```bash
+insta secrets bind DATABASE_URL postgres/db --to compute/app
+```
+
+The binding is injected as `DATABASE_URL` when the service deploys. For local development, print the DSN directly (a governed action):
+
+```bash
+insta db url
+```
+
+User-defined secrets (`insta secrets set STRIPE_KEY ...`) land in a local `.env` with:
 
 ```bash
 insta secrets

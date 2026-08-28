@@ -26,17 +26,17 @@ Branches are cheap to create and delete, capped at 10 per project. `insta branch
 
 ## Services
 
-A branch runs services: `postgres`, `storage`, `compute`, `redis`, `mysql`, `mongodb`, up to 5 of each. Add them with `insta services add <type> <name>`. Each service publishes its connection details as secrets — the oldest service of a type owns the bare name (`DATABASE_URL`), later ones are suffixed (`DATABASE_URL_ANALYTICS`).
+A branch runs services: `postgres`, `storage`, `compute`, `redis`, `mysql`, `mongodb`, up to 5 of each. Add them with `insta services add <type> <name>`. Each service publishes its credentials as a source (`insta secrets sources`) that you bind into a compute service's environment by name — `insta secrets bind DATABASE_URL postgres/db --to compute/app`.
 
 ## The credential seam
 
 Connection strings and API keys live on the platform, not in your repo. They reach code through one seam:
 
-- `insta secrets` writes the current branch's bundle to `.env` and gitignores it
-- `insta run <cmd>` injects the bundle into one process, writing nothing to disk
-- Deploys get secrets injected as environment variables at deploy time — a changed secret takes effect on the next deploy
+- `insta secrets` writes the current branch's user-secret bundle to `.env` and gitignores it; `insta run <cmd>` injects the same bundle into one process, writing nothing to disk
+- Provider credentials are not in that bundle. The Postgres DSN is printed on demand by `insta db url`, and deployed services receive provider credentials only through explicit bindings (`insta secrets bind`), injected as environment variables at deploy time
+- A changed secret or binding takes effect on the next deploy
 
-One seam means one place to audit and one place to gate: reading secrets is itself a governed action.
+One seam means one place to audit and one place to gate: reading secrets is itself a governed action (`secrets.read`).
 
 ## Governance
 

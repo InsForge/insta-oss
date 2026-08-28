@@ -13,7 +13,7 @@ See [branch-per-task](/agents/branch-per-task) for the workflow.
 
 ## Credentials stay behind one seam
 
-An agent working on InstaCloud never needs a connection string pasted into its prompt. Secrets live on the platform and reach code three ways: `insta secrets` writes the branch's `.env`, `insta run` injects them into a single process without writing to disk, and deploys get them injected at deploy time. Reading secrets is itself a governed action, so you can require approval before an agent pulls them at all.
+An agent working on InstaCloud never needs a connection string pasted into its prompt. User secrets live on the platform and reach code through `insta secrets` (writes the branch's `.env`) or `insta run` (injects into a single process, nothing on disk). Provider credentials like the Postgres DSN are held back further: `insta db url` prints one on demand, and deployed services receive them only through explicit bindings. Every one of those reads is governed by the `secrets.read` policy, so you can require approval before an agent touches a credential at all.
 
 The `observe` hook that ships with project setup audits agent tool calls for leaked credentials and records findings to `.insta/audit.jsonl`.
 
