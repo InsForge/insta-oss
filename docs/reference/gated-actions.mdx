@@ -1,18 +1,60 @@
 ---
 title: "Gated actions"
-description: "The governable actions and default policy."
+description: "Every action governance can gate, its default, and how the approval flow works."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+Every consequential operation on InstaCloud is a named action with a policy decision: `allow`, `deny`, or `approve`. This page is the authoritative list.
 
-## Actions
+## The action set
 
-{/* TODO */}
+On the hosted platform, every action defaults to `allow` — governance is opt-in, so it never gets between an admin and their own project. Set the decisions you want with `insta policy set <action> <decision>`.
 
-## Defaults
+| Action | Gates |
+| --- | --- |
+| `secrets.read` | Reading credentials: the secret bundle, `insta db url` |
+| `secrets.write` | Setting or unsetting secrets and bindings |
+| `storage.read` | Browsing and downloading bucket objects |
+| `storage.write` | Writing bucket objects |
+| `storage.delete` | Deleting bucket objects |
+| `deploy` | Deploying to a compute service; attaching or removing custom domains |
+| `project.delete` | Tearing down the entire project |
+| `branch.delete` | Tearing down a branch |
+| `service.add` | Provisioning a new service |
+| `service.remove` | Removing a service (also gates compute volume delete) |
+| `service.rename` | Renaming a service |
+| `service.scale` | Changing a compute service's machine count |
+| `service.upgrade` | Raising a compute or Postgres spec |
+| `service.setAccess` | Making a service public or private |
+| `db.restore` | Restoring a database from backup |
+| `db.query` | Running SQL from the console |
 
-{/* TODO */}
+<Note>
+`insta policy set --help` only lists 13 of these. `service.rename`, `db.restore`, and `db.query` are accepted and take effect all the same — the CLI passes the action straight through and the platform validates it.
+</Note>
+
+## The approval flow
+
+When a gated action's decision is `approve`:
+
+1. The action does not run. The caller gets an approval ID and the exact line to relay: `insta approvals approve <id>`.
+2. An admin approves or denies it — `insta approvals list`, `insta approvals approve <id>`, `insta approvals deny <id>`. Only admins can decide; the platform enforces the role.
+3. The caller reruns the original command. Grants are single-use: one approval covers one execution.
+
+`insta approvals approve <id> --always` approves and flips the project's policy for that action to `allow`. Every decision lands in the audit timeline (`insta events`).
+
+## Recommended baseline for agents
+
+Before handing a project to a coding agent:
+
+```bash
+insta policy set project.delete approve
+insta policy set branch.delete approve
+insta policy set db.restore deny
+insta policy set secrets.read approve
+```
+
+Pick the set that matches your risk tolerance — `deny` is a hard no, `approve` is a human in the loop.
 
 ## Cloud versus self-hosted
 
-{/* TODO */}
+The self-hosted insta-oss daemon enforces a 12-action subset — it has no `service.scale`, `service.upgrade`, `db.restore`, or `db.query` (those surfaces are cloud-only) — and, unlike the hosted platform, it ships with `project.delete` defaulting to `approve`. Approval semantics are otherwise identical: one-shot grants, `approve --always` flips the policy.
