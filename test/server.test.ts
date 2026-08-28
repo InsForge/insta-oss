@@ -569,6 +569,30 @@ test('a lifecycle change landing mid-deploy is neither lost nor undone', async (
   expect(calls.lastIndexOf('compute.start:demo-main:default')).toBeGreaterThan(calls.lastIndexOf('compute.stop:demo-main:default'))
 })
 
+// A restart re-runs what the service runs NOW. Snapshotting the image before joining the queue
+// would make a restart issued behind a deploy re-run the older image and silently roll it back.
+test('a restart queued behind a deploy re-runs the NEW image, not a pre-queue snapshot', async () => {
+  const engine = new Engine(db, compute, storage, managed)
+  const { project } = await engine.createProject('demo')
+  const id = project.id
+  await engine.deploy(id, 'main', { image: 'app:1', port: 3000, group: 'default' })
+
+  let release = () => {}
+  const held = new Promise<void>((r) => { release = r })
+  const realDeploy = compute.deploy
+  compute.deploy = async (ref, o) => { await held; return realDeploy(ref, o) }
+  calls.length = 0
+  const deploying = engine.deploy(id, 'main', { image: 'app:2', port: 3000, group: 'default' })
+  const restarting = engine.restart(id, 'cp-default')   // queued behind it, snapshot would say app:1
+  release()
+  await deploying; await restarting
+  compute.deploy = realDeploy
+
+  const deploys = calls.filter((c) => c.startsWith('deploy:demo-main:default:'))
+  expect(deploys.length).toBe(2)
+  expect(deploys.every((c) => c.startsWith('deploy:demo-main:default:app:2'))).toBe(true)
+})
+
 // The exact verb, not a coarser one: oss allows a suspended volume-bearing service, so a redeploy
 // of a SUSPENDED service must land back on suspend rather than being rewritten to stop.
 test('a redeploy of a suspended service re-suspends rather than stopping it', async () => {

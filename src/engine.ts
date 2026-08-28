@@ -195,14 +195,18 @@ export class Engine {
     const b = this.getBranchByName(projectId, branchName)
     if (!b) throw new Error(`branch "${branchName}" not found`)
     const group = opts.group ?? 'default'
-    return this.serialize(`${b.id}:${group}`, () => this.deployLocked(projectId, b, group, opts))
+    return this.serialize(`${b.id}:${group}`, () => this.deployLocked(projectId, b.id, group, opts))
   }
 
+  // Takes a branch ID, not a Branch: anything read before the chain is a pre-queue snapshot, and an
+  // op that ran ahead of this one has already moved it (its image, its host mapping, its intent).
   private async deployLocked(
-    projectId: string, b: Branch, group: string,
+    projectId: string, branchId: string, group: string,
     opts: { image: string; port?: number; hostPort?: number },
   ): Promise<{ url: string; branch: string; group: string }> {
     const project = this.getProject(projectId)!
+    const b = loadState().branches[branchId]
+    if (!b) throw new Error('branch not found')
     const port = opts.port ?? 8080
     // a redeploy keeps the branch app's existing host address; only brand-new apps default to port.
     // Older state records lack hostPort — recover it from the recorded URL.
@@ -573,13 +577,25 @@ export class Engine {
   async restart(projectId: string, serviceId: string, branchName?: string): Promise<{
     service: Record<string, unknown> | undefined; state: string
   }> {
-    const { branch, group } = this.computeTarget(projectId, serviceId, branchName)
+    const t = this.computeTarget(projectId, serviceId, branchName)
+    return this.serialize(`${t.branch.id}:${t.group}`, () => this.restartLocked(projectId, serviceId, t.branch.id, t.group))
+  }
+
+  private async restartLocked(projectId: string, serviceId: string, branchId: string, group: string): Promise<{
+    service: Record<string, unknown> | undefined; state: string
+  }> {
     const project = this.getProject(projectId)!
+    const branch = loadState().branches[branchId]
+    if (!branch) throw new Error('branch not found')
+    // Read the recorded image INSIDE the chain. A deploy queued ahead of this one has already
+    // replaced it, and re-running a pre-queue snapshot would roll that deploy back — a restart must
+    // re-run what the service runs NOW, which is the whole contract.
     const app = branch.apps[group]
     if (!app) throw new Error('this service has no machines yet — deploy an image first, then retry')
     const desired = app.desiredState ?? 'running'
     if (desired !== 'running') throw new Error(`this service is ${desired} — start it with \`insta compute start\`, which also re-enables auto-wake`)
-    await this.deploy(projectId, branch.name, { image: app.image, port: app.port, hostPort: app.hostPort, group })
+    // deployLocked, not deploy: this already holds the chain and it is not re-entrant.
+    await this.deployLocked(projectId, branchId, group, { image: app.image, port: app.port, hostPort: app.hostPort })
     this.emit(projectId, branch.name, 'resource', 'service.restart', { service: serviceId })
     const service = (await this.services(projectId, branch.name)).find((x) => x.id === serviceId)
     return { service, state: await this.liveState(this.ref(project, branch), group) }
