@@ -593,6 +593,32 @@ test('a restart queued behind a deploy re-runs the NEW image, not a pre-queue sn
   expect(deploys.every((c) => c.startsWith('deploy:demo-main:default:app:2'))).toBe(true)
 })
 
+// Every entry point on the chain has to read the branch INSIDE it. `lifecycle` was the one that
+// still didn't: a stop queued behind a service's first deploy saw a branch with no app record yet
+// and silently did nothing — no adapter call, no state write, and a 200 saying it had.
+test('a stop queued behind the first deploy is not silently dropped', async () => {
+  const engine = new Engine(db, compute, storage, managed)
+  const { project } = await engine.createProject('demo')
+  const id = project.id
+  // Register the group without deploying it: the app record — the thing the stale snapshot lacked —
+  // only appears on the first deploy. Set up over HTTP; it shares the same state file.
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'default' })
+
+  let release = () => {}
+  const held = new Promise<void>((r) => { release = r })
+  const realDeploy = compute.deploy
+  compute.deploy = async (ref, o) => { await held; return realDeploy(ref, o) }
+  calls.length = 0
+  const deploying = engine.deploy(id, 'main', { image: 'app:1', port: 3000, group: 'default' })
+  const stopping = engine.lifecycle(id, 'cp-default', 'stop')   // queued: no app record exists yet
+  release()
+  await deploying; await stopping
+  compute.deploy = realDeploy
+
+  expect(calls).toContain('compute.stop:demo-main:default')
+  expect((await engine.serviceState(id, 'cp-default')).desiredState).toBe('stopped')
+})
+
 // The exact verb, not a coarser one: oss allows a suspended volume-bearing service, so a redeploy
 // of a SUSPENDED service must land back on suspend rather than being rewritten to stop.
 test('a redeploy of a suspended service re-suspends rather than stopping it', async () => {

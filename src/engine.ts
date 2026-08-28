@@ -220,8 +220,13 @@ export class Engine {
     if (vol && !this.compute.supportsVolumes) {
       throw new Error(`service "${group}" has a /data volume, which this compute adapter does not support — use the docker adapter`)
     }
+    // Read before the container work, not only after: the adapter can then decline to start a
+    // replacement whose standing intent is down, instead of running it and being stopped a moment
+    // later. Safe to read here — the chain means nothing else is moving it.
+    const standing = b.apps[group]?.desiredState
     const { url } = await this.compute.deploy(this.ref(project, b), {
       image: opts.image, port, hostPort, network: b.network, group,
+      start: standing !== 'stopped' && standing !== 'suspended',
       ...(vol ? { volume: { name: `io-${this.ref(project, b)}-data-${vol.id}` } } : {}),
       // minted credentials (db + storage + managed databases) reach every compute deploy; user
       // secrets are scoped (project-wide + branch-unbound + bound to THIS group)
@@ -238,7 +243,7 @@ export class Engine {
     // is already right and must not be rewritten, and the EXACT verb matters (oss allows a suspended
     // volume-bearing service, so suspend must not be coarsened to stop). Best-effort, like the
     // adapter ops in lifecycle(): the deploy itself has already succeeded.
-    const standing = loadState().branches[b.id]?.apps[group]?.desiredState
+    // Re-assert anyway: `start` is a hint an adapter may ignore, and this is the guarantee.
     if (standing === 'stopped' || standing === 'suspended') {
       const op = standing === 'suspended' ? this.compute.suspend : this.compute.stop
       await op?.call(this.compute, this.ref(project, b), group).catch(() => { /* best-effort */ })
@@ -546,14 +551,18 @@ export class Engine {
     service: Record<string, unknown> | undefined; state: string
   }> {
     const t = this.computeTarget(projectId, serviceId, branchName)
-    return this.serialize(`${t.branch.id}:${t.group}`, () => this.lifecycleLocked(projectId, serviceId, verb, t))
+    return this.serialize(`${t.branch.id}:${t.group}`, () => this.lifecycleLocked(projectId, serviceId, verb, t.branch.id, t.group))
   }
 
+  // Branch ID, not a Branch — same reason as deployLocked: a snapshot taken before the chain is one
+  // an op ahead has already moved. A stop queued behind a service's FIRST deploy saw a branch with
+  // no app record at all and silently did nothing.
   private async lifecycleLocked(
-    projectId: string, serviceId: string, verb: 'start' | 'stop' | 'suspend',
-    { branch, group }: { branch: Branch; group: string },
+    projectId: string, serviceId: string, verb: 'start' | 'stop' | 'suspend', branchId: string, group: string,
   ): Promise<{ service: Record<string, unknown> | undefined; state: string }> {
     const project = this.getProject(projectId)!
+    const branch = loadState().branches[branchId]
+    if (!branch) throw new Error('branch not found')
     const ref = this.ref(project, branch)
     const desired = verb === 'start' ? 'running' : verb === 'stop' ? 'stopped' : 'suspended'
     let state = 'none'
