@@ -1,38 +1,122 @@
 ---
 title: "Quickstart"
-description: "Install the CLI, create a project, deploy, branch \u2014 in five minutes."
+description: "Install the CLI, create a project, deploy, branch — in five minutes."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+This guide takes an existing app from your machine to a deployed service with an isolated branch environment. You need a terminal and about five minutes.
 
 ## Prerequisites
 
-{/* TODO */}
+- An InstaCloud account — sign up at [console.instacloud.com](https://console.instacloud.com)
+- A Dockerfile in the app you want to deploy (source deploys build from it)
+- Node.js 18+ for the npm install path; the shell installer is a native binary for macOS and Linux
 
 ## Install the CLI
 
-{/* TODO */}
+<CodeGroup>
+
+```bash Shell installer
+curl -fsSL https://agents.instacloud.com | sh
+```
+
+```bash npm
+npm install -g insta
+```
+
+</CodeGroup>
+
+The shell installer (macOS/Linux) ships a dependency-free native CLI and also sets up agent skills — the skills step runs through npx, so it needs Node. On Windows, or if you only want the CLI, use npm.
 
 ## Log in
 
-{/* TODO */}
+```bash
+insta login
+```
+
+By default you are prompted for email and password. Other modes:
+
+- `insta login --oauth github` (or `--oauth google`) — browser OAuth
+- `insta login --device` — device code, for SSH sessions and containers without a browser
+- `insta login --api-key insta_...` — a durable token, for CI
+
+Check where you are at any time:
+
+```bash
+insta status
+```
 
 ## Create a project
 
-{/* TODO */}
+```bash
+insta project create my-app
+```
+
+This creates the project in your organization, links the current directory to it (`.insta/project.json`), and installs agent skills into the repo. A new project starts empty — you add the services you need.
 
 ## Add services
 
-{/* TODO */}
+```bash
+insta services add postgres db
+insta services add compute app
+```
+
+Available service types: `postgres`, `storage`, `compute`, `redis`, `mysql`, `mongodb` — up to 5 of each per branch on the free plan, more on paid plans.
+
+Each service exposes credentials as a bindable source, not as loose environment variables. Give your compute service the database connection string:
+
+```bash
+insta secrets bind DATABASE_URL postgres/db --to compute/app
+```
+
+The binding is injected as `DATABASE_URL` when the service deploys. For local development, print the DSN directly (a governed action):
+
+```bash
+insta db url
+```
+
+User-defined secrets (`insta secrets set STRIPE_KEY ...`) land in a local `.env` with:
+
+```bash
+insta secrets
+```
 
 ## Deploy
 
-{/* TODO */}
+```bash
+insta deploy .
+```
+
+The build runs remotely from your Dockerfile; the listen port is read from its last `EXPOSE` line (default 8080, override with `--port`). When the deploy finishes, the CLI prints your service URL.
+
+To check whether a directory will build before deploying it:
+
+```bash
+insta build . --explain
+```
 
 ## Create a branch
 
-{/* TODO */}
+```bash
+insta branch create staging
+insta branch switch staging
+insta secrets
+```
+
+A branch is an isolated copy of your environment: Postgres is branched copy-on-write with the parent's data, storage is forked, and compute comes up at its own URL running the parent's image — push changes to it with `insta deploy . --branch staging`. Switching branches only relinks the directory; rerun `insta secrets` to refresh `.env` for the branch.
 
 ## Next steps
 
-{/* TODO */}
+<CardGroup cols={2}>
+  <Card title="The basics" icon="map" href="/the-basics">
+    The mental model: projects, branches, services, secrets, governance.
+  </Card>
+  <Card title="Set up your coding agent" icon="robot" href="/agents/setup">
+    One command wires the CLI, skill, and MCP server into your agents.
+  </Card>
+  <Card title="Build & deploy" icon="rocket" href="/deploy/overview">
+    Dockerfiles, images, ports, regions, and deploy troubleshooting.
+  </Card>
+  <Card title="Postgres branching" icon="database" href="/postgres/branching">
+    How copy-on-write database branches work.
+  </Card>
+</CardGroup>
