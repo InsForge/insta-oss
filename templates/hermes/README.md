@@ -40,7 +40,7 @@ The dashboard is what the service URL serves; Telegram is how you give the agent
 
 | Variable | Required | What it does |
 |---|---|---|
-| `ADMIN_USERNAME` | yes | Sign-in username for the dashboard. You choose it; it may not start with a dash. |
+| `ADMIN_USERNAME` | yes | Sign-in username for the dashboard. You choose it; it may not contain a colon (HTTP basic auth uses one to separate user from password) or start with a dash. |
 | `ADMIN_PASSWORD` | yes | Sign-in password for the dashboard. You choose it. |
 | `OPENROUTER_API_KEY` | yes | Key the agent uses for model calls. Get one at <https://openrouter.ai/keys>. |
 | `TELEGRAM_BOT_TOKEN` | yes | Token for the bot that receives your tasks. Create the bot with @BotFather. |

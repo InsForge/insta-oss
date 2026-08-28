@@ -6,10 +6,13 @@ set -e
 : "${ADMIN_USERNAME:?ADMIN_USERNAME is required}"
 : "${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}"
 
-# Handed to `hermes config set` as argv, where a leading dash reads as an option and kills the
-# container on a CLI error naming neither this variable nor the operator's typo.
-case "$ADMIN_USERNAME" in -*|*$'\n'*)
-    echo "entrypoint: refusing to start, ADMIN_USERNAME may not start with a dash or contain a newline" >&2
+# Two different failures, both silent without this. A colon can never reach the dashboard: basic
+# auth sends `user:password` and the server splits on the FIRST one, so `alice:ops` is unpresentable
+# at the browser prompt while the deploy goes green (the health probe fetches /api/status, which is
+# not behind the auth). A leading dash is read as an option by `hermes config set`, which takes this
+# as argv, and kills the container on a CLI error naming neither the variable nor the typo.
+case "$ADMIN_USERNAME" in *:*|-*|*$'\n'*)
+    echo "entrypoint: refusing to start, ADMIN_USERNAME may not contain a colon or a newline, or start with a dash" >&2
     exit 1
 esac
 
