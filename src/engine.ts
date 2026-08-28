@@ -23,6 +23,19 @@ const VOLUME_MOUNT_PATH = '/data'
 export class Engine {
   constructor(private db: DatabaseAdapter, private compute: ComputeAdapter, private storage: StorageAdapter, private managedDb: ManagedDbAdapter) {}
 
+  /** Serialize container work per app. `deploy` re-asserts the standing lifecycle intent after
+   *  replacing the container, and `lifecycle` changes that intent — both read state, then act on the
+   *  container across an await. Interleaved, they leave the row and the container disagreeing in
+   *  whichever direction lost the race: a `start` landing mid-deploy is recorded and then undone by
+   *  the deploy's re-assert. One chain per app, so unrelated services and branches stay concurrent.
+   *  Chained on settle, not success — a failed op must not wedge every later one behind it. */
+  private appChains = new Map<string, Promise<unknown>>()
+  private serialize<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const next = (this.appChains.get(key) ?? Promise.resolve()).then(fn, fn)
+    this.appChains.set(key, next.catch(() => undefined))
+    return next
+  }
+
   // The project's container-ref slug — frozen at creation (older state derives from the name).
   private projectSlug(project: Project): string { return project.refSlug ?? slug(project.name) }
 
@@ -182,6 +195,14 @@ export class Engine {
     const b = this.getBranchByName(projectId, branchName)
     if (!b) throw new Error(`branch "${branchName}" not found`)
     const group = opts.group ?? 'default'
+    return this.serialize(`${b.id}:${group}`, () => this.deployLocked(projectId, b, group, opts))
+  }
+
+  private async deployLocked(
+    projectId: string, b: Branch, group: string,
+    opts: { image: string; port?: number; hostPort?: number },
+  ): Promise<{ url: string; branch: string; group: string }> {
+    const project = this.getProject(projectId)!
     const port = opts.port ?? 8080
     // a redeploy keeps the branch app's existing host address; only brand-new apps default to port.
     // Older state records lack hostPort — recover it from the recorded URL.
@@ -213,7 +234,7 @@ export class Engine {
     // is already right and must not be rewritten, and the EXACT verb matters (oss allows a suspended
     // volume-bearing service, so suspend must not be coarsened to stop). Best-effort, like the
     // adapter ops in lifecycle(): the deploy itself has already succeeded.
-    const standing = prior?.desiredState
+    const standing = loadState().branches[b.id]?.apps[group]?.desiredState
     if (standing === 'stopped' || standing === 'suspended') {
       const op = standing === 'suspended' ? this.compute.suspend : this.compute.stop
       await op?.call(this.compute, this.ref(project, b), group).catch(() => { /* best-effort */ })
@@ -520,7 +541,14 @@ export class Engine {
   async lifecycle(projectId: string, serviceId: string, verb: 'start' | 'stop' | 'suspend', branchName?: string): Promise<{
     service: Record<string, unknown> | undefined; state: string
   }> {
-    const { branch, group } = this.computeTarget(projectId, serviceId, branchName)
+    const t = this.computeTarget(projectId, serviceId, branchName)
+    return this.serialize(`${t.branch.id}:${t.group}`, () => this.lifecycleLocked(projectId, serviceId, verb, t))
+  }
+
+  private async lifecycleLocked(
+    projectId: string, serviceId: string, verb: 'start' | 'stop' | 'suspend',
+    { branch, group }: { branch: Branch; group: string },
+  ): Promise<{ service: Record<string, unknown> | undefined; state: string }> {
     const project = this.getProject(projectId)!
     const ref = this.ref(project, branch)
     const desired = verb === 'start' ? 'running' : verb === 'stop' ? 'stopped' : 'suspended'

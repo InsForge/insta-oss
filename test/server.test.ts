@@ -533,6 +533,42 @@ test('a redeploy preserves desired lifecycle intent AND the container honours it
   expect(calls.some((c) => c.startsWith('deploy:'))).toBe(true)
 })
 
+// The re-assert reads the intent that is current when it runs, not a snapshot from before the
+// container work. A `start` landing mid-deploy must win — otherwise the deploy stops the
+// replacement and the row is left saying `running` for a stopped container, the same class of lie
+// as clobbering the intent, just in the other direction.
+// Driven through the Engine, not HTTP: both entry points register on the per-app chain
+// synchronously before returning, so calling them in order pins the interleaving. Through
+// `app.inject` the routing hops decide which handler reaches the chain first, and the race this
+// guards becomes unpinnable.
+test('a lifecycle change landing mid-deploy is neither lost nor undone', async () => {
+  const engine = new Engine(db, compute, storage, managed)
+  const { project } = await engine.createProject('demo')
+  const id = project.id
+  await engine.deploy(id, 'main', { image: 'app:1', port: 3000, group: 'default' })
+  await engine.lifecycle(id, 'cp-default', 'stop')
+
+  // Hold the adapter inside compute.deploy, so `start` is issued while the redeploy is in flight.
+  let release = () => {}
+  const held = new Promise<void>((r) => { release = r })
+  const realDeploy = compute.deploy
+  compute.deploy = async (ref, o) => { await held; return realDeploy(ref, o) }
+  calls.length = 0
+  const deploying = engine.deploy(id, 'main', { image: 'app:2', port: 3000, group: 'default' })
+  const starting = engine.lifecycle(id, 'cp-default', 'start')
+  release()
+  await deploying; await starting
+  compute.deploy = realDeploy
+
+  // They did not interleave: the start waited for the redeploy instead of landing inside it.
+  // Unserialized, the start runs while compute.deploy is held — i.e. before the deploy is recorded.
+  expect(calls.indexOf('compute.start:demo-main:default'))
+    .toBeGreaterThan(calls.findIndex((c) => c.startsWith('deploy:demo-main:default:app:2')))
+  // ...and the later intent stands, with the container agreeing: `start` is last, no stop after it.
+  expect(await engine.serviceState(id, 'cp-default')).toMatchObject({ desiredState: 'running' })
+  expect(calls.lastIndexOf('compute.start:demo-main:default')).toBeGreaterThan(calls.lastIndexOf('compute.stop:demo-main:default'))
+})
+
 // The exact verb, not a coarser one: oss allows a suspended volume-bearing service, so a redeploy
 // of a SUSPENDED service must land back on suspend rather than being rewritten to stop.
 test('a redeploy of a suspended service re-suspends rather than stopping it', async () => {
