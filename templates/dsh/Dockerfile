@@ -92,17 +92,21 @@ ENV DSH_HOME=/data/dsh
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Unprivileged, and this is the whole point of the sandbox. dsh wraps every shell command the model
-# runs in bubblewrap with `--ro-bind /` plus a `--bind` of the session workspace, and passes NO
-# `--unshare-user`. As root that leaves the read-only binds unlocked: the sandboxed process still
-# holds CAP_SYS_ADMIN, so `mount -o remount,rw /data` undoes the boundary in one command, which is
-# exactly what an agent asked to install a plugin discovered on its first attempt. As `node`,
-# bwrap (not setuid here) must open a user namespace to get that capability, and the kernel locks
-# every mount it inherits, so the same remount answers EPERM and the agent has to ask the operator
-# to widen the policy instead. /run/dsh and /tmp/nginx are made here because /run is root-owned at
-# runtime and the entrypoint could not create them.
+# Everything that matters runs as `node`, and this is the whole point of the sandbox. dsh wraps
+# every shell command the model runs in bubblewrap with `--ro-bind /` plus a `--bind` of the
+# session workspace, and passes NO `--unshare-user`. As root that leaves the read-only binds
+# unlocked: the sandboxed process still holds CAP_SYS_ADMIN, so `mount -o remount,rw /data` undoes
+# the boundary in one command, which is exactly what an agent asked to install a plugin discovered
+# on its first attempt. As `node`, bwrap (not setuid here) must open a user namespace to get that
+# capability, and the kernel locks every mount it inherits, so the same remount answers EPERM and
+# the agent has to ask the operator to widen the policy instead.
+#
+# No `USER` directive, deliberately: the entrypoint needs one root moment to chown a volume it did
+# not create (a 0.1.0 volume, a restored backup and a bind mount all arrive root-owned), and it
+# drops to `node` with setpriv --inh-caps=-all before starting anything. It also refuses to start
+# if it is still root by then, so the boundary does not quietly depend on that drop being intact.
+# /run/dsh and /tmp/nginx are made here because /run is root-owned at runtime.
 RUN mkdir -p /data /run/dsh /tmp/nginx && chown -R node:node /data /run/dsh /tmp/nginx
-USER node
 
 EXPOSE 8080
 CMD ["/entrypoint.sh"]

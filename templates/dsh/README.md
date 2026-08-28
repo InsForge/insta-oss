@@ -75,10 +75,12 @@ case again. The gate therefore refuses any handshake whose `Origin` is not this 
 port included, which covers both the cookie and the basic credentials a browser attaches from its
 own auth cache. Ordinary requests are unaffected: they still need the password.
 
-The agent runs as root in its own container, so the shell commands the model chooses can read the
+The agent runs unprivileged, but as the same uid as nginx, which is what lets nginx read the
+credentials without a shared group. So the shell commands the model chooses can still read the
 gate's password file and the cookie token derived from it, even though the entrypoint unsets
-`ADMIN_USERNAME` and `ADMIN_PASSWORD` before starting anything. Neither grants the agent more than
-it already has inside that container, but they outlive the session that read them, so rotating
+`ADMIN_USERNAME` and `ADMIN_PASSWORD` before starting anything, and even though the sandbox mounts
+that directory read-only: read-only is not unreadable. Neither grants the agent more than it
+already has inside that container, but they outlive the session that read them, so rotating
 `ADMIN_PASSWORD` is the recovery path after any suspected compromise of the agent.
 
 ## What you get by hosting it
