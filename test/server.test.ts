@@ -506,9 +506,27 @@ test('compute restart REDEPLOYS the recorded image (fresh env), and refuses a st
   expect(stopped.json().error).toMatch(/insta compute start/)
   expect(calls.some((c) => c.startsWith('deploy:'))).toBe(false)
 
-  // compute-only, and a never-deployed service has nothing to re-run
+  // compute-only, unknown services 404
   expect((await post(`/projects/${id}/services/pg-db/restart`)).statusCode).toBe(400)
   expect((await post(`/projects/${id}/services/cp-nope/restart`)).statusCode).toBe(404)
+
+  // ...and a compute service that EXISTS but was never deployed has no image to re-run. Its own
+  // branch in engine.restart, distinct from the two above.
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'bare' })
+  const bare = await post(`/projects/${id}/services/cp-bare/restart`)
+  expect(bare.statusCode).toBe(400)
+  expect(bare.json().error).toMatch(/no machines yet/)
+})
+
+// A deploy must not clear the standing lifecycle intent: `stop` then a redeploy leaves the service
+// stopped on the platform, and restart makes the window reachable from an operation that just
+// checked that intent.
+test('a redeploy preserves desired lifecycle intent', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await post(`/projects/${id}/services/cp-default/stop`)
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000 })
+  expect((await get(`/projects/${id}/services/cp-default/state`)).json().desiredState).toBe('stopped')
 })
 
 // Restart reaches engine.deploy(), which re-mints DATABASE_URL, the S3 bundle and every bound

@@ -202,7 +202,11 @@ export class Engine {
       // secrets are scoped (project-wide + branch-unbound + bound to THIS group)
       envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.managedSecretsFor(projectId, b), ...this.deploySecretsFor(projectId, b.name, group) },
     })
-    mutate((s) => { s.branches[b.id].apps[group] = { image: opts.image, port, hostPort, url, updatedAt: Date.now() } })
+    // Spread, not replace: desiredState is the user's standing intent and this write is not the
+    // place to clear it. A `stop` landing while a deploy is in flight would otherwise be undone by
+    // the deploy's own state write — and `restart` makes that reachable from an operation that
+    // checked the intent moments earlier. Matches the platform, whose desired_state survives a deploy.
+    mutate((s) => { s.branches[b.id].apps[group] = { ...s.branches[b.id].apps[group], image: opts.image, port, hostPort, url, updatedAt: Date.now() } })
     this.emit(projectId, b.name, 'resource', 'deploy', { image: opts.image, group, url })
     return { url, branch: b.name, group }
   }
