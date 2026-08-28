@@ -1,5 +1,5 @@
 code: hermes
-version: 1.2.1
+version: 2.0.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -16,7 +16,7 @@ generated:
 services:
   hermes:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/hermes:1.2.1   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/hermes:2.0.0   # built from ./Dockerfile by templates-build-images.yml
     port: 8080
     healthcheck: /api/status
     # Headroom, not a crash fix: 331 MB of 459 MB and pressure "elevated" while idle at 512 MB.
@@ -32,10 +32,13 @@ services:
       generated:
         HERMES_GATEWAY_TOKEN: ${gateway_token}
       required:
-        ACCESS_PASSWORD:
-          description: "Password for the web dashboard (username: admin). Generated if left blank"
-          generate: secret:16
-          editable: true
+        # Neither a `default:` nor a `generate:`, matching the other agent UIs: the operator types
+        # both or does not deploy. A generated password would be one NOBODY can read back, since a
+        # template variable is stored write-only, and a cleared field silently mints another.
+        ADMIN_USERNAME:
+          description: "Username for the dashboard sign-in. Pick your own; it may not contain a colon or start with a dash"
+        ADMIN_PASSWORD:
+          description: "Password for the dashboard sign-in. Pick a strong one: it is all that stands between the URL and an agent holding your API keys"
         OPENROUTER_API_KEY:
           description: "OpenRouter API key the agent uses for model calls (openrouter.ai/keys)"
         TELEGRAM_BOT_TOKEN:

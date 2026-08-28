@@ -57,13 +57,14 @@ function demands(manifest) {
   return out.sort();
 }
 
-describe('the terminal templates ship no credential of their own', () => {
+describe('the credentialed templates ship no credential of their own', () => {
   // What this locks down is a security property, not a convenience one. Each of these publishes a
-  // root shell (or an agent that runs one) over HTTP basic auth, so a `default:` here would be one
-  // password shared by every deployment in the world, and a `generate:` would be a password the
-  // operator never sees. The manifests declare both variables required with neither, which is what
-  // makes the console render two empty fields it will not let you submit blank.
-  it.each(['claude-code', 'codex', 'dsh', 'pi'])('%s makes the operator supply both', (dir) => {
+  // root shell, an agent that runs one, or an agent's control panel over HTTP basic auth, so a
+  // `default:` here would be one password shared by every deployment in the world, and a
+  // `generate:` would be a password the operator never sees. The manifests declare both variables
+  // required with neither, which is what makes the console render two empty fields it will not let
+  // you submit blank.
+  it.each(['claude-code', 'codex', 'dsh', 'hermes', 'pi'])('%s makes the operator supply both', (dir) => {
     const svc = Object.values(templates.find((t) => t.dir === dir).manifest.services)[0];
     for (const k of ['ADMIN_USERNAME', 'ADMIN_PASSWORD']) {
       // null = nothing to fall back on. The platform answers MissingTemplateVariables; the console
@@ -73,6 +74,9 @@ describe('the terminal templates ship no credential of their own', () => {
     }
   });
 
+  // hermes is absent here and only here: it also requires an OpenRouter key and two Telegram
+  // values, so the pair is not the whole of what it demands. The case above still covers its
+  // credentials, and the registry-wide one below covers the fallback rule.
   it.each(['claude-code', 'codex', 'dsh', 'pi'])('%s demands those two and nothing else', (dir) => {
     // Scoped both ways on purpose: a fourth required variable would be a new thing to type on the
     // deploy form, and dropping one would mean a credential came back from somewhere.
@@ -80,11 +84,20 @@ describe('the terminal templates ship no credential of their own', () => {
       .toEqual(['ADMIN_PASSWORD', 'ADMIN_USERNAME']);
   });
 
-  it('still resolves a template whose secret is generated', () => {
-    // hermes keeps `generate: secret:16` on ACCESS_PASSWORD, which is fine there and is what keeps
-    // the generate branch of valueSource exercised against a real manifest rather than a literal.
-    const svc = Object.values(templates.find((t) => t.dir === 'hermes').manifest.services)[0];
-    expect(valueSource(svc.env.required.ACCESS_PASSWORD, undefined)).toBe('generate');
+  it('no template lets a required variable fall back to anything', () => {
+    // Stated once over the whole registry, because the rule is not really about those five: a
+    // required variable is one the platform cannot supply, and hermes shipped that way until
+    // 2.0.0. Its `generate: secret:16` minted a dashboard password into a
+    // write-only store (a template variable is stored `minted = false`, and only minted rows come
+    // back from GET /credentials), so an operator who did not copy it off the form lost the
+    // dashboard with no error anywhere. A value nobody needs to read belongs under `env.generated`
+    // instead, the way n8n declares its encryption key.
+    const withFallback = templates.flatMap((t) =>
+      Object.values(t.manifest.services ?? {}).flatMap((svc) =>
+        Object.entries(svc.env?.required ?? {})
+          .filter(([, spec]) => valueSource(spec, undefined) !== null)
+          .map(([k]) => `${t.dir}:${k}`)));
+    expect(withFallback).toEqual([]);
   });
 });
 
@@ -93,8 +106,8 @@ describe('every variable an entrypoint reads is declared by its manifest', () =>
 
   it('covers the templates that ship one', () => {
     // Guards the guard: if entrypoints move or get renamed, the cases below would silently
-    // become an empty suite that passes forever. hermes ships one too, still on the pre-0.6.0
-    // ACCESS_PASSWORD, which is exactly the divergence this check should keep honest.
+    // become an empty suite that passes forever. 9router and openclaw ship one while requiring no
+    // credential at all, which is the case the per-template check below has to stay honest about.
     expect(withEntrypoint.map((t) => t.dir).sort()).toEqual(['9router', 'claude-code', 'codex', 'dsh', 'hermes', 'openclaw', 'pi']);
   });
 
