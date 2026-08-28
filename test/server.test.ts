@@ -42,6 +42,9 @@ const compute: ComputeAdapter = {
   supportsVolumes: true,
   deploy: async (ref, o) => {
     calls.push(`deploy:${ref}:${o.group}:${o.image}:s3=${o.envVars.BUCKET_NAME ?? 'none'}:p=${o.port}->${o.hostPort}`)
+    // Recorded separately, and only when explicitly false, so the deploy line above stays the exact
+    // string the older assertions match.
+    if (o.start === false) calls.push(`deploy.nostart:${ref}:${o.group}`)
     if (o.volume) calls.push(`deploy.volume:${ref}:${o.group}:${o.volume.name}`)
     return { url: `http://localhost:${o.hostPort}` }
   },
@@ -484,6 +487,197 @@ test('compute lifecycle: stop sets desired intent; state reports desired vs live
   // lifecycle is compute-only; unknown services 404
   expect((await post(`/projects/${id}/services/pg-db/stop`)).statusCode).toBe(400)
   expect((await get(`/projects/${id}/services/cp-nope/state`)).statusCode).toBe(404)
+})
+
+test('compute restart REDEPLOYS the recorded image (fresh env), and refuses a stopped service', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  calls.length = 0
+  const r = await post(`/projects/${id}/services/cp-default/restart`)
+  expect(r.statusCode).toBe(200)
+  // A redeploy of the SAME image on the SAME host mapping, not an adapter start/stop: env is
+  // assembled at deploy time, so this is the only path that carries a changed secret in.
+  expect(calls.some((c) => c.startsWith('deploy:demo-main:default:app:1:'))).toBe(true)
+  expect(calls.some((c) => c.startsWith('compute.start:') || c.startsWith('compute.stop:'))).toBe(false)
+  expect(r.json().state).toBe('running')
+
+  // Stopped is a persistent intent — a restart must not quietly bring it back.
+  await post(`/projects/${id}/services/cp-default/stop`)
+  calls.length = 0
+  const stopped = await post(`/projects/${id}/services/cp-default/restart`)
+  expect(stopped.statusCode).toBe(400)
+  expect(stopped.json().error).toMatch(/insta compute start/)
+  expect(calls.some((c) => c.startsWith('deploy:'))).toBe(false)
+
+  // compute-only, unknown services 404
+  expect((await post(`/projects/${id}/services/pg-db/restart`)).statusCode).toBe(400)
+  expect((await post(`/projects/${id}/services/cp-nope/restart`)).statusCode).toBe(404)
+
+  // ...and a compute service that EXISTS but was never deployed has no image to re-run. Its own
+  // branch in engine.restart, distinct from the two above.
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'bare' })
+  const bare = await post(`/projects/${id}/services/cp-bare/restart`)
+  expect(bare.statusCode).toBe(400)
+  expect(bare.json().error).toMatch(/no machines yet/)
+})
+
+// A deploy must not clear the standing lifecycle intent: `stop` then a redeploy leaves the service
+// stopped on the platform, and restart makes the window reachable from an operation that just
+// checked that intent. The container has to honour it too — a preserved intent the container
+// contradicts is a row that lies, which is worse than the clobber it replaced.
+test('a redeploy preserves desired lifecycle intent AND the container honours it', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await post(`/projects/${id}/services/cp-default/stop`)
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000 })
+  expect((await get(`/projects/${id}/services/cp-default/state`)).json().desiredState).toBe('stopped')
+  expect(calls).toContain('compute.stop:demo-main:default')   // the new container did not stay up
+  expect(calls.some((c) => c.startsWith('deploy:'))).toBe(true)
+})
+
+// The re-assert reads the intent that is current when it runs, not a snapshot from before the
+// container work. A `start` landing mid-deploy must win — otherwise the deploy stops the
+// replacement and the row is left saying `running` for a stopped container, the same class of lie
+// as clobbering the intent, just in the other direction.
+// Driven through the Engine, not HTTP: both entry points register on the per-app chain
+// synchronously before returning, so calling them in order pins the interleaving. Through
+// `app.inject` the routing hops decide which handler reaches the chain first, and the race this
+// guards becomes unpinnable.
+test('a lifecycle change landing mid-deploy is neither lost nor undone', async () => {
+  const engine = new Engine(db, compute, storage, managed)
+  const { project } = await engine.createProject('demo')
+  const id = project.id
+  await engine.deploy(id, 'main', { image: 'app:1', port: 3000, group: 'default' })
+  await engine.lifecycle(id, 'cp-default', 'stop')
+
+  // Hold the adapter inside compute.deploy, so `start` is issued while the redeploy is in flight.
+  let release = () => {}
+  const held = new Promise<void>((r) => { release = r })
+  const realDeploy = compute.deploy
+  compute.deploy = async (ref, o) => { await held; return realDeploy(ref, o) }
+  calls.length = 0
+  try {
+    const deploying = engine.deploy(id, 'main', { image: 'app:2', port: 3000, group: 'default' })
+    const starting = engine.lifecycle(id, 'cp-default', 'start')
+    release()
+    await deploying; await starting
+  } finally { compute.deploy = realDeploy }   // a rejection must not leak the override into later tests
+
+  // They did not interleave: the start waited for the redeploy instead of landing inside it.
+  // Unserialized, the start runs while compute.deploy is held — i.e. before the deploy is recorded.
+  expect(calls.indexOf('compute.start:demo-main:default'))
+    .toBeGreaterThan(calls.findIndex((c) => c.startsWith('deploy:demo-main:default:app:2')))
+  // ...and the later intent stands, with the container agreeing: `start` is last, no stop after it.
+  expect(await engine.serviceState(id, 'cp-default')).toMatchObject({ desiredState: 'running' })
+  expect(calls.lastIndexOf('compute.start:demo-main:default')).toBeGreaterThan(calls.lastIndexOf('compute.stop:demo-main:default'))
+})
+
+// A restart re-runs what the service runs NOW. Snapshotting the image before joining the queue
+// would make a restart issued behind a deploy re-run the older image and silently roll it back.
+test('a restart queued behind a deploy re-runs the NEW image, not a pre-queue snapshot', async () => {
+  const engine = new Engine(db, compute, storage, managed)
+  const { project } = await engine.createProject('demo')
+  const id = project.id
+  await engine.deploy(id, 'main', { image: 'app:1', port: 3000, group: 'default' })
+
+  let release = () => {}
+  const held = new Promise<void>((r) => { release = r })
+  const realDeploy = compute.deploy
+  compute.deploy = async (ref, o) => { await held; return realDeploy(ref, o) }
+  calls.length = 0
+  try {
+    const deploying = engine.deploy(id, 'main', { image: 'app:2', port: 3000, group: 'default' })
+    const restarting = engine.restart(id, 'cp-default')   // queued behind it, snapshot would say app:1
+    release()
+    await deploying; await restarting
+  } finally { compute.deploy = realDeploy }
+
+  const deploys = calls.filter((c) => c.startsWith('deploy:demo-main:default:'))
+  expect(deploys.length).toBe(2)
+  expect(deploys.every((c) => c.startsWith('deploy:demo-main:default:app:2'))).toBe(true)
+})
+
+// Every entry point on the chain has to read the branch INSIDE it. `lifecycle` was the one that
+// still didn't: a stop queued behind a service's first deploy saw a branch with no app record yet
+// and silently did nothing — no adapter call, no state write, and a 200 saying it had.
+test('a stop queued behind the first deploy is not silently dropped', async () => {
+  const engine = new Engine(db, compute, storage, managed)
+  const { project } = await engine.createProject('demo')
+  const id = project.id
+  // Register the group without deploying it: the app record — the thing the stale snapshot lacked —
+  // only appears on the first deploy. Set up over HTTP; it shares the same state file.
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'default' })
+
+  let release = () => {}
+  const held = new Promise<void>((r) => { release = r })
+  const realDeploy = compute.deploy
+  compute.deploy = async (ref, o) => { await held; return realDeploy(ref, o) }
+  calls.length = 0
+  try {
+    const deploying = engine.deploy(id, 'main', { image: 'app:1', port: 3000, group: 'default' })
+    const stopping = engine.lifecycle(id, 'cp-default', 'stop')   // queued: no app record exists yet
+    release()
+    await deploying; await stopping
+  } finally { compute.deploy = realDeploy }
+
+  expect(calls).toContain('compute.stop:demo-main:default')
+  expect((await engine.serviceState(id, 'cp-default')).desiredState).toBe('stopped')
+})
+
+// STOPPED gets start:false; SUSPENDED must not. Suspend is `docker pause`, and a container created
+// but never started cannot be paused — the pause fails, the container stays `created`, and state()
+// reports `stopped`, contradicting the intent the re-assert just preserved.
+test('only a stopped service skips starting its replacement; a suspended one must start', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await post(`/projects/${id}/services/cp-default/stop`)
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000 })
+  expect(calls).toContain('deploy.nostart:demo-main:default')
+
+  await post(`/projects/${id}/services/cp-default/suspend`)
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:3', branch: 'main', port: 3000 })
+  expect(calls).not.toContain('deploy.nostart:demo-main:default')   // it has to run before it can pause
+  expect(calls).toContain('compute.suspend:demo-main:default')
+})
+
+// The exact verb, not a coarser one: oss allows a suspended volume-bearing service, so a redeploy
+// of a SUSPENDED service must land back on suspend rather than being rewritten to stop.
+test('a redeploy of a suspended service re-suspends rather than stopping it', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await post(`/projects/${id}/services/cp-default/suspend`)
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000 })
+  expect((await get(`/projects/${id}/services/cp-default/state`)).json().desiredState).toBe('suspended')
+  expect(calls).toContain('compute.suspend:demo-main:default')
+  expect(calls).not.toContain('compute.stop:demo-main:default')
+})
+
+// Restart reaches engine.deploy(), which re-mints DATABASE_URL, the S3 bundle and every bound
+// secret into a new container — so it stands behind the same policy as `POST /deploy`, exactly as
+// the platform gates it. An ungated door here would mean a `deploy: deny` an operator set is
+// simply not on.
+test('compute restart is gated on `deploy`, like every other door that redeploys', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await put(`/projects/${id}/policy/deploy`, { decision: 'deny' })
+  calls.length = 0
+  const denied = await post(`/projects/${id}/services/cp-default/restart`)
+  expect(denied.statusCode).toBe(403)
+  expect(calls.some((c) => c.startsWith('deploy:'))).toBe(false)
+
+  await put(`/projects/${id}/policy/deploy`, { decision: 'approve' })
+  const relayed = await post(`/projects/${id}/services/cp-default/restart`)
+  expect(relayed.statusCode).toBe(202)
+  expect(relayed.json().approvalId).toBeTruthy()
+  expect(calls.some((c) => c.startsWith('deploy:'))).toBe(false)
+
+  // ...and stop/start stay ungated under the same policy, so a wedged container is still cyclable.
+  expect((await post(`/projects/${id}/services/cp-default/stop`)).statusCode).toBe(200)
+  expect((await post(`/projects/${id}/services/cp-default/start`)).statusCode).toBe(200)
 })
 
 test('storage access mode flips public/private; scale/upgrade stay clean 501s', async () => {

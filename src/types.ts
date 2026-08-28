@@ -104,7 +104,12 @@ export interface ComputeAdapter {
     // port = the port the app LISTENS on (never changes). hostPort/network are LOCAL-substrate
     // hints (docker host mapping + branch network); platform adapters (Railway, …) ignore them
     // and own their routing/URL story. volume = a named volume to mount at /data.
-    opts: { image: string; port: number; hostPort?: number; envVars: Record<string, string>; network?: string; group: string; volume?: { name: string } },
+    // start=false: create the container but leave it down. For a redeploy of a service whose
+    // standing intent is stopped/suspended — without it the replacement runs (entrypoint, migrations,
+    // outbound calls) for the length of the redeploy before being stopped again. Optional and
+    // defaulting to start: an adapter that cannot express it ignores it and the engine's re-assert
+    // still lands the intent, just later.
+    opts: { image: string; port: number; hostPort?: number; envVars: Record<string, string>; network?: string; group: string; volume?: { name: string }; start?: boolean },
   ): Promise<{ url: string }>
   destroy(ref: string): Promise<void>
   // Lifecycle (optional — platform parity for `insta compute start|stop|suspend|status`).

@@ -11,7 +11,7 @@ export class DockerCompute implements ComputeAdapter {
 
   async deploy(
     ref: string,
-    opts: { image: string; port: number; hostPort?: number; envVars: Record<string, string>; network?: string; group: string; volume?: { name: string } },
+    opts: { image: string; port: number; hostPort?: number; envVars: Record<string, string>; network?: string; group: string; volume?: { name: string }; start?: boolean },
   ): Promise<{ url: string }> {
     const name = appName(ref, opts.group)
     if (!opts.network) throw new Error('DockerCompute requires the branch network')
@@ -21,9 +21,14 @@ export class DockerCompute implements ComputeAdapter {
     // named volume mounted at /data (platform parity) — docker creates it on first use, and it
     // survives redeploys because only the container is replaced, never the volume
     const volArgs = opts.volume ? ['-v', `${opts.volume.name}:/data`] : []
+    // create + conditional start, not `run -d`: a redeploy of a service the user stopped must not
+    // run its entrypoint for the length of the redeploy. `--restart unless-stopped` is unaffected —
+    // it only ever restarts containers that were RUNNING when the daemon went down, so one created
+    // and never started stays down.
     // host-side mapping may differ (branch clones); the app's listen port never changes
-    await docker(['run', '-d', '--restart', 'unless-stopped', '--name', name, '--network', opts.network,
+    await docker(['create', '--restart', 'unless-stopped', '--name', name, '--network', opts.network,
       ...envArgs, ...volArgs, '-p', `${hostPort}:${opts.port}`, opts.image])
+    if (opts.start !== false) await docker(['start', name])
     return { url: `http://localhost:${hostPort}` }
   }
 

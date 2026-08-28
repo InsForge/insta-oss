@@ -23,6 +23,19 @@ const VOLUME_MOUNT_PATH = '/data'
 export class Engine {
   constructor(private db: DatabaseAdapter, private compute: ComputeAdapter, private storage: StorageAdapter, private managedDb: ManagedDbAdapter) {}
 
+  /** Serialize container work per app. `deploy` re-asserts the standing lifecycle intent after
+   *  replacing the container, and `lifecycle` changes that intent — both read state, then act on the
+   *  container across an await. Interleaved, they leave the row and the container disagreeing in
+   *  whichever direction lost the race: a `start` landing mid-deploy is recorded and then undone by
+   *  the deploy's re-assert. One chain per app, so unrelated services and branches stay concurrent.
+   *  Chained on settle, not success — a failed op must not wedge every later one behind it. */
+  private appChains = new Map<string, Promise<unknown>>()
+  private serialize<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const next = (this.appChains.get(key) ?? Promise.resolve()).then(fn, fn)
+    this.appChains.set(key, next.catch(() => undefined))
+    return next
+  }
+
   // The project's container-ref slug — frozen at creation (older state derives from the name).
   private projectSlug(project: Project): string { return project.refSlug ?? slug(project.name) }
 
@@ -182,6 +195,18 @@ export class Engine {
     const b = this.getBranchByName(projectId, branchName)
     if (!b) throw new Error(`branch "${branchName}" not found`)
     const group = opts.group ?? 'default'
+    return this.serialize(`${b.id}:${group}`, () => this.deployLocked(projectId, b.id, group, opts))
+  }
+
+  // Takes a branch ID, not a Branch: anything read before the chain is a pre-queue snapshot, and an
+  // op that ran ahead of this one has already moved it (its image, its host mapping, its intent).
+  private async deployLocked(
+    projectId: string, branchId: string, group: string,
+    opts: { image: string; port?: number; hostPort?: number },
+  ): Promise<{ url: string; branch: string; group: string }> {
+    const project = this.getProject(projectId)!
+    const b = loadState().branches[branchId]
+    if (!b) throw new Error('branch not found')
     const port = opts.port ?? 8080
     // a redeploy keeps the branch app's existing host address; only brand-new apps default to port.
     // Older state records lack hostPort — recover it from the recorded URL.
@@ -195,14 +220,39 @@ export class Engine {
     if (vol && !this.compute.supportsVolumes) {
       throw new Error(`service "${group}" has a /data volume, which this compute adapter does not support — use the docker adapter`)
     }
+    // Read before the container work, not only after: the adapter can then decline to start a
+    // replacement whose standing intent is STOPPED, instead of running it and being stopped a moment
+    // later. Safe to read here — the chain means nothing else is moving it.
+    //
+    // Only 'stopped'. A suspended service's replacement must START: suspend is `docker pause`, and
+    // a container that was created and never started cannot be paused — the pause fails, the
+    // container stays `created`, and state() reports it `stopped`, contradicting the intent the
+    // re-assert just preserved. The brief run is the cost of suspend being a pause.
+    const standing = b.apps[group]?.desiredState
     const { url } = await this.compute.deploy(this.ref(project, b), {
       image: opts.image, port, hostPort, network: b.network, group,
+      start: standing !== 'stopped',
       ...(vol ? { volume: { name: `io-${this.ref(project, b)}-data-${vol.id}` } } : {}),
       // minted credentials (db + storage + managed databases) reach every compute deploy; user
       // secrets are scoped (project-wide + branch-unbound + bound to THIS group)
       envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.managedSecretsFor(projectId, b), ...this.deploySecretsFor(projectId, b.name, group) },
     })
-    mutate((s) => { s.branches[b.id].apps[group] = { image: opts.image, port, hostPort, url, updatedAt: Date.now() } })
+    // Spread, not replace: desiredState is the user's standing intent and this write is not the
+    // place to clear it. A `stop` landing while a deploy is in flight would otherwise be undone by
+    // the deploy's own state write — and `restart` makes that reachable from an operation that
+    // checked the intent moments earlier. Matches the platform, whose desired_state survives a deploy.
+    mutate((s) => { s.branches[b.id].apps[group] = { ...s.branches[b.id].apps[group], image: opts.image, port, hostPort, url, updatedAt: Date.now() } })
+    // ...and the container has to HONOUR that intent, or preserving it just makes the row lie:
+    // DockerCompute.deploy always `docker run`s the replacement, so a service the user stopped would
+    // come back up while the row still read `stopped`. Re-assert on the container only — the state
+    // is already right and must not be rewritten, and the EXACT verb matters (oss allows a suspended
+    // volume-bearing service, so suspend must not be coarsened to stop). Best-effort, like the
+    // adapter ops in lifecycle(): the deploy itself has already succeeded.
+    // Re-assert anyway: `start` is a hint an adapter may ignore, and this is the guarantee.
+    if (standing === 'stopped' || standing === 'suspended') {
+      const op = standing === 'suspended' ? this.compute.suspend : this.compute.stop
+      await op?.call(this.compute, this.ref(project, b), group).catch(() => { /* best-effort */ })
+    }
     this.emit(projectId, b.name, 'resource', 'deploy', { image: opts.image, group, url })
     return { url, branch: b.name, group }
   }
@@ -505,8 +555,19 @@ export class Engine {
   async lifecycle(projectId: string, serviceId: string, verb: 'start' | 'stop' | 'suspend', branchName?: string): Promise<{
     service: Record<string, unknown> | undefined; state: string
   }> {
-    const { branch, group } = this.computeTarget(projectId, serviceId, branchName)
+    const t = this.computeTarget(projectId, serviceId, branchName)
+    return this.serialize(`${t.branch.id}:${t.group}`, () => this.lifecycleLocked(projectId, serviceId, verb, t.branch.id, t.group))
+  }
+
+  // Branch ID, not a Branch — same reason as deployLocked: a snapshot taken before the chain is one
+  // an op ahead has already moved. A stop queued behind a service's FIRST deploy saw a branch with
+  // no app record at all and silently did nothing.
+  private async lifecycleLocked(
+    projectId: string, serviceId: string, verb: 'start' | 'stop' | 'suspend', branchId: string, group: string,
+  ): Promise<{ service: Record<string, unknown> | undefined; state: string }> {
     const project = this.getProject(projectId)!
+    const branch = loadState().branches[branchId]
+    if (!branch) throw new Error('branch not found')
     const ref = this.ref(project, branch)
     const desired = verb === 'start' ? 'running' : verb === 'stop' ? 'stopped' : 'suspended'
     let state = 'none'
@@ -520,6 +581,38 @@ export class Engine {
     this.emit(projectId, branch.name, 'resource', `service.${verb}`, { service: serviceId })
     const service = (await this.services(projectId, branch.name)).find((x) => x.id === serviceId)
     return { service, state }
+  }
+
+  /** Restart a compute service: re-run the image it ALREADY runs, so the container is recreated
+   *  with a freshly assembled env. `docker restart` would replay the env the container was created
+   *  with — env reaches a container at `docker run`, exactly as the platform bakes it into machine
+   *  config — so a restart that picks up a changed secret has to be a redeploy on both sides.
+   *  Refused unless the desired state is 'running', mirroring the platform's refusal. */
+  async restart(projectId: string, serviceId: string, branchName?: string): Promise<{
+    service: Record<string, unknown> | undefined; state: string
+  }> {
+    const t = this.computeTarget(projectId, serviceId, branchName)
+    return this.serialize(`${t.branch.id}:${t.group}`, () => this.restartLocked(projectId, serviceId, t.branch.id, t.group))
+  }
+
+  private async restartLocked(projectId: string, serviceId: string, branchId: string, group: string): Promise<{
+    service: Record<string, unknown> | undefined; state: string
+  }> {
+    const project = this.getProject(projectId)!
+    const branch = loadState().branches[branchId]
+    if (!branch) throw new Error('branch not found')
+    // Read the recorded image INSIDE the chain. A deploy queued ahead of this one has already
+    // replaced it, and re-running a pre-queue snapshot would roll that deploy back — a restart must
+    // re-run what the service runs NOW, which is the whole contract.
+    const app = branch.apps[group]
+    if (!app) throw new Error('this service has no machines yet — deploy an image first, then retry')
+    const desired = app.desiredState ?? 'running'
+    if (desired !== 'running') throw new Error(`this service is ${desired} — start it with \`insta compute start\`, which also re-enables auto-wake`)
+    // deployLocked, not deploy: this already holds the chain and it is not re-entrant.
+    await this.deployLocked(projectId, branchId, group, { image: app.image, port: app.port, hostPort: app.hostPort })
+    this.emit(projectId, branch.name, 'resource', 'service.restart', { service: serviceId })
+    const service = (await this.services(projectId, branch.name)).find((x) => x.id === serviceId)
+    return { service, state: await this.liveState(this.ref(project, branch), group) }
   }
 
   /** A compute service's desired (developer intent) vs. live runtime state. */
