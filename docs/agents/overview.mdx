@@ -19,7 +19,7 @@ Use whichever fits the agent; mixing them is fine.
 Everything else in this section is workflow advice. These two are the design:
 
 1. **Isolation by branch.** An agent task gets its own branch — its own database with real data, its own storage, its own compute URL. Mistakes are contained and disposable.
-2. **Approval for the irreversible.** Gated actions return an approval ID instead of executing. A human admin approves or denies; grants are single-use and audited. An agent cannot delete a project, restore a database, or do anything else you've gated — it can only ask.
+2. **Approval for the irreversible.** Gated actions return an approval ID instead of executing. A human admin approves or denies; grants are single-use and audited. An agent cannot delete a project or do anything else you've gated — it can only ask.
 
 ## What ships
 

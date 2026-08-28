@@ -40,7 +40,7 @@ One seam means one place to audit and one place to gate: reading secrets is itse
 
 ## Governance
 
-Every consequential action — deploying, reading or writing secrets, deleting a project, touching storage — has a policy decision: `allow`, `deny`, or `approve`. Defaults are permissive except the destructive ones: `project.delete` and `db.restore` require approval out of the box.
+Every consequential action — deploying, reading or writing secrets, deleting a project, touching storage — has a policy decision: `allow`, `deny`, or `approve`. Defaults are permissive except for the destructive actions — deleting a project requires approval out of the box. See [gated actions](/reference/gated-actions) for the full action set and current defaults.
 
 When a gated action is attempted, it does not run. The caller gets an approval ID, an admin approves or denies it (`insta approvals approve <id>`), and the caller retries. Grants are single-use. This is the mechanism that makes it safe to hand the CLI to a coding agent — see [InstaCloud for agents](/for-agents).
 

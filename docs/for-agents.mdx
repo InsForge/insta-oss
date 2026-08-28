@@ -25,7 +25,7 @@ Destructive and sensitive actions are gated by [policy](/governance/overview). W
 insta approvals approve <id>
 ```
 
-Only an admin can approve, grants are single-use, and everything lands in the audit log (`insta events`). Out of the box, `project.delete` and `db.restore` require approval; tighten anything else with `insta policy set <action> approve`.
+Only an admin can approve, grants are single-use, and everything lands in the audit log (`insta events`). Out of the box, deleting a project requires approval; tighten any other action with `insta policy set <action> approve`.
 
 ## What ships
 
