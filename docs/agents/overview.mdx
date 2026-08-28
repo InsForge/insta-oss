@@ -29,4 +29,4 @@ Everything else in this section is workflow advice. These two are the design:
 | MCP server | 38 hosted tools over streamable HTTP | Registered in each agent's MCP config |
 | Observe hook | Credential audit on agent tool calls | `.insta/observe/` in each linked repo, findings in `.insta/audit.jsonl` |
 
-All three are installed by [`insta setup agent`](/agents/setup). Per-agent guides: [Claude Code](/agents/claude-code), [Cursor](/agents/cursor), [Codex](/agents/codex), [other agents](/agents/other-agents).
+[`insta setup agent`](/agents/setup) installs the skill and the MCP registration; the observe hook is added to a repo when you link it to a project with `insta project create` or `insta project link`. Per-agent guides: [Claude Code](/agents/claude-code), [Cursor](/agents/cursor), [Codex](/agents/codex), [other agents](/agents/other-agents).

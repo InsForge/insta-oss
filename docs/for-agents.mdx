@@ -29,15 +29,15 @@ Only an admin can approve, grants are single-use, and everything lands in the au
 
 ## What ships
 
-Three pieces, installed by one command:
+Three pieces:
 
 - **The `insta` skill** — teaches terminal agents (Claude Code, Cursor, Codex, and others) the CLI workflow: status, branch, secrets, deploy, and the approval protocol.
 - **The MCP server** — `https://mcp.instacloud.com/mcp`, 38 tools covering projects, services, branches, deploys, secrets, logs, metrics, and approvals, for agents that speak MCP rather than a shell.
-- **The observe hook** — the per-repo credential audit described above.
+- **The observe hook** — the per-repo credential audit described above, added when a repo is linked to a project.
 
 ## Set up your agent
 
-One command installs all of it for every agent on your machine:
+One command installs the skill and MCP server for every agent on your machine:
 
 ```bash
 insta setup agent
