@@ -522,6 +522,26 @@ export class Engine {
     return { service, state }
   }
 
+  /** Restart a compute service: re-run the image it ALREADY runs, so the container is recreated
+   *  with a freshly assembled env. `docker restart` would replay the env the container was created
+   *  with — env reaches a container at `docker run`, exactly as the platform bakes it into machine
+   *  config — so a restart that picks up a changed secret has to be a redeploy on both sides.
+   *  Refused unless the desired state is 'running', mirroring the platform's refusal. */
+  async restart(projectId: string, serviceId: string, branchName?: string): Promise<{
+    service: Record<string, unknown> | undefined; state: string
+  }> {
+    const { branch, group } = this.computeTarget(projectId, serviceId, branchName)
+    const project = this.getProject(projectId)!
+    const app = branch.apps[group]
+    if (!app) throw new Error('this service has no machines yet — deploy an image first, then retry')
+    const desired = app.desiredState ?? 'running'
+    if (desired !== 'running') throw new Error(`this service is ${desired} — start it with \`insta compute start\`, which also re-enables auto-wake`)
+    await this.deploy(projectId, branch.name, { image: app.image, port: app.port, hostPort: app.hostPort, group })
+    this.emit(projectId, branch.name, 'resource', 'service.restart', { service: serviceId })
+    const service = (await this.services(projectId, branch.name)).find((x) => x.id === serviceId)
+    return { service, state: await this.liveState(this.ref(project, branch), group) }
+  }
+
   /** A compute service's desired (developer intent) vs. live runtime state. */
   async serviceState(projectId: string, serviceId: string, branchName?: string): Promise<{ desiredState: string; state: string }> {
     const { branch, group } = this.computeTarget(projectId, serviceId, branchName)

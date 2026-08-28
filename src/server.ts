@@ -329,6 +329,15 @@ export function buildServer(engine: Engine): FastifyInstance {
     })
   }
 
+  // Not folded into the verb loop above: a restart is a redeploy, not a desired-state flip, so it
+  // takes the deploy path (fresh env) rather than the adapter's lifecycle ops.
+  app.post('/projects/:id/services/:sid/restart', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    try { return await engine.restart(id, sid, (req.query as { branch?: string }).branch) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+  })
+
   app.get('/projects/:id/services/:sid/state', async (req, reply) => {
     const { id, sid } = req.params as { id: string; sid: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })

@@ -486,6 +486,31 @@ test('compute lifecycle: stop sets desired intent; state reports desired vs live
   expect((await get(`/projects/${id}/services/cp-nope/state`)).statusCode).toBe(404)
 })
 
+test('compute restart REDEPLOYS the recorded image (fresh env), and refuses a stopped service', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  calls.length = 0
+  const r = await post(`/projects/${id}/services/cp-default/restart`)
+  expect(r.statusCode).toBe(200)
+  // A redeploy of the SAME image on the SAME host mapping, not an adapter start/stop: env is
+  // assembled at deploy time, so this is the only path that carries a changed secret in.
+  expect(calls.some((c) => c.startsWith('deploy:demo-main:default:app:1:'))).toBe(true)
+  expect(calls.some((c) => c.startsWith('compute.start:') || c.startsWith('compute.stop:'))).toBe(false)
+  expect(r.json().state).toBe('running')
+
+  // Stopped is a persistent intent — a restart must not quietly bring it back.
+  await post(`/projects/${id}/services/cp-default/stop`)
+  calls.length = 0
+  const stopped = await post(`/projects/${id}/services/cp-default/restart`)
+  expect(stopped.statusCode).toBe(400)
+  expect(stopped.json().error).toMatch(/insta compute start/)
+  expect(calls.some((c) => c.startsWith('deploy:'))).toBe(false)
+
+  // compute-only, and a never-deployed service has nothing to re-run
+  expect((await post(`/projects/${id}/services/pg-db/restart`)).statusCode).toBe(400)
+  expect((await post(`/projects/${id}/services/cp-nope/restart`)).statusCode).toBe(404)
+})
+
 test('storage access mode flips public/private; scale/upgrade stay clean 501s', async () => {
   const id = await createProject()
   const r = await put(`/projects/${id}/services/st-store/access`, { public: true })
