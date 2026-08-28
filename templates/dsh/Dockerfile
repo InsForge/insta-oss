@@ -79,7 +79,8 @@ RUN rg_bin="$(find "$(npm root -g)" -type f -path '*@vscode/ripgrep-*/bin/rg' -p
 # 64-character map key overflows the default map hash bucket and nginx then refuses to start.
 # Debian's stock config is removed so a render that did not happen cannot fall back to no gate.
 COPY nginx.conf /etc/nginx/nginx.conf.template
-RUN stand_in=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+RUN mkdir -p /run/dsh /tmp/nginx \
+    && stand_in=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
     && sed "s|__DSH_GATE_TOKEN__|$stand_in|g" /etc/nginx/nginx.conf.template \
         > /tmp/nginx.check.conf \
     && nginx -t -c /tmp/nginx.check.conf \
@@ -90,5 +91,18 @@ ENV DSH_HOME=/data/dsh
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# Unprivileged, and this is the whole point of the sandbox. dsh wraps every shell command the model
+# runs in bubblewrap with `--ro-bind /` plus a `--bind` of the session workspace, and passes NO
+# `--unshare-user`. As root that leaves the read-only binds unlocked: the sandboxed process still
+# holds CAP_SYS_ADMIN, so `mount -o remount,rw /data` undoes the boundary in one command, which is
+# exactly what an agent asked to install a plugin discovered on its first attempt. As `node`,
+# bwrap (not setuid here) must open a user namespace to get that capability, and the kernel locks
+# every mount it inherits, so the same remount answers EPERM and the agent has to ask the operator
+# to widen the policy instead. /run/dsh and /tmp/nginx are made here because /run is root-owned at
+# runtime and the entrypoint could not create them.
+RUN mkdir -p /data /run/dsh /tmp/nginx && chown -R node:node /data /run/dsh /tmp/nginx
+USER node
+
 EXPOSE 8080
 CMD ["/entrypoint.sh"]
