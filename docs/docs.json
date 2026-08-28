@@ -271,9 +271,12 @@
                   "reference/cli/services",
                   "reference/cli/secrets",
                   "reference/cli/run",
+                  "reference/cli/build",
                   "reference/cli/deploy",
                   "reference/cli/compute",
                   "reference/cli/db",
+                  "reference/cli/storage",
+                  "reference/cli/template",
                   "reference/cli/manifest",
                   "reference/cli/regions",
                   "reference/cli/metrics",
@@ -286,7 +289,9 @@
                   "reference/cli/observe",
                   "reference/cli/setup",
                   "reference/cli/mcp",
-                  "reference/cli/upgrade"
+                  "reference/cli/feedback",
+                  "reference/cli/upgrade",
+                  "reference/cli/autoupdate"
                 ]
               }
             ]

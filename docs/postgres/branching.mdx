@@ -1,22 +1,52 @@
 ---
-title: "Branching a database"
-description: "How a branch copies the database and what that means for your data."
+title: "Postgres branching"
+description: "Branch your database the way you branch your code: copy-on-write, with the parent's data."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+Branch your database the way you branch your code. A database branch is a copy-on-write clone: it opens with all of the parent's data, at its own connection string, isolated from the parent — changes on either side never touch the other.
 
-## What a database branch is
+## What a branch gets
 
-{/* TODO */}
+```bash
+insta branch create staging
+```
 
-## How the copy is made
+Branching happens at the environment level — one command clones the whole stack, and Postgres is the part that carries your data:
 
-{/* TODO */}
+| Piece | On the new branch |
+| --- | --- |
+| Postgres | Copy-on-write clone with the parent's data, own connection string |
+| Storage | Copy-on-write fork of the bucket's objects |
+| Compute | A clone of each app at its own URL, running the parent's image |
+| Secrets | Copied, with service bindings remapped to the branch's services |
 
-## Time to ready
+The branch's connection string reaches your code the same way as any credential: `insta db url` prints it, `insta secrets bind` wires it into a compute service — after `insta branch switch`, both target the branch automatically.
 
-{/* TODO */}
+## Workflows
 
-## Data does not merge back
+**A development environment with real data.** Branch from `main`, develop and run migrations against production-shaped data, throw the branch away when you're done. Nothing you do on the branch can corrupt the parent.
 
-{/* TODO */}
+**One branch per agent task.** Give each coding-agent task its own branch and the agent tests against real data without being anywhere near production. See [branch-per-task](/agents/branch-per-task).
+
+**A branch per pull request.** Create a branch when a PR opens, run CI against it, delete it on merge — every PR gets a database with realistic data instead of an empty fixture.
+
+## Promote changes to main
+
+There is no promote button, by design — data promotion is a migration, not a copy:
+
+1. Merge the code branch in git.
+2. Run your migration files against `main`'s database.
+3. `insta deploy .` to ship the code that expects the new schema.
+4. Validate, then `insta branch delete <name>`.
+
+`insta branch merge <source> --into main` handles the structural half: it recreates services the source has that the target lacks, and never moves data.
+
+## Limits
+
+- 10 branches per project.
+- Branch names: lowercase letters, digits, and dashes, up to 39 characters, starting with a letter or digit.
+- `insta branch create` does not switch you — `insta branch switch <name>` relinks the directory, then rerun `insta secrets` to refresh `.env`.
+
+<Note>
+On self-hosted insta-oss, a branch database is a full copy (dump and restore) rather than copy-on-write — same isolation, without the instant-clone mechanics. See [compatibility](/self-hosting/compatibility).
+</Note>

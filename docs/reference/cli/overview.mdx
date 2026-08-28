@@ -1,28 +1,385 @@
 ---
-title: "CLI"
-description: "Install, update, and the conventions every command follows."
+title: "CLI overview"
+description: "Install the insta CLI, authenticate in CI, and find every command."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+The `insta` CLI manages projects, branches, services, secrets, and deploys from a terminal — yours or a coding agent's. Every command below links to its own page.
 
-## Install and update
+## Install
 
-{/* `insta upgrade`, `autoupdate` */}
+<CodeGroup>
 
-{/* TODO */}
+```bash Shell installer (macOS/Linux)
+curl -fsSL https://agents.instacloud.com | sh
+```
 
-## Output
+```bash npm
+npm install -g insta
+```
 
-{/* `--json` */}
+</CodeGroup>
 
-{/* TODO */}
+The shell installer ships a dependency-free native binary and also sets up agent skills (that step runs through npx, so it needs Node). The npm path works everywhere Node 18+ does, including Windows.
 
-## Scoping
+## Update
 
-{/* `--branch`, directory link, INSTA_PROJECT_ID */}
+```bash
+insta upgrade
+```
 
-{/* TODO */}
+Auto-update is on by default pre-1.0; control it with `insta autoupdate on|off`. Check your version any time with `insta --version`.
 
-## Exit codes and approvals
+## Authenticate in CI
 
-{/* TODO */}
+`insta login` is interactive by default. In CI or headless environments, mint a durable API token and use:
+
+```bash
+insta login --api-key insta_xxxxxxxx
+```
+
+To target a project without a linked directory, set `INSTA_PROJECT_ID` (with `INSTA_ORG_ID` and `INSTA_BRANCH` alongside it as needed).
+
+## Commands
+
+### login
+
+Log in with email + password, browser OAuth, a device code, or an API token.
+
+```bash
+insta login
+insta login --oauth github
+insta login --device
+```
+
+[Learn more about login](/reference/cli/login)
+
+### logout
+
+Log out and clear local tokens.
+
+```bash
+insta logout
+```
+
+[Learn more about logout](/reference/cli/logout)
+
+### status
+
+Show login state and the linked project.
+
+```bash
+insta status
+insta status --json
+```
+
+[Learn more about status](/reference/cli/status)
+
+### env
+
+Show or switch the deployment environment (`prod` | `staging`).
+
+```bash
+insta env show
+insta env use staging
+```
+
+[Learn more about env](/reference/cli/env)
+
+### org
+
+Manage organizations.
+
+```bash
+insta org list
+insta org create acme
+```
+
+[Learn more about org](/reference/cli/org)
+
+### project
+
+Create, list, link, and delete projects.
+
+```bash
+insta project create my-app
+insta project link <project-id>
+```
+
+[Learn more about project](/reference/cli/project)
+
+### branch
+
+Manage branch environments — isolated copies of your project.
+
+```bash
+insta branch create staging
+insta branch switch staging
+insta branch merge staging --into main
+```
+
+[Learn more about branch](/reference/cli/branch)
+
+### services
+
+Manage project services (`postgres` | `storage` | `compute` | `redis` | `mysql` | `mongodb`).
+
+```bash
+insta services add postgres db
+insta services list
+```
+
+[Learn more about services](/reference/cli/services)
+
+### secrets
+
+Fetch the user-secret bundle into `.env`, manage secrets, and bind provider credentials into compute.
+
+```bash
+insta secrets
+insta secrets set STRIPE_KEY
+insta secrets bind DATABASE_URL postgres/db --to compute/app
+```
+
+[Learn more about secrets](/reference/cli/secrets)
+
+### run
+
+Run a command with the branch credential bundle injected into its environment — nothing written to disk.
+
+```bash
+insta run npm start
+insta run --branch staging npm test
+```
+
+[Learn more about run](/reference/cli/run)
+
+### build
+
+Verify a source directory would build before deploying: detection plan, Dockerfile checks, static checks. Local and offline.
+
+```bash
+insta build .
+insta build . --explain
+```
+
+[Learn more about build](/reference/cli/build)
+
+### deploy
+
+Deploy a source directory (built remotely) or a prebuilt `--image` to a branch compute group.
+
+```bash
+insta deploy .
+insta deploy . --branch staging
+insta deploy --image ghcr.io/acme/api:v3
+```
+
+[Learn more about deploy](/reference/cli/deploy)
+
+### compute
+
+Control compute lifecycle and custom domains.
+
+```bash
+insta compute status
+insta compute start
+insta compute set-domain app.example.com
+```
+
+[Learn more about compute](/reference/cli/compute)
+
+### db
+
+Postgres service controls: connection string, psql session, limits, volume, scale-to-zero.
+
+```bash
+insta db url
+insta db connect
+insta db stats
+```
+
+[Learn more about db](/reference/cli/db)
+
+### storage
+
+Browse, download, and delete a storage service's bucket objects.
+
+```bash
+insta storage list
+insta storage get uploads/logo.png
+```
+
+[Learn more about storage](/reference/cli/storage)
+
+### template
+
+Browse and deploy app templates from the registry.
+
+```bash
+insta template list
+insta template info <code>
+insta template deploy <code>
+```
+
+[Learn more about template](/reference/cli/template)
+
+### manifest
+
+Print an agent-legible view of the project environments.
+
+```bash
+insta manifest
+```
+
+[Learn more about manifest](/reference/cli/manifest)
+
+### regions
+
+List regions available for postgres and compute services.
+
+```bash
+insta regions
+```
+
+[Learn more about regions](/reference/cli/regions)
+
+### metrics
+
+Service metrics (`db` | `compute` | `redis` | `mysql` | `mongodb`).
+
+```bash
+insta metrics compute
+insta metrics db
+```
+
+[Learn more about metrics](/reference/cli/metrics)
+
+### logs
+
+Service logs — runtime by default, `--deploy` for machine lifecycle events.
+
+```bash
+insta logs compute
+insta logs compute --deploy
+```
+
+[Learn more about logs](/reference/cli/logs)
+
+### events
+
+Show the audit and agent-event timeline.
+
+```bash
+insta events
+insta events --limit 50
+```
+
+[Learn more about events](/reference/cli/events)
+
+### usage
+
+Usage for the current billing cycle by billing dimension.
+
+```bash
+insta usage
+insta usage --proj
+```
+
+[Learn more about usage](/reference/cli/usage)
+
+### billing
+
+Current billing cycle overview: tier, used, included, overage, credits, forecast.
+
+```bash
+insta billing
+```
+
+[Learn more about billing](/reference/cli/billing)
+
+### policy
+
+Read and set the per-action governance policy.
+
+```bash
+insta policy get
+insta policy set project.delete approve
+```
+
+[Learn more about policy](/reference/cli/policy)
+
+### approvals
+
+Governance approvals — the human side of gated actions.
+
+```bash
+insta approvals list
+insta approvals approve <id>
+insta approvals deny <id>
+```
+
+[Learn more about approvals](/reference/cli/approvals)
+
+### observe
+
+The local credential-audit hook: install, report, sync findings.
+
+```bash
+insta observe install
+insta observe report
+```
+
+[Learn more about observe](/reference/cli/observe)
+
+### setup
+
+Set up this machine for agent workflows: CLI, skill, MCP server.
+
+```bash
+insta setup agent
+insta setup agent --project <id>
+```
+
+[Learn more about setup](/reference/cli/setup)
+
+### mcp
+
+Register the remote MCP server with coding agents.
+
+```bash
+insta mcp install
+insta mcp install --agent cursor
+```
+
+[Learn more about mcp](/reference/cli/mcp)
+
+### feedback
+
+Report an InstaCloud-side bug, missing feature, or friction to the InstaCloud team. Works logged-out.
+
+```bash
+insta feedback
+```
+
+[Learn more about feedback](/reference/cli/feedback)
+
+### upgrade
+
+Update the CLI to the latest release.
+
+```bash
+insta upgrade
+```
+
+[Learn more about upgrade](/reference/cli/upgrade)
+
+### autoupdate
+
+Show or set auto-update (`on` | `off`; default on pre-1.0).
+
+```bash
+insta autoupdate
+insta autoupdate off
+```
+
+[Learn more about autoupdate](/reference/cli/autoupdate)
