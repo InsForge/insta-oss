@@ -49,6 +49,6 @@ When a gated action is attempted, it does not run. The caller gets an approval I
 The same CLI drives two backends:
 
 - **InstaCloud** — the hosted platform these docs describe.
-- **insta-oss** — an open-source daemon on `localhost:8080` for laptops and single machines. No login (localhost trust), projects come pre-provisioned with postgres and storage, and source deploys build locally with Docker. Billing, scaling, and custom domains are cloud-only.
+- **insta-oss** — an open-source daemon on `localhost:8080` for laptops and single machines. No login (localhost trust), projects come pre-provisioned with postgres and storage, source deploys build locally with Docker, and unlike the hosted platform it ships with `project.delete` gated by default. Billing, scaling, and custom domains are cloud-only.
 
 See [Self-hosting](/self-hosting/overview) and the [compatibility table](/self-hosting/compatibility) for the exact differences.
