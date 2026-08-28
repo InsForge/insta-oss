@@ -221,12 +221,17 @@ export class Engine {
       throw new Error(`service "${group}" has a /data volume, which this compute adapter does not support — use the docker adapter`)
     }
     // Read before the container work, not only after: the adapter can then decline to start a
-    // replacement whose standing intent is down, instead of running it and being stopped a moment
+    // replacement whose standing intent is STOPPED, instead of running it and being stopped a moment
     // later. Safe to read here — the chain means nothing else is moving it.
+    //
+    // Only 'stopped'. A suspended service's replacement must START: suspend is `docker pause`, and
+    // a container that was created and never started cannot be paused — the pause fails, the
+    // container stays `created`, and state() reports it `stopped`, contradicting the intent the
+    // re-assert just preserved. The brief run is the cost of suspend being a pause.
     const standing = b.apps[group]?.desiredState
     const { url } = await this.compute.deploy(this.ref(project, b), {
       image: opts.image, port, hostPort, network: b.network, group,
-      start: standing !== 'stopped' && standing !== 'suspended',
+      start: standing !== 'stopped',
       ...(vol ? { volume: { name: `io-${this.ref(project, b)}-data-${vol.id}` } } : {}),
       // minted credentials (db + storage + managed databases) reach every compute deploy; user
       // secrets are scoped (project-wide + branch-unbound + bound to THIS group)

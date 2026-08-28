@@ -42,6 +42,9 @@ const compute: ComputeAdapter = {
   supportsVolumes: true,
   deploy: async (ref, o) => {
     calls.push(`deploy:${ref}:${o.group}:${o.image}:s3=${o.envVars.BUCKET_NAME ?? 'none'}:p=${o.port}->${o.hostPort}`)
+    // Recorded separately, and only when explicitly false, so the deploy line above stays the exact
+    // string the older assertions match.
+    if (o.start === false) calls.push(`deploy.nostart:${ref}:${o.group}`)
     if (o.volume) calls.push(`deploy.volume:${ref}:${o.group}:${o.volume.name}`)
     return { url: `http://localhost:${o.hostPort}` }
   },
@@ -554,11 +557,12 @@ test('a lifecycle change landing mid-deploy is neither lost nor undone', async (
   const realDeploy = compute.deploy
   compute.deploy = async (ref, o) => { await held; return realDeploy(ref, o) }
   calls.length = 0
-  const deploying = engine.deploy(id, 'main', { image: 'app:2', port: 3000, group: 'default' })
-  const starting = engine.lifecycle(id, 'cp-default', 'start')
-  release()
-  await deploying; await starting
-  compute.deploy = realDeploy
+  try {
+    const deploying = engine.deploy(id, 'main', { image: 'app:2', port: 3000, group: 'default' })
+    const starting = engine.lifecycle(id, 'cp-default', 'start')
+    release()
+    await deploying; await starting
+  } finally { compute.deploy = realDeploy }   // a rejection must not leak the override into later tests
 
   // They did not interleave: the start waited for the redeploy instead of landing inside it.
   // Unserialized, the start runs while compute.deploy is held — i.e. before the deploy is recorded.
@@ -582,11 +586,12 @@ test('a restart queued behind a deploy re-runs the NEW image, not a pre-queue sn
   const realDeploy = compute.deploy
   compute.deploy = async (ref, o) => { await held; return realDeploy(ref, o) }
   calls.length = 0
-  const deploying = engine.deploy(id, 'main', { image: 'app:2', port: 3000, group: 'default' })
-  const restarting = engine.restart(id, 'cp-default')   // queued behind it, snapshot would say app:1
-  release()
-  await deploying; await restarting
-  compute.deploy = realDeploy
+  try {
+    const deploying = engine.deploy(id, 'main', { image: 'app:2', port: 3000, group: 'default' })
+    const restarting = engine.restart(id, 'cp-default')   // queued behind it, snapshot would say app:1
+    release()
+    await deploying; await restarting
+  } finally { compute.deploy = realDeploy }
 
   const deploys = calls.filter((c) => c.startsWith('deploy:demo-main:default:'))
   expect(deploys.length).toBe(2)
@@ -609,14 +614,33 @@ test('a stop queued behind the first deploy is not silently dropped', async () =
   const realDeploy = compute.deploy
   compute.deploy = async (ref, o) => { await held; return realDeploy(ref, o) }
   calls.length = 0
-  const deploying = engine.deploy(id, 'main', { image: 'app:1', port: 3000, group: 'default' })
-  const stopping = engine.lifecycle(id, 'cp-default', 'stop')   // queued: no app record exists yet
-  release()
-  await deploying; await stopping
-  compute.deploy = realDeploy
+  try {
+    const deploying = engine.deploy(id, 'main', { image: 'app:1', port: 3000, group: 'default' })
+    const stopping = engine.lifecycle(id, 'cp-default', 'stop')   // queued: no app record exists yet
+    release()
+    await deploying; await stopping
+  } finally { compute.deploy = realDeploy }
 
   expect(calls).toContain('compute.stop:demo-main:default')
   expect((await engine.serviceState(id, 'cp-default')).desiredState).toBe('stopped')
+})
+
+// STOPPED gets start:false; SUSPENDED must not. Suspend is `docker pause`, and a container created
+// but never started cannot be paused — the pause fails, the container stays `created`, and state()
+// reports `stopped`, contradicting the intent the re-assert just preserved.
+test('only a stopped service skips starting its replacement; a suspended one must start', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await post(`/projects/${id}/services/cp-default/stop`)
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000 })
+  expect(calls).toContain('deploy.nostart:demo-main:default')
+
+  await post(`/projects/${id}/services/cp-default/suspend`)
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:3', branch: 'main', port: 3000 })
+  expect(calls).not.toContain('deploy.nostart:demo-main:default')   // it has to run before it can pause
+  expect(calls).toContain('compute.suspend:demo-main:default')
 })
 
 // The exact verb, not a coarser one: oss allows a suspended volume-bearing service, so a redeploy

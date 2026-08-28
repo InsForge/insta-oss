@@ -53,3 +53,16 @@ test('a redeploy replaces the container with the new env, keeping its host mappi
   expect(await inspect('{{.State.Running}}')).toBe('true')
   expect(await inspect('{{json .NetworkSettings.Ports}}')).toContain('18099')
 })
+
+// WHY a suspended service's replacement must still be started: suspend is `docker pause`, and Docker
+// refuses to pause a container that was created and never started. The engine relies on this, so it
+// is pinned here rather than assumed — if Docker ever allowed it, `start: false` could cover suspend
+// too and the extra boot would be removable.
+test('docker cannot pause a container that was created but never started', async () => {
+  await docker(['network', 'create', NETWORK]).catch(() => { /* already there */ })
+  await docker(['rm', '-f', CONTAINER]).catch(() => { /* not there */ })
+  await compute.deploy(REF, { image: IMAGE, port: 80, hostPort: 18098, network: NETWORK, envVars: {}, group: GROUP, start: false })
+  expect(await inspect('{{.State.Status}}')).toBe('created')
+  await expect(docker(['pause', CONTAINER])).rejects.toThrow()
+  expect(await inspect('{{.State.Status}}')).toBe('created')   // still not suspended
+})
