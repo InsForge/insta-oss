@@ -31,6 +31,18 @@ and `Origin` headers to the loopback authority, because the harness pins its set
 credential and model-discovery calls to a loopback origin and would otherwise answer them with
 403 from behind a public hostname.
 
+**Why it runs as an unprivileged user.** nginx is the network boundary; this is the file one, and
+it only exists because the container drops root. dsh wraps every shell command the model runs in
+bubblewrap, binding `/` read-only and the session workspace read-write, and it passes no
+`--unshare-user`. Run as root that contains nothing: the sandboxed process still holds
+`CAP_SYS_ADMIN`, the kernel never locks the read-only binds, and a single `mount -o remount,rw`
+takes the boundary apart. An agent asked to install a plugin found exactly that on its first
+attempt, and installed it without the operator ever seeing the approval prompt that is supposed to
+gate the write. The image therefore runs as `node`. bwrap is not setuid here, so it has to open a
+user namespace to get that capability, the kernel locks every mount it inherits, and the same
+remount answers `EPERM`. The volume is chowned to that user, and nginx gives up its `user`
+directive, its pid file and its five temp paths to run without a root master.
+
 **Why the image relaxes one client-side check.** Rewriting those headers is only half of what the
 Settings and Models pages need, because the harness applies the same loopback test twice. The
 server pins its 15 privileged RPCs to a loopback `Host`, which the rewrite above satisfies, and
@@ -63,10 +75,12 @@ case again. The gate therefore refuses any handshake whose `Origin` is not this 
 port included, which covers both the cookie and the basic credentials a browser attaches from its
 own auth cache. Ordinary requests are unaffected: they still need the password.
 
-The agent runs as root in its own container, so the shell commands the model chooses can read the
+The agent runs unprivileged, but as the same uid as nginx, which is what lets nginx read the
+credentials without a shared group. So the shell commands the model chooses can still read the
 gate's password file and the cookie token derived from it, even though the entrypoint unsets
-`ADMIN_USERNAME` and `ADMIN_PASSWORD` before starting anything. Neither grants the agent more than
-it already has inside that container, but they outlive the session that read them, so rotating
+`ADMIN_USERNAME` and `ADMIN_PASSWORD` before starting anything, and even though the sandbox mounts
+that directory read-only: read-only is not unreadable. Neither grants the agent more than it
+already has inside that container, but they outlive the session that read them, so rotating
 `ADMIN_PASSWORD` is the recovery path after any suspected compromise of the agent.
 
 ## What you get by hosting it
@@ -97,7 +111,7 @@ it already has inside that container, but they outlive the session that read the
 | `ADMIN_PASSWORD` | yes | HTTP basic-auth password for the UI. You pick it at deploy; nothing is generated for you, because this credential fronts an agent that runs shell commands. |
 | `DEEPSEEK_API_KEY` | no | The key the agent uses for model calls and for its `web_search` tool. Leave blank to store one from the Models page instead. |
 | `DEEPSEEK_BASE_URL` | no | Points the DeepSeek adapter at a gateway or compatible proxy. Defaults to `https://api.deepseek.com`. |
-| `DSH_PERMISSION_MODE` | no | The agent's file boundary: `read-only`, `workspace-write` (the default), or `danger-full-access`. You should not need to widen it: the sandbox runs through bubblewrap, which the image installs for exactly this reason. |
+| `DSH_PERMISSION_MODE` | no | The agent's starting file boundary: `read-only`, `workspace-write` (the default), or `danger-full-access`. It is a default, not a lock: the composer has a picker that changes it per conversation, and the agent may ask you to widen it for one command, which is how installing a plugin is meant to work. |
 
 There is deliberately no `GIT_TOKEN`. Earlier revisions of this template advertised one, but
 nothing in the harness reads that name, so it configured nothing. To clone a private repository,
@@ -123,9 +137,14 @@ key you store then lives in `$DSH_HOME/.credentials.yaml` on the volume.
 3. If you left `DEEPSEEK_API_KEY` blank, open Settings and then Models, and store your key
    there. The harness is built for this order: you can browse the model catalogue, store the
    key, and prompt, with no restart in between.
-4. The agent's working directory is `/data/workspace`. Clone your repository there so your work
-   persists. Files written outside `/data` are lost when the container is replaced.
+4. Each session picks its own workspace directory, from a browser rooted at `Home` (`/data/home`).
+   A `workspace` folder is waiting there; make others beside it if you want a directory per
+   project. That choice is also the agent's write boundary: under the default `workspace-write`
+   it may read the rest of the container but write only inside the workspace you picked.
 5. Session history, settings and stored credentials are under `/data/dsh` and survive restarts.
+   They sit outside every workspace on purpose, so the agent cannot rewrite its own credentials or
+   its own permissions without asking you first. Anything written outside `/data` is lost when the
+   container is replaced.
 
 The four agent presets shipped by upstream (`standard`, `code`, `minimal`, `cordis`) carry
 Chinese names and descriptions in the preset picker. The rest of the UI follows your browser's
