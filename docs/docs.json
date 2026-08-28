@@ -22,7 +22,7 @@
     "dark": "/logo/dark.svg"
   },
   "banner": {
-    "content": "InstaCloud docs are in early access — many pages are still being written. Missing something? [Open an issue](https://github.com/InsForge/insta-oss/issues).",
+    "content": "This is InstaCloud banner test! This is so cool new feature 🎉",
     "dismissible": true
   },
   "seo": {
