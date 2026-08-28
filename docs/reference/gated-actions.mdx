@@ -29,7 +29,7 @@ On the hosted platform, every action defaults to `allow` — governance is opt-i
 | `db.query` | Running SQL from the console |
 
 <Note>
-`insta policy set` currently accepts the first 13 of these; `service.rename`, `db.restore`, and `db.query` are enforced by the platform but not yet settable through the CLI.
+`insta policy set` currently accepts 13 of these; `service.rename`, `db.restore`, and `db.query` are enforced by the platform but not yet settable through the CLI.
 </Note>
 
 ## The approval flow
@@ -48,7 +48,7 @@ Before handing a project to a coding agent:
 
 ```bash
 insta policy set project.delete approve
-insta policy set db.restore deny
+insta policy set branch.delete approve
 insta policy set secrets.read approve
 ```
 
