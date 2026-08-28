@@ -10,7 +10,7 @@ This section covers running coding agents against InstaCloud: what to install, h
 Agents reach the platform two ways, and both hit the same API under the same governance:
 
 - **CLI + skill** — terminal agents (Claude Code, Cursor, Codex, and others) run the `insta` CLI directly. The `insta` skill teaches them the workflow: check `insta status`, work on a branch, pull secrets through the seam, deploy, and relay approval requests instead of working around them.
-- **MCP server** — `https://mcp.instacloud.com/mcp` exposes 38 `insta_*` tools over streamable HTTP, authenticated with OAuth or an `insta_` API token. Tools take explicit `projectId` and `branch` arguments, so an MCP agent can operate on any project its token can see, no linked directory required.
+- **MCP server** — `https://mcp.instacloud.com/mcp` exposes the `insta_*` toolset ([reference](/reference/mcp-tools)) over streamable HTTP, authenticated with OAuth or an `insta_` API token. Tools take explicit `projectId` and `branch` arguments, so an MCP agent can operate on any project its token can see, no linked directory required.
 
 Use whichever fits the agent; mixing them is fine.
 
@@ -19,14 +19,14 @@ Use whichever fits the agent; mixing them is fine.
 Everything else in this section is workflow advice. These two are the design:
 
 1. **Isolation by branch.** An agent task gets its own branch — its own database with real data, its own storage, its own compute URL. Mistakes are contained and disposable.
-2. **Approval for the irreversible.** Gated actions return an approval ID instead of executing. A human admin approves or denies; grants are single-use and audited. An agent cannot delete a project or do anything else you've gated — it can only ask.
+2. **Approval for the irreversible.** Any action you gate returns an approval ID instead of executing. A human admin approves or denies; grants are single-use and audited. An agent cannot perform a gated action — it can only ask. Gating is opt-in, so set the policy (`insta policy set project.delete approve`) before the agent starts.
 
 ## What ships
 
 | Piece | What it is | Where it goes |
 | --- | --- | --- |
 | `insta` skill | CLI workflow instructions for terminal agents | Installed globally for every agent detected on the machine |
-| MCP server | 38 hosted tools over streamable HTTP | Registered in each agent's MCP config |
+| MCP server | Hosted `insta_*` tools over streamable HTTP | Registered in each agent's MCP config |
 | Observe hook | Credential audit on agent tool calls | `.insta/observe/` in each linked repo, findings in `.insta/audit.jsonl` |
 
 [`insta setup agent`](/agents/setup) installs the skill and the MCP registration; the observe hook is added to a repo when you link it to a project with `insta project create` or `insta project link`. Per-agent guides: [Claude Code](/agents/claude-code), [Cursor](/agents/cursor), [Codex](/agents/codex), [other agents](/agents/other-agents).

@@ -25,7 +25,7 @@ npm install -g insta
 
 </CodeGroup>
 
-The shell installer (macOS/Linux) also sets up agent skills for any coding agents on your machine. On Windows, or if you only want the CLI, use npm.
+The shell installer (macOS/Linux) ships a dependency-free native CLI and also sets up agent skills — the skills step runs through npx, so it needs Node. On Windows, or if you only want the CLI, use npm.
 
 ## Log in
 
@@ -60,7 +60,7 @@ insta services add postgres db
 insta services add compute app
 ```
 
-Available service types: `postgres`, `storage`, `compute`, `redis`, `mysql`, `mongodb` — up to 5 of each per project.
+Available service types: `postgres`, `storage`, `compute`, `redis`, `mysql`, `mongodb` — up to 5 of each per branch on the free plan, more on paid plans.
 
 Each service exposes credentials as a bindable source, not as loose environment variables. Give your compute service the database connection string:
 
@@ -102,7 +102,7 @@ insta branch switch staging
 insta secrets
 ```
 
-A branch is an isolated copy of your environment: Postgres is branched copy-on-write with the parent's data, storage is forked, and compute gets a fresh app and URL — deploy to it with `insta deploy . --branch staging`. Switching branches only relinks the directory; rerun `insta secrets` to refresh `.env` for the branch.
+A branch is an isolated copy of your environment: Postgres is branched copy-on-write with the parent's data, storage is forked, and compute comes up at its own URL running the parent's image — push changes to it with `insta deploy . --branch staging`. Switching branches only relinks the directory; rerun `insta secrets` to refresh `.env` for the branch.
 
 ## Next steps
 

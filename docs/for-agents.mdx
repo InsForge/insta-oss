@@ -19,20 +19,20 @@ The `observe` hook that ships with project setup audits agent tool calls for lea
 
 ## Humans approve
 
-Destructive and sensitive actions are gated by [policy](/governance/overview). When an agent hits a gated action, the platform returns an approval ID instead of running it. The agent relays one line:
+Destructive and sensitive actions can be gated by [policy](/governance/overview). When an agent hits a gated action, the platform returns an approval ID instead of running it. The agent relays one line:
 
 ```bash
 insta approvals approve <id>
 ```
 
-Only an admin can approve, grants are single-use, and everything lands in the audit log (`insta events`). Out of the box, deleting a project requires approval; tighten any other action with `insta policy set <action> approve`.
+Only an admin can approve, grants are single-use, and everything lands in the audit log (`insta events`). Gating is opt-in — a fresh project allows everything so governance never blocks its own admins. Before handing the CLI to an agent, gate what matters: `insta policy set project.delete approve` is the usual first move.
 
 ## What ships
 
 Three pieces:
 
 - **The `insta` skill** — teaches terminal agents (Claude Code, Cursor, Codex, and others) the CLI workflow: status, branch, secrets, deploy, and the approval protocol.
-- **The MCP server** — `https://mcp.instacloud.com/mcp`, 38 tools covering projects, services, branches, deploys, secrets, logs, metrics, and approvals, for agents that speak MCP rather than a shell.
+- **The MCP server** — `https://mcp.instacloud.com/mcp`, hosted tools covering projects, services, branches, deploys, secrets, logs, metrics, and approvals ([full list](/reference/mcp-tools)), for agents that speak MCP rather than a shell.
 - **The observe hook** — the per-repo credential audit described above, added when a repo is linked to a project.
 
 ## Set up your agent

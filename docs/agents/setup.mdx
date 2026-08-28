@@ -19,7 +19,7 @@ insta setup agent
 
 ## What gets installed
 
-- **The `insta` skill**, installed user-globally for every agent the skills tool detects — Claude Code, Cursor, OpenAI Codex, OpenCode, GitHub Copilot, Gemini CLI, Windsurf, Factory Droid, Goose, Aider, Continue, Roo, Kilo Code, Qwen, and the universal `.agents` directory.
+- **The `insta` skill**, installed user-globally into every agent directory the skills tool knows — including Claude Code, Cursor, OpenAI Codex, OpenCode, GitHub Copilot, Gemini CLI, Windsurf, Factory Droid, Goose, Aider, Continue, Roo, Kilo Code, Qwen, and the universal `.agents` directory.
 - **The MCP server registration.** For Claude Code, setup runs `claude mcp add --transport http --scope user insta-cloud https://mcp.instacloud.com/mcp`. For config-file agents (Cursor, Codex, OpenCode, Copilot, Factory Droid), it writes the equivalent entry into each agent's config — only for agents whose config directory already exists.
 
 By default the MCP connection authenticates with OAuth in the agent's own flow, so no credential is written to disk.
