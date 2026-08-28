@@ -22,7 +22,7 @@
     "dark": "/logo/dark.svg"
   },
   "banner": {
-    "content": "This is InstaCloud banner test! This is so cool new feature 🎉",
+    "content": "InstaCloud docs are in early access — many pages are still being written. Missing something? [Open an issue](https://github.com/InsForge/insta-oss/issues).",
     "dismissible": true
   },
   "seo": {
@@ -254,44 +254,54 @@
         "tab": "Reference",
         "groups": [
           {
-            "group": "Reference",
+            "group": "CLI",
+            "icon": "terminal",
             "pages": [
               "reference/cli/overview",
-              "reference/cli/login",
-              "reference/cli/logout",
-              "reference/cli/status",
-              "reference/cli/env",
-              "reference/cli/org",
-              "reference/cli/project",
-              "reference/cli/branch",
-              "reference/cli/services",
-              "reference/cli/secrets",
-              "reference/cli/run",
-              "reference/cli/deploy",
-              "reference/cli/compute",
-              "reference/cli/db",
-              "reference/cli/manifest",
-              "reference/cli/regions",
-              "reference/cli/metrics",
-              "reference/cli/logs",
-              "reference/cli/events",
-              "reference/cli/usage",
-              "reference/cli/billing",
-              "reference/cli/policy",
-              "reference/cli/approvals",
-              "reference/cli/observe",
-              "reference/cli/setup",
-              "reference/cli/mcp",
-              "reference/cli/upgrade",
+              {
+                "group": "Commands",
+                "pages": [
+                  "reference/cli/login",
+                  "reference/cli/logout",
+                  "reference/cli/status",
+                  "reference/cli/env",
+                  "reference/cli/org",
+                  "reference/cli/project",
+                  "reference/cli/branch",
+                  "reference/cli/services",
+                  "reference/cli/secrets",
+                  "reference/cli/run",
+                  "reference/cli/deploy",
+                  "reference/cli/compute",
+                  "reference/cli/db",
+                  "reference/cli/manifest",
+                  "reference/cli/regions",
+                  "reference/cli/metrics",
+                  "reference/cli/logs",
+                  "reference/cli/events",
+                  "reference/cli/usage",
+                  "reference/cli/billing",
+                  "reference/cli/policy",
+                  "reference/cli/approvals",
+                  "reference/cli/observe",
+                  "reference/cli/setup",
+                  "reference/cli/mcp",
+                  "reference/cli/upgrade"
+                ]
+              }
+            ]
+          },
+          {
+            "group": "Reference",
+            "icon": "book",
+            "pages": [
               "reference/mcp-tools",
-              "reference/api/overview",
               "reference/environment-variables",
               "reference/gated-actions",
               "reference/limits",
               "reference/errors",
               "reference/faq"
-            ],
-            "icon": "book"
+            ]
           }
         ],
         "icon": "code"
@@ -360,6 +370,10 @@
     },
     {
       "source": "/reference/cli",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/api/overview",
       "destination": "/reference/cli/overview"
     }
   ]
