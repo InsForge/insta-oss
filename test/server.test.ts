@@ -511,6 +511,30 @@ test('compute restart REDEPLOYS the recorded image (fresh env), and refuses a st
   expect((await post(`/projects/${id}/services/cp-nope/restart`)).statusCode).toBe(404)
 })
 
+// Restart reaches engine.deploy(), which re-mints DATABASE_URL, the S3 bundle and every bound
+// secret into a new container — so it stands behind the same policy as `POST /deploy`, exactly as
+// the platform gates it. An ungated door here would mean a `deploy: deny` an operator set is
+// simply not on.
+test('compute restart is gated on `deploy`, like every other door that redeploys', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await put(`/projects/${id}/policy/deploy`, { decision: 'deny' })
+  calls.length = 0
+  const denied = await post(`/projects/${id}/services/cp-default/restart`)
+  expect(denied.statusCode).toBe(403)
+  expect(calls.some((c) => c.startsWith('deploy:'))).toBe(false)
+
+  await put(`/projects/${id}/policy/deploy`, { decision: 'approve' })
+  const relayed = await post(`/projects/${id}/services/cp-default/restart`)
+  expect(relayed.statusCode).toBe(202)
+  expect(relayed.json().approvalId).toBeTruthy()
+  expect(calls.some((c) => c.startsWith('deploy:'))).toBe(false)
+
+  // ...and stop/start stay ungated under the same policy, so a wedged container is still cyclable.
+  expect((await post(`/projects/${id}/services/cp-default/stop`)).statusCode).toBe(200)
+  expect((await post(`/projects/${id}/services/cp-default/start`)).statusCode).toBe(200)
+})
+
 test('storage access mode flips public/private; scale/upgrade stay clean 501s', async () => {
   const id = await createProject()
   const r = await put(`/projects/${id}/services/st-store/access`, { public: true })
