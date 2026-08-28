@@ -3,28 +3,52 @@ title: "The basics"
 description: "The mental model: projects, branches, services, secrets, and the approval gate."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+Five concepts explain the whole platform. Read this once and the rest of the docs are reference.
 
 ## A project
 
-{/* TODO */}
+A project belongs to an organization and holds everything else: branches, services, secrets, and policy. `insta project create` makes one and links the current directory to it through `.insta/project.json` — the link is found the way git finds `.git`, by walking up from wherever you run the CLI. A new project starts with no services; you add exactly what you need.
+
+`INSTA_PROJECT_ID`, `INSTA_ORG_ID`, and `INSTA_BRANCH` environment variables override the file, which is how CI and agents target a project without a linked directory.
 
 ## A branch
 
-{/* TODO */}
+Every project starts on `main`. A branch is a full, isolated environment created from a parent:
+
+| Service | What the branch gets |
+| --- | --- |
+| Postgres | Copy-on-write branch with the parent's data |
+| Storage | Copy-on-write fork with the parent's objects |
+| Compute | A fresh app with its own URL — empty until you deploy to it |
+| Secrets | Copied, with service bindings remapped to the branch's services |
+
+Branches are cheap to create and delete, capped at 10 per project. `insta branch merge` recreates missing services in the target; data promotion is a procedure (run migrations against `main`, deploy, delete the branch), not a button.
 
 ## Services
 
-{/* TODO */}
+A branch runs services: `postgres`, `storage`, `compute`, `redis`, `mysql`, `mongodb`, up to 5 of each. Add them with `insta services add <type> <name>`. Each service publishes its connection details as secrets — the oldest service of a type owns the bare name (`DATABASE_URL`), later ones are suffixed (`DATABASE_URL_ANALYTICS`).
 
 ## The credential seam
 
-{/* TODO */}
+Connection strings and API keys live on the platform, not in your repo. They reach code through one seam:
+
+- `insta secrets` writes the current branch's bundle to `.env` and gitignores it
+- `insta run <cmd>` injects the bundle into one process, writing nothing to disk
+- Deploys get secrets injected as environment variables at deploy time — a changed secret takes effect on the next deploy
+
+One seam means one place to audit and one place to gate: reading secrets is itself a governed action.
 
 ## Governance
 
-{/* TODO */}
+Every consequential action — deploying, reading or writing secrets, deleting a project, touching storage — has a policy decision: `allow`, `deny`, or `approve`. Defaults are permissive except the destructive ones: `project.delete` and `db.restore` require approval out of the box.
+
+When a gated action is attempted, it does not run. The caller gets an approval ID, an admin approves or denies it (`insta approvals approve <id>`), and the caller retries. Grants are single-use. This is the mechanism that makes it safe to hand the CLI to a coding agent — see [InstaCloud for agents](/for-agents).
 
 ## Hosted and self-hosted
 
-{/* TODO */}
+The same CLI drives two backends:
+
+- **InstaCloud** — the hosted platform these docs describe.
+- **insta-oss** — an open-source daemon on `localhost:8080` for laptops and single machines. No login (localhost trust), projects come pre-provisioned with postgres, storage, and compute, and source deploys build locally with Docker. Billing, scaling, and custom domains are cloud-only.
+
+See [Self-hosting](/self-hosting/overview) and the [compatibility table](/self-hosting/compatibility) for the exact differences.

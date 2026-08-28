@@ -3,16 +3,30 @@ title: "Agents overview"
 description: "The `insta` skill, the MCP server, and the governance model for agents."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+This section covers running coding agents against InstaCloud: what to install, how each agent connects, and the workflow that keeps agents productive without giving them the keys to production.
 
 ## The model
 
-{/* TODO */}
+Agents reach the platform two ways, and both hit the same API under the same governance:
+
+- **CLI + skill** — terminal agents (Claude Code, Cursor, Codex, and others) run the `insta` CLI directly. The `insta` skill teaches them the workflow: check `insta status`, work on a branch, pull secrets through the seam, deploy, and relay approval requests instead of working around them.
+- **MCP server** — `https://mcp.instacloud.com/mcp` exposes 38 `insta_*` tools over streamable HTTP, authenticated with OAuth or an `insta_` API token. Tools take explicit `projectId` and `branch` arguments, so an MCP agent can operate on any project its token can see, no linked directory required.
+
+Use whichever fits the agent; mixing them is fine.
 
 ## Two non-negotiables
 
-{/* TODO */}
+Everything else in this section is workflow advice. These two are the design:
+
+1. **Isolation by branch.** An agent task gets its own branch — its own database with real data, its own storage, its own compute URL. Mistakes are contained and disposable.
+2. **Approval for the irreversible.** Gated actions return an approval ID instead of executing. A human admin approves or denies; grants are single-use and audited. An agent cannot delete a project, restore a database, or do anything else you've gated — it can only ask.
 
 ## What ships
 
-{/* TODO */}
+| Piece | What it is | Where it goes |
+| --- | --- | --- |
+| `insta` skill | CLI workflow instructions for terminal agents | Installed globally for every agent detected on the machine |
+| MCP server | 38 hosted tools over streamable HTTP | Registered in each agent's MCP config |
+| Observe hook | Credential audit on agent tool calls | `.insta/observe/` in each linked repo, findings in `.insta/audit.jsonl` |
+
+All three are installed by [`insta setup agent`](/agents/setup). Per-agent guides: [Claude Code](/agents/claude-code), [Cursor](/agents/cursor), [Codex](/agents/codex), [other agents](/agents/other-agents).

@@ -3,28 +3,44 @@ title: "InstaCloud for agents"
 description: "Why the platform is shaped for coding agents, and what to install."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+Coding agents are good at writing code and bad at being trusted with production. InstaCloud is built around that asymmetry: give the agent real infrastructure to work against, keep the blast radius contained, and put a human in front of anything irreversible.
 
 ## One branch per task
 
-{/* TODO */}
+Give each agent task its own branch: a copy-on-write database with real data, forked storage, and a fresh compute URL. The agent develops and tests against production-shaped infrastructure without touching production. When the task is done, merge what's needed and delete the branch. Branches are capped at 10 per project, which also caps how much an agent fleet can sprawl.
 
-## Credentials never leave the daemon
+See [branch-per-task](/agents/branch-per-task) for the workflow.
 
-{/* TODO */}
+## Credentials stay behind one seam
+
+An agent working on InstaCloud never needs a connection string pasted into its prompt. Secrets live on the platform and reach code three ways: `insta secrets` writes the branch's `.env`, `insta run` injects them into a single process without writing to disk, and deploys get them injected at deploy time. Reading secrets is itself a governed action, so you can require approval before an agent pulls them at all.
+
+The `observe` hook that ships with project setup audits agent tool calls for leaked credentials and records findings to `.insta/audit.jsonl`.
 
 ## Humans approve
 
-{/* TODO */}
+Destructive and sensitive actions are gated by [policy](/governance/overview). When an agent hits a gated action, the platform returns an approval ID instead of running it. The agent relays one line:
+
+```bash
+insta approvals approve <id>
+```
+
+Only an admin can approve, grants are single-use, and everything lands in the audit log (`insta events`). Out of the box, `project.delete` and `db.restore` require approval; tighten anything else with `insta policy set <action> approve`.
 
 ## What ships
 
-{/* skill, MCP server, observe hook */}
+Three pieces, installed by one command:
 
-{/* TODO */}
+- **The `insta` skill** — teaches terminal agents (Claude Code, Cursor, Codex, and others) the CLI workflow: status, branch, secrets, deploy, and the approval protocol.
+- **The MCP server** — `https://mcp.instacloud.com/mcp`, 38 tools covering projects, services, branches, deploys, secrets, logs, metrics, and approvals, for agents that speak MCP rather than a shell.
+- **The observe hook** — the per-repo credential audit described above.
 
 ## Set up your agent
 
-{/* link /agents/setup */}
+One command installs all of it for every agent on your machine:
 
-{/* TODO */}
+```bash
+insta setup agent
+```
+
+See [Set up your coding agent](/agents/setup) for what it writes and how to verify.
