@@ -19,6 +19,7 @@ Branching happens at the environment level — one command clones the whole stac
 | Storage | Copy-on-write fork of the bucket's objects |
 | Compute | A clone of each app at its own URL, running the parent's image |
 | Secrets | Copied, with service bindings remapped to the branch's services |
+| Managed databases (`redis`/`mysql`/`mongodb`) | A fresh, empty instance — no data cloned from the parent |
 
 The branch's connection string reaches your code the same way as any credential: `insta db url` prints it, `insta secrets bind` wires it into a compute service — after `insta branch switch`, both target the branch automatically.
 
@@ -44,6 +45,7 @@ There is no promote button, by design — data promotion is a migration, not a c
 ## Limits
 
 - 10 branches per project.
+- The parent defaults to your current branch; choose it explicitly with `insta branch create <name> --from <branch>`.
 - Branch names: lowercase letters, digits, and dashes, up to 39 characters, starting with a letter or digit.
 - `insta branch create` does not switch you — `insta branch switch <name>` relinks the directory, then rerun `insta secrets` to refresh `.env`.
 
