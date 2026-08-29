@@ -3,16 +3,37 @@ title: "Storage buckets"
 description: "An S3-compatible bucket per branch, forked with the branch."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+A storage service is an S3-compatible bucket. Your app talks to it with any S3 client or SDK, and it branches with your environment — a branch's bucket forks copy-on-write with the parent's objects.
+
+```bash
+insta services add storage files
+```
+
+Buckets are private by default; create with `--public` (or flip later) to serve objects with anonymous public read. Changing access is the `service.setAccess` [gated action](/reference/gated-actions).
 
 ## What you get
 
-{/* TODO */}
+- **S3 compatibility.** Point any S3 SDK, the aws CLI, or rclone at it — no proprietary client.
+- **Terminal access.** `insta storage list` (prefix filtering, cursor paging), `insta storage get <key>` (downloads through a short-lived presigned URL), `insta storage delete <key>`. Reads are governed by `storage.read`, deletes by `storage.delete`.
+- **Per-branch buckets.** Each branch has its own bucket, so work on a branch stays on that branch. As everywhere, the boundary is separation, not authorization — the storage commands accept `--branch`, governed by the `storage.*` [policies](/governance/overview).
 
 ## Branching a bucket
 
-{/* TODO */}
+`insta branch create` forks the bucket copy-on-write: the branch opens with all of the parent's objects, and writes on either side never touch the other. Uploads an agent makes on its task branch disappear with `insta branch delete`.
+
+<Note>
+On self-hosted insta-oss the fork is a full object sync rather than copy-on-write — same isolation, duplicated at clone time.
+</Note>
 
 ## Credentials
 
-{/* TODO */}
+Bucket credentials are provider-minted and live on the platform, like the database DSN. List what a bucket exposes and bind it into a compute service:
+
+```bash
+insta secrets sources
+insta secrets bind BUCKET_NAME storage/files --source-name BUCKET_NAME --to compute/app
+```
+
+Storage exposes several credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL_S3`, `BUCKET_NAME`, `AWS_REGION`), so `--source-name` is required — unlike Postgres, which exposes exactly one.
+
+Bindings are injected as environment variables at deploy time. For local development, `insta secrets` writes user secrets to `.env` and `insta run <cmd>` injects the branch bundle into one process.

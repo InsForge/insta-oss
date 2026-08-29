@@ -3,18 +3,47 @@ title: "Compute"
 description: "Run any container in a microVM that sleeps when idle."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+A compute service runs your container — web app, API, worker — in an isolated microVM with its own URL. Idle services sleep and wake on request, and billing is actual usage either way — an idle project pays only for the data it stores.
+
+```bash
+insta services add compute app
+insta deploy .
+```
 
 ## What a compute service is
 
-{/* image + env + port + args */}
+An image, its environment, and a listen port:
 
-{/* TODO */}
+- **Image** — built remotely from your Dockerfile on `insta deploy .`, or supplied prebuilt with `--image`. See [build & deploy](/deploy/overview).
+- **Environment** — user secrets plus explicitly bound provider credentials, injected at deploy time. See [secrets](/deploy/deployments/secrets).
+- **Port** — an explicit `--port` wins; otherwise the Dockerfile's last `EXPOSE` line; otherwise 8080.
+
+A branch can run several compute services, each its own group with its own URL and deploys. WebSocket apps deploy with `--websocket` for a larger guest and connection-based concurrency.
 
 ## MicroVMs
 
-{/* TODO */}
+Each service runs in its own microVM — hardware-level isolation rather than a shared-kernel container, which is what makes it safe to run agent-built code next to everything else. Need disk that survives restarts? Attach a persistent `/data` volume:
+
+```bash
+insta services add compute app --volume 1
+insta compute volume app --size 10
+```
+
+Any plan can attach the default 1 Gi; larger sizes are paid and plan-capped. Volume-backed services stop (cold wake) instead of suspending, so the disk stays consistent.
 
 ## Lifecycle
 
-{/* TODO */}
+Idle services suspend; a request wakes them in seconds. Control the lifecycle directly:
+
+```bash
+insta compute status    # desired vs actual state
+insta compute start
+insta compute stop
+insta compute suspend
+```
+
+Create a service as `--always-on` when cold starts are unacceptable — an always-on service never sleeps, and billing remains actual usage. Machine counts and specs move with [`insta services scale` and `insta services upgrade`](/compute/limits-and-scaling) on paid plans. Custom domains attach per branch with `insta compute set-domain` — see [custom domains](/networking/custom-domains).
+
+<Note>
+On self-hosted insta-oss, `--always-on`, `services scale`/`upgrade`, and custom domains are cloud-only. See [compatibility](/self-hosting/compatibility).
+</Note>
