@@ -3,7 +3,7 @@ title: "One branch per task"
 description: "Run agents in parallel, each in an isolated environment."
 ---
 
-Give every agent task its own branch: a copy-on-write database with the parent's data, a forked bucket, and a running copy of the app at its own URL. Agents work against production-shaped infrastructure in parallel, and no branch operation mutates `main` or another agent's branch. Isolation covers what agents *do*; what they can *read* is governed by policy — which is why the workflow below starts with `secrets.read`.
+Give every agent task its own branch: a copy-on-write database with the parent's data, a forked bucket, and a running copy of the app at its own URL. A branch's resources are fully separate — its own connection string, bucket, and machines — so work an agent does *on its own branch* never reaches `main` or another agent's branch. But the branch boundary is separation, not authorization: any command that accepts `--branch` reaches any branch, reads and writes alike, subject only to [policy](/governance/overview). The workflow below starts with policy for exactly that reason.
 
 ## Why branches
 
@@ -25,6 +25,8 @@ insta policy set secrets.read approve
 ```
 
 `secrets.read approve` matters most: credential reads accept a `--branch` argument, so without it an agent on a task branch can read `main`'s connection string. Gating it puts a human in front of every credential read, on any branch.
+
+Know what this baseline covers: destruction and credential reads. Cross-branch *writes* — `insta deploy . --branch main`, `insta secrets set --branch main`, `insta storage delete --branch main` — remain open by default, because policy is per action, not per branch: gating `deploy` would also put an approval in front of the agent's own branch deploys. If protecting `main` from writes matters more than agent autonomy, gate `deploy` and `secrets.write` too and accept approving branch deploys.
 
 Then, per task — the agent runs these itself if it has the `insta` skill:
 
