@@ -15,6 +15,10 @@ A branch is a full, isolated clone of your environment. Every project starts on 
 | Secrets | Copied, with service bindings remapped to the branch's services |
 | Managed databases (`redis`/`mysql`/`mongodb`) | A fresh, empty instance — no data cloned |
 
+<Note>
+On self-hosted insta-oss, the database and bucket are full copies (dump-and-restore, object sync) rather than copy-on-write — same isolation, duplicated at clone time.
+</Note>
+
 ## Creating and switching
 
 ```bash

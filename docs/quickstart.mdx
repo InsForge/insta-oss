@@ -15,17 +15,21 @@ This guide takes an existing app from your machine to a deployed service with an
 
 <CodeGroup>
 
-```bash Shell installer
-curl -fsSL https://agents.instacloud.com | sh
+```bash npx
+npx insta@latest setup agent
 ```
 
 ```bash npm
 npm install -g insta
 ```
 
+```bash Shell installer (macOS/Linux)
+curl -fsSL https://agents.instacloud.com | sh
+```
+
 </CodeGroup>
 
-The shell installer (macOS/Linux) ships a dependency-free native CLI and also sets up agent skills — the skills step runs through npx, so it needs Node. On Windows, or if you only want the CLI, use npm.
+The npx path installs the CLI and wires up any coding agents on your machine; `npm install -g insta` installs just the CLI. The shell installer ships a dependency-free native binary on macOS and Linux — on Windows, use one of the Node paths.
 
 ## Log in
 

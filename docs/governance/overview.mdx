@@ -56,5 +56,5 @@ insta events
 ```
 
 <Note>
-Self-hosted insta-oss enforces a 12-action subset and, unlike the hosted platform, ships with `project.delete` defaulting to `approve`. See [compatibility](/self-hosting/compatibility).
+Self-hosted insta-oss enforces a 12-action subset — `service.scale`, `service.upgrade`, `db.restore`, and `db.query` are cloud-only, so setting them there fails — and, unlike the hosted platform, it ships with `project.delete` defaulting to `approve`. See [compatibility](/self-hosting/compatibility).
 </Note>

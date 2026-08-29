@@ -16,27 +16,32 @@ Install the CLI:
 
 <CodeGroup>
 
-```bash Shell installer (macOS/Linux)
-curl -fsSL https://agents.instacloud.com | sh
+```bash npx
+npx insta@latest setup agent
 ```
 
 ```bash npm
 npm install -g insta
 ```
 
+```bash Shell installer (macOS/Linux)
+curl -fsSL https://agents.instacloud.com | sh
+```
+
 </CodeGroup>
 
-Then, from a directory with a Dockerfile:
+The npx path installs the CLI and wires up any coding agents on your machine in one command; `npm install -g insta` installs just the CLI. Then, from a directory with a Dockerfile:
 
 ```bash
 insta login
 insta project create my-app
 insta services add postgres db
 insta services add compute app
+insta secrets bind DATABASE_URL postgres/db --to compute/app
 insta deploy .
 ```
 
-That's a running app on its own URL. The [quickstart](/quickstart) walks through each step, including wiring `DATABASE_URL` into your service and creating your first branch. If you're setting up a coding agent, `insta setup agent` wires the CLI, skill, and MCP server in one command — see [agent setup](/agents/setup).
+That's a running app on its own URL, with its database connection injected. The [quickstart](/quickstart) walks through each step, including creating your first branch; [agent setup](/agents/setup) covers what the agent wiring installs.
 
 ```
 project = a Postgres database + an S3 bucket + your app containers
