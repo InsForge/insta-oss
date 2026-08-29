@@ -3,18 +3,37 @@ title: "Postgres"
 description: "A real, isolated Postgres server per project that scales to zero and branches in seconds."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+Every project gets real Postgres: its own server, not a schema in a shared one. It scales to zero when idle, wakes on the first connection, and branches with your environment — a branch's database opens with the parent's data and its own connection string.
+
+```bash
+insta services add postgres db
+```
 
 ## What you get
 
-{/* TODO */}
+- **Isolation.** Your own Postgres instance per project, and another per branch. Connection limits, extensions, and load are yours alone.
+- **Scale to zero.** By default an idle instance suspends and the first connection cold-starts it — a suspended database costs nothing to keep. Keep it warm with `insta db always-on on`.
+- **Branching.** `insta branch create` clones the database copy-on-write with the parent's data. See [branching](/postgres/branching).
+- **A standard connection string.** `insta db url` prints the DSN (bare on stdout, so `psql "$(insta db url)"` works); bind it into a service with `insta secrets bind DATABASE_URL postgres/db --to compute/app`. Reading the DSN is governed by `secrets.read`.
+
+Day-to-day commands:
+
+```bash
+insta db connect     # interactive psql; a suspended instance wakes on connect
+insta db stats       # connections vs max, cache hit rate, database size
+insta db url         # print the DSN
+```
+
+`insta db stats` answers without waking a suspended instance, so it's safe to poll.
 
 ## How it is built
 
-{/* insta-db: standard Postgres, per-instance volume, no custom storage engine */}
+It is standard Postgres — no custom storage engine, no protocol proxy rewriting your queries. Each instance runs with its own provisioned volume:
 
-{/* TODO */}
+- `insta db volume` shows the provisioned size and your plan's cap; `--size` grows it (grow-only). Billing is actual data stored — the size is a cap, not a price.
+- `insta db limits` shows or raises the instance's resource ceiling (paid plans). It moves both directions.
+- Backups and restore are managed; restoring is the `db.restore` [gated action](/reference/gated-actions).
 
 ## Cloud versus self-hosted
 
-{/* TODO */}
+On self-hosted insta-oss the database is a Postgres container per project: branches are full copies (dump and restore) rather than copy-on-write, and `db limits`, `db volume`, and scale-to-zero are cloud-only. See [compatibility](/self-hosting/compatibility).

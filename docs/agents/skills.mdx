@@ -3,20 +3,36 @@ title: "Agent skills"
 description: "The `insta` skill and project-level stack skills."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+A skill is a set of instructions a coding agent loads when a task matches it. The `insta` skill teaches terminal agents the platform workflow, so an agent that has it runs the right commands instead of guessing.
 
 ## The insta skill
 
-{/* TODO */}
+What it teaches:
+
+- Check `insta status` before assuming login or project state
+- Work on a branch, not on `main` — create, switch, refresh secrets
+- Reach credentials through the seam (`insta secrets`, `insta run`, `insta db url`, bindings) instead of asking for them
+- Deploy with `insta deploy` and verify with `insta logs` / `insta metrics`
+- Treat a gated action's approval ID as a governance event: relay `insta approvals approve <id>` to a human and retry after the grant
 
 ## Installing
 
-{/* TODO */}
+```bash
+npx insta@latest setup agent
+```
+
+Setup installs the skill user-globally into every agent directory the skills tool knows — Claude Code, Cursor, OpenAI Codex, OpenCode, GitHub Copilot, Gemini CLI, Windsurf, Factory Droid, Goose, Aider, Continue, Roo, Kilo Code, Qwen, and the universal `.agents` directory among them.
 
 ## Project-level skills
 
-{/* TODO */}
+`insta project create` and `insta project link` also install skills into the repo itself, so any agent working in that repo picks them up: the `insta` skill plus stack-specific skills for services the project uses. The repo copy travels with the code — teammates and CI agents get it from a clone with no machine setup.
 
 ## Updating
 
-{/* TODO */}
+Rerun setup:
+
+```bash
+insta setup agent
+```
+
+Skills reinstall from the current published set each time; there is nothing to version-pin locally.

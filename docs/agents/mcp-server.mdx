@@ -3,26 +3,41 @@ title: "MCP server"
 description: "Connect any MCP client to InstaCloud."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+The MCP server exposes the platform to agents that speak MCP rather than a shell: every operation — projects, services, branches, deploys, secrets, logs, approvals — as an `insta_*` tool, under the same governance as the CLI.
 
 ## Endpoint
 
-{/* TODO */}
+```
+https://mcp.instacloud.com/mcp
+```
+
+Streamable HTTP; there is no stdio server to run locally. Register it with your agent in one command:
+
+```bash
+insta mcp install                      # Claude Code + all detected agents
+insta mcp install --agent cursor      # one agent
+```
+
+Supported agents: `claude-code`, `cursor`, `codex`, `opencode`, `copilot`, `factory-droid`. [`insta setup agent`](/agents/setup) does this as part of full setup.
 
 ## Authentication
 
-{/* API token or OAuth 2.1 + PKCE */}
+Two options, both a Bearer credential the server forwards to the platform — it stores nothing itself:
 
-{/* TODO */}
+- **OAuth** (default) — the agent runs the OAuth 2.1 + PKCE flow, discovered via the standard protected-resource metadata. No credential is written to disk.
+- **API token** — a durable `insta_` token, for headless machines and CI. `insta mcp install --mcp-token` mints one and embeds it (Claude Code only); other agents use OAuth.
 
 ## Tools overview
 
-{/* TODO */}
+The [MCP tools reference](/reference/mcp-tools) tables the full set by area. Two things to know up front:
+
+- Project-scoped tools take an explicit `projectId`, branch-scoped tools take `branch` too — the CLI's linked directory does not carry over. Discover IDs with `insta_org_list` → `insta_project_list`.
+- `insta_manifest` returns the agent-legible view of a project: branches, services with bound secret names, and URLs.
 
 ## Gated tools and approvals
 
-{/* TODO */}
+Tools hit the same [governance](/governance/overview) gates as the CLI. A gated call does not execute — it returns an approval ID and the follow-up action, and the agent should relay `insta approvals approve <id>` to a human. Grants are single-use; the agent retries the original call after approval. Admin-only tools (`insta_approvals_approve`, `insta_approvals_deny`) are enforced by role on the platform, so an agent cannot approve its own requests.
 
 ## Staging server
 
-{/* TODO */}
+The staging deployment has its own server at `https://mcp.staging.instacloud.com/mcp`, registered as `insta-cloud-staging` when you run setup with `--env staging`. Accounts and sessions never cross between the two.
