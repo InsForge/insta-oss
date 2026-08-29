@@ -25,7 +25,7 @@ Setup installs the skill user-globally into every agent directory the skills too
 
 ## Project-level skills
 
-`insta project create` and `insta project link` also install skills into the repo itself, so any agent working in that repo picks them up: the `insta` skill plus stack-specific skills for services the project uses. The repo copy travels with the code — teammates and CI agents get it from a clone with no machine setup.
+`insta project create` and `insta project link` also install skills into the repo's agent directories (`.claude/skills/`, `.agents/skills/`), so any agent working in that checkout picks them up: the `insta` skill plus stack-specific skills for services the project uses. These directories are gitignored — they don't travel with a clone. On a teammate or CI machine, run `insta project link <id>` (or `insta setup agent`) once to install them there.
 
 ## Updating
 
