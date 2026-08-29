@@ -20,6 +20,7 @@ Branching happens at the environment level — one command clones the whole stac
 | Compute | A clone of each app at its own URL, running the parent's image |
 | Secrets | Copied, with service bindings remapped to the branch's services |
 | Managed databases (`redis`/`mysql`/`mongodb`) | A fresh, empty instance — no data cloned from the parent |
+| Compute `/data` volume | Same size, empty — no data inheritance |
 
 The branch's connection string reaches your code the same way as any credential: `insta db url` prints it, `insta secrets bind` wires it into a compute service — after `insta branch switch`, both target the branch automatically.
 
@@ -40,7 +41,7 @@ There is no promote button, by design — data promotion is a migration, not a c
 3. `insta deploy .` to ship the code that expects the new schema.
 4. Validate, then `insta branch delete <name>`.
 
-`insta branch merge <source> --into main` handles the structural half: it recreates services the source has that the target lacks, and never moves data.
+`insta branch merge <source> --into main` handles the structural half: services the source has that the target lacks are created there, empty — deploy to them afterwards. It never moves data. (On self-hosted insta-oss, a merged compute group is created and deployed with the source branch's image against the target's own database and bucket.)
 
 ## Limits
 

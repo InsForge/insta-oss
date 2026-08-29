@@ -3,16 +3,60 @@ title: "One branch per task"
 description: "Run agents in parallel, each in an isolated environment."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+Give every agent task its own branch: a copy-on-write database with the parent's data, a forked bucket, and a running copy of the app at its own URL. A branch's resources are fully separate — its own connection string, bucket, and machines — so work an agent does *on its own branch* never reaches `main` or another agent's branch. But the branch boundary is separation, not authorization: any command that accepts `--branch` reaches any branch, reads and writes alike, subject only to [policy](/governance/overview). The workflow below starts with policy for exactly that reason.
 
 ## Why branches
 
-{/* TODO */}
+An agent that shares an environment with you — or with another agent — can corrupt data, race migrations, or read credentials it shouldn't. A branch removes the entire class of problem:
+
+- **Real data, zero risk.** The branch's Postgres opens with the parent's data. Broken migrations and bad writes stay on the branch.
+- **A live URL from the start.** Branch compute comes up running the parent's image, so the agent can see the app working before its first deploy.
+- **Disposable.** When the task is done, delete the branch. Ten branches per project caps how far a fleet can sprawl.
 
 ## The workflow
 
-{/* TODO */}
+Set policy once, before the first agent touches the project:
+
+```bash
+insta policy set project.delete approve
+insta policy set branch.delete approve
+insta policy set secrets.read approve
+```
+
+On the hosted platform, also `insta policy set db.restore deny` — that action is cloud-only, so it's kept out of the copy-paste block.
+
+`secrets.read approve` matters most: credential reads accept a `--branch` argument, so without it an agent on a task branch can read `main`'s connection string. Gating it puts a human in front of every credential read, on any branch.
+
+Know what this baseline covers: destruction and credential reads. Cross-branch *writes* — `insta deploy . --branch main`, `insta secrets set --branch main`, `insta storage delete --branch main` — remain open by default, because policy is per action, not per branch: gating `deploy` would also put an approval in front of the agent's own branch deploys. If protecting `main` from writes matters more than agent autonomy, gate `deploy`, `secrets.write`, `storage.delete`, and `service.add` too and accept approving the agent's branch work. Also note `secrets.read approve` means the workflow's `insta secrets` step returns an approval to relay on every task — that is the gate working as designed.
+
+Then, per task — the agent runs these itself if it has the `insta` skill:
+
+```bash
+insta branch create task-auth-refactor
+insta branch switch task-auth-refactor
+insta secrets
+insta deploy .
+```
+
+`insta branch create` forks from your current branch (choose explicitly with `--from`). After `switch`, every CLI command — `secrets`, `db url`, `run`, `deploy` — targets the branch automatically. MCP agents pass `branch` explicitly instead; they have no linked directory.
+
+If the agent hits a gated action, it gets an approval ID instead of execution and relays one line — `insta approvals approve <id>` — for you to run. See [governance](/governance/overview).
 
 ## Promote and clean up
 
-{/* TODO */}
+Promotion is a migration, not a copy:
+
+1. Merge the agent's code branch in git.
+2. Run the migration files against `main`'s database.
+3. `insta branch switch main`, then `insta deploy .`.
+4. Delete the branch:
+
+```bash
+insta branch delete task-auth-refactor
+```
+
+`insta branch merge <source> --into main` creates any service the branch added as an empty service of the same type and name on the target — deploy to it afterwards; data never merges. Audit what the agent did at any point with `insta events`.
+
+<Note>
+On self-hosted insta-oss, a merged compute group is created **and deployed** with the source branch's image, against the target's own database and bucket — an agent-built image can go live on `main` through merge alone. The merge route is gated `service.add`.
+</Note>
