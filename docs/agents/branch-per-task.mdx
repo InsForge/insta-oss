@@ -3,7 +3,7 @@ title: "One branch per task"
 description: "Run agents in parallel, each in an isolated environment."
 ---
 
-Give every agent task its own branch: a copy-on-write database with the parent's data, a forked bucket, and a running copy of the app at its own URL. Agents work against production-shaped infrastructure in parallel, and nothing an agent does on its branch can touch `main` or another agent's branch.
+Give every agent task its own branch: a copy-on-write database with the parent's data, a forked bucket, and a running copy of the app at its own URL. Agents work against production-shaped infrastructure in parallel, and no branch operation mutates `main` or another agent's branch. Isolation covers what agents *do*; what they can *read* is governed by policy — which is why the workflow below starts with `secrets.read`.
 
 ## Why branches
 
@@ -21,7 +21,10 @@ Set policy once, before the first agent touches the project:
 insta policy set project.delete approve
 insta policy set branch.delete approve
 insta policy set db.restore deny
+insta policy set secrets.read approve
 ```
+
+`secrets.read approve` matters most: credential reads accept a `--branch` argument, so without it an agent on a task branch can read `main`'s connection string. Gating it puts a human in front of every credential read, on any branch.
 
 Then, per task — the agent runs these itself if it has the `insta` skill:
 

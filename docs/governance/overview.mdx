@@ -27,7 +27,10 @@ insta policy set db.restore deny
 insta policy set project.delete approve
 insta policy set branch.delete approve
 insta policy set db.restore deny
+insta policy set secrets.read approve
 ```
+
+The last line is the one that contains credential reads — including cross-branch reads like `insta secrets --branch main`, which the branch boundary itself does not block.
 
 ## The approval flow
 
@@ -49,7 +52,7 @@ Grants are single-use: one approval covers one execution, and the caller reruns 
 
 ## Who can approve
 
-Only organization admins — the platform enforces the role on every decide call, so an agent holding a member token cannot approve its own requests. Every decision, grant, and consumption lands in the audit timeline:
+Only organization admins — the platform enforces the role on every decide call. Be aware that a token inherits the role of the user who minted it: in a single-developer setup where you are the admin, an agent running with your token can approve its own requests. For approval to be a real gate, run agents under a member account's token, not an admin's. Every decision, grant, and consumption lands in the audit timeline:
 
 ```bash
 insta events

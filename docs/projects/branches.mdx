@@ -31,7 +31,7 @@ insta secrets
 
 ## Branch URLs and credentials
 
-Each branch's compute services get their own URLs, printed on deploy and listed by `insta manifest`. Credentials are per-branch: `insta db url` prints the branch's connection string, and the branch's copied bindings point at the branch's own services — nothing on a branch can reach the parent's database or bucket.
+Each branch's compute services get their own URLs, printed on deploy and listed by `insta manifest`. Credentials are per-branch: `insta db url` prints the branch's connection string, and the branch's copied bindings point at the branch's own services — no branch operation touches the parent's database or bucket. Reading *another* branch's credentials (`insta secrets --branch main`) is possible and governed by the `secrets.read` policy, not by the branch boundary — gate it if agents can reach the project.
 
 ## Merging
 
@@ -39,7 +39,7 @@ Each branch's compute services get their own URLs, printed on deploy and listed 
 insta branch merge staging --into main
 ```
 
-Merging is structural and additive: services that exist on the source but not the target are created there. Data never merges — promoting data changes means running your migrations against the target and deploying. Existing services are skipped with a reason (`exists`, `cap`, `secret-collision`).
+Merging is structural and additive: services that exist on the source but not the target are created there. Data never merges — promoting data changes means running your migrations against the target and deploying. Existing services are skipped with a reason (`exists`, `cap`).
 
 ## Limits
 
