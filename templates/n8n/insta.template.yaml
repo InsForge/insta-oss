@@ -1,5 +1,5 @@
 code: n8n
-version: 1.1.0
+version: 1.2.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -19,8 +19,6 @@ services:
     image: docker.io/n8nio/n8n:2.36.5
     port: 5678
     healthcheck: /healthz
-    # Measured on prod: 557 MB resident while idle, before a single workflow runs.
-    spec: 2vcpu-2gb
     # Schedule and polling triggers fire from inside the process, so an idle machine never wakes.
     alwaysOn: true
     # n8n defaults to SQLite, and N8N_USER_FOLDER below puts that file on this volume.

@@ -1,5 +1,5 @@
 code: hermes
-version: 2.0.0
+version: 2.1.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -16,11 +16,9 @@ generated:
 services:
   hermes:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/hermes:2.0.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/hermes:2.1.0   # built from ./Dockerfile by templates-build-images.yml
     port: 8080
     healthcheck: /api/status
-    # Headroom, not a crash fix: 331 MB of 459 MB and pressure "elevated" while idle at 512 MB.
-    spec: 2vcpu-2gb
     # Telegram arrives on an OUTBOUND long poll, so an idle machine stops and nothing can wake it.
     alwaysOn: true
     volume:

@@ -1,5 +1,5 @@
 code: openclaw
-version: 0.1.0
+version: 0.2.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -16,11 +16,9 @@ generated:
 services:
   openclaw:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/openclaw:0.1.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/openclaw:0.2.0   # built from ./Dockerfile by templates-build-images.yml
     port: 8080
     healthcheck: /startupz
-    # Mirrors upstream's fly.toml sizing: 2 vCPU / 2 GB with the node heap capped below the ceiling.
-    spec: 2vcpu-2gb
     # Channel connections (Telegram, Discord, ...) run inside the process; an idle machine never wakes for them.
     alwaysOn: true
     volume:

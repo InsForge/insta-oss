@@ -42,8 +42,10 @@ Set by the template, not by you: `N8N_USER_FOLDER=/data` (database and settings 
 `N8N_PORT=5678`, `N8N_LISTEN_ADDRESS=0.0.0.0`, `N8N_PROXY_HOPS=1`, and `N8N_WEBHOOK_URL` /
 `N8N_EDITOR_BASE_URL` resolved to the service's own HTTPS URL.
 
-The compute size is pinned to `2vcpu-2gb`: n8n sits at roughly 557 MB resident while idle, so the
-512 MB and 1 GB sizes leave no room for a workflow run. The service is always-on, because schedule
+The template no longer pins a compute size, so a new service starts at whatever your plan gives
+one, and you can change it afterwards from the service settings. The number that mattered when it
+did pin one still holds as a floor: n8n sits at roughly 557 MB resident while idle, so anything
+around 512 MB leaves no room for a workflow run. The service is always-on, because schedule
 and polling triggers fire from inside the process and an idle machine is only ever woken by an
 inbound request.
 

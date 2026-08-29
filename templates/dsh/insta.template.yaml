@@ -1,5 +1,5 @@
 code: dsh
-version: 0.2.0
+version: 0.3.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -16,10 +16,9 @@ services:
   # the same branch, the second overwriting the first (QA.md finding 1).
   dsh:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/dsh:0.2.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/dsh:0.3.0   # built from ./Dockerfile by templates-build-images.yml
     port: 8080
     healthcheck: /             # nginx answers 401 unauthenticated, which counts as healthy
-    spec: 1vcpu-1gb            # measured 188 MB at boot peak before any model turn (QA.md: "512 MB is not enough for an agent CLI")
     # A volume makes scale-to-zero a cold boot, not a resume; same tradeoff as the other agent UIs.
     alwaysOn: true
     volume:
