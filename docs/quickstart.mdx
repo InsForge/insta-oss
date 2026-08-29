@@ -9,7 +9,7 @@ This guide takes an existing app from your machine to a deployed service with an
 
 - An InstaCloud account — sign up at [console.instacloud.com](https://console.instacloud.com)
 - A Dockerfile in the app you want to deploy (source deploys build from it)
-- Node.js 18+ for the npm install path; the shell installer is a native binary for macOS and Linux
+- Node.js 18+ for the npx and npm install paths; the shell installer is a native binary for macOS and Linux
 
 ## Install the CLI
 
@@ -23,7 +23,7 @@ npx insta@latest setup agent
 npm install -g insta
 ```
 
-```bash Shell installer (macOS/Linux)
+```bash title="Shell installer (macOS/Linux)"
 curl -fsSL https://agents.instacloud.com | sh
 ```
 

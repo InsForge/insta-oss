@@ -5,7 +5,7 @@ description: "InstaCloud is the agent-native cloud: branchable Postgres, storage
 
 InstaCloud hosts your app's backend — Postgres, object storage, and containers — and lets you clone the whole environment into an isolated branch in seconds. You use it for two things:
 
-- **Deploying an app.** Add a database and a compute service, `insta deploy .`, get a URL. Databases scale to zero and containers sleep when idle, so an idle project costs nothing.
+- **Deploying an app.** Add a database and a compute service, `insta deploy .`, get a URL. Databases scale to zero and containers sleep when idle — an idle project pays only for the data it stores.
 - **Working with coding agents safely.** Give each agent task its own branch — a real database with real data, storage, and a running copy of the app — so agents build against production-shaped infrastructure without ever touching production. Credentials stay on the platform instead of in prompts, and any action you choose can require human approval.
 
 The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/overview), the open-source runtime you can run on your own Docker.
@@ -24,7 +24,7 @@ npx insta@latest setup agent
 npm install -g insta
 ```
 
-```bash Shell installer (macOS/Linux)
+```bash title="Shell installer (macOS/Linux)"
 curl -fsSL https://agents.instacloud.com | sh
 ```
 

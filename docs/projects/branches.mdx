@@ -39,7 +39,7 @@ Each branch's compute services get their own URLs, printed on deploy and listed 
 insta branch merge staging --into main
 ```
 
-Merging is structural and additive: services that exist on the source but not the target are created there. Data never merges — promoting data changes means running your migrations against the target and deploying. Existing services are skipped with a reason (`exists`, `cap`).
+Merging is structural and additive: a service that exists on the source but not the target is created there, empty — deploy to it afterwards. Data never merges — promoting data changes means running your migrations against the target and deploying. Existing services are skipped with a reason (`exists`, `cap`).
 
 ## Limits
 

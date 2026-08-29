@@ -45,11 +45,11 @@ Promotion is a migration, not a copy:
 
 1. Merge the agent's code branch in git.
 2. Run the migration files against `main`'s database.
-3. `insta deploy .` from `main`.
+3. `insta branch switch main`, then `insta deploy .`.
 4. Delete the branch:
 
 ```bash
 insta branch delete task-auth-refactor
 ```
 
-`insta branch merge <source> --into main` recreates any services the branch added; data never merges. Audit what the agent did at any point with `insta events`.
+`insta branch merge <source> --into main` creates any service the branch added as an empty service of the same type and name on the target — deploy to it afterwards; data never merges. Audit what the agent did at any point with `insta events`.
