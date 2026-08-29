@@ -36,4 +36,4 @@ It is standard Postgres — no custom storage engine, no protocol proxy rewritin
 
 ## Cloud versus self-hosted
 
-On self-hosted insta-oss the database is a Postgres container per branch: branches are full copies (dump and restore) rather than copy-on-write. `insta db volume` works end-to-end; `db limits` and scale-to-zero are cloud-only. See [compatibility](/self-hosting/compatibility).
+On self-hosted insta-oss the database is a Postgres container per branch: branches are full copies (dump and restore) rather than copy-on-write. `insta db volume` accepts and persists the same grow-only sizes, but locally the size is advisory — the container's disk is not actually bounded. `db limits` and scale-to-zero are cloud-only. See [compatibility](/self-hosting/compatibility).
