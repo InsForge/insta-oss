@@ -41,7 +41,7 @@ There is no promote button, by design — data promotion is a migration, not a c
 3. `insta deploy .` to ship the code that expects the new schema.
 4. Validate, then `insta branch delete <name>`.
 
-`insta branch merge <source> --into main` handles the structural half: services the source has that the target lacks are created there, empty — deploy to them afterwards. It never moves data.
+`insta branch merge <source> --into main` handles the structural half: services the source has that the target lacks are created there, empty — deploy to them afterwards. It never moves data. (On self-hosted insta-oss, a merged compute group is created and deployed with the source branch's image against the target's own database and bucket.)
 
 ## Limits
 
