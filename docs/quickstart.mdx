@@ -10,7 +10,7 @@ This guide takes an existing app from your machine to a deployed service with an
 - An InstaCloud account — sign up at [console.instacloud.com](https://console.instacloud.com)
 - A Dockerfile in the app you want to deploy (source deploys build from it)
 - Node.js 18+ for the npx and npm install paths; the shell installer is a native binary for macOS and Linux
-- Source deploys shell out to `flyctl` for the remote build — installed automatically on macOS and Linux; on Windows, install it manually before `insta deploy`
+- Source deploys shell out to [`flyctl`](https://fly.io/docs/flyctl/install/) for the remote build. `insta deploy` installs it automatically on macOS and Linux; on Windows run `iwr https://fly.io/install.ps1 -useb | iex` first
 
 ## Install the CLI
 
