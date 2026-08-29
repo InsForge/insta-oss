@@ -91,8 +91,9 @@ already has inside that container, but they outlive the session that read them, 
   restarts, redeploys and version upgrades.
 - The sign-in credentials kept as service variables rather than baked into the image, so you can
   change them later without rebuilding anything.
-- 1 vCPU and 1 GiB of memory, declared by the template so the machine is created at that size
-  rather than resized later.
+- The machine size your plan gives a new compute service, because the template no longer asks for
+  one of its own. You can move CPU and memory in both directions afterwards from the service
+  settings; the template only ever set the size it was created at.
 - Deploys are health-gated: a container that does not answer is rolled back to the last healthy
   image instead of leaving you with a dead URL.
 

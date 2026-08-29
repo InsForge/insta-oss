@@ -47,10 +47,12 @@ outside the state dir, and must survive redeploys or credentials entered in the 
 decrypting),
 `OPENCLAW_PUBLIC_URL` resolved to the service's own HTTPS URL (the image's entrypoint appends it
 to `gateway.controlUi.allowedOrigins` before start, or the gateway would reject the Control UI's
-browser connection), and `NODE_OPTIONS=--max-old-space-size=1536` (heap capped under the 2 GB
-machine, mirroring upstream's own fly.toml).
+browser connection), and `NODE_OPTIONS=--max-old-space-size=1536` (upstream's own fly.toml value,
+kept: it caps the V8 heap below the 2 GB machine upstream sizes for, which is at or under whatever
+this deployment gets).
 
-The compute size is pinned to `2vcpu-2gb`, matching upstream's fly.toml sizing. The service is
+The template no longer pins a compute size, so a new service starts at whatever your plan gives
+one, and you can change it afterwards from the service settings. The service is
 always-on, because channel connections (for example a Telegram long-poll) live inside the process
 and an idle machine would never wake for an incoming message.
 

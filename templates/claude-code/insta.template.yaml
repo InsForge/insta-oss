@@ -16,8 +16,10 @@ services:
     image: ghcr.io/insforge/insta-oss/templates/claude-code:0.7.0   # built from ./Dockerfile by templates-build-images.yml
     port: 7681
     healthcheck: /
-    # Stays at 1 GB: 2vcpu-2gb was tried on a live deployment against a ~30s first-response
-    # complaint and made no difference, so the cost is not memory or core count.
+    # No `spec:`, so the platform's birth size applies. Worth keeping from when this asked for
+    # 1 GB: 2vcpu-2gb was tried on a live deployment against a ~30s first-response complaint and
+    # made no difference, so that cost is not memory or core count and a bigger machine will not
+    # fix it.
     # A volume makes scale-to-zero a cold boot, not a resume (24.5s measured).
     alwaysOn: true
     volume:
