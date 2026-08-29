@@ -26,9 +26,10 @@ insta policy set db.restore deny
 ```bash
 insta policy set project.delete approve
 insta policy set branch.delete approve
-insta policy set db.restore deny
 insta policy set secrets.read approve
 ```
+
+On the hosted platform, also `insta policy set db.restore deny` — it's kept out of the copy-paste block because that action is cloud-only and errors on self-hosted insta-oss.
 
 The last line is the one that contains credential reads — including cross-branch reads like `insta secrets --branch main`, which the branch boundary itself does not block.
 

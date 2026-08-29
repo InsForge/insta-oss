@@ -20,13 +20,14 @@ Set policy once, before the first agent touches the project:
 ```bash
 insta policy set project.delete approve
 insta policy set branch.delete approve
-insta policy set db.restore deny
 insta policy set secrets.read approve
 ```
 
+On the hosted platform, also `insta policy set db.restore deny` — that action is cloud-only, so it's kept out of the copy-paste block.
+
 `secrets.read approve` matters most: credential reads accept a `--branch` argument, so without it an agent on a task branch can read `main`'s connection string. Gating it puts a human in front of every credential read, on any branch.
 
-Know what this baseline covers: destruction and credential reads. Cross-branch *writes* — `insta deploy . --branch main`, `insta secrets set --branch main`, `insta storage delete --branch main` — remain open by default, because policy is per action, not per branch: gating `deploy` would also put an approval in front of the agent's own branch deploys. If protecting `main` from writes matters more than agent autonomy, gate `deploy`, `secrets.write`, `storage.delete`, and `service.add` too and accept approving the agent's branch work. Also note `secrets.read approve` means the workflow's `insta secrets` step returns an approval to relay on every task — that is the gate working as designed. `db.restore` is cloud-only; on self-hosted insta-oss setting it fails (see [governance](/governance/overview)).
+Know what this baseline covers: destruction and credential reads. Cross-branch *writes* — `insta deploy . --branch main`, `insta secrets set --branch main`, `insta storage delete --branch main` — remain open by default, because policy is per action, not per branch: gating `deploy` would also put an approval in front of the agent's own branch deploys. If protecting `main` from writes matters more than agent autonomy, gate `deploy`, `secrets.write`, `storage.delete`, and `service.add` too and accept approving the agent's branch work. Also note `secrets.read approve` means the workflow's `insta secrets` step returns an approval to relay on every task — that is the gate working as designed.
 
 Then, per task — the agent runs these itself if it has the `insta` skill:
 
