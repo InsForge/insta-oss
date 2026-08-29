@@ -3,28 +3,45 @@ title: "Introduction"
 description: "InstaCloud is the agent-native cloud: branchable Postgres, storage, and compute with one gated seam for credentials."
 ---
 
-InstaCloud is the agent-native cloud. Every project gets a Postgres database, an S3-compatible bucket, and any number of compute services — and any of them can be cloned into an isolated branch in seconds, so each task, each agent, each pull request gets its own environment. Credentials flow through one seam you can gate, every sensitive action can require a human approval, and the same `insta` CLI, MCP server, and agent skill drive both the hosted service and the open-source runtime you can run on your own Docker.
+InstaCloud hosts your app's backend — Postgres, object storage, and containers — and lets you clone the whole environment into an isolated branch in seconds. You use it for two things:
+
+- **Deploying an app.** Add a database and a compute service, `insta deploy .`, get a URL. Databases scale to zero and containers sleep when idle, so an idle project costs nothing.
+- **Working with coding agents safely.** Give each agent task its own branch — a real database with real data, storage, and a running copy of the app — so agents build against production-shaped infrastructure without ever touching production. Credentials stay on the platform instead of in prompts, and any action you choose can require human approval.
+
+The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/overview), the open-source runtime you can run on your own Docker.
+
+## Start here
+
+Install the CLI:
+
+<CodeGroup>
+
+```bash Shell installer (macOS/Linux)
+curl -fsSL https://agents.instacloud.com | sh
+```
+
+```bash npm
+npm install -g insta
+```
+
+</CodeGroup>
+
+Then, from a directory with a Dockerfile:
+
+```bash
+insta login
+insta project create my-app
+insta services add postgres db
+insta services add compute app
+insta deploy .
+```
+
+That's a running app on its own URL. The [quickstart](/quickstart) walks through each step, including wiring `DATABASE_URL` into your service and creating your first branch. If you're setting up a coding agent, `insta setup agent` wires the CLI, skill, and MCP server in one command — see [agent setup](/agents/setup).
 
 ```
 project = a Postgres database + an S3 bucket + your app containers
 branch  = a disposable, fully isolated clone of all three
 ```
-
-Built for developers who work with coding agents — and for the agents themselves: an agent gets a branch, does its work against real infrastructure, and hands the result back for review — with production credentials injected at run time rather than pasted into a prompt.
-
-## Get started
-
-<CardGroup cols={3}>
-  <Card title="Quickstart" icon="rocket" href="/quickstart">
-    Install the CLI, create a project, deploy, branch.
-  </Card>
-  <Card title="Set up your agent" icon="robot" href="/agents/setup">
-    Claude Code, Cursor, Codex — one command.
-  </Card>
-  <Card title="Self-host" icon="server" href="/self-hosting/install">
-    Run the same stack on your own Docker.
-  </Card>
-</CardGroup>
 
 ## Built for agents
 

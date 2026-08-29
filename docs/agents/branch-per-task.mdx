@@ -3,16 +3,50 @@ title: "One branch per task"
 description: "Run agents in parallel, each in an isolated environment."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+Give every agent task its own branch: a copy-on-write database with the parent's data, a forked bucket, and a running copy of the app at its own URL. Agents work against production-shaped infrastructure in parallel, and nothing an agent does on its branch can touch `main` or another agent's branch.
 
 ## Why branches
 
-{/* TODO */}
+An agent that shares an environment with you — or with another agent — can corrupt data, race migrations, or read credentials it shouldn't. A branch removes the entire class of problem:
+
+- **Real data, zero risk.** The branch's Postgres opens with the parent's data. Broken migrations and bad writes stay on the branch.
+- **A live URL from the start.** Branch compute comes up running the parent's image, so the agent can see the app working before its first deploy.
+- **Disposable.** When the task is done, delete the branch. Ten branches per project caps how far a fleet can sprawl.
 
 ## The workflow
 
-{/* TODO */}
+Set policy once, before the first agent touches the project:
+
+```bash
+insta policy set project.delete approve
+insta policy set branch.delete approve
+insta policy set db.restore deny
+```
+
+Then, per task — the agent runs these itself if it has the `insta` skill:
+
+```bash
+insta branch create task-auth-refactor
+insta branch switch task-auth-refactor
+insta secrets
+insta deploy . --branch task-auth-refactor
+```
+
+`insta branch create` forks from your current branch (choose explicitly with `--from`). After `switch`, every CLI command — `secrets`, `db url`, `run`, `deploy` — targets the branch automatically. MCP agents pass `branch` explicitly instead; they have no linked directory.
+
+If the agent hits a gated action, it gets an approval ID instead of execution and relays one line — `insta approvals approve <id>` — for you to run. See [governance](/governance/overview).
 
 ## Promote and clean up
 
-{/* TODO */}
+Promotion is a migration, not a copy:
+
+1. Merge the agent's code branch in git.
+2. Run the migration files against `main`'s database.
+3. `insta deploy .` from `main`.
+4. Delete the branch:
+
+```bash
+insta branch delete task-auth-refactor
+```
+
+`insta branch merge <source> --into main` recreates any services the branch added; data never merges. Audit what the agent did at any point with `insta events`.

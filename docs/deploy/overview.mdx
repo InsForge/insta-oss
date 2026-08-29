@@ -3,16 +3,46 @@ title: "Build & deploy"
 description: "From a directory, a Dockerfile, an image, or GitHub to a running service."
 ---
 
-{/* TODO: one-paragraph intro — what this is and when you need it. */}
+A deploy puts a container on a compute service and prints its URL. There are three ways in; all of them end at the same place.
 
 ## Deploy paths
 
-{/* TODO */}
+**From source.** The default. Requires a Dockerfile in the directory; the build runs remotely, and the image is deployed pinned by digest:
+
+```bash
+insta deploy .
+```
+
+The listen port is read from the Dockerfile's last `EXPOSE` line (8080 if there is none); override with `--port`. Check whether a directory will build — locally, offline, before deploying:
+
+```bash
+insta build . --explain
+```
+
+**From a prebuilt image.** Skip the build entirely — exactly one of a directory or `--image` per deploy:
+
+```bash
+insta deploy --image ghcr.io/acme/api:v3
+```
+
+**From GitHub.** Connect a repository in the console and pushes deploy automatically, with per-pull-request environments. See [pull request environments](/deploy/github/pull-request-environments).
+
+Deploying is a [gated action](/reference/gated-actions) (`deploy`), so it can be put behind approval like anything else.
 
 ## Compute groups
 
-{/* TODO */}
+A branch can run several compute services — an API, a worker, a websocket server. Each is its own group with its own URL, port, and deploys. With one compute service, `insta deploy .` needs no addressing; with more than one, pick the target:
+
+```bash
+insta deploy . --group worker
+```
+
+Deploy to a branch's compute from anywhere with `--branch <name>`. WebSocket apps should deploy with `--websocket` — it provisions a larger guest and connection-based concurrency.
 
 ## What happens on redeploy
 
-{/* TODO */}
+- Secrets and [credential bindings](/deploy/deployments/secrets) are injected as environment variables at deploy time — a changed secret takes effect on the next deploy, not before.
+- The service's URL is stable across deploys.
+- Sleeping services wake on request; a redeploy replaces the image they wake into.
+
+If a deploy fails, start with [build failures](/deploy/troubleshooting/build-failures) and `insta logs compute --deploy` for the machine lifecycle log.
