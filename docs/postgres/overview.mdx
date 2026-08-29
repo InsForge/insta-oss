@@ -12,7 +12,7 @@ insta services add postgres db
 ## What you get
 
 - **Isolation.** Your own Postgres instance per project, and another per branch. Connection limits, extensions, and load are yours alone.
-- **Scale to zero.** By default an idle instance suspends and the first connection cold-starts it — a suspended database costs nothing to keep. Keep it warm with `insta db always-on on`.
+- **Scale to zero.** By default an idle instance suspends and the first connection cold-starts it — a suspended database bills only for the data it stores. Keep it warm with `insta db always-on on`.
 - **Branching.** `insta branch create` clones the database copy-on-write with the parent's data. See [branching](/postgres/branching).
 - **A standard connection string.** `insta db url` prints the DSN (bare on stdout, so `psql "$(insta db url)"` works); bind it into a service with `insta secrets bind DATABASE_URL postgres/db --to compute/app`. Reading the DSN is governed by `secrets.read`.
 
@@ -30,10 +30,10 @@ insta db url         # print the DSN
 
 It is standard Postgres — no custom storage engine, no protocol proxy rewriting your queries. Each instance runs with its own provisioned volume:
 
-- `insta db volume` shows the provisioned size and your plan's cap; `--size` grows it (grow-only). Billing is actual data stored — the size is a cap, not a price.
+- `insta db volume` shows the provisioned size and your plan's cap on any plan; `--size` grows it (paid plans; grow-only). Billing is actual data stored — the size is a cap, not a price.
 - `insta db limits` shows or sets the instance's resource ceiling (paid plans). Unlike `service.upgrade`, which is up-only, limits move both directions.
 - Backups and restore are managed; restoring is the `db.restore` [gated action](/reference/gated-actions).
 
 ## Cloud versus self-hosted
 
-On self-hosted insta-oss the database is a Postgres container per project: branches are full copies (dump and restore) rather than copy-on-write, and `db limits`, `db volume`, and scale-to-zero are cloud-only. See [compatibility](/self-hosting/compatibility).
+On self-hosted insta-oss the database is a Postgres container per branch: branches are full copies (dump and restore) rather than copy-on-write. `insta db volume` works end-to-end; `db limits` and scale-to-zero are cloud-only. See [compatibility](/self-hosting/compatibility).

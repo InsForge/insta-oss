@@ -16,7 +16,7 @@ An image, its environment, and a listen port:
 
 - **Image** — built remotely from your Dockerfile on `insta deploy .`, or supplied prebuilt with `--image`. See [build & deploy](/deploy/overview).
 - **Environment** — user secrets plus explicitly bound provider credentials, injected at deploy time. See [secrets](/deploy/deployments/secrets).
-- **Port** — from the Dockerfile's last `EXPOSE` line, `--port`, or 8080.
+- **Port** — an explicit `--port` wins; otherwise the Dockerfile's last `EXPOSE` line; otherwise 8080.
 
 A branch can run several compute services, each its own group with its own URL and deploys. WebSocket apps deploy with `--websocket` for a larger guest and connection-based concurrency.
 
@@ -42,4 +42,8 @@ insta compute stop
 insta compute suspend
 ```
 
-Create a service as `--always-on` (or scale it later) when cold starts are unacceptable — an always-on service never sleeps, and billing remains actual usage. Machine counts and specs move with [`insta_service_scale` / `service.upgrade`](/compute/limits-and-scaling) on paid plans. Custom domains attach per branch with `insta compute set-domain` — see [custom domains](/networking/custom-domains).
+Create a service as `--always-on` when cold starts are unacceptable — an always-on service never sleeps, and billing remains actual usage. Machine counts and specs move with [`insta services scale` and `insta services upgrade`](/compute/limits-and-scaling) on paid plans. Custom domains attach per branch with `insta compute set-domain` — see [custom domains](/networking/custom-domains).
+
+<Note>
+On self-hosted insta-oss, `--always-on`, `services scale`/`upgrade`, and custom domains are cloud-only. See [compatibility](/self-hosting/compatibility).
+</Note>

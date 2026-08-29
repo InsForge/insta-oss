@@ -15,7 +15,7 @@ Buckets are private by default; create with `--public` (or flip later) to serve 
 
 - **S3 compatibility.** Point any S3 SDK, the aws CLI, or rclone at it — no proprietary client.
 - **Terminal access.** `insta storage list` (prefix filtering, cursor paging), `insta storage get <key>` (downloads through a short-lived presigned URL), `insta storage delete <key>`. Reads are governed by `storage.read`, deletes by `storage.delete`.
-- **Per-branch isolation.** Nothing on a branch can reach the parent's bucket.
+- **Per-branch buckets.** Each branch has its own bucket, so work on a branch stays on that branch. As everywhere, the boundary is separation, not authorization — the storage commands accept `--branch`, governed by the `storage.*` [policies](/governance/overview).
 
 ## Branching a bucket
 
@@ -31,7 +31,9 @@ Bucket credentials are provider-minted and live on the platform, like the databa
 
 ```bash
 insta secrets sources
-insta secrets bind BUCKET_NAME storage/files --to compute/app
+insta secrets bind BUCKET_NAME storage/files --source-name BUCKET_NAME --to compute/app
 ```
+
+Storage exposes several credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL_S3`, `BUCKET_NAME`, `AWS_REGION`), so `--source-name` is required — unlike Postgres, which exposes exactly one.
 
 Bindings are injected as environment variables at deploy time. For local development, `insta secrets` writes user secrets to `.env` and `insta run <cmd>` injects the branch bundle into one process.
