@@ -184,11 +184,11 @@
     },
     {
       "source": "/concepts/secrets",
-      "destination": "/deploy/deployments/secrets"
+      "destination": "/deploy/overview"
     },
     {
       "source": "/reference/architecture",
-      "destination": "/self-hosting/architecture"
+      "destination": "/self-hosting/install"
     },
     {
       "source": "/reference/compatibility",
