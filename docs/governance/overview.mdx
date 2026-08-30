@@ -3,62 +3,21 @@ title: "Governance"
 description: "Every sensitive action passes an allow / deny / approve gate."
 ---
 
-Every consequential operation — deploying, reading credentials, deleting things — is a named action with a policy decision: `allow`, `deny`, or `approve`. Governance is the reason you can hand the CLI or MCP server to a coding agent: the agent can do everything you allow, nothing you deny, and must ask a human for anything you gate.
+Every consequential operation — deploying, reading credentials, deleting things — is a named action with a policy decision: `allow`, `deny`, or `approve`. This is what makes it safe to hand a project to a coding agent: the agent can do everything you allow, nothing you deny, and must ask a human for anything you gate.
 
-## Gated actions
-
-Sixteen actions cover the credential seam (`secrets.read`, `secrets.write`), storage (`storage.read` / `write` / `delete`), deploys (`deploy`), destruction (`project.delete`, `branch.delete`), service management (`service.add` / `remove` / `rename` / `scale` / `upgrade` / `setAccess`), and the database (`db.restore`, `db.query`). The [gated actions reference](/reference/gated-actions) is the authoritative table.
-
-On the hosted platform every action defaults to `allow` — governance never gets between an admin and their own project until you opt in.
-
-## Policies
-
-Read and set decisions per project:
+The mechanics work today:
 
 ```bash
 insta policy get
 insta policy set project.delete approve
-insta policy set db.restore deny
-```
-
-`deny` is a hard no. `approve` inserts a human. A sensible baseline before an agent gets access:
-
-```bash
-insta policy set project.delete approve
-insta policy set branch.delete approve
-insta policy set secrets.read approve
-```
-
-On the hosted platform, also `insta policy set db.restore deny` — it's kept out of the copy-paste block because that action is cloud-only and errors on self-hosted insta-oss.
-
-The last line is the one that contains credential reads — including cross-branch reads like `insta secrets --branch main`, which the branch boundary itself does not block.
-
-## The approval flow
-
-When a gated action's decision is `approve`, the action does not run. The caller — human or agent — receives an approval ID and the exact line to relay:
-
-```bash
-insta approvals approve <id>
-```
-
-An admin lists and decides pending requests:
-
-```bash
 insta approvals list
 insta approvals approve <id>
 insta approvals deny <id>
-```
-
-Grants are single-use: one approval covers one execution, and the caller reruns the original command. `insta approvals approve <id> --always` approves and flips that action's policy to `allow` going forward.
-
-## Who can approve
-
-Only organization admins — the platform enforces the role on every decide call. Be aware that a token inherits the role of the user who minted it: in a single-developer setup where you are the admin, an agent running with your token can approve its own requests. For approval to be a real gate, run agents under a member account's token, not an admin's. Every decision, grant, and consumption lands in the audit timeline:
-
-```bash
 insta events
 ```
 
+A gated action doesn't run — the caller gets an approval ID to relay, an admin decides, and grants are single-use. A token inherits its minter's role, so run agents under a member account, not an admin's, for approval to be a real gate. The [gated actions reference](/reference/gated-actions) has the full action table and a recommended baseline for agent access.
+
 <Note>
-Self-hosted insta-oss enforces a 12-action subset — `service.scale`, `service.upgrade`, `db.restore`, and `db.query` are cloud-only, so setting them there fails — and, unlike the hosted platform, it ships with `project.delete` defaulting to `approve`. See [compatibility](/self-hosting/compatibility).
+The full governance guide is coming soon.
 </Note>

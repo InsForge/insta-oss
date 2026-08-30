@@ -57,7 +57,7 @@ The engine never talks to Docker for resources except through the adapter contra
   `types.ts` as a new file in `src/adapters/`, wire it in `main.ts`. Nothing else changes:
   the engine, server, tests, and CLI are provider-agnostic.
 - **New endpoint**: don't. The surface mirrors the standard `insta` CLI
-  (see [docs/self-hosting/compatibility.md](docs/self-hosting/compatibility.md)); additions belong in the shared
+  (see [COMPATIBILITY.md](COMPATIBILITY.md)); additions belong in the shared
   CLI/platform contract first.
 
 ## Guidelines

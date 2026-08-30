@@ -1,0 +1,29 @@
+---
+title: "Self-hosting"
+description: "Run the same stack on your own Docker with insta-oss."
+---
+
+InstaCloud's runtime is open source: [insta-oss](https://github.com/InsForge/insta-oss) runs the same three primitives — Postgres, storage, and compute — on your own Docker, driven by the same `insta` CLI and agent skill.
+
+Prerequisites: Docker (running) and Node 22+ — no cloud account, no API keys.
+
+```bash
+git clone https://github.com/InsForge/insta-oss.git && cd insta-oss
+npm install
+npm run build:ui   # optional: the web dashboard, served by the daemon itself
+npm run dev        # the daemon, on http://127.0.0.1:8080
+```
+
+The first run pulls the Postgres, storage, and sync images — give it a minute. Then, in another terminal, install the CLI if you don't have it and point it at the daemon (its default is the cloud):
+
+```bash
+npm install -g insta
+export INSTA_API_URL=http://127.0.0.1:8080
+insta status
+```
+
+The repository's README covers setup and architecture, and [COMPATIBILITY.md](https://github.com/InsForge/insta-oss/blob/main/COMPATIBILITY.md) has the command-by-command compatibility with the hosted platform.
+
+<Note>
+Full self-hosting documentation is coming soon.
+</Note>

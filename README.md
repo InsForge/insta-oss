@@ -118,7 +118,7 @@ adapter → Docker:
   Redis/MySQL/MongoDB containers per branch).
 - **state** (`src/state.ts`): a single JSON file, `~/.insta-oss/state.json`.
 
-Command-by-command CLI and MCP compatibility tables: [docs/self-hosting/compatibility.md](docs/self-hosting/compatibility.md).
+Command-by-command CLI and MCP compatibility tables: [COMPATIBILITY.md](COMPATIBILITY.md).
 
 ## Dashboard
 

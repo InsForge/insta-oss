@@ -53,7 +53,7 @@ insta policy set db.restore deny
 insta policy set secrets.read approve
 ```
 
-Pick the set that matches your risk tolerance — `deny` is a hard no, `approve` is a human in the loop.
+Pick the set that matches your risk tolerance — `deny` is a hard no, `approve` is a human in the loop. On self-hosted insta-oss, drop the `db.restore` line — that action is cloud-only and errors there.
 
 ## Cloud versus self-hosted
 
