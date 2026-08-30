@@ -74,13 +74,18 @@
               "agents/setup",
               "agents/mcp-server",
               "agents/skills",
-              "agents/claude-code",
-              "agents/cursor",
-              "agents/codex",
-              "agents/other-agents",
               "agents/branch-per-task",
               "agents/human-in-the-loop",
-              "agents/observe"
+              "agents/observe",
+              {
+                "group": "Agent integrations",
+                "pages": [
+                  "agents/claude-code",
+                  "agents/cursor",
+                  "agents/codex",
+                  "agents/other-agents"
+                ]
+              }
             ],
             "icon": "robot"
           },
@@ -88,10 +93,20 @@
             "group": "Platform",
             "pages": [
               "platform/how-it-works",
-              "platform/compare/railway",
-              "platform/compare/fly",
-              "platform/migrate/railway",
-              "platform/migrate/fly"
+              {
+                "group": "Compare",
+                "pages": [
+                  "platform/compare/railway",
+                  "platform/compare/fly"
+                ]
+              },
+              {
+                "group": "Migrate",
+                "pages": [
+                  "platform/migrate/railway",
+                  "platform/migrate/fly"
+                ]
+              }
             ],
             "icon": "layer-group"
           },
@@ -120,20 +135,40 @@
             "pages": [
               "deploy/overview",
               "deploy/services",
-              "deploy/builds/detection",
-              "deploy/builds/dockerfile",
-              "deploy/builds/images",
-              "deploy/builds/monorepo",
-              "deploy/deployments/ports",
-              "deploy/deployments/secrets",
-              "deploy/deployments/regions",
-              "deploy/deployments/websockets",
-              "deploy/deployments/deploy-events",
-              "deploy/github/overview",
-              "deploy/github/pull-request-environments",
-              "deploy/troubleshooting/no-start-command",
-              "deploy/troubleshooting/failed-to-respond",
-              "deploy/troubleshooting/build-failures"
+              {
+                "group": "Builds",
+                "pages": [
+                  "deploy/builds/detection",
+                  "deploy/builds/dockerfile",
+                  "deploy/builds/images",
+                  "deploy/builds/monorepo"
+                ]
+              },
+              {
+                "group": "Deployments",
+                "pages": [
+                  "deploy/deployments/ports",
+                  "deploy/deployments/secrets",
+                  "deploy/deployments/regions",
+                  "deploy/deployments/websockets",
+                  "deploy/deployments/deploy-events"
+                ]
+              },
+              {
+                "group": "GitHub",
+                "pages": [
+                  "deploy/github/overview",
+                  "deploy/github/pull-request-environments"
+                ]
+              },
+              {
+                "group": "Troubleshooting",
+                "pages": [
+                  "deploy/troubleshooting/no-start-command",
+                  "deploy/troubleshooting/failed-to-respond",
+                  "deploy/troubleshooting/build-failures"
+                ]
+              }
             ],
             "icon": "hammer"
           },
