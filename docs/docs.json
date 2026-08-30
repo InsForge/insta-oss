@@ -59,11 +59,7 @@
             "group": "Overview",
             "pages": [
               "introduction",
-              "quickstart",
-              "the-basics",
-              "for-agents",
-              "best-practices",
-              "production-checklist"
+              "quickstart"
             ],
             "icon": "rocket"
           },
@@ -416,6 +412,22 @@
     {
       "source": "/reference/api/overview",
       "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/the-basics",
+      "destination": "/introduction"
+    },
+    {
+      "source": "/for-agents",
+      "destination": "/agents/overview"
+    },
+    {
+      "source": "/best-practices",
+      "destination": "/introduction"
+    },
+    {
+      "source": "/production-checklist",
+      "destination": "/introduction"
     }
   ]
 }
