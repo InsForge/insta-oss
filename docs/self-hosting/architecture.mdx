@@ -1,9 +1,0 @@
----
-title: "Architecture"
-description: "CLI/MCP/dashboard \u2192 HTTP server \u2192 engine \u2192 adapter \u2192 Docker."
----
-
-- **engine** (`src/engine.ts`): project and branch lifecycle, from provision through clone (`pg_dump` → restore, `rclone sync`, app redeploys) to teardown with compensation on failure.
-- **govern** (`src/govern.ts`): the policy engine — 12 gated actions, allow/deny/approve per project, one-shot grants, HTTP 202 approval flow.
-- **adapters** (`src/adapters/`): `LocalPostgres` (a container per branch), `LocalGarage` (one shared S3 server; a bucket + bucket-scoped key per branch), `DockerCompute` (your image per compute group), `LocalManagedDb` (private Redis/MySQL/MongoDB per branch).
-- **state** (`src/state.ts`): a single JSON file, `~/.insta-oss/state.json`.

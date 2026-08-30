@@ -7,7 +7,7 @@ InstaCloud is a cloud platform built for agents: agents as the primary operator,
 
 Traditional devtools were built by humans to serve humans. When the one operating the infrastructure — and increasingly the one running on it — is an agent, that model has to change: environments must be disposable and parallel instead of one shared staging, credentials can't live in prompts, irreversible actions need a human gate rather than a confirmation dialog, and every operation has to be legible to a machine, not a dashboard.
 
-InstaCloud provides the three basic primitives — **database** (real Postgres), **storage** (S3-compatible buckets), and **compute** (containers, run in microVMs on the hosted platform) — rebuilt on those terms. Operations are driven from a CLI command or an MCP tool, not a dashboard. The whole environment clones into an isolated branch per task. Credentials flow through one seam you can gate, and humans approve what matters. The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/install), the open-source runtime you can run on your own Docker — and it works just as well when the operator is you.
+InstaCloud provides the three basic primitives — **database** (real Postgres), **storage** (S3-compatible buckets), and **compute** (containers, run in microVMs on the hosted platform) — rebuilt on those terms. Operations are driven from a CLI command or an MCP tool, not a dashboard. The whole environment clones into an isolated branch per task. Credentials flow through one seam you can gate, and humans approve what matters. The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/overview), the open-source runtime you can run on your own Docker — and it works just as well when the operator is you.
 
 ## Start here
 
@@ -96,4 +96,4 @@ InstaCloud provides the three basic primitives — **database** (real Postgres),
 | CLI, MCP, skills | Same | Same |
 | Cloud-only features | Orgs, GitHub deploys, custom domains, backups, usage | Returns `501` with guidance |
 
-See [CLI & MCP compatibility](/self-hosting/compatibility) for the command-by-command list.
+The repository README has the command-by-command compatibility list.

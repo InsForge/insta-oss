@@ -110,9 +110,7 @@
             "group": "Self-hosting",
             "icon": "server",
             "pages": [
-              "self-hosting/install",
-              "self-hosting/architecture",
-              "self-hosting/compatibility"
+              "self-hosting/overview"
             ]
           }
         ]
@@ -169,7 +167,7 @@
   "redirects": [
     {
       "source": "/getting-started/self-host",
-      "destination": "/self-hosting/install"
+      "destination": "/self-hosting/overview"
     },
     {
       "source": "/getting-started/first-project",
@@ -189,11 +187,11 @@
     },
     {
       "source": "/reference/architecture",
-      "destination": "/self-hosting/architecture"
+      "destination": "/self-hosting/overview"
     },
     {
       "source": "/reference/compatibility",
-      "destination": "/self-hosting/compatibility"
+      "destination": "/self-hosting/overview"
     },
     {
       "source": "/reference/cli",
@@ -657,19 +655,19 @@
     },
     {
       "source": "/self-hosting/adapters",
-      "destination": "/self-hosting/install"
+      "destination": "/self-hosting/overview"
     },
     {
       "source": "/self-hosting/configuration",
-      "destination": "/self-hosting/install"
+      "destination": "/self-hosting/overview"
     },
     {
       "source": "/self-hosting/managed-databases",
-      "destination": "/self-hosting/install"
+      "destination": "/self-hosting/overview"
     },
     {
       "source": "/self-hosting/overview",
-      "destination": "/self-hosting/install"
+      "destination": "/self-hosting/overview"
     },
     {
       "source": "/storage/access",
@@ -682,6 +680,18 @@
     {
       "source": "/storage/volumes",
       "destination": "/storage/overview"
+    },
+    {
+      "source": "/self-hosting/install",
+      "destination": "/self-hosting/overview"
+    },
+    {
+      "source": "/self-hosting/architecture",
+      "destination": "/self-hosting/overview"
+    },
+    {
+      "source": "/self-hosting/compatibility",
+      "destination": "/self-hosting/overview"
     }
   ]
 }
