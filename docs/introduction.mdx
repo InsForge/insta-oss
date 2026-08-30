@@ -3,50 +3,48 @@ title: "Introduction"
 description: "InstaCloud is the agent-native cloud: branchable Postgres, storage, and compute with one gated seam for credentials."
 ---
 
-InstaCloud hosts your app's backend — Postgres, object storage, and containers — and lets you clone the whole environment into an isolated branch in seconds. You use it for two things:
-
-- **Deploying an app.** Add a database and a compute service, `insta deploy .`, get a URL. Databases scale to zero and containers sleep when idle — an idle project pays only for the data it stores.
-- **Working with coding agents safely.** Give each agent task its own branch — a real database with real data, storage, and a running copy of the app — so agents build against production-shaped infrastructure without ever touching production. Credentials stay on the platform instead of in prompts, and any action you choose can require human approval.
-
-The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/install), the open-source runtime you can run on your own Docker.
+InstaCloud hosts your app's backend — Postgres, object storage, and containers — and clones the whole environment into an isolated branch in seconds. Deploy an app and pay only for what it stores when idle, or give every coding-agent task its own branch of production-shaped infrastructure, with credentials on the platform and human approval where you want it. The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/install), the open-source runtime you can run on your own Docker.
 
 ## Start here
 
-Install the CLI:
+<Steps>
+  <Step title="Install the CLI">
+    <CodeGroup>
 
-<CodeGroup>
+    ```bash npx
+    npx insta@latest setup agent
+    ```
 
-```bash npx
-npx insta@latest setup agent
-```
+    ```bash npm
+    npm install -g insta
+    ```
 
-```bash npm
-npm install -g insta
-```
+    ```bash title="Shell installer (macOS/Linux)"
+    curl -fsSL https://agents.instacloud.com | sh
+    ```
 
-```bash title="Shell installer (macOS/Linux)"
-curl -fsSL https://agents.instacloud.com | sh
-```
+    </CodeGroup>
 
-</CodeGroup>
+    The npx path also wires up any coding agents on your machine; npm installs just the CLI.
+  </Step>
+  <Step title="Deploy your app">
+    From a directory with a Dockerfile:
 
-The npx path installs the CLI and wires up any coding agents on your machine in one command; `npm install -g insta` installs just the CLI. Then, from a directory with a Dockerfile:
+    ```bash
+    insta login
+    insta project create my-app
+    insta services add postgres db
+    insta services add compute app
+    insta secrets bind DATABASE_URL postgres/db --to compute/app
+    insta deploy .
+    ```
 
-```bash
-insta login
-insta project create my-app
-insta services add postgres db
-insta services add compute app
-insta secrets bind DATABASE_URL postgres/db --to compute/app
-insta deploy .
-```
-
-That's a running app on its own URL, with its database connection injected. The [quickstart](/quickstart) walks through each step, including creating your first branch; [agent setup](/agents/setup) covers what the agent wiring installs.
-
-```
-project = a Postgres database + an S3 bucket + your app containers
-branch  = a disposable, fully isolated clone of all three
-```
+    That's a running app on its own URL, with its database connection injected.
+  </Step>
+  <Step title="Keep going">
+    The [quickstart](/quickstart) walks through each step, including your first branch; [agent setup](/agents/setup) covers what the agent wiring installs.
+  </Step>
+</Steps>
 
 ## Built for agents
 
