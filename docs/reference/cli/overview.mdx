@@ -3,18 +3,22 @@ title: "CLI overview"
 description: "Install the insta CLI, authenticate in CI, and find every command."
 ---
 
-The `insta` CLI manages projects, branches, services, secrets, and deploys from a terminal — yours or a coding agent's. Every command below links to its own page.
+The `insta` CLI manages projects, branches, services, secrets, and deploys from a terminal — yours or a coding agent's. Every command is listed below with its common invocations; `insta <command> --help` has the full flag set.
 
 ## Install
 
 <CodeGroup>
 
-```bash title="Shell installer (macOS/Linux)"
-curl -fsSL https://agents.instacloud.com | sh
+```bash npx
+npx insta@latest setup agent
 ```
 
 ```bash npm
 npm install -g insta
+```
+
+```bash title="Shell installer (macOS/Linux)"
+curl -fsSL https://agents.instacloud.com | sh
 ```
 
 </CodeGroup>
@@ -51,7 +55,6 @@ insta login --oauth github
 insta login --device
 ```
 
-[Learn more about login](/reference/cli/login)
 
 ### logout
 
@@ -61,7 +64,6 @@ Log out and clear local tokens.
 insta logout
 ```
 
-[Learn more about logout](/reference/cli/logout)
 
 ### status
 
@@ -72,7 +74,6 @@ insta status
 insta status --json
 ```
 
-[Learn more about status](/reference/cli/status)
 
 ### env
 
@@ -83,7 +84,6 @@ insta env show
 insta env use staging
 ```
 
-[Learn more about env](/reference/cli/env)
 
 ### org
 
@@ -94,7 +94,6 @@ insta org list
 insta org create acme
 ```
 
-[Learn more about org](/reference/cli/org)
 
 ### project
 
@@ -105,7 +104,6 @@ insta project create my-app
 insta project link <project-id>
 ```
 
-[Learn more about project](/reference/cli/project)
 
 ### branch
 
@@ -117,7 +115,6 @@ insta branch switch staging
 insta branch merge staging --into main
 ```
 
-[Learn more about branch](/reference/cli/branch)
 
 ### services
 
@@ -128,7 +125,6 @@ insta services add postgres db
 insta services list
 ```
 
-[Learn more about services](/reference/cli/services)
 
 ### secrets
 
@@ -140,7 +136,6 @@ insta secrets set STRIPE_KEY
 insta secrets bind DATABASE_URL postgres/db --to compute/app
 ```
 
-[Learn more about secrets](/reference/cli/secrets)
 
 ### run
 
@@ -151,7 +146,6 @@ insta run npm start
 insta run --branch staging npm test
 ```
 
-[Learn more about run](/reference/cli/run)
 
 ### build
 
@@ -162,7 +156,6 @@ insta build .
 insta build . --explain
 ```
 
-[Learn more about build](/reference/cli/build)
 
 ### deploy
 
@@ -174,7 +167,6 @@ insta deploy . --branch staging
 insta deploy --image ghcr.io/acme/api:v3
 ```
 
-[Learn more about deploy](/reference/cli/deploy)
 
 ### compute
 
@@ -186,7 +178,6 @@ insta compute start
 insta compute set-domain app.example.com
 ```
 
-[Learn more about compute](/reference/cli/compute)
 
 ### db
 
@@ -198,7 +189,6 @@ insta db connect
 insta db stats
 ```
 
-[Learn more about db](/reference/cli/db)
 
 ### storage
 
@@ -209,7 +199,6 @@ insta storage list
 insta storage get uploads/logo.png
 ```
 
-[Learn more about storage](/reference/cli/storage)
 
 ### template
 
@@ -221,7 +210,6 @@ insta template info <code>
 insta template deploy <code>
 ```
 
-[Learn more about template](/reference/cli/template)
 
 ### manifest
 
@@ -231,7 +219,6 @@ Print an agent-legible view of the project environments.
 insta manifest
 ```
 
-[Learn more about manifest](/reference/cli/manifest)
 
 ### regions
 
@@ -241,7 +228,6 @@ List regions available for postgres and compute services.
 insta regions
 ```
 
-[Learn more about regions](/reference/cli/regions)
 
 ### metrics
 
@@ -252,7 +238,6 @@ insta metrics compute
 insta metrics db
 ```
 
-[Learn more about metrics](/reference/cli/metrics)
 
 ### logs
 
@@ -263,7 +248,6 @@ insta logs compute
 insta logs compute --deploy
 ```
 
-[Learn more about logs](/reference/cli/logs)
 
 ### events
 
@@ -274,7 +258,6 @@ insta events
 insta events --limit 50
 ```
 
-[Learn more about events](/reference/cli/events)
 
 ### usage
 
@@ -285,7 +268,6 @@ insta usage
 insta usage --proj
 ```
 
-[Learn more about usage](/reference/cli/usage)
 
 ### billing
 
@@ -295,7 +277,6 @@ Current billing cycle overview: tier, used, included, overage, credits, forecast
 insta billing
 ```
 
-[Learn more about billing](/reference/cli/billing)
 
 ### policy
 
@@ -306,7 +287,6 @@ insta policy get
 insta policy set project.delete approve
 ```
 
-[Learn more about policy](/reference/cli/policy)
 
 ### approvals
 
@@ -318,7 +298,6 @@ insta approvals approve <id>
 insta approvals deny <id>
 ```
 
-[Learn more about approvals](/reference/cli/approvals)
 
 ### observe
 
@@ -329,7 +308,6 @@ insta observe install
 insta observe report
 ```
 
-[Learn more about observe](/reference/cli/observe)
 
 ### setup
 
@@ -340,7 +318,6 @@ insta setup agent
 insta setup agent --project <id>
 ```
 
-[Learn more about setup](/reference/cli/setup)
 
 ### mcp
 
@@ -351,7 +328,6 @@ insta mcp install
 insta mcp install --agent cursor
 ```
 
-[Learn more about mcp](/reference/cli/mcp)
 
 ### feedback
 
@@ -361,7 +337,6 @@ Report an InstaCloud-side bug, missing feature, or friction to the InstaCloud te
 insta feedback
 ```
 
-[Learn more about feedback](/reference/cli/feedback)
 
 ### upgrade
 
@@ -371,7 +346,6 @@ Update the CLI to the latest release.
 insta upgrade
 ```
 
-[Learn more about upgrade](/reference/cli/upgrade)
 
 ### autoupdate
 
@@ -382,4 +356,3 @@ insta autoupdate
 insta autoupdate off
 ```
 
-[Learn more about autoupdate](/reference/cli/autoupdate)
