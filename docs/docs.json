@@ -666,10 +666,6 @@
       "destination": "/self-hosting/overview"
     },
     {
-      "source": "/self-hosting/overview",
-      "destination": "/self-hosting/overview"
-    },
-    {
       "source": "/storage/access",
       "destination": "/storage/overview"
     },
