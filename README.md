@@ -115,8 +115,7 @@ adapter → Docker:
 - **adapters** (`src/adapters/`): swappable providers behind small contracts. `LocalPostgres`
   (a container per branch), `LocalGarage` (one shared S3 server; a bucket + bucket-scoped key
   per branch), `DockerCompute` (your image per compute group), `LocalManagedDb` (private
-  Redis/MySQL/MongoDB containers per branch). `RailwayCompute`
-  (`INSTA_OSS_COMPUTE=railway`) runs compute on Railway instead; proof the seam holds.
+  Redis/MySQL/MongoDB containers per branch).
 - **state** (`src/state.ts`): a single JSON file, `~/.insta-oss/state.json`.
 
 Command-by-command CLI and MCP compatibility tables: [docs/self-hosting/compatibility.md](docs/self-hosting/compatibility.md).

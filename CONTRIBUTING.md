@@ -37,15 +37,13 @@ src/
     ├── garage.ts        LocalGarage: one shared server; bucket + scoped key per branch;
     │                    clone = rclone sync
     ├── compute.ts       DockerCompute: your image per group; host port mapped per branch
-    ├── manageddb.ts     LocalManagedDb: redis/mysql/mongodb, one private container per
-    │                    branch; a clone gets a fresh empty instance
-    └── railway.ts       RailwayCompute: the same ComputeAdapter contract over Railway's API
+    └── manageddb.ts     LocalManagedDb: redis/mysql/mongodb, one private container per
+                         branch; a clone gets a fresh empty instance
 
 test/
 ├── server.test.ts               API contract tests (fake adapters, no Docker, fast)
 ├── clone-isolation.int.test.ts  real Docker: db clone is copied AND isolated
 ├── storage.int.test.ts          real Docker: bucket clone is copied AND isolated
-├── railway.test.ts              RailwayCompute GraphQL contract (fake fetch)
 └── restart-policy.test.ts       long-lived containers get --restart unless-stopped
 ```
 
@@ -57,8 +55,7 @@ The engine never talks to Docker for resources except through the adapter contra
 
 - **Different database/storage/compute backend**: implement the matching interface from
   `types.ts` as a new file in `src/adapters/`, wire it in `main.ts`. Nothing else changes:
-  the engine, server, tests, and CLI are provider-agnostic (`railway.ts` is the existence
-  proof).
+  the engine, server, tests, and CLI are provider-agnostic.
 - **New endpoint**: don't. The surface mirrors the standard `insta` CLI
   (see [docs/self-hosting/compatibility.md](docs/self-hosting/compatibility.md)); additions belong in the shared
   CLI/platform contract first.

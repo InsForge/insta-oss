@@ -96,13 +96,13 @@ export interface DatabaseAdapter {
 export interface ComputeAdapter {
   // /data volumes (optional — platform parity for create-time volumeGib + PUT …/volume). An
   // adapter that can mount persistent volumes declares supportsVolumes and honors opts.volume;
-  // adapters that can't (e.g. Railway — its volumes don't map onto this deploy path) leave it
+  // adapters that can't (a platform control plane whose volumes don't map onto this deploy path) leave it
   // unset and the engine rejects volume-carrying services with a clear error.
   supportsVolumes?: boolean
   deploy(
     ref: string,
     // port = the port the app LISTENS on (never changes). hostPort/network are LOCAL-substrate
-    // hints (docker host mapping + branch network); platform adapters (Railway, …) ignore them
+    // hints (docker host mapping + branch network); platform adapters ignore them
     // and own their routing/URL story. volume = a named volume to mount at /data.
     // start=false: create the container but leave it down. For a redeploy of a service whose
     // standing intent is stopped/suspended — without it the replacement runs (entrypoint, migrations,
