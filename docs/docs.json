@@ -111,6 +111,7 @@
             "icon": "server",
             "pages": [
               "self-hosting/install",
+              "self-hosting/architecture",
               "self-hosting/compatibility"
             ]
           }
@@ -656,10 +657,6 @@
     },
     {
       "source": "/self-hosting/adapters",
-      "destination": "/self-hosting/install"
-    },
-    {
-      "source": "/self-hosting/architecture",
       "destination": "/self-hosting/install"
     },
     {
