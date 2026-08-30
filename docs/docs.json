@@ -189,7 +189,7 @@
     },
     {
       "source": "/reference/architecture",
-      "destination": "/self-hosting/install"
+      "destination": "/self-hosting/architecture"
     },
     {
       "source": "/reference/compatibility",
