@@ -10,12 +10,14 @@ Prerequisites: Docker (running) and Node 22+ — no cloud account, no API keys.
 ```bash
 git clone https://github.com/InsForge/insta-oss.git && cd insta-oss
 npm install
-npm run dev   # the daemon, on http://127.0.0.1:8080
+npm run build:ui   # optional: the web dashboard, served by the daemon itself
+npm run dev        # the daemon, on http://127.0.0.1:8080
 ```
 
-Then, in another terminal, point the CLI at the daemon (its default is the cloud):
+The first run pulls the Postgres, storage, and sync images — give it a minute. Then, in another terminal, install the CLI if you don't have it and point it at the daemon (its default is the cloud):
 
 ```bash
+npm install -g insta
 export INSTA_API_URL=http://127.0.0.1:8080
 insta status
 ```

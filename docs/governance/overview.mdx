@@ -12,9 +12,11 @@ insta policy get
 insta policy set project.delete approve
 insta approvals list
 insta approvals approve <id>
+insta approvals deny <id>
+insta events
 ```
 
-A gated action doesn't run — the caller gets an approval ID to relay, an admin decides, and grants are single-use. The [gated actions reference](/reference/gated-actions) has the full action table and a recommended baseline for agent access.
+A gated action doesn't run — the caller gets an approval ID to relay, an admin decides, and grants are single-use. A token inherits its minter's role, so run agents under a member account, not an admin's, for approval to be a real gate. The [gated actions reference](/reference/gated-actions) has the full action table and a recommended baseline for agent access.
 
 <Note>
 The full governance guide is coming soon.
