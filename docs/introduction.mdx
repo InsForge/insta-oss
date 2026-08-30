@@ -1,9 +1,13 @@
 ---
 title: "Introduction"
-description: "InstaCloud is the agent-native cloud: branchable Postgres, storage, and compute with one gated seam for credentials."
+description: "InstaCloud is the cloud built for agents — as the primary operator, and as the workload."
 ---
 
-InstaCloud hosts your app's backend — Postgres, object storage, and containers — and clones the whole environment into an isolated branch in seconds. Deploy an app and pay only for what it stores when idle, or give every coding-agent task its own branch of production-shaped infrastructure, with credentials on the platform and human approval where you want it. The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/install), the open-source runtime you can run on your own Docker.
+InstaCloud is a cloud platform built for agents: agents as the primary operator, and agents as the workload.
+
+Traditional devtools were built by humans to serve humans. When the one operating the infrastructure — and increasingly the one running on it — is an agent, that model has to change: environments must be disposable and parallel instead of one shared staging, credentials can't live in prompts, irreversible actions need a human gate rather than a confirmation dialog, and every operation has to be legible to a machine, not a dashboard.
+
+InstaCloud provides the three basic primitives — **database** (real Postgres), **storage** (S3-compatible buckets), and **compute** (containers, run in microVMs on the hosted platform) — rebuilt on those terms. Operations are driven from a CLI command or an MCP tool, not a dashboard. The whole environment clones into an isolated branch per task. Credentials flow through one seam you can gate, and humans approve what matters. The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/install), the open-source runtime you can run on your own Docker — and it works just as well when the operator is you.
 
 ## Start here
 
@@ -50,7 +54,7 @@ InstaCloud hosts your app's backend — Postgres, object storage, and containers
 
 <CardGroup cols={3}>
   <Card title="MCP server" icon="plug" href="/agents/mcp-server">
-    Every operation as an `insta_*` tool.
+    Drive the platform through `insta_*` tools.
   </Card>
   <Card title="Agent skill" icon="book" href="/agents/skills">
     The `insta` skill for Claude Code, Cursor, Codex, and more.
