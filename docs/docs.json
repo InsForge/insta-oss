@@ -334,8 +334,9 @@
   },
   "navbar": {
     "primary": {
-      "type": "github",
-      "href": "https://github.com/InsForge/insta-oss"
+      "type": "button",
+      "label": "Console",
+      "href": "https://console.instacloud.com"
     }
   },
   "footer": {
