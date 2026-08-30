@@ -54,293 +54,83 @@
     "tabs": [
       {
         "tab": "Documentation",
+        "icon": "book-open",
         "groups": [
           {
             "group": "Overview",
+            "icon": "flag",
             "pages": [
               "introduction",
-              "quickstart"
-            ],
-            "icon": "rocket"
+              "quickstart",
+              "projects/branches"
+            ]
           },
           {
             "group": "Agents",
+            "icon": "robot",
             "pages": [
               "agents/overview",
               "agents/setup",
               "agents/mcp-server",
               "agents/skills",
-              "agents/branch-per-task",
-              "agents/human-in-the-loop",
-              "agents/observe",
-              {
-                "group": "Agent integrations",
-                "pages": [
-                  "agents/claude-code",
-                  "agents/cursor",
-                  "agents/codex",
-                  "agents/other-agents"
-                ]
-              }
-            ],
-            "icon": "robot"
+              "agents/branch-per-task"
+            ]
           },
           {
-            "group": "Platform",
-            "pages": [
-              "platform/how-it-works",
-              {
-                "group": "Compare",
-                "pages": [
-                  "platform/compare/railway",
-                  "platform/compare/fly"
-                ]
-              },
-              {
-                "group": "Migrate",
-                "pages": [
-                  "platform/migrate/railway",
-                  "platform/migrate/fly"
-                ]
-              }
-            ],
-            "icon": "layer-group"
-          },
-          {
-            "group": "Pricing",
-            "pages": [
-              "pricing/plans",
-              "pricing/understanding-your-bill",
-              "pricing/cost-control",
-              "pricing/faq"
-            ],
-            "icon": "credit-card"
-          },
-          {
-            "group": "Projects & branches",
-            "pages": [
-              "projects/overview",
-              "projects/branches",
-              "projects/environments",
-              "projects/manifest"
-            ],
-            "icon": "code-branch"
-          },
-          {
-            "group": "Build & deploy",
-            "pages": [
-              "deploy/overview",
-              "deploy/services",
-              {
-                "group": "Builds",
-                "pages": [
-                  "deploy/builds/detection",
-                  "deploy/builds/dockerfile",
-                  "deploy/builds/images",
-                  "deploy/builds/monorepo"
-                ]
-              },
-              {
-                "group": "Deployments",
-                "pages": [
-                  "deploy/deployments/ports",
-                  "deploy/deployments/secrets",
-                  "deploy/deployments/regions",
-                  "deploy/deployments/websockets",
-                  "deploy/deployments/deploy-events"
-                ]
-              },
-              {
-                "group": "GitHub",
-                "pages": [
-                  "deploy/github/overview",
-                  "deploy/github/pull-request-environments"
-                ]
-              },
-              {
-                "group": "Troubleshooting",
-                "pages": [
-                  "deploy/troubleshooting/no-start-command",
-                  "deploy/troubleshooting/failed-to-respond",
-                  "deploy/troubleshooting/build-failures"
-                ]
-              }
-            ],
-            "icon": "hammer"
-          },
-          {
-            "group": "Postgres",
+            "group": "Database",
+            "icon": "database",
             "pages": [
               "postgres/overview",
-              "postgres/connect",
-              "postgres/branching",
-              "postgres/scale-to-zero",
-              "postgres/sizing",
-              "postgres/databases-and-roles",
-              "postgres/backups",
-              "postgres/extensions",
-              "postgres/observability"
-            ],
-            "icon": "database"
+              "postgres/branching"
+            ]
           },
           {
-            "group": "Data & storage",
+            "group": "Storage",
+            "icon": "box-archive",
             "pages": [
-              "storage/overview",
-              "storage/access",
-              "storage/objects",
-              "storage/volumes"
-            ],
-            "icon": "box-archive"
+              "storage/overview"
+            ]
           },
           {
             "group": "Compute",
+            "icon": "microchip",
             "pages": [
               "compute/overview",
-              "compute/sleep-and-wake",
-              "compute/limits-and-scaling",
-              "compute/workers"
-            ],
-            "icon": "microchip"
+              "deploy/overview"
+            ]
           },
           {
-            "group": "Networking",
+            "group": "Governance",
+            "icon": "shield-check",
             "pages": [
-              "networking/overview",
-              "networking/custom-domains",
-              "networking/troubleshooting/ssl"
-            ],
-            "icon": "globe"
-          },
-          {
-            "group": "Observability",
-            "pages": [
-              "observability/logs",
-              "observability/metrics",
-              "observability/events"
-            ],
-            "icon": "chart-line"
-          },
-          {
-            "group": "Governance & access",
-            "pages": [
-              "governance/overview",
-              "governance/approvals",
-              "governance/organizations",
-              "governance/api-tokens",
-              "governance/login"
-            ],
-            "icon": "shield-check"
+              "governance/overview"
+            ]
           },
           {
             "group": "Self-hosting",
+            "icon": "server",
             "pages": [
-              "self-hosting/overview",
               "self-hosting/install",
-              "self-hosting/configuration",
               "self-hosting/architecture",
-              "self-hosting/adapters",
-              "self-hosting/managed-databases",
               "self-hosting/compatibility"
-            ],
-            "icon": "server"
-          },
-          {
-            "group": "Frameworks",
-            "pages": [
-              "frameworks/overview",
-              "frameworks/nextjs",
-              "frameworks/nuxt",
-              "frameworks/vite",
-              "frameworks/remix",
-              "frameworks/astro",
-              "frameworks/express",
-              "frameworks/django",
-              "frameworks/flask",
-              "frameworks/fastapi",
-              "frameworks/deno",
-              "frameworks/go",
-              "frameworks/rust",
-              "frameworks/java",
-              "frameworks/php",
-              "frameworks/rails",
-              "frameworks/elixir"
-            ],
-            "icon": "cubes"
-          },
-          {
-            "group": "Guides",
-            "pages": [
-              "guides/parallel-agents",
-              "guides/ci",
-              "guides/lock-down-production",
-              "guides/rotate-credentials"
-            ],
-            "icon": "book-open"
+            ]
           }
-        ],
-        "icon": "book-open"
+        ]
       },
       {
         "tab": "Reference",
+        "icon": "code",
         "groups": [
-          {
-            "group": "CLI",
-            "icon": "terminal",
-            "pages": [
-              "reference/cli/overview",
-              {
-                "group": "Commands",
-                "pages": [
-                  "reference/cli/login",
-                  "reference/cli/logout",
-                  "reference/cli/status",
-                  "reference/cli/env",
-                  "reference/cli/org",
-                  "reference/cli/project",
-                  "reference/cli/branch",
-                  "reference/cli/services",
-                  "reference/cli/secrets",
-                  "reference/cli/run",
-                  "reference/cli/build",
-                  "reference/cli/deploy",
-                  "reference/cli/compute",
-                  "reference/cli/db",
-                  "reference/cli/storage",
-                  "reference/cli/template",
-                  "reference/cli/manifest",
-                  "reference/cli/regions",
-                  "reference/cli/metrics",
-                  "reference/cli/logs",
-                  "reference/cli/events",
-                  "reference/cli/usage",
-                  "reference/cli/billing",
-                  "reference/cli/policy",
-                  "reference/cli/approvals",
-                  "reference/cli/observe",
-                  "reference/cli/setup",
-                  "reference/cli/mcp",
-                  "reference/cli/feedback",
-                  "reference/cli/upgrade",
-                  "reference/cli/autoupdate"
-                ]
-              }
-            ]
-          },
           {
             "group": "Reference",
             "icon": "book",
             "pages": [
+              "reference/cli/overview",
               "reference/mcp-tools",
-              "reference/environment-variables",
-              "reference/gated-actions",
-              "reference/limits",
-              "reference/errors",
-              "reference/faq"
+              "reference/gated-actions"
             ]
           }
-        ],
-        "icon": "code"
+        ]
       }
     ],
     "global": {
@@ -395,7 +185,7 @@
     },
     {
       "source": "/concepts/secrets",
-      "destination": "/deploy/deployments/secrets"
+      "destination": "/deploy/overview"
     },
     {
       "source": "/reference/architecture",
@@ -428,6 +218,470 @@
     {
       "source": "/production-checklist",
       "destination": "/introduction"
+    },
+    {
+      "source": "/agents/claude-code",
+      "destination": "/agents/setup"
+    },
+    {
+      "source": "/agents/codex",
+      "destination": "/agents/setup"
+    },
+    {
+      "source": "/agents/cursor",
+      "destination": "/agents/setup"
+    },
+    {
+      "source": "/agents/human-in-the-loop",
+      "destination": "/agents/overview"
+    },
+    {
+      "source": "/agents/observe",
+      "destination": "/agents/overview"
+    },
+    {
+      "source": "/agents/other-agents",
+      "destination": "/agents/setup"
+    },
+    {
+      "source": "/compute/limits-and-scaling",
+      "destination": "/compute/overview"
+    },
+    {
+      "source": "/compute/sleep-and-wake",
+      "destination": "/compute/overview"
+    },
+    {
+      "source": "/compute/workers",
+      "destination": "/compute/overview"
+    },
+    {
+      "source": "/deploy/builds/detection",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/builds/dockerfile",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/builds/images",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/builds/monorepo",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/deployments/deploy-events",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/deployments/ports",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/deployments/regions",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/deployments/secrets",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/deployments/websockets",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/github/overview",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/github/pull-request-environments",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/services",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/troubleshooting/build-failures",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/troubleshooting/failed-to-respond",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/deploy/troubleshooting/no-start-command",
+      "destination": "/deploy/overview"
+    },
+    {
+      "source": "/frameworks/astro",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/deno",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/django",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/elixir",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/express",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/fastapi",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/flask",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/go",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/java",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/nextjs",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/nuxt",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/overview",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/php",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/rails",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/remix",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/rust",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/frameworks/vite",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/governance/api-tokens",
+      "destination": "/governance/overview"
+    },
+    {
+      "source": "/governance/approvals",
+      "destination": "/governance/overview"
+    },
+    {
+      "source": "/governance/login",
+      "destination": "/governance/overview"
+    },
+    {
+      "source": "/governance/organizations",
+      "destination": "/governance/overview"
+    },
+    {
+      "source": "/guides/ci",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/guides/lock-down-production",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/guides/parallel-agents",
+      "destination": "/agents/branch-per-task"
+    },
+    {
+      "source": "/guides/rotate-credentials",
+      "destination": "/quickstart"
+    },
+    {
+      "source": "/networking/custom-domains",
+      "destination": "/compute/overview"
+    },
+    {
+      "source": "/networking/overview",
+      "destination": "/compute/overview"
+    },
+    {
+      "source": "/networking/troubleshooting/ssl",
+      "destination": "/compute/overview"
+    },
+    {
+      "source": "/observability/events",
+      "destination": "/compute/overview"
+    },
+    {
+      "source": "/observability/logs",
+      "destination": "/compute/overview"
+    },
+    {
+      "source": "/observability/metrics",
+      "destination": "/compute/overview"
+    },
+    {
+      "source": "/platform/compare/fly",
+      "destination": "/introduction"
+    },
+    {
+      "source": "/platform/compare/railway",
+      "destination": "/introduction"
+    },
+    {
+      "source": "/platform/how-it-works",
+      "destination": "/introduction"
+    },
+    {
+      "source": "/platform/migrate/fly",
+      "destination": "/introduction"
+    },
+    {
+      "source": "/platform/migrate/railway",
+      "destination": "/introduction"
+    },
+    {
+      "source": "/postgres/backups",
+      "destination": "/postgres/overview"
+    },
+    {
+      "source": "/postgres/connect",
+      "destination": "/postgres/overview"
+    },
+    {
+      "source": "/postgres/databases-and-roles",
+      "destination": "/postgres/overview"
+    },
+    {
+      "source": "/postgres/extensions",
+      "destination": "/postgres/overview"
+    },
+    {
+      "source": "/postgres/observability",
+      "destination": "/postgres/overview"
+    },
+    {
+      "source": "/postgres/scale-to-zero",
+      "destination": "/postgres/overview"
+    },
+    {
+      "source": "/postgres/sizing",
+      "destination": "/postgres/overview"
+    },
+    {
+      "source": "/pricing/cost-control",
+      "destination": "/introduction"
+    },
+    {
+      "source": "/pricing/faq",
+      "destination": "/introduction"
+    },
+    {
+      "source": "/pricing/plans",
+      "destination": "/introduction"
+    },
+    {
+      "source": "/pricing/understanding-your-bill",
+      "destination": "/introduction"
+    },
+    {
+      "source": "/projects/environments",
+      "destination": "/projects/branches"
+    },
+    {
+      "source": "/projects/manifest",
+      "destination": "/projects/branches"
+    },
+    {
+      "source": "/projects/overview",
+      "destination": "/projects/branches"
+    },
+    {
+      "source": "/reference/cli/approvals",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/autoupdate",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/billing",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/branch",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/build",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/compute",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/db",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/deploy",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/env",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/events",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/feedback",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/login",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/logout",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/logs",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/manifest",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/mcp",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/metrics",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/observe",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/org",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/policy",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/project",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/regions",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/run",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/secrets",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/services",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/setup",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/status",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/storage",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/template",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/upgrade",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/cli/usage",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/environment-variables",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/errors",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/faq",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/reference/limits",
+      "destination": "/reference/cli/overview"
+    },
+    {
+      "source": "/self-hosting/adapters",
+      "destination": "/self-hosting/install"
+    },
+    {
+      "source": "/self-hosting/configuration",
+      "destination": "/self-hosting/install"
+    },
+    {
+      "source": "/self-hosting/managed-databases",
+      "destination": "/self-hosting/install"
+    },
+    {
+      "source": "/self-hosting/overview",
+      "destination": "/self-hosting/install"
+    },
+    {
+      "source": "/storage/access",
+      "destination": "/storage/overview"
+    },
+    {
+      "source": "/storage/objects",
+      "destination": "/storage/overview"
+    },
+    {
+      "source": "/storage/volumes",
+      "destination": "/storage/overview"
     }
   ]
 }
