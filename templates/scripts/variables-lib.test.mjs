@@ -74,10 +74,10 @@ describe('the credentialed templates ship no credential of their own', () => {
     }
   });
 
-  // hermes is absent here and only here: it also requires an OpenRouter key and two Telegram
-  // values, so the pair is not the whole of what it demands. The case above still covers its
-  // credentials, and the registry-wide one below covers the fallback rule.
-  it.each(['claude-code', 'codex', 'dsh', 'pi'])('%s demands those two and nothing else', (dir) => {
+  // hermes joined this list in 2.2.0, when its OpenRouter key and Telegram values moved to
+  // `optional`: the admin pair is now the whole of what it demands, and this is the regression
+  // guard that keeps the keyless, channel-less deploy contract from drifting.
+  it.each(['claude-code', 'codex', 'dsh', 'hermes', 'pi'])('%s demands those two and nothing else', (dir) => {
     // Scoped both ways on purpose: a fourth required variable would be a new thing to type on the
     // deploy form, and dropping one would mean a credential came back from somewhere.
     expect(demands(templates.find((t) => t.dir === dir).manifest))

@@ -39,9 +39,18 @@ hermes config set --force dashboard.basic_auth.password_hash "$hash" >/dev/null
 # the main process instead, and those buttons fought it: a restart either exited the
 # container or left a detached gateway the dashboard could no longer manage.
 # Zero configured channels is fine: the gateway idles and browser chat still works.
+#
+# First boot ONLY: upstream's boot reconciliation replays the operator's persisted
+# intent from ${HERMES_HOME}/gateway_state.json (running comes back up, an explicit
+# dashboard Stop stays down), and s6 lifecycle commands write that file. Starting
+# unconditionally here would overwrite a persisted Stop on every container restart,
+# silently reconnecting messaging channels the operator turned off. The seed exists so
+# a fresh deploy connects its deploy-time channel variables without a dashboard visit.
 # Non-fatal on purpose: in a runtime without s6 this prints guidance and exits 0, the
 # dashboard still serves, and channels can wait for a start from the System page.
-hermes gateway start || echo "entrypoint: gateway start failed; start it from the dashboard's System page" >&2
+if [ ! -f "${HERMES_HOME}/gateway_state.json" ]; then
+  hermes gateway start || echo "entrypoint: gateway start failed; start it from the dashboard's System page" >&2
+fi
 
 # The dashboard is the main process of the s6 CMD service: the /api/status healthcheck
 # tracks the UI users actually reach, and gateway restarts never touch it. If it dies,

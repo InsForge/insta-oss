@@ -61,8 +61,9 @@ services:
         SLACK_ALLOWED_USERS:
           description: "Comma-separated Slack member IDs allowed to use the bot (e.g. U01ABC2DEF3)"
 
-# No provider oneOf: OPENROUTER_API_KEY is simply required. Upstream DOES document ~30 provider env
-# names (this note used to claim otherwise); pinning a model needs `hermes config set model.default`.
+# No provider oneOf: every provider key is optional, the dashboard's API Keys page sets any of
+# them after deploy. Upstream DOES document ~30 provider env names (this note used to claim
+# otherwise); pinning a model needs `hermes config set model.default`.
 # No channel oneOf either, deliberately: with zero channels the gateway idles (verified on
 # v2026.8.16 and v2026.8.27: it logs "No messaging platforms enabled." and keeps running) and the
 # dashboard's browser chat is a full channel on its own, so an empty deploy is usable, not broken.
