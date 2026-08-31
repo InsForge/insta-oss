@@ -38,12 +38,13 @@ services:
           description: "Username for the dashboard sign-in. Pick your own; it may not contain a colon or start with a dash"
         ADMIN_PASSWORD:
           description: "Password for the dashboard sign-in. Pick a strong one: it is all that stands between the URL and an agent holding your API keys"
-        OPENROUTER_API_KEY:
-          description: "OpenRouter API key the agent uses for model calls (openrouter.ai/keys)"
-      # Every messaging platform is optional: the dashboard's Channels page configures any of the
-      # ~17 supported platforms after deploy, with a restart button that applies them. The three
-      # declared here are a deploy-form convenience for people who already hold a token.
+      # Everything else is optional and dashboard-configurable after deploy: provider keys live on
+      # the API Keys page, and the Channels page configures any of the ~17 supported messaging
+      # platforms, with a restart button that applies them. The variables declared here are a
+      # deploy-form convenience for people who already hold the value.
       optional:
+        OPENROUTER_API_KEY:
+          description: "OpenRouter API key the agent uses for model calls (openrouter.ai/keys). Leave blank to add it later on the dashboard's API Keys page; chat starts answering once a provider key is set"
         TELEGRAM_BOT_TOKEN:
           description: "Telegram bot token, created with @BotFather. Leave blank to connect channels later from the dashboard's Channels page"
         TELEGRAM_ALLOWED_USERS:
