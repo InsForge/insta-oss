@@ -1,5 +1,5 @@
 code: hermes
-version: 2.1.0
+version: 2.2.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -16,10 +16,11 @@ generated:
 services:
   hermes:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/hermes:2.1.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/hermes:2.2.0   # built from ./Dockerfile by templates-build-images.yml
     port: 8080
     healthcheck: /api/status
-    # Telegram arrives on an OUTBOUND long poll, so an idle machine stops and nothing can wake it.
+    # Channels arrive on OUTBOUND connections (Telegram long poll, Slack Socket Mode, ...),
+    # so an idle machine stops and nothing can wake it.
     alwaysOn: true
     volume:
       size: 1
@@ -39,18 +40,35 @@ services:
           description: "Password for the dashboard sign-in. Pick a strong one: it is all that stands between the URL and an agent holding your API keys"
         OPENROUTER_API_KEY:
           description: "OpenRouter API key the agent uses for model calls (openrouter.ai/keys)"
+      # Every messaging platform is optional: the dashboard's Channels page configures any of the
+      # ~17 supported platforms after deploy, with a restart button that applies them. The three
+      # declared here are a deploy-form convenience for people who already hold a token.
+      optional:
         TELEGRAM_BOT_TOKEN:
-          description: "Telegram bot token, created with @BotFather"
+          description: "Telegram bot token, created with @BotFather. Leave blank to connect channels later from the dashboard's Channels page"
         TELEGRAM_ALLOWED_USERS:
           # The adapter compares user ids and never reads usernames; the old wording silently locked owners out.
           description: "Comma-separated numeric Telegram user IDs allowed to use the bot (not @usernames; get yours from @userinfobot)"
+        DISCORD_BOT_TOKEN:
+          description: "Discord bot token from the Discord Developer Portal. Leave blank to connect channels later from the dashboard"
+        DISCORD_ALLOWED_USERS:
+          description: "Comma-separated numeric Discord user IDs allowed to use the bot"
+        SLACK_BOT_TOKEN:
+          description: "Slack bot token (xoxb-...). Slack needs SLACK_APP_TOKEN too; both can also be set later from the dashboard"
+        SLACK_APP_TOKEN:
+          description: "Slack app-level token (xapp-...) for Socket Mode; pairs with SLACK_BOT_TOKEN"
+        SLACK_ALLOWED_USERS:
+          description: "Comma-separated Slack member IDs allowed to use the bot (e.g. U01ABC2DEF3)"
 
 # No provider oneOf: OPENROUTER_API_KEY is simply required. Upstream DOES document ~30 provider env
 # names (this note used to claim otherwise); pinning a model needs `hermes config set model.default`.
+# No channel oneOf either, deliberately: with zero channels the gateway idles (verified on
+# v2026.8.16: it logs "No messaging platforms enabled." and keeps running) and the dashboard's
+# browser chat is a full channel on its own, so an empty deploy is usable, not broken.
 
 meta:
   name: Hermes Agent
-  tagline: Autonomous AI agent from Nous Research, driven from Telegram
+  tagline: Autonomous AI agent from Nous Research with multi-channel messaging
   category: ai-agent
   tags: [ai-agent, ai]
   logo: ./logo.png              # 512x512, real transparency; see the attribution table in ../README.md

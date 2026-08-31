@@ -29,9 +29,22 @@ hash="$(cd /opt/hermes && python3 -c 'import sys; from plugins.dashboard_auth.ba
 hermes config set --force dashboard.basic_auth.username "$ADMIN_USERNAME" >/dev/null
 hermes config set --force dashboard.basic_auth.password_hash "$hash" >/dev/null
 
-# --skip-build serves the dist baked into the image instead of running npm at boot.
-hermes dashboard --host 0.0.0.0 --port "${HERMES_DASHBOARD_PORT:-8080}" --no-open --skip-build &
+# The gateway runs as the s6-supervised gateway-default service, NOT as this script's
+# child. The platform hands the image PID 1, so s6-overlay is live (a 2.1.x comment
+# claiming Fly skips it was wrong: PID 1 on a deployed machine is s6-svscan) and
+# `hermes gateway start` dispatches to s6, bringing the slot up. That slot is the same
+# one the dashboard's Channels-page "Restart gateway" and System-page buttons drive
+# through s6-svc, so channel changes apply repeatedly and a crashed gateway is
+# respawned by s6, both upstream-owned behaviors. In the 2.1.x layout the gateway was
+# the main process instead, and those buttons fought it: a restart either exited the
+# container or left a detached gateway the dashboard could no longer manage.
+# Zero configured channels is fine: the gateway idles and browser chat still works.
+# Non-fatal on purpose: in a runtime without s6 this prints guidance and exits 0, the
+# dashboard still serves, and channels can wait for a start from the System page.
+hermes gateway start || echo "entrypoint: gateway start failed; start it from the dashboard's System page" >&2
 
-# --no-supervise: the default hands the gateway to s6 and RETURNS, and s6 is not
-# running here.
-exec hermes gateway run --no-supervise
+# The dashboard is the main process of the s6 CMD service: the /api/status healthcheck
+# tracks the UI users actually reach, and gateway restarts never touch it. If it dies,
+# s6 reruns this script, which is idempotent.
+# --skip-build serves the dist baked into the image instead of running npm at boot.
+exec hermes dashboard --host 0.0.0.0 --port "${HERMES_DASHBOARD_PORT:-8080}" --no-open --skip-build
