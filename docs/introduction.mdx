@@ -7,7 +7,7 @@ InstaCloud is a cloud platform built for agents: agents as the primary operator,
 
 Traditional devtools were built by humans to serve humans. When the one operating the infrastructure, and increasingly the one running on it, is an agent, that model has to change: environments must be disposable and parallel instead of one shared staging, credentials can't live in prompts, irreversible actions need a human gate rather than a confirmation dialog, and every operation has to be legible to a machine, not a dashboard.
 
-InstaCloud provides the three basic primitives, rebuilt on those terms: **database** (real Postgres), **storage** (S3-compatible buckets), and **compute** (containers, run in microVMs on the hosted platform). Operations are driven from a CLI command or an MCP tool, not a dashboard. The whole environment clones into an isolated branch per task. Credentials flow through one seam you can gate, and humans approve what matters. The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/overview), the open-source runtime you can run on your own Docker. It works just as well when the operator is you.
+InstaCloud provides the three basic primitives, rebuilt on those terms: **database** (real Postgres), **storage** (S3-compatible buckets), and **compute** (containers, run in microVMs on the hosted platform). Operations are driven from a CLI command or an MCP tool, not a dashboard. The whole environment clones into an isolated branch per task. Credentials flow through one seam you can gate, and humans approve what matters. The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/overview), the open-source runtime you can run on your own Docker. The same is true when the operator is you.
 
 ## Start here
 
@@ -32,7 +32,7 @@ InstaCloud provides the three basic primitives, rebuilt on those terms: **databa
     The npx path also wires up any coding agents on your machine; npm installs just the CLI.
   </Step>
   <Step title="Deploy your app">
-    Open your coding agent (Claude Code, Cursor, Codex, or any agent the setup wired) in a directory with a Dockerfile and ask it to deploy. The agent runs the platform for you:
+    Open your coding agent (Claude Code, Cursor, Codex, or any agent the setup wired) in a directory with a Dockerfile and ask it to deploy. You complete the one-time browser login; the agent drives the rest:
 
     ```bash
     insta login
@@ -46,6 +46,6 @@ InstaCloud provides the three basic primitives, rebuilt on those terms: **databa
     That's a running app on its own URL, with its database connection injected. The same commands work by hand if you'd rather drive them yourself.
   </Step>
   <Step title="Keep going">
-    The [quickstart](/quickstart) walks through each step, including your first branch; [agent setup](/agents/setup) covers what the agent wiring installs.
+    The [quickstart](/quickstart) walks through each step, including your first branch; [agent setup](/agents/setup) covers what the agent wiring installs. From there, the primitives: [Postgres](/postgres/overview), [storage](/storage/overview), and [compute](/compute/overview), plus [governance](/governance/overview) to gate what an agent can do on its own.
   </Step>
 </Steps>
