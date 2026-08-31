@@ -6,7 +6,7 @@ sourceRepo: InsForge/insta-oss
 upstream:
   repo: NousResearch/hermes-agent
   image: docker.io/nousresearch/hermes-agent
-  pinned: v2026.8.16
+  pinned: v2026.8.27
   license: MIT
 
 # Declare once, reference many: one generated value can be reused across services and vars
@@ -64,8 +64,8 @@ services:
 # No provider oneOf: OPENROUTER_API_KEY is simply required. Upstream DOES document ~30 provider env
 # names (this note used to claim otherwise); pinning a model needs `hermes config set model.default`.
 # No channel oneOf either, deliberately: with zero channels the gateway idles (verified on
-# v2026.8.16: it logs "No messaging platforms enabled." and keeps running) and the dashboard's
-# browser chat is a full channel on its own, so an empty deploy is usable, not broken.
+# v2026.8.16 and v2026.8.27: it logs "No messaging platforms enabled." and keeps running) and the
+# dashboard's browser chat is a full channel on its own, so an empty deploy is usable, not broken.
 
 meta:
   name: Hermes Agent
