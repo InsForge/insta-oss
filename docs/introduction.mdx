@@ -1,13 +1,13 @@
 ---
 title: "Introduction"
-description: "InstaCloud is the cloud built for agents — as the primary operator, and as the workload."
+description: "InstaCloud is the cloud built for agents: as the primary operator, and as the workload."
 ---
 
 InstaCloud is a cloud platform built for agents: agents as the primary operator, and agents as the workload.
 
-Traditional devtools were built by humans to serve humans. When the one operating the infrastructure — and increasingly the one running on it — is an agent, that model has to change: environments must be disposable and parallel instead of one shared staging, credentials can't live in prompts, irreversible actions need a human gate rather than a confirmation dialog, and every operation has to be legible to a machine, not a dashboard.
+Traditional devtools were built by humans to serve humans. When the one operating the infrastructure, and increasingly the one running on it, is an agent, that model has to change: environments must be disposable and parallel instead of one shared staging, credentials can't live in prompts, irreversible actions need a human gate rather than a confirmation dialog, and every operation has to be legible to a machine, not a dashboard.
 
-InstaCloud provides the three basic primitives — **database** (real Postgres), **storage** (S3-compatible buckets), and **compute** (containers, run in microVMs on the hosted platform) — rebuilt on those terms. Operations are driven from a CLI command or an MCP tool, not a dashboard. The whole environment clones into an isolated branch per task. Credentials flow through one seam you can gate, and humans approve what matters. The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/overview), the open-source runtime you can run on your own Docker — and it works just as well when the operator is you.
+InstaCloud provides the three basic primitives, rebuilt on those terms: **database** (real Postgres), **storage** (S3-compatible buckets), and **compute** (containers, run in microVMs on the hosted platform). Operations are driven from a CLI command or an MCP tool, not a dashboard. The whole environment clones into an isolated branch per task. Credentials flow through one seam you can gate, and humans approve what matters. The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/overview), the open-source runtime you can run on your own Docker. The same is true when the operator is you.
 
 ## Start here
 
@@ -32,7 +32,7 @@ InstaCloud provides the three basic primitives — **database** (real Postgres),
     The npx path also wires up any coding agents on your machine; npm installs just the CLI.
   </Step>
   <Step title="Deploy your app">
-    From a directory with a Dockerfile:
+    Open your coding agent (Claude Code, Cursor, Codex, or any agent the setup wired) in a directory with a Dockerfile and ask it to deploy. You complete the one-time browser login; the agent drives the rest:
 
     ```bash
     insta login
@@ -43,57 +43,9 @@ InstaCloud provides the three basic primitives — **database** (real Postgres),
     insta deploy .
     ```
 
-    That's a running app on its own URL, with its database connection injected.
+    That's a running app on its own URL, with its database connection injected. The same commands work by hand if you'd rather drive them yourself.
   </Step>
   <Step title="Keep going">
-    The [quickstart](/quickstart) walks through each step, including your first branch; [agent setup](/agents/setup) covers what the agent wiring installs.
+    The [quickstart](/quickstart) walks through each step, including your first branch; [agent setup](/agents/setup) covers what the agent wiring installs. From there, the primitives: [Postgres](/postgres/overview), [storage](/storage/overview), and [compute](/compute/overview), plus [governance](/governance/overview) to gate what an agent can do on its own.
   </Step>
 </Steps>
-
-## Built for agents
-
-<CardGroup cols={3}>
-  <Card title="MCP server" icon="plug" href="/agents/mcp-server">
-    Drive the platform through `insta_*` tools.
-  </Card>
-  <Card title="Agent skill" icon="book" href="/agents/skills">
-    The `insta` skill for Claude Code, Cursor, Codex, and more.
-  </Card>
-  <Card title="One branch per task" icon="layer-group" href="/agents/branch-per-task">
-    Run agents in parallel without them touching each other.
-  </Card>
-</CardGroup>
-
-## What you get
-
-<CardGroup cols={2}>
-  <Card title="Branchable environments" icon="code-branch" href="/projects/branches">
-    Database with data, bucket, and every service — cloned per branch, on its own URL.
-  </Card>
-  <Card title="Serverless Postgres" icon="database" href="/postgres/overview">
-    A real, isolated Postgres server per project that scales to zero and branches in seconds.
-  </Card>
-  <Card title="MicroVM compute" icon="microchip" href="/compute/overview">
-    Any container — web app, worker, or database — sleeping when idle, waking in seconds.
-  </Card>
-  <Card title="Object storage" icon="box-archive" href="/storage/overview">
-    An S3-compatible bucket per branch, forked with the branch.
-  </Card>
-  <Card title="One credential seam" icon="key" href="/governance/overview">
-    Standard `DATABASE_URL` and `AWS_*` variables, scoped project → branch → service.
-  </Card>
-  <Card title="Governance" icon="shield-check" href="/governance/overview">
-    Allow, deny, or require approval for every sensitive action. Agents propose, humans approve.
-  </Card>
-</CardGroup>
-
-## Hosted or self-hosted
-
-| | InstaCloud | insta-oss |
-| --- | --- | --- |
-| Where it runs | Managed, multi-region | Your Docker |
-| Accounts and billing | Yes | None — single tenant |
-| CLI, MCP, skills | Same | Same |
-| Cloud-only features | Orgs, GitHub deploys, custom domains, backups, usage | Returns `501` with guidance |
-
-The repository's [COMPATIBILITY.md](https://github.com/InsForge/insta-oss/blob/main/COMPATIBILITY.md) has the command-by-command list.
