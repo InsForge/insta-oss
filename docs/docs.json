@@ -22,13 +22,13 @@
     "dark": "/logo/dark.svg"
   },
   "banner": {
-    "content": "InstaCloud docs are in early access — many pages are still being written. Missing something? [Open an issue](https://github.com/InsForge/insta-oss/issues).",
+    "content": "InstaCloud docs are in early access: many pages are still being written. Missing something? [Open an issue](https://github.com/InsForge/insta-oss/issues).",
     "dismissible": true
   },
   "seo": {
     "metatags": {
-      "og:site_name": "InstaCloud Docs — the cloud built for agents",
-      "description": "InstaCloud is the cloud built for agents — as the primary operator, and as the workload: database, storage, and compute that branch per task, with one gated credential seam and humans in the approval loop."
+      "og:site_name": "InstaCloud Docs | Cloud infrastructure for the era of agents",
+      "description": "InstaCloud is the cloud infrastructure built from the ground up to serve agents: database, storage, and compute that branch per task, with one gated credential seam and humans in the approval loop."
     },
     "indexing": "navigable"
   },
