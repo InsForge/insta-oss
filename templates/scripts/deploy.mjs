@@ -56,7 +56,10 @@ step(2, `generated ${Object.keys(generated).length} value(s)`);
 // Step 6 owns the deploy now, after step 5 has written the variables, and passes the same --image.
 for (const [name, svc] of services) {
   const cmd = ["services", "add", "compute", name, "--branch", branch, "--port", String(svc.port ?? 8080)];
-  if (svc.volume?.size) cmd.push("--volume", String(svc.volume.size));
+  // `volume: true` says a disk is NEEDED; the size is the platform's, and this prototype path
+  // goes through `services add`, which has no way to ask for it. A dev deploy takes the smallest
+  // allowance rather than guessing at production's — the real executor picks the real size.
+  if (svc.volume) cmd.push("--volume", "1");
   try {
     insta(cmd);
   } catch (e) {

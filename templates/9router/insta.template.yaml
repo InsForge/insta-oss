@@ -1,5 +1,5 @@
 code: 9router
-version: 1.2.0
+version: 1.2.1
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -12,11 +12,10 @@ upstream:
 services:
   router:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/9router:1.2.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/9router:1.2.1   # built from ./Dockerfile by templates-build-images.yml
     port: 20128
     healthcheck: /api/health    # / is a 307 redirect chain and never satisfies the deploy health gate
-    volume:
-      size: 10                  # DATA_DIR points provider keys, accounts, and jwt-secret at it
+    volume: true  # DATA_DIR points provider keys, accounts, and jwt-secret at it
     env:
       fixed:
         DATA_DIR: /data

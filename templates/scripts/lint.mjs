@@ -16,9 +16,6 @@ const codes = new Set();
 if (existsSync(join(root, "index.json"))) { failures++; console.error("✗ index.json: never commit it: CI generates it"); }
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
-// Mirror of the platform's compute catalog. The platform is the authority; this copy exists so a
-// typo fails on the pull request instead of on the publish run after merge.
-const COMPUTE_SPECS = ["1vcpu-256mb", "1vcpu-512mb", "1vcpu-1gb", "2vcpu-1gb", "2vcpu-2gb"];
 // Images this repo builds for itself; templates-build-images derives their tag from `version:`.
 const SELF_IMAGE_PREFIX = "ghcr.io/insforge/insta-oss/templates/";
 const dirs = readdirSync(root).filter((d) => !NON_TEMPLATE.has(d) && statSync(join(root, d)).isDirectory());
@@ -107,8 +104,13 @@ for (const dir of dirs) {
     }
     if (svc.build && !existsSync(join(root, dir, svc.build.replace(/^\.\//, "")))) err(dir, `${name}: build file ${svc.build} not found`);
     if (svc.type === "web" && !svc.healthcheck) err(dir, `${name}: web service needs healthcheck`);
-    if (svc.spec !== undefined && !COMPUTE_SPECS.includes(String(svc.spec))) {
-      err(dir, `${name}: unknown compute spec '${svc.spec}' (one of: ${COMPUTE_SPECS.join(", ")})`);
+    // Sizing is the platform's, so neither field is a manifest field any more. Mirrors what
+    // publish refuses, said here so an author finds out before the upload rather than after.
+    if (svc.spec !== undefined) {
+      err(dir, `${name}: compute size is the platform's to choose — remove spec`);
+    }
+    if (svc.volume !== undefined && svc.volume !== true) {
+      err(dir, `${name}: the volume size is the platform's to choose — declare 'volume: true'`);
     }
     // Same message the platform uses. Catches the shape only: a misspelled key is silent on both sides.
     if (svc.alwaysOn !== undefined && typeof svc.alwaysOn !== "boolean") {
