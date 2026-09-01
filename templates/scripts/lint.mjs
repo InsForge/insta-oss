@@ -83,6 +83,14 @@ for (const dir of dirs) {
         if (verdict.error) err(dir, verdict.error);
       }
     }
+    // Also before the postgres skip: the platform refuses these on EVERY service type, so a lint
+    // that ran them only for compute would green-light a manifest publish then rejects.
+    if (svc.spec !== undefined) {
+      err(dir, `${name}: compute size is the platform's to choose — remove spec`);
+    }
+    if (svc.volume !== undefined && svc.volume !== true) {
+      err(dir, `${name}: the volume size is the platform's to choose — declare 'volume: true'`);
+    }
     if (svc.type === "postgres") continue; // managed service: platform injects credentials
     // rule 1: image must be pinned (tag or digest), never latest/tagless
     if (!svc.image && !svc.build) err(dir, `${name}: needs image or build`);
@@ -104,13 +112,6 @@ for (const dir of dirs) {
     }
     if (svc.build && !existsSync(join(root, dir, svc.build.replace(/^\.\//, "")))) err(dir, `${name}: build file ${svc.build} not found`);
     if (svc.type === "web" && !svc.healthcheck) err(dir, `${name}: web service needs healthcheck`);
-    // Mirrors what publish refuses, so an author hears it on the PR rather than after merge.
-    if (svc.spec !== undefined) {
-      err(dir, `${name}: compute size is the platform's to choose — remove spec`);
-    }
-    if (svc.volume !== undefined && svc.volume !== true) {
-      err(dir, `${name}: the volume size is the platform's to choose — declare 'volume: true'`);
-    }
     // Same message the platform uses. Catches the shape only: a misspelled key is silent on both sides.
     if (svc.alwaysOn !== undefined && typeof svc.alwaysOn !== "boolean") {
       err(dir, `${name}: alwaysOn must be a boolean`);

@@ -6,7 +6,7 @@
 // "nothing to build" case the job exists to produce.
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
@@ -98,6 +98,47 @@ function run(script, args = []) {
     return { out: `${e.stdout ?? ''}${e.stderr ?? ''}`, code: e.status ?? 1 };
   }
 }
+
+// lint discovers any directory under templates/, so a case is a directory written and removed.
+function withTemplate(name, manifest, fn) {
+  const dir = join(root, name);
+  mkdirSync(dir, { recursive: true });
+  try {
+    writeFileSync(join(dir, 'insta.template.yaml'), yaml.dump(manifest));
+    return fn();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe('lint: sizing is the platform\'s, on every service type', () => {
+  // logo: none so the fixture is otherwise CLEAN, and the positive case can assert exit 0.
+  const base = { code: 'sizing-case', version: '1.0.0', maintainer: 'official', upstream: { pinned: 'v1' }, meta: { category: 'test', logo: 'none' } };
+  const web = { type: 'web', image: 'docker.io/library/nginx:1.27', port: 80, healthcheck: '/' };
+
+  it('refuses spec and a sized volume on a compute service', () => {
+    for (const [field, extra] of [['spec', { spec: '1vcpu-1gb' }], ['volume', { volume: { size: 10 } }]]) {
+      const r = withTemplate('sizing-case', { ...base, services: { web: { ...web, ...extra } } }, () => run('lint.mjs'));
+      expect(r.code, `${field} should fail lint`).toBe(1);
+      expect(r.out).toContain("the platform's to choose");
+    }
+  });
+
+  // The postgres skip used to sit ABOVE these checks, so a managed DB could carry either field
+  // through lint and only fail at publish. The platform refuses them on every type; so does this.
+  it('refuses them on a postgres service too, despite the managed-service skip', () => {
+    for (const extra of [{ spec: '1vcpu-1gb' }, { volume: { size: 10 } }]) {
+      const r = withTemplate('sizing-case', { ...base, services: { web, db: { type: 'postgres', ...extra } } }, () => run('lint.mjs'));
+      expect(r.code).toBe(1);
+      expect(r.out).toContain("the platform's to choose");
+    }
+  });
+
+  it('accepts `volume: true`', () => {
+    const r = withTemplate('sizing-case', { ...base, services: { web: { ...web, volume: true } } }, () => run('lint.mjs'));
+    expect(r.code, r.out).toBe(0);
+  });
+});
 
 describe('lint: a self-built image must be tagged with its own version', () => {
   it('passes the registry as it stands', () => {
