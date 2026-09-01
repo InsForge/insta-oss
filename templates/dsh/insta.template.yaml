@@ -1,5 +1,5 @@
 code: dsh
-version: 0.3.0
+version: 0.4.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -16,13 +16,13 @@ services:
   # the same branch, the second overwriting the first (QA.md finding 1).
   dsh:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/dsh:0.3.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/dsh:0.4.0   # built from ./Dockerfile by templates-build-images.yml
     port: 8080
     healthcheck: /             # nginx answers 401 unauthenticated, which counts as healthy
     # A volume makes scale-to-zero a cold boot, not a resume; same tradeoff as the other agent UIs.
     alwaysOn: true
     volume:
-      size: 1                  # mounts at /data
+      size: 10                 # mounts at /data
     env:
       fixed:
         HOME: /data/home

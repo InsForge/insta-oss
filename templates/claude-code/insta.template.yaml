@@ -1,5 +1,5 @@
 code: claude-code
-version: 0.7.0
+version: 0.8.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -13,7 +13,7 @@ services:
   # the same branch, the second overwriting the first (QA.md finding 1).
   claude-code:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/claude-code:0.7.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/claude-code:0.8.0   # built from ./Dockerfile by templates-build-images.yml
     port: 7681
     healthcheck: /
     # No `spec:`, so the platform's birth size applies. Worth keeping from when this asked for
@@ -23,7 +23,7 @@ services:
     # A volume makes scale-to-zero a cold boot, not a resume (24.5s measured).
     alwaysOn: true
     volume:
-      size: 1                    # mounts at /data
+      size: 10                   # mounts at /data
     env:
       fixed:
         HOME: /data/home

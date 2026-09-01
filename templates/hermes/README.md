@@ -25,7 +25,7 @@ after deploy: a per-platform form, an enable toggle, and a restart button that a
 - The Channels page: connect any supported messaging platform (Telegram, Slack, Discord, WhatsApp,
   Signal, Email, and more) from the browser, with connection status and a gateway restart button,
   so channel setup never needs a redeploy.
-- A 1 GiB volume mounted at `/data`, with `HERMES_HOME` pointed at `/data/.hermes` so the agent's
+- A 10 GiB volume mounted at `/data`, with `HERMES_HOME` pointed at `/data/.hermes` so the agent's
   state, and every channel you configure, survives restarts and redeploys.
 - The gateway token generated for you (64 chars) and stored as a managed secret, so it is never
   committed anywhere or shown in the manifest.

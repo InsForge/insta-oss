@@ -1,5 +1,5 @@
 code: n8n
-version: 1.2.0
+version: 1.3.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -23,7 +23,7 @@ services:
     alwaysOn: true
     # n8n defaults to SQLite, and N8N_USER_FOLDER below puts that file on this volume.
     volume:
-      size: 1
+      size: 10
     env:
       fixed:
         N8N_USER_FOLDER: /data

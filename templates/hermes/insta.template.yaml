@@ -1,5 +1,5 @@
 code: hermes
-version: 2.2.0
+version: 2.3.0
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -16,14 +16,14 @@ generated:
 services:
   hermes:
     type: web
-    image: ghcr.io/insforge/insta-oss/templates/hermes:2.2.0   # built from ./Dockerfile by templates-build-images.yml
+    image: ghcr.io/insforge/insta-oss/templates/hermes:2.3.0   # built from ./Dockerfile by templates-build-images.yml
     port: 8080
     healthcheck: /api/status
     # Channels arrive on OUTBOUND connections (Telegram long poll, Slack Socket Mode, ...),
     # so an idle machine stops and nothing can wake it.
     alwaysOn: true
     volume:
-      size: 1
+      size: 10
     env:
       fixed:
         HERMES_HOME: /data/.hermes

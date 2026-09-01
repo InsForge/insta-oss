@@ -24,7 +24,7 @@ and a manifest cannot override a container command, so a wrapper image carries t
 - An HTTPS URL for the Control UI at `/openclaw`, where you configure model providers and connect
   channels after deploy — no deploy-time keys needed.
 - A gateway auth token generated for you and stored as a managed secret.
-- A 1 GiB volume mounted at `/data` holding `openclaw.json`, auth profiles, channel and session
+- A 10 GiB volume mounted at `/data` holding `openclaw.json`, auth profiles, channel and session
   state (`OPENCLAW_STATE_DIR=/data/.openclaw`) and the agent workspace
   (`OPENCLAW_WORKSPACE_DIR=/data/workspace`), so all of it survives restarts and redeploys.
 
