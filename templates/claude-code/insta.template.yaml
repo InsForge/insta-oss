@@ -20,8 +20,11 @@ services:
     # 1 GB: 2vcpu-2gb was tried on a live deployment against a ~30s first-response complaint and
     # made no difference, so that cost is not memory or core count and a bigger machine will not
     # fix it.
-    # A volume makes scale-to-zero a cold boot, not a resume (24.5s measured).
-    alwaysOn: true
+    # No alwaysOn: every request arrives INBOUND (a browser opening the terminal), so
+    # wake-on-request reaches this service — unlike hermes or n8n, whose work arrives on an
+    # outbound socket or an in-process timer and would stop silently. The cost is real: a
+    # volume-bearing service cold-boots rather than resuming (~25s), and an agent left
+    # working with no browser attached is stopped, not paused.
     volume: true  # mounts at /data
     env:
       fixed:
