@@ -15,7 +15,7 @@ database a local `npm install n8n` would use, and it asks you for nothing at dep
 ## What you get by hosting it
 
 - An HTTPS URL for the n8n editor, with no port forwarding or tunnel to manage.
-- A 1 GiB volume mounted at `/data`, with `N8N_USER_FOLDER` pointed at it, so the SQLite database
+- A 10 GiB volume mounted at `/data`, with `N8N_USER_FOLDER` pointed at it, so the SQLite database
   lives on the volume and survives restarts and redeploys along with your settings file and any
   community nodes you install. This pairing is the whole persistence story: without it, a redeploy
   would take your workflows with it.
@@ -57,7 +57,7 @@ this template does not use: n8n reads its database as five separate `DB_POSTGRES
 and no connection string, so a managed database cannot be wired to it from a manifest today.
 
 **The volume is the only copy.** Workflows, encrypted credentials and execution history all live on
-that one 1 GiB volume, and nothing here snapshots or replicates it. Export anything you would mind
+that one 10 GiB volume, and nothing here snapshots or replicates it. Export anything you would mind
 losing — n8n's own **Download** on a workflow, or the whole set from the workflow list — and keep a
 copy of `N8N_ENCRYPTION_KEY`, since exported credentials are unreadable without it.
 

@@ -86,7 +86,7 @@ already has inside that container, but they outlive the session that read them, 
 ## What you get by hosting it
 
 - An HTTPS URL for the harness UI, gated by HTTP basic auth, with no port forwarding or tunnel.
-- A 1 GiB volume mounted at `/data`. `DSH_HOME` is `/data/dsh` and `HOME` is `/data/home`, so
+- A 10 GiB volume mounted at `/data`. `DSH_HOME` is `/data/dsh` and `HOME` is `/data/home`, so
   settings, stored credentials, session history, installed plugins and your files survive
   restarts, redeploys and version upgrades.
 - The sign-in credentials kept as service variables rather than baked into the image, so you can
