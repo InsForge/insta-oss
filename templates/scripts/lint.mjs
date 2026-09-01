@@ -104,8 +104,7 @@ for (const dir of dirs) {
     }
     if (svc.build && !existsSync(join(root, dir, svc.build.replace(/^\.\//, "")))) err(dir, `${name}: build file ${svc.build} not found`);
     if (svc.type === "web" && !svc.healthcheck) err(dir, `${name}: web service needs healthcheck`);
-    // Sizing is the platform's, so neither field is a manifest field any more. Mirrors what
-    // publish refuses, said here so an author finds out before the upload rather than after.
+    // Mirrors what publish refuses, so an author hears it on the PR rather than after merge.
     if (svc.spec !== undefined) {
       err(dir, `${name}: compute size is the platform's to choose — remove spec`);
     }

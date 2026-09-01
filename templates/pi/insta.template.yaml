@@ -17,11 +17,8 @@ services:
     image: ghcr.io/insforge/insta-oss/templates/pi:0.8.1   # built from ./Dockerfile by templates-build-images.yml
     port: 7681
     healthcheck: /
-    # No alwaysOn: every request arrives INBOUND (a browser opening the terminal), so
-    # wake-on-request reaches this service — unlike hermes or n8n, whose work arrives on an
-    # outbound socket or an in-process timer and would stop silently. The cost is real: a
-    # volume-bearing service cold-boots rather than resuming (~25s), and an agent left
-    # working with no browser attached is stopped, not paused.
+    # No alwaysOn: the browser reaches this INBOUND, so wake-on-request works (hermes and n8n
+    # cannot). Costs a ~25s cold boot, and an agent left running with no browser is stopped.
     volume: true
     env:
       fixed:
