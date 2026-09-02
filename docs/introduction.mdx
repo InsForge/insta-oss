@@ -3,8 +3,6 @@ title: "Introduction"
 description: "Cloud infrastructure built from the ground up to serve agents."
 ---
 
-InstaCloud is the cloud infrastructure built from the ground up to serve agents.
-
 Traditional devtools were built by humans to serve humans. When the one operating the infrastructure, and increasingly the one running on it, is an agent, that model has to change: environments must be disposable and parallel instead of one shared staging, credentials can't live in prompts, irreversible actions need a human gate rather than a confirmation dialog, and every operation has to be legible to a machine, not a dashboard.
 
 InstaCloud provides the three basic primitives, rebuilt on those terms: **database** (real Postgres), **storage** (S3-compatible buckets), and **compute** (containers, run in microVMs on the hosted platform). Operations are driven from a CLI command or an MCP tool, not a dashboard. The whole environment clones into an isolated branch per task. Credentials flow through one seam you can gate, and humans approve what matters. The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/overview), the open-source runtime you can run on your own Docker. The same is true when the operator is you.
