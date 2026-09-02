@@ -72,9 +72,9 @@ for (const dir of dirs) {
   const declared = new Set();
   for (const [name, svc] of Object.entries(m?.services ?? {})) {
     for (const group of ["required", "optional"]) for (const k of Object.keys(svc.env?.[group] ?? {})) declared.add(k);
-    // Same bargain as COMPUTE_SPECS above: the platform is the authority, and this check exists so
-    // a typo fails on the pull request instead of asynchronously, mid-run, on every by-code deploy
-    // after merge. Runs before the postgres skip below, because the platform checks every service.
+    // The platform is the authority; this check exists so a typo fails on the pull request instead
+    // of asynchronously, mid-run, on every by-code deploy after merge. Runs before the postgres
+    // skip below, because the platform checks every service.
     for (const [k, value] of Object.entries(svc.env?.fixed ?? {})) {
       for (const mt of String(value).matchAll(FIXED_REF_RE)) {
         const verdict = checkFixedRef(mt[1], {
