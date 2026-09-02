@@ -1,6 +1,6 @@
 ---
 title: "Introduction"
-description: "Cloud infrastructure built from the ground up to serve agents."
+description: "InstaCloud is the cloud infrastructure built from the ground up to serve agents."
 ---
 
 Traditional devtools were built by humans to serve humans. When a swarm of agents operates the infrastructure, that model has to change: environments must clone fast and be disposable, credentials can't live in prompts, irreversible high-impact actions need a human gate, and every operation has to be legible to agents, not a dashboard.
@@ -32,11 +32,11 @@ InstaCloud provides the three basic primitives, rebuilt on those terms: **databa
   <Step title="Deploy your app">
     Open your coding agent (Claude Code, Cursor, Codex, or any agent the setup wired) in a directory with a Dockerfile and tell it:
 
-    ```text Your prompt
+    ```text title="Your prompt"
     Deploy this app on InstaCloud with a Postgres database wired in.
     ```
 
-    You complete the one-time browser login; the agent drives the rest. The result is a running app on its own URL, with its database connection injected. Under the hood the agent runs the [insta CLI](/reference/cli/overview); the same commands work by hand if you'd rather drive them yourself.
+    You complete the one-time login; the agent drives the rest. The result is a running app on its own URL, with its database connection injected. Under the hood the agent runs the [insta CLI](/reference/cli/overview), which you can also drive by hand.
   </Step>
   <Step title="Keep going">
     The [quickstart](/quickstart) walks through each step, including your first branch; [agent setup](/agents/setup) covers what the agent wiring installs. From there, the primitives: [Postgres](/postgres/overview), [storage](/storage/overview), and [compute](/compute/overview), plus [governance](/governance/overview) to gate what an agent can do on its own.
