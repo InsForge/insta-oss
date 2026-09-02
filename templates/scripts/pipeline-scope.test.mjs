@@ -4,9 +4,9 @@
 // and assert the exit status as well as the value. That distinction is the whole point: an earlier
 // version computed `[]` correctly and still exited 1, which killed the step on exactly the
 // "nothing to build" case the job exists to produce.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
@@ -98,6 +98,63 @@ function run(script, args = []) {
     return { out: `${e.stdout ?? ''}${e.stderr ?? ''}`, code: e.status ?? 1 };
   }
 }
+
+// lint discovers any directory under templates/, so a case has to BE a directory here — in the
+// contributor's source tree, which this helper then rm -rf's. So it may only ever remove a
+// directory it provably created: the name is unique per call, and `mkdir` is NOT recursive, so an
+// existing path throws EEXIST instead of being adopted and deleted. A fixed name would take an
+// untracked draft template with it.
+const FIXTURE_PREFIX = 'zz-selftest-';
+let fixtureN = 0;
+function withTemplate(manifest, fn) {
+  const code = `${FIXTURE_PREFIX}${process.pid}-${++fixtureN}`;
+  const dir = join(root, code);
+  mkdirSync(dir); // throws EEXIST rather than adopting a directory this helper did not make
+  try {
+    // `code` must equal the folder name (lint.mjs), so the helper owns it, not the caller.
+    writeFileSync(join(dir, 'insta.template.yaml'), yaml.dump({ ...manifest, code }));
+    return fn();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A killed run leaves its fixture behind, and lint scans every directory here — so the next run
+// would fail on someone else's litter. Only the prefix this helper mints is ever swept.
+beforeAll(() => {
+  for (const d of readdirSync(root)) {
+    if (d.startsWith(FIXTURE_PREFIX)) rmSync(join(root, d), { recursive: true, force: true });
+  }
+});
+
+describe('lint: sizing is the platform\'s, on every service type', () => {
+  // logo: none so the fixture is otherwise CLEAN, and the positive case can assert exit 0.
+  const base = { version: '1.0.0', maintainer: 'official', upstream: { pinned: 'v1' }, meta: { category: 'test', logo: 'none' } };
+  const web = { type: 'web', image: 'docker.io/library/nginx:1.27', port: 80, healthcheck: '/' };
+
+  it('refuses spec and a sized volume on a compute service', () => {
+    for (const [field, extra] of [['spec', { spec: '1vcpu-1gb' }], ['volume', { volume: { size: 10 } }]]) {
+      const r = withTemplate({ ...base, services: { web: { ...web, ...extra } } }, () => run('lint.mjs'));
+      expect(r.code, `${field} should fail lint`).toBe(1);
+      expect(r.out).toContain("the platform's to choose");
+    }
+  });
+
+  // The postgres skip used to sit ABOVE these checks, so a managed DB could carry either field
+  // through lint and only fail at publish. The platform refuses them on every type; so does this.
+  it('refuses them on a postgres service too, despite the managed-service skip', () => {
+    for (const extra of [{ spec: '1vcpu-1gb' }, { volume: { size: 10 } }]) {
+      const r = withTemplate({ ...base, services: { web, db: { type: 'postgres', ...extra } } }, () => run('lint.mjs'));
+      expect(r.code).toBe(1);
+      expect(r.out).toContain("the platform's to choose");
+    }
+  });
+
+  it('accepts `volume: true`', () => {
+    const r = withTemplate({ ...base, services: { web: { ...web, volume: true } } }, () => run('lint.mjs'));
+    expect(r.code, r.out).toBe(0);
+  });
+});
 
 describe('lint: a self-built image must be tagged with its own version', () => {
   it('passes the registry as it stands', () => {

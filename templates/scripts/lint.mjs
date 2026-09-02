@@ -16,9 +16,6 @@ const codes = new Set();
 if (existsSync(join(root, "index.json"))) { failures++; console.error("✗ index.json: never commit it: CI generates it"); }
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
-// Mirror of the platform's compute catalog. The platform is the authority; this copy exists so a
-// typo fails on the pull request instead of on the publish run after merge.
-const COMPUTE_SPECS = ["1vcpu-256mb", "1vcpu-512mb", "1vcpu-1gb", "2vcpu-1gb", "2vcpu-2gb"];
 // Images this repo builds for itself; templates-build-images derives their tag from `version:`.
 const SELF_IMAGE_PREFIX = "ghcr.io/insforge/insta-oss/templates/";
 const dirs = readdirSync(root).filter((d) => !NON_TEMPLATE.has(d) && statSync(join(root, d)).isDirectory());
@@ -75,9 +72,9 @@ for (const dir of dirs) {
   const declared = new Set();
   for (const [name, svc] of Object.entries(m?.services ?? {})) {
     for (const group of ["required", "optional"]) for (const k of Object.keys(svc.env?.[group] ?? {})) declared.add(k);
-    // Same bargain as COMPUTE_SPECS above: the platform is the authority, and this check exists so
-    // a typo fails on the pull request instead of asynchronously, mid-run, on every by-code deploy
-    // after merge. Runs before the postgres skip below, because the platform checks every service.
+    // The platform is the authority; this check exists so a typo fails on the pull request instead
+    // of asynchronously, mid-run, on every by-code deploy after merge. Runs before the postgres
+    // skip below, because the platform checks every service.
     for (const [k, value] of Object.entries(svc.env?.fixed ?? {})) {
       for (const mt of String(value).matchAll(FIXED_REF_RE)) {
         const verdict = checkFixedRef(mt[1], {
@@ -85,6 +82,14 @@ for (const dir of dirs) {
         });
         if (verdict.error) err(dir, verdict.error);
       }
+    }
+    // Also before the postgres skip: the platform refuses these on EVERY service type, so a lint
+    // that ran them only for compute would green-light a manifest publish then rejects.
+    if (svc.spec !== undefined) {
+      err(dir, `${name}: compute size is the platform's to choose — remove spec`);
+    }
+    if (svc.volume !== undefined && svc.volume !== true) {
+      err(dir, `${name}: the volume size is the platform's to choose — declare 'volume: true'`);
     }
     if (svc.type === "postgres") continue; // managed service: platform injects credentials
     // rule 1: image must be pinned (tag or digest), never latest/tagless
@@ -107,9 +112,6 @@ for (const dir of dirs) {
     }
     if (svc.build && !existsSync(join(root, dir, svc.build.replace(/^\.\//, "")))) err(dir, `${name}: build file ${svc.build} not found`);
     if (svc.type === "web" && !svc.healthcheck) err(dir, `${name}: web service needs healthcheck`);
-    if (svc.spec !== undefined && !COMPUTE_SPECS.includes(String(svc.spec))) {
-      err(dir, `${name}: unknown compute spec '${svc.spec}' (one of: ${COMPUTE_SPECS.join(", ")})`);
-    }
     // Same message the platform uses. Catches the shape only: a misspelled key is silent on both sides.
     if (svc.alwaysOn !== undefined && typeof svc.alwaysOn !== "boolean") {
       err(dir, `${name}: alwaysOn must be a boolean`);

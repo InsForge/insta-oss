@@ -56,7 +56,9 @@ step(2, `generated ${Object.keys(generated).length} value(s)`);
 // Step 6 owns the deploy now, after step 5 has written the variables, and passes the same --image.
 for (const [name, svc] of services) {
   const cmd = ["services", "add", "compute", name, "--branch", branch, "--port", String(svc.port ?? 8080)];
-  if (svc.volume?.size) cmd.push("--volume", String(svc.volume.size));
+  // `services add` cannot ask for the platform's size, so a dev deploy takes the smallest
+  // allowance. The real executor picks the real one.
+  if (svc.volume) cmd.push("--volume", "1");
   try {
     insta(cmd);
   } catch (e) {

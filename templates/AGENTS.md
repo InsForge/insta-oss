@@ -40,8 +40,10 @@ IS the template code. Copying the closest existing template is the fastest way t
    editing a template without bumping would overwrite an image that published instances pull.
 5. A service may not carry both `image:` and `build:`.
 6. `constraints[].oneOf` and `allOf` may only name variables the manifest declares.
-7. `spec:` must name a compute size the platform offers (`1vcpu-256mb`, `1vcpu-512mb`, `1vcpu-1gb`,
-   `2vcpu-1gb`, `2vcpu-2gb`). `npm run lint` mirrors that list; the platform is the authority.
+7. A manifest never sizes a service. There is no `spec:`, and `volume:` is the boolean `true`, not
+   a size. CPU, memory and disk are the platform's to choose and are capped for the org's plan, so
+   a number here could only drift from it: every template once carried `size: 1` because that was
+   the free cap the day it was written. `npm run lint` refuses both, and so does publish.
 8. Never commit `index.json`. CI generates it.
 9. A `${...}` inside an `env.fixed` value may only be `${services.<name>.url}` or
    `${services.<name>.host}`, naming a service the manifest declares that is not a managed

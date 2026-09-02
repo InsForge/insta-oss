@@ -1,5 +1,5 @@
 code: n8n
-version: 1.3.0
+version: 1.3.1
 maintainer: official
 sourceRepo: InsForge/insta-oss
 
@@ -22,8 +22,7 @@ services:
     # Schedule and polling triggers fire from inside the process, so an idle machine never wakes.
     alwaysOn: true
     # n8n defaults to SQLite, and N8N_USER_FOLDER below puts that file on this volume.
-    volume:
-      size: 10
+    volume: true
     env:
       fixed:
         N8N_USER_FOLDER: /data

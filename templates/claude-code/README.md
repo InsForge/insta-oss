@@ -18,7 +18,7 @@ gives you the same environment.
 ## What you get by hosting it
 
 - An HTTPS URL for the terminal, with no port forwarding or tunnel to manage.
-- A 10 GiB volume mounted at `/data`. `HOME` is set to `/data/home`, so your CLI login, shell
+- A persistent volume mounted at `/data`. `HOME` is set to `/data/home`, so your CLI login, shell
   history, and any repositories you clone survive restarts, redeploys, and version upgrades.
 - The terminal credentials kept as service variables rather than baked into the image, so you can
   change them later without rebuilding anything. They are yours, not ours: the template ships no
