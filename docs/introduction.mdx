@@ -30,18 +30,13 @@ InstaCloud provides the three basic primitives, rebuilt on those terms: **databa
     The npx path also wires up any coding agents on your machine; npm installs just the CLI.
   </Step>
   <Step title="Deploy your app">
-    Open your coding agent (Claude Code, Cursor, Codex, or any agent the setup wired) in a directory with a Dockerfile and ask it to deploy. You complete the one-time browser login; the agent drives the rest:
+    Open your coding agent (Claude Code, Cursor, Codex, or any agent the setup wired) in a directory with a Dockerfile and tell it:
 
-    ```bash
-    insta login
-    insta project create my-app
-    insta services add postgres db
-    insta services add compute app
-    insta secrets bind DATABASE_URL postgres/db --to compute/app
-    insta deploy .
+    ```text Your prompt
+    Deploy this app on InstaCloud with a Postgres database wired in.
     ```
 
-    That's a running app on its own URL, with its database connection injected. The same commands work by hand if you'd rather drive them yourself.
+    You complete the one-time browser login; the agent drives the rest. The result is a running app on its own URL, with its database connection injected. Under the hood the agent runs the [insta CLI](/reference/cli/overview); the same commands work by hand if you'd rather drive them yourself.
   </Step>
   <Step title="Keep going">
     The [quickstart](/quickstart) walks through each step, including your first branch; [agent setup](/agents/setup) covers what the agent wiring installs. From there, the primitives: [Postgres](/postgres/overview), [storage](/storage/overview), and [compute](/compute/overview), plus [governance](/governance/overview) to gate what an agent can do on its own.
