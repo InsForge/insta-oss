@@ -5,7 +5,7 @@ description: "InstaCloud is the cloud infrastructure built from the ground up to
 
 Traditional devtools were built by humans to serve humans. When a swarm of agents operates the infrastructure, that model has to change: environments must clone fast and be disposable, credentials can't live in prompts, irreversible high-impact actions need a human gate, and every operation has to be legible to agents, not a dashboard.
 
-InstaCloud provides the three basic primitives, rebuilt on those terms: **database** (real Postgres), **storage** (S3-compatible buckets), and **compute** (containers, run in microVMs on the hosted platform). Operations are driven from a CLI command or an MCP tool, not a dashboard. The whole environment clones into an isolated branch per task. Credentials flow through one seam you can gate, and humans approve what matters. The same `insta` CLI, MCP server, and agent skill drive both the hosted service and [insta-oss](/self-hosting/overview), the open-source runtime you can run on your own Docker. The same is true when the operator is you.
+InstaCloud provides the three basic primitives, rebuilt on those terms: **database** (real Postgres), **storage** (S3-compatible buckets), and **compute** (containers, run in microVMs on the hosted platform). Every operation is a CLI command or an MCP tool call, not a dashboard click. The whole environment clones into an isolated branch per task. Credentials flow through one seam you can gate, and humans approve what matters. One `insta` CLI, MCP server, and agent skill drive it all, on the hosted service or on [insta-oss](/self-hosting/overview), the open-source runtime you run on your own Docker. And none of it is agent-only: the same commands work when the operator is you.
 
 ## Start here
 
