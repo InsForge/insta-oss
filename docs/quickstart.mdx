@@ -3,11 +3,17 @@ title: "Quickstart"
 description: "Connect your coding agent to an InstaCloud project and deploy something, in about five minutes."
 ---
 
-This guide connects a coding agent to a fresh InstaCloud project, checks the wiring, and has the agent deploy something. You need an InstaCloud account, a coding agent (Claude Code, Cursor, Codex, or any other), and Node.js 18 or newer. No Dockerfile is needed until the last step.
+This guide takes you from no account to a coding agent deploying on InstaCloud. You need a coding agent (Claude Code, Cursor, Codex, or any other) and Node.js 18 or newer. No Dockerfile is needed until the last step.
 
 <Steps>
+  <Step title="Create an account" titleSize="h2">
+    Sign up at [console.instacloud.com/signup](https://console.instacloud.com/signup). **GitHub** or **Google** is one click and creates the account on first sign-in. Email needs a password and the verification code the console emails you.
+
+    Already have an account? Sign in and go to the next step.
+  </Step>
+
   <Step title="Create a project" titleSize="h2">
-    Sign in at [console.instacloud.com](https://console.instacloud.com) and click **Create Project**. The console opens the project's **Quick Start** page, which prints the setup command for this project with its project id already filled in.
+    In the console, click **Create Project**. The console opens the project's **Quick Start** page, which prints the setup command for this project with its project id already filled in.
 
     {/* screenshot: console project Quick Start page, Connect-agent panel with the one-liner */}
 
@@ -33,7 +39,7 @@ This guide connects a coding agent to a fresh InstaCloud project, checks the wir
 
     </CodeGroup>
 
-    Both paths do the same work. The `insta` CLI is installed globally, the `insta` skill and the remote MCP server are registered for every coding agent on this machine, your browser opens once to sign in, and the current directory is linked to the project. The command is safe to run again.
+    Both paths do the same work. The `insta` CLI is installed globally, the `insta` skill and the remote MCP server are registered for every coding agent on this machine, the console opens in your browser once so you can approve the sign-in, and the current directory is linked to the project. The command is safe to run again.
 
     <Note>
       The command targets production. Machines without Node, native Windows shells, and the staging deployment are covered in [Set up your coding agent](/agents/setup).
