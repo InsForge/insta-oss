@@ -3,30 +3,16 @@ title: "Agents overview"
 description: "The `insta` skill, the MCP server, and the governance model for agents."
 ---
 
-This section covers running coding agents against InstaCloud: what to install, how each agent connects, and the workflow that keeps agents productive without giving them the keys to production.
+InstaCloud is agent-native: the stack is designed so that everything you can do in the console, an agent can do through the `insta` CLI or an MCP tool call. This page covers how agents connect, and the two rules that keep them productive without handing them production.
 
-## The model
+Agents reach the platform two ways, both hitting the same API under the same governance:
 
-Agents reach the platform two ways, and both hit the same API under the same governance:
+- **CLI + skill.** Terminal agents (Claude Code, Cursor, Codex, and others) run the `insta` CLI directly. The `insta` skill teaches the workflow: check `insta status`, work on a branch, pull secrets through the seam, deploy, and relay approval requests instead of working around them.
+- **MCP server.** `https://mcp.instacloud.com/mcp` exposes the `insta_*` toolset ([reference](/reference/mcp-tools)) over streamable HTTP, authenticated with OAuth or an `insta_` API token. Tools take explicit `projectId` and `branch` arguments, so an agent can operate on any project its token can see, no linked directory required.
 
-- **CLI + skill** — terminal agents (Claude Code, Cursor, Codex, and others) run the `insta` CLI directly. The `insta` skill teaches them the workflow: check `insta status`, work on a branch, pull secrets through the seam, deploy, and relay approval requests instead of working around them.
-- **MCP server** — `https://mcp.instacloud.com/mcp` exposes the `insta_*` toolset ([reference](/reference/mcp-tools)) over streamable HTTP, authenticated with OAuth or an `insta_` API token. Tools take explicit `projectId` and `branch` arguments, so an MCP agent can operate on any project its token can see, no linked directory required.
+Use whichever fits the agent; mixing them is fine. Two things are the design, not advice:
 
-Use whichever fits the agent; mixing them is fine.
+1. **Isolation by branch.** An agent task gets its own branch: its own database with real data, its own storage, its own compute URL. Mistakes are contained and disposable.
+2. **Approval for the irreversible.** A gated action returns an approval ID instead of executing; a human admin approves or denies, and grants are single-use and audited. The agent can only ask. Gating is opt-in, so set the policy (`insta policy set project.delete approve`) before the agent starts.
 
-## Two non-negotiables
-
-Everything else in this section is workflow advice. These two are the design:
-
-1. **Isolation by branch.** An agent task gets its own branch — its own database with real data, its own storage, its own compute URL. Mistakes are contained and disposable.
-2. **Approval for the irreversible.** Any action you gate returns an approval ID instead of executing. A human admin approves or denies; grants are single-use and audited. An agent cannot perform a gated action — it can only ask. Gating is opt-in, so set the policy (`insta policy set project.delete approve`) before the agent starts.
-
-## What ships
-
-| Piece | What it is | Where it goes |
-| --- | --- | --- |
-| `insta` skill | CLI workflow instructions for terminal agents | Installed globally for every agent detected on the machine |
-| MCP server | Hosted `insta_*` tools over streamable HTTP | Registered in each agent's MCP config |
-| Observe hook | Credential audit on agent tool calls | `.insta/observe/` in each linked repo, findings in `.insta/audit.jsonl` |
-
-[`insta setup agent`](/agents/setup) installs the skill and the MCP registration; the observe hook is added to a repo when you link it to a project with `insta project create` or `insta project link`.
+[`insta setup agent`](/agents/setup) installs the skill and registers the MCP server for every agent on the machine. Linking a repo (`insta project create` or `insta project link`) adds the observe hook, a credential audit that writes findings to `.insta/audit.jsonl`.
