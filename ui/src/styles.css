@@ -1,9 +1,6 @@
 @import "tailwindcss";
 @import "@insforge/ui/styles.css";
 
-/* Tailwind can't see class names inside pre-built packages — scan the ui dist. */
-@source "../node_modules/@insforge/ui/dist";
-
 /*
  * Map @insforge/ui design tokens (defined in styles.css above) to Tailwind v4
  * theme colors — same mapping as insta-frontend's globals.css. RGB-triplet
