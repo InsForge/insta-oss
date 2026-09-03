@@ -23,11 +23,33 @@ mkdir -p "$HERMES_HOME"
 # (`--insecure` is a documented no-op), so the credential has to exist first.
 # `config set` rather than writing config.yaml: the volume survives reboots, and an
 # appended YAML block would pile up a copy per boot.
-hash="$(cd /opt/hermes && python3 -c 'import sys; from plugins.dashboard_auth.basic import hash_password; print(hash_password(sys.argv[1]))' "$ADMIN_PASSWORD")"
-# Output suppressed: `config set` echoes the value, and the hash would land in the
-# log tail the console shows.
-hermes config set --force dashboard.basic_auth.username "$ADMIN_USERNAME" >/dev/null
-hermes config set --force dashboard.basic_auth.password_hash "$hash" >/dev/null
+#
+# Only when the credential CHANGED. Hashing the password and the two `config set`
+# calls are three full Python boots of the hermes CLI, ~6-8 s of every wake on a
+# 4 vCPU VM, and the result is already in config.yaml on the volume from the last
+# boot. A marker records a digest of the credential the config was last written
+# from; a boot with the same digest skips straight to serving. The marker holds a
+# SHA-256 of `user:password`, never the values, at 0600 next to the bcrypt hash
+# that config.yaml already stores, so it widens nothing. A rotated secret changes
+# the digest and takes the slow path once. Anything odd about the marker (unreadable,
+# empty, a config.yaml that went missing) falls back to the slow path: the fast path
+# is only ever taken on positive evidence.
+marker="$HERMES_HOME/.insta-auth-digest"
+digest="$(printf '%s:%s' "$ADMIN_USERNAME" "$ADMIN_PASSWORD" | sha256sum | cut -d' ' -f1)"
+if [ -f "$HERMES_HOME/config.yaml" ] && [ -r "$marker" ] && [ "$(cat "$marker" 2>/dev/null)" = "$digest" ]; then
+  echo "entrypoint: dashboard credential unchanged since the last boot; skipping auth bootstrap"
+else
+  hash="$(cd /opt/hermes && python3 -c 'import sys; from plugins.dashboard_auth.basic import hash_password; print(hash_password(sys.argv[1]))' "$ADMIN_PASSWORD")"
+  # Output suppressed: `config set` echoes the value, and the hash would land in the
+  # log tail the console shows.
+  hermes config set --force dashboard.basic_auth.username "$ADMIN_USERNAME" >/dev/null
+  hermes config set --force dashboard.basic_auth.password_hash "$hash" >/dev/null
+  # Written last, and only after both sets succeeded (set -e): a marker can never
+  # describe a config that was not actually written.
+  umask 077
+  printf '%s' "$digest" > "$marker"
+  umask 022
+fi
 
 # The gateway runs as the s6-supervised gateway-default service, NOT as this script's
 # child. The platform hands the image PID 1, so s6-overlay is live (a 2.1.x comment
