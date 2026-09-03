@@ -25,18 +25,36 @@ mkdir -p "$HERMES_HOME"
 # appended YAML block would pile up a copy per boot.
 #
 # Only when the credential CHANGED. Hashing the password and the two `config set`
-# calls are three full Python boots of the hermes CLI, ~6-8 s of every wake on a
-# 4 vCPU VM, and the result is already in config.yaml on the volume from the last
-# boot. A marker records a digest of the credential the config was last written
-# from; a boot with the same digest skips straight to serving. The marker holds a
-# SHA-256 of `user:password`, never the values, at 0600 next to the bcrypt hash
-# that config.yaml already stores, so it widens nothing. A rotated secret changes
-# the digest and takes the slow path once. Anything odd about the marker (unreadable,
-# empty, a config.yaml that went missing) falls back to the slow path: the fast path
-# is only ever taken on positive evidence.
-marker="$HERMES_HOME/.insta-auth-digest"
-digest="$(printf '%s:%s' "$ADMIN_USERNAME" "$ADMIN_PASSWORD" | sha256sum | cut -d' ' -f1)"
-if [ -f "$HERMES_HOME/config.yaml" ] && [ -r "$marker" ] && [ "$(cat "$marker" 2>/dev/null)" = "$digest" ]; then
+# calls are three full boots of the hermes CLI, ~6-8 s of every wake on a 4 vCPU VM,
+# and the result is already in config.yaml on the volume from the last boot. So first
+# check the supplied credential against what config.yaml holds: the username must
+# match and the password must verify against the stored scrypt hash, re-derived with
+# the stored parameters and compared in constant time. That check is stdlib Python
+# (hashlib, base64, hmac) and takes a fraction of a second; it stores NOTHING new --
+# no marker, no second verifier -- the only secret material on the volume stays the
+# salted scrypt hash the dashboard keeps anyway. A rotated secret fails the check
+# and takes the full path once. Any doubt (no config.yaml, no hash, an unparseable
+# hash, a Python error) also takes the full path: the fast path is only ever taken
+# on a positive verification.
+credential_current() {
+  [ -f "$HERMES_HOME/config.yaml" ] || return 1
+  ADMIN_USERNAME="$ADMIN_USERNAME" ADMIN_PASSWORD="$ADMIN_PASSWORD" HERMES_CONFIG="$HERMES_HOME/config.yaml" python3 - <<'PY'
+import base64, hashlib, hmac, os, sys
+import yaml
+cfg = yaml.safe_load(open(os.environ["HERMES_CONFIG"])) or {}
+auth = ((cfg.get("dashboard") or {}).get("basic_auth") or {})
+if auth.get("username") != os.environ["ADMIN_USERNAME"]:
+    sys.exit(1)
+stored = auth.get("password_hash") or ""
+kind, n, r, p, salt, digest = stored.split("$", 5)
+if kind != "scrypt":
+    sys.exit(1)
+salt, digest = base64.b64decode(salt), base64.b64decode(digest)
+got = hashlib.scrypt(os.environ["ADMIN_PASSWORD"].encode(), salt=salt, n=int(n), r=int(r), p=int(p), dklen=len(digest), maxmem=0)
+sys.exit(0 if hmac.compare_digest(got, digest) else 1)
+PY
+}
+if credential_current 2>/dev/null; then
   echo "entrypoint: dashboard credential unchanged since the last boot; skipping auth bootstrap"
 else
   hash="$(cd /opt/hermes && python3 -c 'import sys; from plugins.dashboard_auth.basic import hash_password; print(hash_password(sys.argv[1]))' "$ADMIN_PASSWORD")"
@@ -44,11 +62,6 @@ else
   # log tail the console shows.
   hermes config set --force dashboard.basic_auth.username "$ADMIN_USERNAME" >/dev/null
   hermes config set --force dashboard.basic_auth.password_hash "$hash" >/dev/null
-  # Written last, and only after both sets succeeded (set -e): a marker can never
-  # describe a config that was not actually written.
-  umask 077
-  printf '%s' "$digest" > "$marker"
-  umask 022
 fi
 
 # The gateway runs as the s6-supervised gateway-default service, NOT as this script's
