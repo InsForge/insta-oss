@@ -173,6 +173,14 @@
       "destination": "/introduction"
     },
     {
+      "source": "/governance/overview",
+      "destination": "/introduction"
+    },
+    {
+      "source": "/reference/gated-actions",
+      "destination": "/reference/cli/overview"
+    },
+    {
       "source": "/concepts/secrets",
       "destination": "/deploy/overview"
     },

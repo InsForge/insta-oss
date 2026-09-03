@@ -7,7 +7,7 @@ Give every agent task its own branch: a copy-on-write database with the parent's
 
 ## Why branches
 
-An agent that shares an environment with you — or with another agent — can corrupt data, race migrations, or read credentials it shouldn't. A branch removes the entire class of problem:
+An agent that shares an environment with you — or with another agent — can corrupt data or race migrations. A branch removes that class of problem:
 
 - **Real data, zero risk.** The branch's Postgres opens with the parent's data. Broken migrations and bad writes stay on the branch.
 - **A live URL from the start.** Branch compute comes up running the parent's image, so the agent can see the app working before its first deploy.
@@ -15,7 +15,7 @@ An agent that shares an environment with you — or with another agent — can c
 
 ## The workflow
 
-Per task, and the agent runs these itself if it has the `insta` skill:
+Per task, the agent runs these itself if it has the `insta` skill:
 
 ```bash
 insta branch create task-auth-refactor

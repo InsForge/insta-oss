@@ -39,7 +39,7 @@ Deploy to a branch's compute from anywhere with `--branch <name>`. WebSocket app
 
 ## What happens on redeploy
 
-- Secrets and credential bindings (`insta secrets bind`) are injected as environment variables at deploy time. To land a changed secret without rebuilding, `insta compute restart` re-runs the already-deployed image against a freshly resolved bundle — no new image, no new spec. Restart lands configuration the way a deploy does, so it sits under the same `deploy` gate.
+- Secrets and credential bindings (`insta secrets bind`) are injected as environment variables at deploy time. To land a changed secret without rebuilding, `insta compute restart` re-runs the already-deployed image against a freshly resolved bundle — no new image, no new spec.
 - The service's URL is stable across deploys.
 - Sleeping services wake on request; a redeploy replaces the image they wake into.
 
