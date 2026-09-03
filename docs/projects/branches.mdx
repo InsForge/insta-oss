@@ -32,7 +32,7 @@ insta secrets
 
 ## Branch URLs and credentials
 
-Each branch's compute services get their own URLs, printed on deploy and listed by `insta manifest`. Credentials are per-branch: `insta db url` prints the branch's connection string, and the branch's copied bindings point at the branch's own services, so work done on a branch stays on that branch. The boundary is separation, not authorization: commands that accept `--branch` (`secrets`, `deploy`, `storage delete`, and others) reach any branch in both directions, governed by [policy](/governance/overview) — gate the actions that matter if agents can reach the project.
+Each branch's compute services get their own URLs, printed on deploy and listed by `insta manifest`. Credentials are per-branch: `insta db url` prints the branch's connection string, and the branch's copied bindings point at the branch's own services, so work done on a branch stays on that branch. Commands that accept `--branch` (`secrets`, `deploy`, `storage delete`, and others) can still reach another branch when you tell them to.
 
 ## Merging
 
@@ -53,4 +53,4 @@ Merging is structural and additive: a service that exists on the source but not 
 insta branch delete staging
 ```
 
-Tears down the branch's database, bucket fork, compute, and secrets. `branch.delete` is a [gated action](/reference/gated-actions) — put it behind approval if agents can reach the project.
+Tears down the branch's database, bucket fork, compute, and secrets.

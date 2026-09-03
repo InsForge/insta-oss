@@ -32,7 +32,7 @@ It is standard Postgres — no custom storage engine, no protocol proxy rewritin
 
 - `insta db volume` shows the provisioned size and your plan's cap on any plan; `--size` grows it (paid plans; grow-only). Billing is actual data stored — the size is a cap, not a price.
 - `insta db limits` shows or sets the instance's resource ceiling (paid plans). Unlike `service.upgrade`, which is up-only, limits move both directions.
-- Backups and restore are managed; restoring is the `db.restore` [gated action](/reference/gated-actions).
+- Backups and restore are managed.
 
 ## Cloud versus self-hosted
 

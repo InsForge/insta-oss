@@ -28,7 +28,7 @@
   "seo": {
     "metatags": {
       "og:site_name": "InstaCloud Docs | Cloud infrastructure for the era of agents",
-      "description": "InstaCloud is the cloud infrastructure built from the ground up to serve agents: database, storage, and compute that branch per task, with one gated credential seam and humans in the approval loop."
+      "description": "InstaCloud is the cloud infrastructure built from the ground up to serve agents: database, storage, and compute that branch per task, with credentials through one seam."
     },
     "indexing": "navigable"
   },
@@ -116,8 +116,7 @@
             "icon": "book",
             "pages": [
               "reference/cli/overview",
-              "reference/mcp-tools",
-              "reference/gated-actions"
+              "reference/mcp-tools"
             ]
           }
         ]
@@ -171,7 +170,7 @@
     },
     {
       "source": "/concepts/governance",
-      "destination": "/governance/overview"
+      "destination": "/introduction"
     },
     {
       "source": "/concepts/secrets",
@@ -375,19 +374,19 @@
     },
     {
       "source": "/governance/api-tokens",
-      "destination": "/governance/overview"
+      "destination": "/agents/mcp-server"
     },
     {
       "source": "/governance/approvals",
-      "destination": "/governance/overview"
+      "destination": "/introduction"
     },
     {
       "source": "/governance/login",
-      "destination": "/governance/overview"
+      "destination": "/introduction"
     },
     {
       "source": "/governance/organizations",
-      "destination": "/governance/overview"
+      "destination": "/introduction"
     },
     {
       "source": "/guides/ci",
