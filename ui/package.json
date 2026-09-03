@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@insforge/ui": "^0.1.7",
+    "@insforge/ui": "^0.1.10",
     "lucide-react": "^0.536.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
