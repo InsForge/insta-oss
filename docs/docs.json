@@ -95,8 +95,7 @@
               "agents/setup",
               "agents/mcp-server",
               "agents/skills",
-              "agents/branch-per-task",
-              "governance/overview"
+              "agents/branch-per-task"
             ]
           },
           {
