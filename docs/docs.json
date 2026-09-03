@@ -61,19 +61,7 @@
             "icon": "flag",
             "pages": [
               "introduction",
-              "quickstart",
-              "projects/branches"
-            ]
-          },
-          {
-            "group": "Agents",
-            "icon": "robot",
-            "pages": [
-              "agents/overview",
-              "agents/setup",
-              "agents/mcp-server",
-              "agents/skills",
-              "agents/branch-per-task"
+              "quickstart"
             ]
           },
           {
@@ -100,9 +88,14 @@
             ]
           },
           {
-            "group": "Governance",
-            "icon": "shield-check",
+            "group": "Agent-native",
+            "icon": "robot",
             "pages": [
+              "agents/overview",
+              "agents/setup",
+              "agents/mcp-server",
+              "agents/skills",
+              "agents/branch-per-task",
               "governance/overview"
             ]
           },
