@@ -1,127 +1,124 @@
 ---
 title: "Quickstart"
-description: "Install the CLI, create a project, deploy, branch — in five minutes."
+description: "Connect your coding agent to an InstaCloud project and deploy something, in about five minutes."
 ---
 
-This guide takes an existing app from your machine to a deployed service with an isolated branch environment. You need a terminal and about five minutes.
+This guide connects a coding agent to a fresh InstaCloud project, checks the wiring, and has the agent deploy something. You need an InstaCloud account, a coding agent (Claude Code, Cursor, Codex, or any other), and Node.js 18 or newer. No Dockerfile is needed until the last step.
 
-## Prerequisites
+<Steps>
+  <Step title="Create a project" titleSize="h2">
+    Sign in at [console.instacloud.com](https://console.instacloud.com) and click **Create Project**. The console opens the project's **Quick Start** page, which prints the setup command for this project with its project id already filled in.
 
-- An InstaCloud account — sign up at [console.instacloud.com](https://console.instacloud.com)
-- A Dockerfile in the app you want to deploy (source deploys build from it)
-- Node.js 18+ for the npx and npm install paths; the shell installer is a native binary for macOS and Linux
-- Source deploys shell out to [`flyctl`](https://fly.io/docs/flyctl/install/) for the remote build. `insta deploy` installs it automatically on macOS and Linux; on Windows run `iwr https://fly.io/install.ps1 -useb | iex` first. (On self-hosted insta-oss the build is local Docker — no `flyctl` needed.)
+    {/* screenshot: console project Quick Start page, Connect-agent panel with the one-liner */}
 
-## Install the CLI
+    Prefer to stay in the terminal? Skip the console. This creates a project named after the current directory and links it in the same run:
 
-<CodeGroup>
+    ```bash
+    npx -y insta@latest setup agent --create
+    ```
+  </Step>
 
-```bash npx
-npx insta@latest setup agent
-```
+  <Step title="Connect your agent" titleSize="h2">
+    Copy the line from the console, or use either form below with your project id.
 
-```bash npm
-npm install -g insta
-```
+    <CodeGroup>
 
-```bash title="Shell installer (macOS/Linux)"
-curl -fsSL https://agents.instacloud.com | sh
-```
+    ```bash title="One command"
+    npx -y insta@latest setup agent --project <project-id>
+    ```
 
-</CodeGroup>
+    ```text title="One prompt" wrap
+    Fetch and execute the appropriate instructions to set me up for InstaCloud from https://instacloud.com/prompt.md. Project id: <project-id>.
+    ```
 
-The npx path installs the CLI and wires up any coding agents on your machine; `npm install -g insta` installs just the CLI. The shell installer ships a dependency-free native binary on macOS and Linux — on Windows, use one of the Node paths.
+    </CodeGroup>
 
-## Log in
+    Both paths do the same work. The `insta` CLI is installed globally, the `insta` skill and the remote MCP server are registered for every coding agent on this machine, your browser opens once to sign in, and the current directory is linked to the project. The command is safe to run again.
 
-```bash
-insta login
-```
+    <Note>
+      The command targets production. Machines without Node, native Windows shells, and the staging deployment are covered in [Set up your coding agent](/agents/setup).
+    </Note>
+  </Step>
 
-By default you are prompted for email and password. Other modes:
+  <Step title="Verify" titleSize="h2">
+    Check the CLI first:
 
-- `insta login --oauth github` (or `--oauth google`) — browser OAuth
-- `insta login --device` — device code, for SSH sessions and containers without a browser
-- `insta login --api-key insta_...` — a durable token, for CI
+    ```bash
+    insta status
+    ```
 
-Check where you are at any time:
+    It prints the environment, the signed-in user, and the linked project and branch:
 
-```bash
-insta status
-```
+    ```text
+    env:     prod
+    api:     https://api.instacloud.com
+    user:    you@example.com
+    project: 7d3c2a10-5b8e-4f61-9a2c-0e4f6b1d8c35 (branch main)
+    ```
 
-## Create a project
+    Then start a new session in your agent and send it this prompt:
 
-```bash
-insta project create my-app
-```
+    ```text wrap
+    Check my InstaCloud setup: run insta status and call insta_whoami.
+    ```
 
-This creates the project in your organization, links the current directory to it (`.insta/project.json`), and installs agent skills into the repo. A new project starts empty — you add the services you need.
+    If both answer, the CLI, the skill, and the MCP server are all wired. In Claude Code, `claude mcp list` also shows `insta-cloud` as connected.
+  </Step>
 
-## Add services
+  <Step title="Deploy something" titleSize="h2">
+    Hand the work to the agent. Pick the prompt that matches where you are:
 
-```bash
-insta services add postgres db
-insta services add compute app
-```
+    <Tabs>
+      <Tab title="I have an app">
+        Run your agent in the app's directory. Source deploys build from a Dockerfile, so the app needs one.
 
-Available service types: `postgres`, `storage`, `compute`, `redis`, `mysql`, `mongodb` — up to 5 of each per branch on the free plan, more on paid plans.
+        ```text wrap
+        Deploy this app on InstaCloud with a Postgres database wired in.
+        ```
+      </Tab>
+      <Tab title="Start from scratch">
+        Run your agent in an empty directory.
 
-Each service exposes credentials as a bindable source, not as loose environment variables. Give your compute service the database connection string:
+        ```text wrap
+        Build a todo app with Postgres for the data, then deploy it on InstaCloud and send me the live URL.
+        ```
+      </Tab>
+    </Tabs>
 
-```bash
-insta secrets bind DATABASE_URL postgres/db --to compute/app
-```
+    The agent adds the services, wires the database credentials into compute, and deploys. When it finishes it reports the service URL. You approve the sign-in and any action your project policy gates, and the agent drives the rest.
 
-The binding is injected as `DATABASE_URL` when the service deploys. For local development, print the DSN directly (a governed action):
+    <Accordion title="What the agent runs">
+      The same commands work by hand:
 
-```bash
-insta db url
-```
+      ```bash
+      insta services add postgres db
+      insta services add compute app
+      insta secrets bind DATABASE_URL postgres/db --to compute/app
+      insta deploy .
+      ```
 
-User-defined secrets (`insta secrets set STRIPE_KEY ...`) land in a local `.env` with:
+      `services add` creates each service on the current branch. `secrets bind` injects the Postgres connection string as `DATABASE_URL` when compute deploys. `deploy .` builds the directory remotely from its Dockerfile and prints the URL. Ports, regions, images, and build troubleshooting are in [Build & deploy](/deploy/overview).
+    </Accordion>
 
-```bash
-insta secrets
-```
+    No Dockerfile and no agent at hand? In the console, open the project's **Services** page, click **Add Service**, and choose **Deploy a Template**.
 
-## Deploy
-
-```bash
-insta deploy .
-```
-
-The build runs remotely from your Dockerfile; the listen port is read from its last `EXPOSE` line (default 8080, override with `--port`). When the deploy finishes, the CLI prints your service URL.
-
-To check whether a directory will build before deploying it:
-
-```bash
-insta build . --explain
-```
-
-## Create a branch
-
-```bash
-insta branch create staging
-insta branch switch staging
-insta secrets
-```
-
-A branch is an isolated copy of your environment: Postgres is branched copy-on-write with the parent's data, storage is forked, and compute comes up at its own URL running the parent's image — push changes to it with `insta deploy . --branch staging`. Switching branches only relinks the directory; rerun `insta secrets` to refresh `.env` for the branch.
+    {/* screenshot: Services page, Add Service, Deploy a Template */}
+  </Step>
+</Steps>
 
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Agents overview" icon="map" href="/agents/overview">
-    The `insta` skill, the MCP server, and the governance model for agents.
-  </Card>
   <Card title="Set up your coding agent" icon="robot" href="/agents/setup">
-    One command wires the CLI, skill, and MCP server into your agents.
+    What the one-line setup installs, the flags, and the per-agent MCP install.
+  </Card>
+  <Card title="MCP server" icon="plug" href="/agents/mcp-server">
+    The `insta_*` tools, authentication, and gated actions.
   </Card>
   <Card title="Build & deploy" icon="rocket" href="/deploy/overview">
     Dockerfiles, images, ports, regions, and deploy troubleshooting.
   </Card>
-  <Card title="Postgres branching" icon="database" href="/postgres/branching">
-    How copy-on-write database branches work.
+  <Card title="One branch per task" icon="code-branch" href="/agents/branch-per-task">
+    Give each agent task its own database, storage, and compute.
   </Card>
 </CardGroup>
