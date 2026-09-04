@@ -59,7 +59,7 @@ skip that step), and messaging platforms on the Channels page.
 | `DISCORD_ALLOWED_USERS` | no | Comma-separated numeric Discord user IDs allowed to use the bot. |
 | `SLACK_BOT_TOKEN` | no | Slack bot token (`xoxb-...`). Pair it with `SLACK_SIGNING_SECRET` (inbound Events API, works on a scale-to-zero machine) or with `SLACK_APP_TOKEN` (Socket Mode, needs always-on). |
 | `SLACK_SIGNING_SECRET` | no | The Slack app's signing secret, from its Basic Information page. Setting it switches Slack to the inbound Events API; see [Scale to zero](#scale-to-zero) for the one-time setup in the Slack app. `SLACK_APP_TOKEN` is then not needed. |
-| `SLACK_APP_TOKEN` | no | Slack app-level token (`xapp-...`) for Socket Mode, which needs no public callback URL but is a connection the bot opens outward: turn always-on on in the console before using it. Leave blank when using `SLACK_SIGNING_SECRET`. |
+| `SLACK_APP_TOKEN` | no | Slack app-level token (`xapp-...`) for Socket Mode, which needs no public callback URL but is a connection the bot opens outward: turn always-on on in the console before using it. Leave blank when using `SLACK_SIGNING_SECRET`: if both are set the Events API wins and this token is ignored, and the Slack app's Socket Mode toggle must then be off or Slack keeps delivering events there. |
 | `SLACK_ALLOWED_USERS` | no | Comma-separated Slack member IDs (e.g. `U01ABC2DEF3`) allowed to use the bot. |
 | `HERMES_GATEWAY_TOKEN` | generated | Generated 64-character token; you do not set this. |
 | `TELEGRAM_WEBHOOK_SECRET` | generated | Generated 32-character token Telegram signs each webhook update with; you do not set this, and only the machine and Telegram ever see it. |
@@ -113,7 +113,9 @@ decides whether a channel survives scale to zero:
   wakes the machine. Slack expects an answer within 3 seconds and a wake takes about 15, so the
   first message after an idle period is delivered on Slack's retry about a minute later; messages
   while the machine is awake are answered at once. Set `SLACK_APP_TOKEN` instead and Slack uses
-  Socket Mode, an outbound connection that needs always-on.
+  Socket Mode, an outbound connection that needs always-on. With both set, the signing secret wins
+  and the gateway logs a warning; Slack only delivers to the Request URL while the app's Socket
+  Mode toggle is off, so a bot that goes quiet after switching almost always has it still on.
 - **Discord: no.** The Discord gateway is a connection the bot opens outward. The router never sees
   it, an idle machine is stopped, the connection dies, and a Discord message cannot wake it: the bot
   stays silent until someone opens the dashboard. Discord offers no inbound delivery for channel

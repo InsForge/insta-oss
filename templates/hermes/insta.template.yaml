@@ -83,7 +83,7 @@ services:
         SLACK_SIGNING_SECRET:
           description: "Slack app signing secret (Basic Information page). Setting it switches Slack to the inbound Events API: point the app's Event Subscriptions request URL at <service URL>/slack/events after deploy. SLACK_APP_TOKEN is then not needed"
         SLACK_APP_TOKEN:
-          description: "Slack app-level token (xapp-...) for Socket Mode, a connection the bot opens outward, so it needs an always-on machine. Leave blank when using SLACK_SIGNING_SECRET"
+          description: "Slack app-level token (xapp-...) for Socket Mode, a connection the bot opens outward, so it needs an always-on machine. Leave blank when using SLACK_SIGNING_SECRET: with both set the Events API wins and this is ignored"
         SLACK_ALLOWED_USERS:
           description: "Comma-separated Slack member IDs allowed to use the bot (e.g. U01ABC2DEF3)"
 
