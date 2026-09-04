@@ -52,8 +52,42 @@ if [ ! -f "${HERMES_HOME}/gateway_state.json" ]; then
   hermes gateway start || echo "entrypoint: gateway start failed; start it from the dashboard's System page" >&2
 fi
 
-# The dashboard is the main process of the s6 CMD service: the /api/status healthcheck
-# tracks the UI users actually reach, and gateway restarts never touch it. If it dies,
-# s6 reruns this script, which is idempotent.
+# Telegram arrives over an INBOUND webhook when the manifest's TELEGRAM_WEBHOOK_URL is in the
+# environment (the gateway registers the URL with Telegram itself on connect). The gateway's
+# webhook server listens on loopback and nginx publishes it at /telegram on the routed port, next
+# to the dashboard. An inbound update is traffic the platform can see and wake a machine for; the
+# long poll upstream defaults to is not. Slack Socket Mode and the Discord gateway are still
+# outbound connections, so a deployment using them has to turn always-on on in the console: see
+# the README's scale-to-zero section. Nothing here depends on a Telegram token being set: without
+# one the adapter never starts and these variables are inert.
+
+# Upstream's s6 runs this script as the unprivileged hermes user, so nginx gets its pid file and
+# temp directories under /tmp (nginx.conf points there); /run and /var/lib/nginx are root's.
+mkdir -p /tmp/hermes-nginx
+
+# Checked before anything starts, so a config nginx will not load fails the boot with nginx's own
+# message instead of leaving the dashboard up behind a dead port.
+nginx -t -c /etc/nginx/hermes.conf
+
+# Both processes are children of this script, which is the s6 CMD service's main process. Either
+# dying is fatal: s6 then reruns this script, which is idempotent (the config writes above use
+# --force and the gateway seed checks its own marker). Backgrounding nginx under an exec'd dashboard
+# would instead leave a dead nginx unnoticed behind a healthy-looking container.
 # --skip-build serves the dist baked into the image instead of running npm at boot.
-exec hermes dashboard --host 0.0.0.0 --port "${HERMES_DASHBOARD_PORT:-8080}" --no-open --skip-build
+nginx -c /etc/nginx/hermes.conf -g 'daemon off;' &
+nginx_pid=$!
+hermes dashboard --host 127.0.0.1 --port "${HERMES_DASHBOARD_PORT:-8081}" --no-open --skip-build &
+dashboard_pid=$!
+
+# A signal is an orderly stop (s6 sends TERM on stop and on the platform's suspend), so only a
+# child dying on its own is a failure.
+stopping=""
+trap 'stopping=1; kill -TERM "$nginx_pid" "$dashboard_pid" 2>/dev/null || true' TERM INT
+wait -n || true
+if [[ -n "$stopping" ]]; then
+  wait || true
+  exit 0
+fi
+echo "entrypoint: nginx or the dashboard exited on its own, restarting the service" >&2
+kill -TERM "$nginx_pid" "$dashboard_pid" 2>/dev/null || true
+exit 1

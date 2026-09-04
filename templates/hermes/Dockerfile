@@ -1,10 +1,19 @@
 # Pinned by digest; the upstream tag floats.
 FROM docker.io/nousresearch/hermes-agent:v2026.8.27@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79
 
+# nginx fronts the one port the platform routes, so two listeners can share it: the dashboard, and
+# the Telegram webhook server the gateway opens when TELEGRAM_WEBHOOK_URL is set. The webhook path
+# must not sit behind the dashboard's sign-in: Telegram authenticates each update with its own
+# secret token, never with our username and password. See nginx.conf. Upstream is Debian 13, so
+# nginx-light comes from apt like every other package in the image.
+RUN apt-get update && apt-get install -y --no-install-recommends nginx-light \
+    && rm -rf /var/lib/apt/lists/*
+COPY nginx.conf /etc/nginx/hermes.conf
+
 # Upstream's main process is the interactive TUI, which exits without a TTY. This
 # image supplies the main process instead: bootstrap auth, bring up the s6-supervised
-# gateway service, then serve the dashboard. Upstream's ENTRYPOINT stays: it routes
-# an executable through, and on a deployed machine PID 1 is s6-svscan (a 2.1.x note
+# gateway service, then serve the dashboard behind nginx. Upstream's ENTRYPOINT stays: it
+# routes an executable through, and on a deployed machine PID 1 is s6-svscan (a 2.1.x note
 # here claimed Fly skips s6; observed machines say otherwise), so the s6 service
 # tree the entrypoint relies on is present.
 COPY entrypoint.sh /entrypoint.sh
