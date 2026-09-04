@@ -56,10 +56,12 @@ fi
 # environment (the gateway registers the URL with Telegram itself on connect). The gateway's
 # webhook server listens on loopback and nginx publishes it at /telegram on the routed port, next
 # to the dashboard. An inbound update is traffic the platform can see and wake a machine for; the
-# long poll upstream defaults to is not. Slack Socket Mode and the Discord gateway are still
-# outbound connections, so a deployment using them has to turn always-on on in the console: see
-# the README's scale-to-zero section. Nothing here depends on a Telegram token being set: without
-# one the adapter never starts and these variables are inert.
+# long poll upstream defaults to is not. Slack gets the same treatment when SLACK_SIGNING_SECRET is
+# set: the adapter patched in the Dockerfile serves Slack's Events API on loopback and nginx
+# publishes it at /slack/events. Slack over Socket Mode and the Discord gateway are still outbound
+# connections, so a deployment using them has to turn always-on on in the console: see the README's
+# scale-to-zero section. Nothing here depends on a channel token being set: without one the adapter
+# never starts and these variables are inert.
 
 # Upstream's s6 runs this script as the unprivileged hermes user, so nginx gets its pid file and
 # temp directories under /tmp (nginx.conf points there); /run and /var/lib/nginx are root's.
