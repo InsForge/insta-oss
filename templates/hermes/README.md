@@ -71,10 +71,14 @@ nginx, which owns the service port 8080), the Telegram webhook settings `TELEGRA
 The entrypoint checks the nginx config, starts nginx and the dashboard, and starts the gateway as
 a managed daemon the dashboard's System and Channels pages control.
 
-The Slack Events API mode is not in upstream Hermes yet: the image applies two small patches at
-build time, `slack-events-api.patch` (the adapter serves Slack's Events API through slack_bolt's
-own HTTP helpers) and `dashboard-slack-events.patch` (the Channels page's Slack card asks for the
-signing secret and shows the Request URL instead of asking for a Socket Mode app-level token).
+The image applies three small patches to upstream at build time. `slack-events-api.patch`: the
+Slack adapter serves Slack's Events API through slack_bolt's own HTTP helpers (upstream speaks
+Socket Mode only). `dashboard-slack-events.patch`: the Channels page's Slack card asks for the
+signing secret and shows the Request URL instead of asking for a Socket Mode app-level token.
+`telegram-keep-pending-updates.patch`: upstream registers the Telegram webhook with
+`drop_pending_updates=True` on every boot, and on a machine that scales to zero the message that
+woke the machine is still in flight while the gateway boots, so that flag threw away the first
+message after every wake; the patch keeps pending updates and Telegram redelivers them.
 
 ## After deploy
 
@@ -101,8 +105,10 @@ decides whether a channel survives scale to zero:
 - **Telegram: yes.** The template registers a webhook with Telegram at deploy time (the
   `TELEGRAM_WEBHOOK_*` settings above), so Telegram pushes each update to the service URL. That is
   inbound traffic: it wakes a stopped machine, the gateway handles the update, and the machine can
-  scale to zero again afterwards. Telegram retries deliveries, so the first message after an idle
-  period arrives once the machine is up (a wake takes on the order of fifteen seconds).
+  scale to zero again afterwards. Telegram waits for the answer and retries deliveries, so the
+  first message after an idle period is answered once the machine is up: a wake takes ten to
+  twenty seconds and the gateway a few more to start, so expect the reply to that first message
+  after about half a minute, and later messages within seconds.
 - **Slack: yes.** This image runs Slack over the Events API only. Set `SLACK_BOT_TOKEN` and
   `SLACK_SIGNING_SECRET` (at deploy time or later on the dashboard's Channels page, which shows the
   exact Request URL), then in the Slack app's settings: turn **Socket Mode** off, open **Event

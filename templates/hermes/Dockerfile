@@ -10,12 +10,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends nginx-light pat
     && rm -rf /var/lib/apt/lists/*
 COPY nginx.conf /etc/nginx/hermes.conf
 
+# Telegram webhook mode already exists upstream, but on boot it registers the webhook with
+# drop_pending_updates=True, on the (wrong) theory that Telegram keeps no queue for webhooks. It
+# does keep every delivery it has no 2xx for yet, and on a machine that scales to zero the update
+# that woke the machine is in flight while the gateway boots. Dropping pending updates there lost
+# the first message after every wake (seen on the PoC). One line: keep them, Telegram redelivers.
+COPY telegram-keep-pending-updates.patch /tmp/telegram-keep-pending-updates.patch
+RUN patch -p1 -d /opt/hermes --forward --no-backup-if-mismatch < /tmp/telegram-keep-pending-updates.patch \
+    && rm /tmp/telegram-keep-pending-updates.patch \
+    && python3 -m py_compile /opt/hermes/plugins/platforms/telegram/adapter.py
+
 # Slack over the inbound Events API. Upstream's Slack adapter speaks Socket Mode only, an outbound
-# connection a scale-to-zero platform cannot see; slack_bolt ships an aiohttp request handler for
-# the Events API, and this patch wires it in behind SLACK_SIGNING_SECRET plus SLACK_EVENTS_URL,
-# leaving Socket Mode as the default when neither is set. Applied against the digest-pinned upstream
-# file, so a pin bump that touches the adapter fails this step loudly instead of drifting. Candidate
-# for an upstream PR; see slack-events-api.patch for the change itself.
+# connection a scale-to-zero platform cannot see; slack_bolt ships aiohttp helpers for the Events
+# API, and this patch wires them in behind SLACK_SIGNING_SECRET plus SLACK_EVENTS_URL. This image
+# offers no Socket Mode. Applied against the digest-pinned upstream file, so a pin bump that touches
+# the adapter fails this step loudly instead of drifting. Candidate for an upstream PR; see
+# slack-events-api.patch for the change itself.
 COPY slack-events-api.patch /tmp/slack-events-api.patch
 RUN patch -p1 -d /opt/hermes --forward --no-backup-if-mismatch < /tmp/slack-events-api.patch \
     && rm /tmp/slack-events-api.patch \
