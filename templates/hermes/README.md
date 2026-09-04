@@ -57,24 +57,24 @@ skip that step), and messaging platforms on the Channels page.
 | `TELEGRAM_ALLOWED_USERS` | no | Comma-separated **numeric** Telegram user IDs allowed to use the bot. Not @usernames: the adapter compares the user id and never reads the username. Get yours from @userinfobot. |
 | `DISCORD_BOT_TOKEN` | no | Token for a Discord bot from the Discord Developer Portal. Discord delivers messages over a connection the bot opens, so turn always-on on in the console before connecting it. |
 | `DISCORD_ALLOWED_USERS` | no | Comma-separated numeric Discord user IDs allowed to use the bot. |
-| `SLACK_BOT_TOKEN` | no | Slack bot token (`xoxb-...`). Pair it with `SLACK_SIGNING_SECRET` (inbound Events API, works on a scale-to-zero machine) or with `SLACK_APP_TOKEN` (Socket Mode, needs always-on). |
-| `SLACK_SIGNING_SECRET` | no | The Slack app's signing secret, from its Basic Information page. Setting it switches Slack to the inbound Events API; see [Scale to zero](#scale-to-zero) for the one-time setup in the Slack app. `SLACK_APP_TOKEN` is then not needed. |
-| `SLACK_APP_TOKEN` | no | Slack app-level token (`xapp-...`) for Socket Mode, which needs no public callback URL but is a connection the bot opens outward: turn always-on on in the console before using it. Leave blank when using `SLACK_SIGNING_SECRET`: if both are set the Events API wins and this token is ignored, and the Slack app's Socket Mode toggle must then be off or Slack keeps delivering events there. |
+| `SLACK_BOT_TOKEN` | no | Slack bot token (`xoxb-...`) from OAuth & Permissions. Slack reaches this deployment over its inbound Events API, so the bot works on a scale-to-zero machine; `SLACK_SIGNING_SECRET` goes with it. |
+| `SLACK_SIGNING_SECRET` | no | The Slack app's signing secret, from Basic Information > App Credentials. Needed whenever `SLACK_BOT_TOKEN` is set; see [Scale to zero](#scale-to-zero) for the one-time setup in the Slack app. This image does not offer Slack's Socket Mode (no app-level token). |
 | `SLACK_ALLOWED_USERS` | no | Comma-separated Slack member IDs (e.g. `U01ABC2DEF3`) allowed to use the bot. |
 | `HERMES_GATEWAY_TOKEN` | generated | Generated 64-character token; you do not set this. |
 | `TELEGRAM_WEBHOOK_SECRET` | generated | Generated 32-character token Telegram signs each webhook update with; you do not set this, and only the machine and Telegram ever see it. |
 
 Set by the template, not by you: `HERMES_HOME=/data/.hermes` (state on the volume),
-`HERMES_DASHBOARD_PORT=8081` (the dashboard listens on loopback behind nginx, which owns the
-service port 8080), the Telegram webhook settings `TELEGRAM_WEBHOOK_URL=<service URL>/telegram`,
+`HERMES_DASHBOARD_PORT=8081` (the dashboard listens on a port the platform does not route, behind
+nginx, which owns the service port 8080), the Telegram webhook settings `TELEGRAM_WEBHOOK_URL=<service URL>/telegram`,
 `TELEGRAM_WEBHOOK_PORT=8443`, `TELEGRAM_WEBHOOK_HOST=127.0.0.1`, and the Slack Events API settings
 `SLACK_EVENTS_URL=<service URL>/slack/events`, `SLACK_EVENTS_PORT=8444`, `SLACK_EVENTS_HOST=127.0.0.1`.
 The entrypoint checks the nginx config, starts nginx and the dashboard, and starts the gateway as
 a managed daemon the dashboard's System and Channels pages control.
 
-The Slack Events API mode is not in upstream Hermes yet: the image applies a small patch
-(`slack-events-api.patch`) to the Slack adapter that uses slack_bolt's own HTTP request handler when
-`SLACK_SIGNING_SECRET` is set and keeps upstream's Socket Mode otherwise.
+The Slack Events API mode is not in upstream Hermes yet: the image applies two small patches at
+build time, `slack-events-api.patch` (the adapter serves Slack's Events API through slack_bolt's
+own HTTP helpers) and `dashboard-slack-events.patch` (the Channels page's Slack card asks for the
+signing secret and shows the Request URL instead of asking for a Socket Mode app-level token).
 
 ## After deploy
 
@@ -103,8 +103,9 @@ decides whether a channel survives scale to zero:
   inbound traffic: it wakes a stopped machine, the gateway handles the update, and the machine can
   scale to zero again afterwards. Telegram retries deliveries, so the first message after an idle
   period arrives once the machine is up (a wake takes on the order of fifteen seconds).
-- **Slack: yes, with the Events API.** Set `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` (and no
-  `SLACK_APP_TOKEN`), then in the Slack app's settings: turn **Socket Mode** off, open **Event
+- **Slack: yes.** This image runs Slack over the Events API only. Set `SLACK_BOT_TOKEN` and
+  `SLACK_SIGNING_SECRET` (at deploy time or later on the dashboard's Channels page, which shows the
+  exact Request URL), then in the Slack app's settings: turn **Socket Mode** off, open **Event
   Subscriptions**, enable events, and paste `<service URL>/slack/events` as the Request URL. Slack
   verifies the URL immediately, so open the dashboard first so the machine is awake, and it must
   also be awake later when you save scope or event changes. Subscribe to the bot events Hermes
@@ -112,10 +113,10 @@ decides whether a channel survives scale to zero:
   reinstall the app. From then on Slack pushes each event to the service URL: inbound traffic that
   wakes the machine. Slack expects an answer within 3 seconds and a wake takes about 15, so the
   first message after an idle period is delivered on Slack's retry about a minute later; messages
-  while the machine is awake are answered at once. Set `SLACK_APP_TOKEN` instead and Slack uses
-  Socket Mode, an outbound connection that needs always-on. With both set, the signing secret wins
-  and the gateway logs a warning; Slack only delivers to the Request URL while the app's Socket
-  Mode toggle is off, so a bot that goes quiet after switching almost always has it still on.
+  while the machine is awake are answered at once. A bot token without the signing secret is
+  reported as a configuration error on the Channels page rather than silently falling back to
+  Socket Mode, and a bot that goes quiet after the switch almost always has the Slack app's Socket
+  Mode toggle still on.
 - **Discord: no.** The Discord gateway is a connection the bot opens outward. The router never sees
   it, an idle machine is stopped, the connection dies, and a Discord message cannot wake it: the bot
   stays silent until someone opens the dashboard. Discord offers no inbound delivery for channel
@@ -123,8 +124,8 @@ decides whether a channel survives scale to zero:
 
 The template ships with the platform's scale-to-zero default: the machine stops while idle and
 wakes on the next dashboard visit, Telegram message or Slack event, and you pay only for the time it
-runs. If you connect Discord, or Slack over Socket Mode, turn always-on on in the console first; it
-costs a small continuous RAM charge and keeps those connections alive.
+runs. If you connect Discord, turn always-on on in the console first; it costs a small continuous
+RAM charge and keeps that connection alive.
 
 ## Links
 

@@ -56,12 +56,12 @@ fi
 # environment (the gateway registers the URL with Telegram itself on connect). The gateway's
 # webhook server listens on loopback and nginx publishes it at /telegram on the routed port, next
 # to the dashboard. An inbound update is traffic the platform can see and wake a machine for; the
-# long poll upstream defaults to is not. Slack gets the same treatment when SLACK_SIGNING_SECRET is
-# set: the adapter patched in the Dockerfile serves Slack's Events API on loopback and nginx
-# publishes it at /slack/events. Slack over Socket Mode and the Discord gateway are still outbound
-# connections, so a deployment using them has to turn always-on on in the console: see the README's
-# scale-to-zero section. Nothing here depends on a channel token being set: without one the adapter
-# never starts and these variables are inert.
+# long poll upstream defaults to is not. Slack gets the same treatment: the adapter patched in the
+# Dockerfile serves Slack's Events API on loopback and nginx publishes it at /slack/events (this
+# image offers no Socket Mode). The Discord gateway is still an outbound connection, so a Discord
+# deployment has to turn always-on on in the console: see the README's scale-to-zero section.
+# Nothing here depends on a channel token being set: without one the adapter never starts and
+# these variables are inert.
 
 # Upstream's s6 runs this script as the unprivileged hermes user, so nginx gets its pid file and
 # temp directories under /tmp (nginx.conf points there); /run and /var/lib/nginx are root's.
@@ -78,7 +78,12 @@ nginx -t -c /etc/nginx/hermes.conf
 # --skip-build serves the dist baked into the image instead of running npm at boot.
 nginx -c /etc/nginx/hermes.conf -g 'daemon off;' &
 nginx_pid=$!
-hermes dashboard --host 127.0.0.1 --port "${HERMES_DASHBOARD_PORT:-8081}" --no-open --skip-build &
+# 0.0.0.0, NOT 127.0.0.1, even though only nginx on this machine ever connects: upstream treats a
+# loopback bind as a trusted local operator and switches its sign-in gate OFF (auth_required=false,
+# the SPA served to anyone), which behind a public reverse proxy is an open dashboard. A
+# non-loopback bind keeps the gate on, exactly as 2.3.x had it. The port is not one the platform
+# routes, so nothing but nginx reaches it anyway.
+hermes dashboard --host 0.0.0.0 --port "${HERMES_DASHBOARD_PORT:-8081}" --no-open --skip-build &
 dashboard_pid=$!
 
 # A signal is an orderly stop (s6 sends TERM on stop and on the platform's suspend), so only a

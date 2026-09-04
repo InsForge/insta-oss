@@ -1,9 +1,10 @@
 --- a/plugins/platforms/slack/adapter.py
 +++ b/plugins/platforms/slack/adapter.py
-@@ -34,6 +34,17 @@
+@@ -33,6 +33,17 @@
+     AsyncApp = Any
      AsyncSocketModeHandler = Any
      AsyncWebClient = Any
- 
++
 +# InstaCloud template patch: slack_bolt's aiohttp helpers for the inbound Events API transport
 +# (see SlackAdapter._start_events_server). Its own try block on purpose: a missing piece here must
 +# disable only that transport, never Socket Mode above.
@@ -14,10 +15,9 @@
 +    SLACK_EVENTS_HTTP_AVAILABLE = True
 +except ImportError:
 +    SLACK_EVENTS_HTTP_AVAILABLE = False
-+
+ 
  import sys
  from pathlib import Path as _Path
- 
 @@ -1163,6 +1174,15 @@
          # user messages without bot_id/subtype=bot_message markers.
          self._user_is_bot_cache: Dict[Tuple[str, str], bool] = {}
@@ -164,16 +164,41 @@
          if not raw_token:
              logger.error(
                  "[Slack] SLACK_BOT_TOKEN not set — this is a permanent config "
-@@ -2055,7 +2177,7 @@
+@@ -2055,8 +2177,32 @@
                  retryable=False,
              )
              return False
 -        if not app_token:
-+        if not app_token and not self._events_url:
++        if events_url and not signing_secret:
++            # InstaCloud template patch: with a public events URL configured this
++            # deployment receives Slack events inbound, so a bot token without the
++            # signing secret is a configuration error to report by name, not a
++            # reason to fall back to Socket Mode (an outbound connection a
++            # scale-to-zero machine cannot keep alive).
              logger.error(
++                "[Slack] SLACK_SIGNING_SECRET not set — this deployment receives "
++                "Slack events over the Events API at %s and needs the app's signing "
++                "secret to verify them. Paste it from Basic Information > App "
++                "Credentials, set the Slack app's Event Subscriptions request URL "
++                "to that address, turn Socket Mode off, then restart the gateway.",
++                events_url,
++            )
++            self._set_fatal_error(
++                "missing_slack_signing_secret",
++                "SLACK_SIGNING_SECRET not configured. This deployment receives Slack "
++                f"events over the Events API at {events_url}: paste the app's signing "
++                "secret (Basic Information > App Credentials), set the Slack app's "
++                "Event Subscriptions request URL to that address, turn Socket Mode "
++                "off, then restart the gateway.",
++                retryable=False,
++            )
++            return False
++        if not app_token and not self._events_url:
++            logger.error(
                  "[Slack] SLACK_APP_TOKEN not set — this is a permanent config "
                  "error; set SLACK_APP_TOKEN via `hermes gateway setup` "
-@@ -2169,6 +2291,9 @@
+                 "or in the active profile's ~/.hermes/.env file, then restart "
+@@ -2169,6 +2315,9 @@
              self._app = AsyncApp(
                  token=primary_token,
                  client=primary_client,
@@ -183,7 +208,7 @@
                  before_authorize=_slack_per_request_proxy_middleware(proxy_url),
              )
              _apply_slack_proxy(self._app.client, proxy_url)
-@@ -2431,7 +2556,10 @@
+@@ -2431,7 +2580,10 @@
              # down whatever we managed to start, leave ``_running=False``, and
              # let the ``finally`` block release the platform lock cleanly.
              try:
@@ -195,7 +220,7 @@
                  self._running = True
                  self._ensure_socket_watchdog()
              except Exception:
-@@ -2445,7 +2573,8 @@
+@@ -2445,7 +2597,8 @@
                  raise
  
              logger.info(

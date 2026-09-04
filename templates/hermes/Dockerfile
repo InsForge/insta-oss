@@ -21,6 +21,15 @@ RUN patch -p1 -d /opt/hermes --forward --no-backup-if-mismatch < /tmp/slack-even
     && rm /tmp/slack-events-api.patch \
     && python3 -m py_compile /opt/hermes/plugins/platforms/slack/adapter.py
 
+# The dashboard's Channels page and the Slack plugin manifest describe Slack in Socket Mode terms
+# (app-level token required). This image runs Slack over the Events API only, so the same patch
+# mechanism rewrites that one card: bot token plus signing secret, the request URL to paste into the
+# Slack app spelled out, and no app-level token field. One place to configure Slack, one story.
+COPY dashboard-slack-events.patch /tmp/dashboard-slack-events.patch
+RUN patch -p1 -d /opt/hermes --forward --no-backup-if-mismatch < /tmp/dashboard-slack-events.patch \
+    && rm /tmp/dashboard-slack-events.patch \
+    && python3 -m py_compile /opt/hermes/hermes_cli/web_server.py /opt/hermes/hermes_cli/config_defaults.py
+
 # Upstream's main process is the interactive TUI, which exits without a TTY. This
 # image supplies the main process instead: bootstrap auth, bring up the s6-supervised
 # gateway service, then serve the dashboard behind nginx. Upstream's ENTRYPOINT stays: it
