@@ -5,53 +5,71 @@ description: "Connect your coding agent to an InstaCloud project and deploy some
 
 This guide takes you from no account to a coding agent deploying on InstaCloud. You need a coding agent (Claude Code, Cursor, Codex, or any other) and Node.js 18 or newer. No Dockerfile is needed until the last step.
 
+Every step after the first works two ways: hand your agent a prompt, or run the CLI yourself. Where both are shown, the prompt comes first and the CLI sits on the second tab.
+
 <Steps>
   <Step title="Create an account" titleSize="h2">
     [Sign up](https://console.instacloud.com/signup) with GitHub, Google, or email. Already have an account? [Sign in](https://console.instacloud.com/signin) and go to the next step.
   </Step>
 
   <Step title="Create a project" titleSize="h2">
-    In the console, click **Create Project**. The console opens the project's **Quick Start** page, which prints the setup command for this project with its project id already filled in.
+    In the console, click **Create Project**. The console opens the project's **Quick Start** page, which prints the setup prompt and command for this project with its project id already filled in.
 
     {/* screenshot: console project Quick Start page, Connect-agent panel with the one-liner */}
 
-    Prefer to stay in the terminal? Skip the console. This creates a project named after the current directory and links it in the same run:
-
-    ```bash
-    npx -y insta@latest setup agent --create
-    ```
-  </Step>
-
-  <Step title="Connect your agent" titleSize="h2">
-    Copy the line from the console, or use either form below with your project id.
+    Prefer to skip the console? Either of these also does the next step in the same run. The prompt has the agent ask whether to create a new project or link an existing one. The command creates a project named after the current directory and links it.
 
     <CodeGroup>
 
-    ```bash title="One command"
-    npx -y insta@latest setup agent --project <project-id>
+    ```text title="Prompt" wrap
+    Fetch and execute the appropriate instructions to set me up for InstaCloud from https://instacloud.com/prompt.md.
     ```
 
-    ```text title="One prompt" wrap
+    ```bash title="CLI"
+    npx -y insta@latest setup agent --create
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Connect your agent" titleSize="h2">
+    Copy the prompt or the command from the console, or use either form below with your project id.
+
+    <CodeGroup>
+
+    ```text title="Prompt" wrap
     Fetch and execute the appropriate instructions to set me up for InstaCloud from https://instacloud.com/prompt.md. Project id: <project-id>.
+    ```
+
+    ```bash title="CLI"
+    npx -y insta@latest setup agent --project <project-id>
     ```
 
     </CodeGroup>
 
-    Both paths do the same work. The `insta` CLI is installed globally, the `insta` skill and the remote MCP server are registered for every coding agent on this machine, the console opens in your browser once so you can approve the sign-in, and the current directory is linked to the project. The command is safe to run again.
+    Both do the same work. The `insta` CLI is installed globally, the `insta` skill and the remote MCP server are registered for every coding agent on this machine, the console opens in your browser once so you can approve the sign-in, and the current directory is linked to the project. Both are safe to run again.
 
     <Note>
-      The command targets production. Machines without Node, native Windows shells, and the staging deployment are covered in [Set up your coding agent](/agents/setup).
+      Setup targets production. Machines without Node, native Windows shells, and the staging deployment are covered in [Set up your coding agent](/agents/setup).
     </Note>
   </Step>
 
   <Step title="Verify" titleSize="h2">
-    Check the CLI first:
+    Start a new agent session so it picks up the MCP server, then ask it to check the wiring. Or run the check yourself.
 
-    ```bash
+    <CodeGroup>
+
+    ```text title="Prompt" wrap
+    Check my InstaCloud setup: run insta status and call insta_whoami.
+    ```
+
+    ```bash title="CLI"
     insta status
     ```
 
-    It prints the environment, the signed-in user, and the linked project and branch:
+    </CodeGroup>
+
+    Either way you should see the environment, the signed-in user, and the linked project and branch:
 
     ```text
     env:     prod
@@ -60,13 +78,7 @@ This guide takes you from no account to a coding agent deploying on InstaCloud. 
     project: 7d3c2a10-5b8e-4f61-9a2c-0e4f6b1d8c35 (branch main)
     ```
 
-    Then start a new session in your agent and send it this prompt:
-
-    ```text wrap
-    Check my InstaCloud setup: run insta status and call insta_whoami.
-    ```
-
-    If both answer, the CLI, the skill, and the MCP server are all wired. In Claude Code, `claude mcp list` also shows `insta-cloud` as connected.
+    If the agent gets answers from both `insta status` and `insta_whoami`, the CLI, the skill, and the MCP server are all wired. In Claude Code, `claude mcp list` also shows `insta-cloud` as connected.
   </Step>
 
   <Step title="Deploy something" titleSize="h2">
@@ -91,7 +103,7 @@ This guide takes you from no account to a coding agent deploying on InstaCloud. 
 
     The agent adds the services, wires the database credentials into compute, and deploys. When it finishes it reports the service URL. You approve the sign-in, and the agent drives the rest.
 
-    <Accordion title="What the agent runs">
+    <Accordion title="CLI: the commands the agent runs">
       The same commands work by hand:
 
       ```bash
