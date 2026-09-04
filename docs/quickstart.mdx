@@ -5,7 +5,7 @@ description: "Connect your coding agent to an InstaCloud project and deploy some
 
 This guide takes you from no account to a coding agent deploying on InstaCloud. You need a coding agent (Claude Code, Cursor, Codex, or any other) and Node.js 18 or newer. No Dockerfile is needed until the last step.
 
-Every step after the first works two ways: hand your agent a prompt, or run the CLI yourself. Where both are shown, the prompt comes first and the CLI sits on the second tab.
+From step 3 on, everything works two ways: hand your agent a prompt, or run the CLI yourself. Where both are shown, the prompt comes first and the CLI sits on the second tab.
 
 <Steps>
   <Step title="Create an account" titleSize="h2">
@@ -13,23 +13,15 @@ Every step after the first works two ways: hand your agent a prompt, or run the 
   </Step>
 
   <Step title="Create a project" titleSize="h2">
-    In the console, click **Create Project**. The console opens the project's **Quick Start** page, which prints the setup prompt and command for this project with its project id already filled in.
+    In the console, click **Create Project**. The console opens the project's **Quick Start** page, which prints the setup command for this project with its project id already filled in.
 
     {/* screenshot: console project Quick Start page, Connect-agent panel with the one-liner */}
 
-    Prefer to skip the console? Either of these also does the next step in the same run.
+    Prefer to stay in the terminal? Skip the console. This creates a project named after the current directory and links it in the same run:
 
-    <CodeGroup>
-
-    ```text title="Prompt" wrap
-    Fetch and execute the appropriate instructions to set me up for InstaCloud from https://instacloud.com/prompt.md.
-    ```
-
-    ```bash title="CLI"
+    ```bash
     npx -y insta@latest setup agent --create
     ```
-
-    </CodeGroup>
   </Step>
 
   <Step title="Connect your agent" titleSize="h2">
