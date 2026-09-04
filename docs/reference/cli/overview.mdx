@@ -1,9 +1,9 @@
 ---
 title: "CLI overview"
-description: "Install the insta CLI, authenticate in CI, and find every command."
+description: "Install the insta CLI, authenticate in CI, and find the common commands."
 ---
 
-The `insta` CLI manages projects, branches, services, secrets, and deploys from a terminal — yours or a coding agent's. Every command is listed below with its common invocations; `insta <command> --help` has the full flag set.
+The `insta` CLI manages projects, branches, services, secrets, and deploys from a terminal — yours or a coding agent's. Commands are listed below with their common invocations; `insta <command> --help` has the full flag set.
 
 ## Install
 
@@ -275,37 +275,6 @@ Current billing cycle overview: tier, used, included, overage, credits, forecast
 
 ```bash
 insta billing
-```
-
-
-### policy
-
-Read and set the per-action governance policy.
-
-```bash
-insta policy get
-insta policy set project.delete approve
-```
-
-
-### approvals
-
-Governance approvals — the human side of gated actions.
-
-```bash
-insta approvals list
-insta approvals approve <id>
-insta approvals deny <id>
-```
-
-
-### observe
-
-The local credential-audit hook: install, report, sync findings.
-
-```bash
-insta observe install
-insta observe report
 ```
 
 

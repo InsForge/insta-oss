@@ -1,6 +1,6 @@
 ---
 title: "MCP tools"
-description: "Every insta_* tool the hosted MCP server exposes, grouped by area."
+description: "The insta_* tools the hosted MCP server exposes, grouped by area."
 ---
 
 The InstaCloud MCP server at `https://mcp.instacloud.com/mcp` (streamable HTTP) exposes the tools below. Authenticate with OAuth or an `insta_` API token; register it with `insta mcp install` or as part of [`insta setup agent`](/agents/setup).
@@ -92,15 +92,6 @@ The CLI's linked directory does not carry over: project-scoped tools take an exp
 | `insta_deploy_events` | Machine lifecycle events (the deploy log) |
 | `insta_events` | The project's audit and agent-event timeline |
 | `insta_manifest` | Agent-legible environment view: branches, services, bound secret names, URLs |
-
-## Governance
-
-| Tool | What it does |
-| --- | --- |
-| `insta_policy_get` | Read the per-action policy for a project |
-| `insta_approvals_list` | List governance approval requests |
-| `insta_approvals_approve` | Approve a pending gated action (admin only) |
-| `insta_approvals_deny` | Deny a pending gated action (admin only) |
 
 ## Billing and usage
 

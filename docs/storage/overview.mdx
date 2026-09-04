@@ -9,13 +9,13 @@ A storage service is an S3-compatible bucket. Your app talks to it with any S3 c
 insta services add storage files
 ```
 
-Buckets are private by default; create with `--public` (or flip later) to serve objects with anonymous public read. Changing access is the `service.setAccess` [gated action](/reference/gated-actions).
+Buckets are private by default; create with `--public` (or flip later) to serve objects with anonymous public read.
 
 ## What you get
 
 - **S3 compatibility.** Point any S3 SDK, the aws CLI, or rclone at it — no proprietary client.
-- **Terminal access.** `insta storage list` (prefix filtering, cursor paging), `insta storage get <key>` (downloads through a short-lived presigned URL), `insta storage delete <key>`. Reads are governed by `storage.read`, deletes by `storage.delete`.
-- **Per-branch buckets.** Each branch has its own bucket, so work on a branch stays on that branch. As everywhere, the boundary is separation, not authorization — the storage commands accept `--branch`, governed by the `storage.*` [policies](/governance/overview).
+- **Terminal access.** `insta storage list` (prefix filtering, cursor paging), `insta storage get <key>` (downloads through a short-lived presigned URL), `insta storage delete <key>`.
+- **Per-branch buckets.** Each branch has its own bucket, so work on a branch stays on that branch. The storage commands accept `--branch` to reach another branch's bucket when you mean to.
 
 ## Branching a bucket
 
