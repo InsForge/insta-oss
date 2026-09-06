@@ -65,26 +65,48 @@ fi
 
 # Upstream's s6 runs this script as the unprivileged hermes user, so nginx gets its pid file and
 # temp directories under /tmp (nginx.conf points there); /run and /var/lib/nginx are root's.
+# The config itself is checked at BUILD time (see the Dockerfile), not here: a boot-time `nginx -t`
+# is one more process start on a wake path, and the config is baked into the image, so it cannot
+# have changed since that check.
 mkdir -p /tmp/hermes-nginx
-
-# Checked before anything starts, so a config nginx will not load fails the boot with nginx's own
-# message instead of leaving the dashboard up behind a dead port.
-nginx -t -c /etc/nginx/hermes.conf
 
 # Both processes are children of this script, which is the s6 CMD service's main process. Either
 # dying is fatal: s6 then reruns this script, which is idempotent (the config writes above use
 # --force and the gateway seed checks its own marker). Backgrounding nginx under an exec'd dashboard
 # would instead leave a dead nginx unnoticed behind a healthy-looking container.
 # --skip-build serves the dist baked into the image instead of running npm at boot.
-nginx -c /etc/nginx/hermes.conf -g 'daemon off;' &
-nginx_pid=$!
 # 0.0.0.0, NOT 127.0.0.1, even though only nginx on this machine ever connects: upstream treats a
 # loopback bind as a trusted local operator and switches its sign-in gate OFF (auth_required=false,
 # the SPA served to anyone), which behind a public reverse proxy is an open dashboard. A
 # non-loopback bind keeps the gate on, exactly as 2.3.x had it. The port is not one the platform
 # routes, so nothing but nginx reaches it anyway.
-hermes dashboard --host 0.0.0.0 --port "${HERMES_DASHBOARD_PORT:-8081}" --no-open --skip-build &
+dashboard_port="${HERMES_DASHBOARD_PORT:-8081}"
+hermes dashboard --host 0.0.0.0 --port "$dashboard_port" --no-open --skip-build &
 dashboard_pid=$!
+
+# nginx binds the ROUTED port only once the dashboard behind it accepts. The platform reads "the
+# port accepts" as the service being ready, and a wake request is released on that signal: bind
+# first and the machine is declared ready while every request still answers 502 from nginx, which
+# the platform's own router documents as this image's failure mode (insta-compute #194, "Bad
+# Gateway until I refresh"). Waiting here costs nothing on the happy path (the dashboard is the
+# slow part either way) and turns the router's up-to-1s retry backoff into its 100ms accept probe.
+dashboard_up=""
+for ((i = 0; i < 240; i++)); do
+  if (exec 3<>"/dev/tcp/127.0.0.1/$dashboard_port") 2>/dev/null; then
+    dashboard_up=1
+    break
+  fi
+  # A dashboard that died is not worth waiting a minute for; fall through and fail.
+  kill -0 "$dashboard_pid" 2>/dev/null || break
+  sleep 0.25
+done
+if [[ -z "$dashboard_up" ]]; then
+  echo "entrypoint: the dashboard never bound :$dashboard_port; not binding the routed port" >&2
+  kill -TERM "$dashboard_pid" 2>/dev/null || true
+  exit 1
+fi
+nginx -c /etc/nginx/hermes.conf -g 'daemon off;' &
+nginx_pid=$!
 
 # A signal is an orderly stop (s6 sends TERM on stop and on the platform's suspend), so only a
 # child dying on its own is a failure.

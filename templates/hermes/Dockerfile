@@ -9,6 +9,11 @@ FROM docker.io/nousresearch/hermes-agent:v2026.8.27@sha256:e0df6adebddf29b91112a
 RUN apt-get update && apt-get install -y --no-install-recommends nginx-light patch \
     && rm -rf /var/lib/apt/lists/*
 COPY nginx.conf /etc/nginx/hermes.conf
+# Checked once here rather than on every boot: the config is baked in, so a wake cannot discover a
+# new problem, and a broken config fails the BUILD instead of the container.
+# The temp dir is removed again: the entrypoint runs as the unprivileged hermes user and creates it
+# itself, and a root-owned leftover from this check makes nginx fail at runtime with EACCES.
+RUN mkdir -p /tmp/hermes-nginx && nginx -t -c /etc/nginx/hermes.conf && rm -rf /tmp/hermes-nginx
 
 # Telegram webhook mode already exists upstream, but on boot it registers the webhook with
 # drop_pending_updates=True, on the (wrong) theory that Telegram keeps no queue for webhooks. It
