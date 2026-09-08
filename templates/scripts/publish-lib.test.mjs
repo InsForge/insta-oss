@@ -325,6 +325,21 @@ describe('mentionsDeployButtonAsset', () => {
     expect(mentionsDeployButtonAsset(`![x](${DEPLOY_BUTTON_ASSET})`)).toBe(true)
   })
 
+  it('sees the forms a README actually writes', () => {
+    // An allow-list of delimiters has to name every one of these, so they are pinned rather than
+    // assumed: a missing delimiter would silently stop the draft guard from seeing a real button.
+    for (const text of [
+      `![x](${DEPLOY_BUTTON_ASSET})`,
+      `<img src="${DEPLOY_BUTTON_ASSET}">`,
+      `<img src='${DEPLOY_BUTTON_ASSET}'>`,
+      `${DEPLOY_BUTTON_ASSET}\n`,
+      `see ${DEPLOY_BUTTON_ASSET} here`,
+      DEPLOY_BUTTON_ASSET,
+    ]) {
+      expect(mentionsDeployButtonAsset(text)).toBe(true)
+    }
+  })
+
   it('sees a relative reference with no leading ./', () => {
     // Bounded by "not a path character" rather than "start or slash" for exactly this: the
     // character to the left here is an opening parenthesis.
@@ -340,14 +355,20 @@ describe('mentionsDeployButtonAsset', () => {
   it('does NOT see a different file, bounded on EITHER side', () => {
     // Every one of these renders as some other file, and findDeployButtons already leaves them
     // alone. The right-hand cases are the ones the first version of this bound got wrong.
+    // The allow-list bound is what makes the last four of these work without the pattern knowing
+    // anything about Unicode categories: whatever is not a delimiter is part of a name.
     for (const other of [
-      `my${DEPLOY_BUTTON_ASSET}`,        // left: another directory
-      `x-${DEPLOY_BUTTON_ASSET}`,        // left: hyphen is a path character
-      `foo.${DEPLOY_BUTTON_ASSET}`,      // left: so is a dot
-      `\u00e9${DEPLOY_BUTTON_ASSET}`,   // left: and a letter outside ASCII
-      `${DEPLOY_BUTTON_ASSET}.bak`,      // right: a neighbouring file
-      `${DEPLOY_BUTTON_ASSET}x`,         // right: .svgx
-      `${DEPLOY_BUTTON_ASSET}/extra`,    // right: something BELOW the file, not the file
+      `my${DEPLOY_BUTTON_ASSET}`,            // left: another directory
+      `x-${DEPLOY_BUTTON_ASSET}`,            // left: hyphen is a path character
+      `foo.${DEPLOY_BUTTON_ASSET}`,          // left: so is a dot
+      `1${DEPLOY_BUTTON_ASSET}`,             // left: so is a digit
+      `\u00e9${DEPLOY_BUTTON_ASSET}`,        // left: precomposed e-acute
+      `e\u0301${DEPLOY_BUTTON_ASSET}`,       // left: the SAME name decomposed, e + U+0301
+      `\u200d${DEPLOY_BUTTON_ASSET}`,        // left: a zero-width joiner
+      `${DEPLOY_BUTTON_ASSET}.bak`,          // right: a neighbouring file
+      `${DEPLOY_BUTTON_ASSET}x`,             // right: .svgx
+      `${DEPLOY_BUTTON_ASSET}/extra`,        // right: something BELOW the file, not the file
+      `${DEPLOY_BUTTON_ASSET}\u0301`,        // right: a combining mark
     ]) {
       expect(mentionsDeployButtonAsset(`![x](https://example.com/${other})`)).toBe(false)
     }

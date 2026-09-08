@@ -201,21 +201,24 @@ function scanDeployButtons(text) {
 // other files, and DEPLOY_BUTTON_LINE already leaves every one of them alone. A test that says so
 // is what stops these two from contradicting each other again.
 //
-// The boundary is "not a path character" rather than "start or slash": a relative reference in
-// markdown, `![x](assets/deploy-button.svg)`, has an opening parenthesis to its left, and a
-// slash-or-start rule would miss it. Unicode-aware, because a non-ASCII name is percent-encoded
-// in a real URL (`%` is in the class) but a relative reference can carry it literally, and
-// `éassets/…` is someone else's file.
-const PATH_CHAR = "\\p{L}\\p{N}_.~:@+%-";
-// The two sides differ over `/`, which is the whole reason they are written out separately: on the
-// LEFT a slash ENDS the previous segment, so `@main/assets/…` is our asset; on the RIGHT it opens
-// another one, so `assets/deploy-button.svg/extra` names something below the file rather than the
-// file. A symmetric class cannot say that, and saying it wrong is what let a longer path through.
-// The slash goes FIRST in the right-hand class on purpose: PATH_CHAR ends in `-`, so appending
-// instead of prepending would read `%-/` as a RANGE (U+0025 to U+002F) and quietly swallow `)`,
-// which is the character every markdown link ends with.
+// The asset has to be a whole path, so the bound is what SURROUNDS it, and it is spelled as an
+// ALLOW-LIST of characters that cannot be part of a path. The obvious way round, listing the
+// characters that can, was wrong twice in a row for the same reason: a deny-list of path
+// characters is never finished. It missed non-ASCII letters, then combining marks, and after
+// those would come format characters, joiners, and whatever else Unicode adds. Inverting it ends
+// the category: anything not named here counts as part of a name, so
+// `eassets/…`, `\u00e9assets/…` and `e\u0301assets/…` are all somebody else's file without the
+// class having to know what a combining acute is.
+//
+// Left: nothing (start of input), a slash, which ENDS the previous segment, or a delimiter that
+// markdown or HTML puts next to a URL. That covers `](${cdn}/assets/…)`, `](assets/…)`,
+// `src="assets/…"` and a bare path at the start of a line.
+const LEFT_BOUND = "\\s/()\\[\\]{}<>\"'`|,;=!*\\\\";
+// Right: the same delimiters, plus the `?` and `#` that open a query or a fragment, and NOT a
+// slash: `assets/deploy-button.svg/extra` names something BELOW the file rather than the file.
+const RIGHT_BOUND = "\\s()\\[\\]{}<>\"'`|,;=!*?#\\\\";
 const ASSET_MENTION = new RegExp(
-  `(?<![${PATH_CHAR}])${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}(?![/${PATH_CHAR}])`,
+  `(?:^|[${LEFT_BOUND}])${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}(?:$|[${RIGHT_BOUND}])`,
   "u",
 );
 
