@@ -5,6 +5,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { FIXED_REF_RE, checkFixedRef } from "./manifest-refs.mjs";
+import { DEPLOY_BUTTON_ASSET } from "./publish-lib.mjs";
 
 // Template dirs live beside this script's parent (templates/<code>/): runs from any cwd.
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -65,6 +66,28 @@ for (const dir of dirs) {
         err(dir, `README image '${t}' points outside the template directory; keep assets beside the manifest`);
       } else if (!existsSync(join(root, dir, rel))) {
         err(dir, `README image '${t}' does not exist in the template directory`);
+      }
+    }
+
+    // The one-click deploy button. publish.mjs strips it on the way to the catalog, so a wrong
+    // link never surfaces on the gallery where someone would notice it: this is the only place it
+    // gets checked. AGENTS.md tells a contributor to start by copying the nearest template, which
+    // makes a carried-over <code> in the href the likeliest mistake in this block.
+    if (text.includes(DEPLOY_BUTTON_ASSET)) {
+      const expected = `https://instacloud.com/templates/${dir}`;
+      if (draft) {
+        err(dir, `README carries the deploy button, but the template is a draft: ${expected} does not exist until it publishes`);
+      }
+      if (!existsSync(join(root, "..", DEPLOY_BUTTON_ASSET))) {
+        err(dir, `README references ${DEPLOY_BUTTON_ASSET}, which is not in this repository`);
+      }
+      const asset = DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.");
+      const linked = [...text.matchAll(new RegExp(`\\[!\\[[^\\]]*\\]\\([^)\\s]*${asset}[^)\\s]*\\)\\]\\(([^)\\s]*)\\)`, "g"))].map((mt) => mt[1]);
+      if (!linked.length) {
+        err(dir, `deploy button is not a link: wrap it as [![Deploy on InstaCloud](<button url>)](${expected})`);
+      }
+      for (const href of linked) {
+        if (href !== expected) err(dir, `deploy button links '${href}', expected '${expected}'`);
       }
     }
   }

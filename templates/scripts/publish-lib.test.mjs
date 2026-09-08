@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ghcrGateMessage, ghcrRetryVerdict, parseGhcrRef, rewriteReadme } from './publish-lib.mjs'
+import { DEPLOY_BUTTON_ASSET, ghcrGateMessage, ghcrRetryVerdict, parseGhcrRef, rewriteReadme, stripDeployBadge } from './publish-lib.mjs'
 
 const SHA = 'a'.repeat(40)
 const REPO = 'InsForge/insta-oss'
@@ -141,5 +141,43 @@ describe('ghcrRetryVerdict', () => {
   it('leaves every other status to the caller loop', () => {
     expect(ghcrRetryVerdict({ anon: 404, auth: 0 })).toBe('retry')
     expect(ghcrRetryVerdict({ anon: 500, auth: null })).toBe('retry')
+  })
+})
+
+describe('stripDeployBadge', () => {
+  const button = `[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/insta-oss@main/${DEPLOY_BUTTON_ASSET})](https://instacloud.com/templates/n8n)`
+
+  it('takes the button and the blank line it leaves behind', () => {
+    // One blank line has to survive between the tagline and the next section, not two.
+    expect(stripDeployBadge(`# n8n\n\nTagline.\n\n${button}\n\n## Overview\n\nBody.\n`))
+      .toBe('# n8n\n\nTagline.\n\n## Overview\n\nBody.\n')
+  })
+
+  it('handles the button as the last thing in the file', () => {
+    expect(stripDeployBadge(`# n8n\n\nTagline.\n\n${button}\n`)).toBe('# n8n\n\nTagline.\n')
+  })
+
+  it('leaves a fenced sample of the snippet alone', () => {
+    // assets/README.md documents the snippet inside a fence, and the gallery should keep showing
+    // it: only a button standing on its own in the prose is an affordance to remove.
+    const doc = `# Button\n\nPaste this:\n\n\`\`\`markdown\n${button}\n\`\`\`\n\nDone.\n`
+    expect(stripDeployBadge(doc)).toBe(doc)
+  })
+
+  it('leaves a README that has no button untouched', () => {
+    const text = '# n8n\n\nTagline.\n\n## Overview\n'
+    expect(stripDeployBadge(text)).toBe(text)
+  })
+
+  it('does not touch an unrelated image or link', () => {
+    const text = `# n8n\n\n![shot](./shot.png)\n\n[docs](https://docs.instacloud.com/)\n`
+    expect(stripDeployBadge(text)).toBe(text)
+  })
+
+  it('matches the button whatever host serves it', () => {
+    // The snippet is documented against jsDelivr, but a fork or a short vanity URL should still
+    // be recognised: the asset path is what identifies it.
+    const short = `[![Deploy on InstaCloud](https://instacloud.com/${DEPLOY_BUTTON_ASSET})](https://instacloud.com/templates/pi)`
+    expect(stripDeployBadge(`# pi\n\nTag.\n\n${short}\n\n## Overview\n`)).toBe('# pi\n\nTag.\n\n## Overview\n')
   })
 })

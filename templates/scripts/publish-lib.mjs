@@ -129,3 +129,50 @@ export function rewriteReadme(text, { dirInRepo, repo, sha, isDirectory = () => 
     (m, head, q, target) => head + q + (resolve(target, true) ?? target) + q);
   return out;
 }
+
+/**
+ * The repo-relative path of the one-click button asset. Referenced from a README as an absolute
+ * CDN URL (rewriteReadme leaves absolute targets alone), so this is matched as a URL SUFFIX.
+ */
+export const DEPLOY_BUTTON_ASSET = "assets/deploy-button.svg";
+
+// A whole line that is nothing but the linked button image. Anchored, and without /g, so it can
+// be tested line by line without carrying lastIndex between calls.
+const DEPLOY_BUTTON_LINE = new RegExp(
+  `^[ \\t]*\\[!\\[[^\\]]*\\]\\([^)\\s]*${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}[^)\\s]*\\)\\]\\([^)\\s]*\\)[ \\t]*$`,
+);
+
+/**
+ * Drop the "Deploy on InstaCloud" button from a README on its way to the catalog.
+ *
+ * The button is authored for GitHub, where a template directory has no deploy affordance of its
+ * own. The gallery serves this same text at instacloud.com/templates/<code>, which is the page
+ * the button LINKS TO, and which already carries its own Deploy Now button: republished verbatim
+ * it renders as a second button pointing at the page the reader is already on. The gallery's
+ * markdown renderer also parses no raw HTML, so there is no <picture> or conditional-comment
+ * escape hatch to hide it with. Stripping at publish keeps one README serving both surfaces.
+ *
+ * @param {string} text  the README source
+ * @returns {string}     the same text with any button line, and the blank line it left behind, gone
+ */
+export function stripDeployBadge(text) {
+  const lines = String(text ?? "").split("\n");
+  const out = [];
+  let fenced = false;
+  for (let i = 0; i < lines.length; i++) {
+    // Inside a fence the same line is DOCUMENTATION of the button rather than the button itself,
+    // and the line-anchored match above tolerates the indentation a fenced sample carries. The
+    // snippet in assets/README.md is exactly that, so the distinction has to survive publish.
+    if (/^[ \t]*(?:`{3,}|~{3,})/.test(lines[i])) fenced = !fenced;
+    if (fenced || !DEPLOY_BUTTON_LINE.test(lines[i])) {
+      out.push(lines[i]);
+      continue;
+    }
+    // The button sits in its own paragraph, so removing the line alone would leave the blank line
+    // above AND below it: take the trailing one, and only when a blank line is already standing.
+    const nextIsBlank = lines[i + 1] !== undefined && lines[i + 1].trim() === "";
+    const prevIsBlank = out.length > 0 && out[out.length - 1].trim() === "";
+    if (nextIsBlank && prevIsBlank) i++;
+  }
+  return out.join("\n");
+}

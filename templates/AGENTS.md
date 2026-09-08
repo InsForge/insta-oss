@@ -18,6 +18,14 @@ IS the template code. Copying the closest existing template is the fastest way t
   it does and where the value comes from), After deploy (how to actually start using it), and
   Links (upstream, the image or package, the license). A draft template opens with a note saying
   why it is draft.
+- The **deploy button**, in its own paragraph under the title and tagline, for every publishable
+  template: `[![Deploy on InstaCloud](<cdn>/assets/deploy-button.svg)](https://instacloud.com/templates/<code>)`.
+  CI checks that the href names this template's own code, and that a draft carries no button at
+  all, because its gallery page does not exist until it publishes. Since copying the nearest
+  template is the fastest way to start, a code carried over from the one you copied is the mistake
+  that check exists for. The publish step removes the line on the way to the catalog, so the
+  gallery never shows a button pointing at the page the reader is already on. The asset and the
+  snippet live in [assets/README.md](../assets/README.md).
 - `logo.svg`: the template's mark, and a **hard requirement for a publishable template**. CI
   rejects a non-draft template without one. Declare the path as `meta.logo: ./logo.svg` and CI
   checks that it resolves. Details and the reasoning are under [Logos](#logos).
