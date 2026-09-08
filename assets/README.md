@@ -40,10 +40,10 @@ The rule is load-bearing rather than a nicety: brand black on GitHub's dark READ
 
 ## In this repository
 
-Every publishable template README carries the button under its title, and `templates/scripts/lint.mjs`
-enforces that: a publishable template that omits it is rejected, the href has to name that
-template's own code, and a draft cannot carry one at all, since its gallery page does not exist
-until it publishes. Copying the nearest template is how
+Every publishable template README carries the button under its title, and
+`templates/scripts/lint.mjs` enforces that: a publishable template that omits it is rejected, the
+href has to name that template's own code, and a draft cannot carry one at all, since its gallery
+page does not exist until it publishes. Copying the nearest template is how
 `templates/AGENTS.md` says to start a new one, so a carried-over code in that href is the mistake
 the check is really there for.
 
