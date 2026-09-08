@@ -194,11 +194,21 @@ function scanDeployButtons(text) {
   return { lines, hits };
 }
 
-// The asset named as a whole path segment. Deliberately looser than DEPLOY_BUTTON_LINE (see the
-// draft check in lint.mjs) but not so loose that a DIFFERENT file whose path merely ends the same
-// way counts: `myassets/deploy-button.svg` is another file, and the button matcher above already
-// treats it as one, so a raw substring test would have contradicted it.
-const ASSET_MENTION = new RegExp(`(?:^|[^\\w-])${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}`);
+// The asset named as a whole path, bounded on BOTH sides by something that cannot be part of one.
+// Deliberately looser than DEPLOY_BUTTON_LINE about the markdown around it (see the draft check in
+// lint.mjs) but exact about WHICH FILE, because a different file renders as that file:
+// `myassets/…`, `foo.assets/…`, `…deploy-button.svg.bak` and `…deploy-button.svgx` are all
+// other files, and DEPLOY_BUTTON_LINE already leaves every one of them alone. A test that says so
+// is what stops these two from contradicting each other again.
+//
+// The boundary is "not a path character" rather than "start or slash": a relative reference in
+// markdown, `![x](assets/deploy-button.svg)`, has an opening parenthesis to its left, and a
+// slash-or-start rule would miss it. `/` is absent from the class on purpose, so the slash in
+// `@main/assets/…` is a boundary rather than part of the name.
+const PATH_CHAR = "\\w.~:@+%-";
+const ASSET_MENTION = new RegExp(
+  `(?<![${PATH_CHAR}])${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}(?![${PATH_CHAR}])`,
+);
 
 /**
  * Does this README name the button asset at all, in any form: linked or not, fenced or not,

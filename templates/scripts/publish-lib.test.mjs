@@ -317,10 +317,49 @@ describe('mentionsDeployButtonAsset', () => {
     expect(mentionsDeployButtonAsset(`${DEPLOY_BUTTON_ASSET}\n`)).toBe(true)
   })
 
-  it('does NOT see a different file whose path merely ends the same way', () => {
-    // The whole point of the path-segment bound: this renders as that file, not as this button.
-    expect(mentionsDeployButtonAsset(`![x](https://example.com/my${DEPLOY_BUTTON_ASSET})`)).toBe(false)
-    expect(mentionsDeployButtonAsset(`![x](https://example.com/x-${DEPLOY_BUTTON_ASSET})`)).toBe(false)
+  it('sees a relative reference with no leading ./', () => {
+    // Bounded by "not a path character" rather than "start or slash" for exactly this: the
+    // character to the left here is an opening parenthesis.
+    expect(mentionsDeployButtonAsset(`![x](${DEPLOY_BUTTON_ASSET})`)).toBe(true)
+    expect(mentionsDeployButtonAsset(`![x](./${DEPLOY_BUTTON_ASSET})`)).toBe(true)
+  })
+
+  it('sees one carrying a query or a fragment', () => {
+    expect(mentionsDeployButtonAsset(`![x](${url}?v=2)`)).toBe(true)
+    expect(mentionsDeployButtonAsset(`![x](${url}#icon)`)).toBe(true)
+  })
+
+  it('does NOT see a different file, bounded on EITHER side', () => {
+    // Every one of these renders as some other file, and findDeployButtons already leaves them
+    // alone. The right-hand cases are the ones the first version of this bound got wrong.
+    for (const other of [
+      `my${DEPLOY_BUTTON_ASSET}`,        // left: another directory
+      `x-${DEPLOY_BUTTON_ASSET}`,        // left: hyphen is a path character
+      `foo.${DEPLOY_BUTTON_ASSET}`,      // left: so is a dot
+      `${DEPLOY_BUTTON_ASSET}.bak`,      // right: a neighbouring file
+      `${DEPLOY_BUTTON_ASSET}x`,         // right: .svgx
+    ]) {
+      expect(mentionsDeployButtonAsset(`![x](https://example.com/${other})`)).toBe(false)
+    }
+  })
+
+  it('never contradicts the stripper', () => {
+    // The invariant that keeps these two from drifting: anything strippable is mentioned, and
+    // nothing the stripper calls a different file is mentioned. Two answers to "is this our
+    // asset" is how this bound was wrong twice.
+    const strippable = [`[![D](${url})](https://x)`, `   [![D](${url})](https://x)`]
+    const otherFiles = [
+      `[![D](https://x/my${DEPLOY_BUTTON_ASSET})](https://x)`,
+      `[![D](${url}.bak)](https://x)`,
+    ]
+    for (const t of strippable) {
+      expect(findDeployButtons(t).length).toBeGreaterThan(0)
+      expect(mentionsDeployButtonAsset(t)).toBe(true)
+    }
+    for (const t of otherFiles) {
+      expect(findDeployButtons(t)).toEqual([])
+      expect(mentionsDeployButtonAsset(t)).toBe(false)
+    }
   })
 
   it('does not see a README that never names it', () => {
@@ -328,11 +367,4 @@ describe('mentionsDeployButtonAsset', () => {
     expect(mentionsDeployButtonAsset('')).toBe(false)
   })
 
-  it('is implied by every button the stripper would remove', () => {
-    // findDeployButtons is a strict subset: anything strippable is, necessarily, mentioned.
-    for (const line of [`[![D](${url})](https://x)`, `   [![D](${url})](https://x)`]) {
-      expect(findDeployButtons(line).length > 0).toBe(true)
-      expect(mentionsDeployButtonAsset(line)).toBe(true)
-    }
-  })
 })
