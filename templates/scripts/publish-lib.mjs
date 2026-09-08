@@ -194,6 +194,27 @@ function scanDeployButtons(text) {
   return { lines, hits };
 }
 
+// The asset named as a whole path segment. Deliberately looser than DEPLOY_BUTTON_LINE (see the
+// draft check in lint.mjs) but not so loose that a DIFFERENT file whose path merely ends the same
+// way counts: `myassets/deploy-button.svg` is another file, and the button matcher above already
+// treats it as one, so a raw substring test would have contradicted it.
+const ASSET_MENTION = new RegExp(`(?:^|[^\\w-])${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}`);
+
+/**
+ * Does this README name the button asset at all, in any form: linked or not, fenced or not,
+ * inline in prose or alone on its line.
+ *
+ * This is the question "is the asset mentioned", NOT "is there a button" (findDeployButtons).
+ * lint.mjs wants the first for its draft rule, where the risk is what a reader can click rather
+ * than what publish strips, and the second everywhere else.
+ *
+ * @param {string} text  the README source
+ * @returns {boolean}
+ */
+export function mentionsDeployButtonAsset(text) {
+  return ASSET_MENTION.test(String(text ?? ""));
+}
+
 /**
  * Every deploy button in a README, as the href each one links to. Empty when the asset is only
  * mentioned: unlinked, indented into a code block, inside a fence, or a neighbouring filename.

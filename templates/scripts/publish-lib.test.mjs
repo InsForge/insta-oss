@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { DEPLOY_BUTTON_ASSET, findDeployButtons, ghcrGateMessage, ghcrRetryVerdict, parseGhcrRef, rewriteReadme, stripDeployBadge } from './publish-lib.mjs'
+import {
+  DEPLOY_BUTTON_ASSET,
+  findDeployButtons,
+  ghcrGateMessage,
+  ghcrRetryVerdict,
+  mentionsDeployButtonAsset,
+  parseGhcrRef,
+  rewriteReadme,
+  stripDeployBadge,
+} from './publish-lib.mjs'
 
 const SHA = 'a'.repeat(40)
 const REPO = 'InsForge/insta-oss'
@@ -280,6 +289,50 @@ describe('findDeployButtons', () => {
     for (const line of [button(), `   ${button()}`, `    ${button()}`, `![x](${url})`, button(`${url}.bak`)]) {
       const text = wrap(line)
       expect(findDeployButtons(text).length > 0).toBe(stripDeployBadge(text) !== text)
+    }
+  })
+})
+
+describe('mentionsDeployButtonAsset', () => {
+  // lint.mjs's draft rule rides on this, so a false positive fails a draft over a file it does
+  // not have, and a false negative lets a draft ship a button pointing at a route that does not
+  // exist yet.
+  const url = `https://cdn.jsdelivr.net/gh/InsForge/insta-oss@main/${DEPLOY_BUTTON_ASSET}`
+
+  it('sees the asset in the documented snippet', () => {
+    expect(mentionsDeployButtonAsset(`[![Deploy on InstaCloud](${url})](https://x)`)).toBe(true)
+  })
+
+  it('sees it inline in prose, which the button matcher does not', () => {
+    const inline = `Try [![Deploy](${url})](https://x) here.`
+    expect(mentionsDeployButtonAsset(inline)).toBe(true)
+    expect(findDeployButtons(inline)).toEqual([])
+  })
+
+  it('sees it in a fenced sample', () => {
+    expect(mentionsDeployButtonAsset(`\`\`\`markdown\n![x](${url})\n\`\`\`\n`)).toBe(true)
+  })
+
+  it('sees a bare path at the start of a line', () => {
+    expect(mentionsDeployButtonAsset(`${DEPLOY_BUTTON_ASSET}\n`)).toBe(true)
+  })
+
+  it('does NOT see a different file whose path merely ends the same way', () => {
+    // The whole point of the path-segment bound: this renders as that file, not as this button.
+    expect(mentionsDeployButtonAsset(`![x](https://example.com/my${DEPLOY_BUTTON_ASSET})`)).toBe(false)
+    expect(mentionsDeployButtonAsset(`![x](https://example.com/x-${DEPLOY_BUTTON_ASSET})`)).toBe(false)
+  })
+
+  it('does not see a README that never names it', () => {
+    expect(mentionsDeployButtonAsset('# n8n\n\nTag.\n\n![shot](./shot.png)\n')).toBe(false)
+    expect(mentionsDeployButtonAsset('')).toBe(false)
+  })
+
+  it('is implied by every button the stripper would remove', () => {
+    // findDeployButtons is a strict subset: anything strippable is, necessarily, mentioned.
+    for (const line of [`[![D](${url})](https://x)`, `   [![D](${url})](https://x)`]) {
+      expect(findDeployButtons(line).length > 0).toBe(true)
+      expect(mentionsDeployButtonAsset(line)).toBe(true)
     }
   })
 })

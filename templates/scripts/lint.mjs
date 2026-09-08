@@ -5,7 +5,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { FIXED_REF_RE, checkFixedRef } from "./manifest-refs.mjs";
-import { DEPLOY_BUTTON_ASSET, findDeployButtons } from "./publish-lib.mjs";
+import { DEPLOY_BUTTON_ASSET, findDeployButtons, mentionsDeployButtonAsset } from "./publish-lib.mjs";
 
 // Template dirs live beside this script's parent (templates/<code>/): runs from any cwd.
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -86,11 +86,12 @@ for (const dir of dirs) {
     // image inline in prose as a button while the line-anchored matcher does not match it. On a
     // draft that button points at a console route that does not exist until the template
     // publishes. Erring wide costs a draft author a fenced sample; erring narrow ships a dead
-    // button.
+    // button. Wide stops at the asset being a whole path segment though: a different file whose
+    // path merely ends the same way renders as that file, not as this button.
     const expected = `https://console.instacloud.com/templates/${dir}`;
     const buttons = findDeployButtons(text);
     if (draft) {
-      if (text.includes(DEPLOY_BUTTON_ASSET)) {
+      if (mentionsDeployButtonAsset(text)) {
         err(dir, `README mentions ${DEPLOY_BUTTON_ASSET}, but the template is a draft: `
           + `${expected} does not exist until it publishes, so nothing here should link to it, `
           + `a sample included`);
@@ -107,7 +108,7 @@ for (const dir of dirs) {
       // logo rule is enforced. Two different mistakes get two different messages: writing it in a
       // form publish cannot strip is not the same as not writing it, and telling someone to "add"
       // one they already wrote would only get a second copy.
-      err(dir, text.includes(DEPLOY_BUTTON_ASSET)
+      err(dir, mentionsDeployButtonAsset(text)
         ? `README mentions ${DEPLOY_BUTTON_ASSET}, but not as a button publish would strip: it has to be `
           + `a linked image alone on its line, outside any code fence, indented at most three spaces, `
           + `with the asset last in the URL. `
