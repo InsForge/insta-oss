@@ -148,7 +148,7 @@ export const DEPLOY_BUTTON_ASSET = "assets/deploy-button.svg";
 //   (?:[?#]..) and it has to end there, give or take a query or a fragment, so a neighbouring
 //              file like 'deploy-button.svg.bak' stays.
 const DEPLOY_BUTTON_LINE = new RegExp(
-  `^[ ]{0,3}\\[!\\[[^\\]]*\\]\\((?:[^)\\s]*/)?${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}(?:[?#][^)\\s]*)?\\)\\]\\([^)\\s]*\\)[ \\t]*$`,
+  `^[ ]{0,3}\\[!\\[[^\\]]*\\]\\((?:[^)\\s]*/)?${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}(?:[?#][^)\\s]*)?\\)\\]\\(([^)\\s]*)\\)[ \\t]*$`,
 );
 
 // A code fence: up to three spaces, three or more backticks or tildes, then the rest of the line
@@ -156,27 +156,20 @@ const DEPLOY_BUTTON_LINE = new RegExp(
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
 /**
- * Drop the "Deploy on InstaCloud" button from a README on its way to the catalog.
+ * The one place that decides what IS the button, so the publisher and the lint cannot drift:
+ * stripDeployBadge removes exactly what this finds, and lint.mjs validates exactly what this
+ * finds. A looser test in either one is a way for a README to pass CI carrying something the
+ * other will not act on.
  *
- * The button is authored for GitHub, where a template directory has no deploy affordance of its
- * own. The gallery serves this same text at instacloud.com/templates/<code>, which is the page
- * the button LINKS TO, and which already carries its own Deploy Now button: republished verbatim
- * it renders as a second button pointing at the page the reader is already on. The gallery's
- * markdown renderer also parses no raw HTML, so there is no <picture> or conditional-comment
- * escape hatch to hide it with. Stripping at publish keeps one README serving both surfaces.
- *
- * @param {string} text  the README source
- * @returns {string}     the same text with any button line, and the blank line it left behind, gone
+ * @param {string} text
+ * @returns {{ lines: string[], hits: Map<number, string> }} lines, and line index -> href
  */
-export function stripDeployBadge(text) {
+function scanDeployButtons(text) {
   const lines = String(text ?? "").split("\n");
-  const out = [];
-  // Inside a fence the same line is DOCUMENTATION of the button rather than the button itself,
-  // and the snippet in assets/README.md is exactly that, so the distinction has to survive
-  // publish. Tracked as the OPENING fence's character and length, not as a parity flip:
-  // CommonMark closes a fence only with the same character, at least as long, carrying nothing
-  // else, so a four-backtick block quoting a three-backtick line stays open. A flip read that
-  // inner line as the close and resumed stripping inside the sample.
+  const hits = new Map();
+  // Tracked as the OPENING fence's character and length, not as a parity flip: CommonMark closes
+  // a fence only with the same character, at least as long, carrying nothing else, so a
+  // four-backtick block quoting a three-backtick line stays open.
   let fence = null;
   for (let i = 0; i < lines.length; i++) {
     const f = FENCE.exec(lines[i]);
@@ -190,8 +183,48 @@ export function stripDeployBadge(text) {
       } else if (char === fence.char && bars.length >= fence.len && rest.trim() === "") {
         fence = null;
       }
+      continue; // a fence line is never the button
     }
-    if (fence || !DEPLOY_BUTTON_LINE.test(lines[i])) {
+    // Inside a fence the same line is DOCUMENTATION of the button rather than the button itself,
+    // and the snippet in assets/README.md is exactly that.
+    if (fence) continue;
+    const m = DEPLOY_BUTTON_LINE.exec(lines[i]);
+    if (m) hits.set(i, m[1]);
+  }
+  return { lines, hits };
+}
+
+/**
+ * Every deploy button in a README, as the href each one links to. Empty when the asset is only
+ * mentioned: unlinked, indented into a code block, inside a fence, or a neighbouring filename.
+ * Used by lint.mjs so it checks the same affordance publish removes.
+ *
+ * @param {string} text  the README source
+ * @returns {string[]}   one href per button, in document order
+ */
+export function findDeployButtons(text) {
+  return [...scanDeployButtons(text).hits.values()];
+}
+
+/**
+ * Drop the "Deploy on InstaCloud" button from a README on its way to the catalog.
+ *
+ * The button is authored for GitHub, where a template directory has no deploy affordance of its
+ * own. The gallery serves this same text on a page whose rail already carries a Deploy Now to the
+ * same console deploy route, so republished verbatim the button is a second, identical call to
+ * action sitting in the middle of the prose. The gallery's markdown renderer also parses no raw
+ * HTML, so there is no <picture> or conditional-comment escape hatch to hide it with. Stripping
+ * at publish keeps one README serving both surfaces.
+ *
+ * @param {string} text  the README source
+ * @returns {string}     the same text with any button line, and the blank line it left behind, gone
+ */
+export function stripDeployBadge(text) {
+  const { lines, hits } = scanDeployButtons(text);
+  if (!hits.size) return text; // nothing to remove, and no rejoin that could alter the text
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!hits.has(i)) {
       out.push(lines[i]);
       continue;
     }

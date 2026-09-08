@@ -10,20 +10,26 @@ than those only because "Deploy on InstaCloud" is four characters longer than "D
 ## Use it
 
 ```markdown
-[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/insta-oss@main/assets/deploy-button.svg)](https://instacloud.com/templates/<code>)
+[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/insta-oss@main/assets/deploy-button.svg)](https://console.instacloud.com/templates/<code>)
 ```
 
-Point the link at your template's gallery page, `https://instacloud.com/templates/<code>`, where
-`<code>` is the template code (the folder name under `templates/`). That page carries the deploy
-form, the variables and the README, so it is the one target that works for a reader who has not
-signed in yet.
+Point the link at the console's deploy route, `https://console.instacloud.com/templates/<code>`,
+where `<code>` is the template code (the folder name under `templates/`). That route is the
+one-click path: it mints a project named for the template and opens its deploy configuration, the
+same way Railway's and Zeabur's buttons behave. A visitor who is not signed in reaches sign-in
+first and lands there afterwards.
+
+The gallery page, `https://instacloud.com/templates/<code>`, is the other defensible target: it
+carries the description, the variable table and the README, needs no account to read, and its own
+Deploy Now goes to the same console route. Point at it instead when the button should introduce
+the template rather than deploy it.
 
 jsDelivr serves the file straight from this repository, which is the same CDN the template logos
 go through. `@main` tracks this branch; pin a commit instead of `main` if you would rather the
 button never change under you:
 
 ```markdown
-[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/insta-oss@<sha>/assets/deploy-button.svg)](https://instacloud.com/templates/<code>)
+[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/insta-oss@<sha>/assets/deploy-button.svg)](https://console.instacloud.com/templates/<code>)
 ```
 
 ## Light and dark
@@ -43,15 +49,20 @@ The rule is load-bearing rather than a nicety: brand black on GitHub's dark READ
 Every publishable template README carries the button under its title, and
 `templates/scripts/lint.mjs` enforces that: a publishable template that omits it is rejected, the
 href has to name that template's own code, and a draft cannot carry one at all, since its gallery
-page does not exist until it publishes. Copying the nearest template is how
+page does not exist until it publishes.
+
+The lint asks the publisher what counts, through the same `findDeployButtons` the stripper uses,
+so only a form publish would actually remove counts as the button. A fenced sample, an unlinked
+image, a four-space indent or a neighbouring filename is a mention rather than a button, and gets
+said so rather than passing as one. Copying the nearest template is how
 `templates/AGENTS.md` says to start a new one, so a carried-over code in that href is the mistake
 the check is really there for.
 
 `templates/scripts/publish.mjs` strips the button on the way to the catalog. The gallery renders
-the same README text at `instacloud.com/templates/<code>`, which is the page the button links to
-and which already has its own Deploy Now button, so republished verbatim it would render as a
-second button pointing at the page the reader is already on. A fenced sample of the snippet, like
-the ones above, is left alone.
+the same README text on a page whose rail already carries a Deploy Now to the same console route,
+so republished verbatim the button is a second, identical call to action sitting in the middle of
+the prose. It earns its place on GitHub, where a template directory has no deploy affordance at
+all. A fenced sample of the snippet, like the ones above, is left alone.
 
 ## Changing it
 
