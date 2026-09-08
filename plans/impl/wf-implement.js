@@ -9,7 +9,7 @@ export const meta = {
 }
 
 const WT = '/Users/gary/projects/instacloud/insta-oss/.claude/worktrees/serverless'
-const BASE = '65c5196'
+const BASE = '906c6b6'
 const CONTEXT = [
   'Repo InsForge/insta-oss. The integration branch is feat/single-node-serverless at ' + BASE + ' (the scaffold commit) in ' + WT + '.',
   'You work in your OWN git worktree (the harness created it for you: run git rev-parse --show-toplevel and stay inside it; never touch ' + WT + ' itself). Your worktree starts from ' + BASE + '. Create a branch named wp<N>/<slug> and commit there.',
