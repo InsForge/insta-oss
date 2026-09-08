@@ -230,6 +230,11 @@ test('every cloud-only or not-yet route answers a clean 501, never a bare 404', 
     ['POST', '/projects/x/backups'], ['GET', '/projects/x/backups'], ['DELETE', '/projects/x/backups/b1'], ['POST', '/projects/x/backups/b1/restore'],
     ['GET', '/orgs/local/billing/cycle'], ['GET', '/orgs/local/billing/overview'],
     ['POST', '/orgs/local/billing/checkout'], ['POST', '/orgs/local/billing/portal'],
+    ['POST', '/orgs/local/github/setup'], ['POST', '/orgs/local/github/setup/complete'],
+    ['GET', '/github/installations'], ['GET', '/github/installations/7/repos'],
+    ['POST', '/projects/x/github/detect'], ['POST', '/projects/x/github/public-repo/resolve'],
+    ['GET', '/projects/x/github/repo-binding'], ['POST', '/projects/x/github/repo-binding'], ['DELETE', '/projects/x/github/repo-binding'],
+    ['GET', '/projects/x/github/builds'],
   ]
   for (const [method, url] of cloudOnly) {
     const r = await app.inject({ method: method as 'GET', url })

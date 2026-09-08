@@ -518,6 +518,18 @@ export function buildServer(engine: Engine): FastifyInstance {
   // Not-yet surfaces (real local answers exist meanwhile):
   app.get('/projects/:id/deploy-events', async (_req, reply) => notYet(reply, 'the deploy-event feed', 'use `insta events` and `insta logs`'))
 
+  // GitHub repo connect needs the GitHub App, a public webhook URL and the remote build gateway — cloud-only.
+  app.post('/orgs/:orgId/github/setup', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/orgs/:orgId/github/setup/complete', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/github/installations', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/github/installations/:installationId/repos', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/projects/:id/github/detect', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/projects/:id/github/public-repo/resolve', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/projects/:id/github/repo-binding', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/projects/:id/github/repo-binding', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.delete('/projects/:id/github/repo-binding', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/projects/:id/github/builds', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+
   // Project rename — display name only, like the cloud: every resource keeps its frozen slug.
   app.patch('/projects/:id', async (req, reply) => {
     const { id } = req.params as { id: string }

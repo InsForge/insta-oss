@@ -32,6 +32,7 @@ to work.
 | `login/logout` | not needed: localhost trust, no accounts |
 | `services scale/upgrade` | 501: machine scaling / instance specs are cloud pricing concepts |
 | `compute limits/always-on` | 501: tier caps / scale-to-zero are cloud pricing concepts; local containers already stay up |
+| `compute repo` / `compute connect-repo` (and the console's Git Repo tab) | 501: connecting a GitHub repo needs the GitHub App and a public webhook URL — cloud-only; deploy a directory with `insta deploy <dir>` instead |
 | `usage` / `billing` | 501: billing metering is cloud-only by design; local visibility = `manifest` + docker-backed `metrics`/`logs` |
 | `org create` / `tokens` | 501: single-tenant |
 
