@@ -94,7 +94,7 @@ services:
 
 Garage stays on the compose bridge (the daemon `docker network connect`s it to branch networks for rclone).
 
-### C. Caddyfile (concrete values; no env placeholders)
+### C. Caddyfile (concrete values rendered by install.sh from `instad.env`; no runtime placeholders: `8081` is `INSTA_OSS_INTERNAL_PORT` and `8080` is `INSTA_OSS_PORT`, both at their defaults below)
 
 ```
 {
@@ -174,7 +174,7 @@ CloudFront distribution over `raw.githubusercontent.com/InsForge/insta-oss/main/
 - `--print-daemon-json renders {"default-address-pools":[{"base":"10.100.0.0/14","size":24}]}; the script greps daemon.json for default-address-pools before writing`
 - `--print-firewall lists ufw allow in on docker0 ... 443,5432,6379,27017 and 20000:20999 and the inbound 80,443,5432 rule; the script gates them on ufw status / firewall-cmd --state`
 
-`test/server.test.ts` (one assertion, region WP2 owns the route absence; WP6 adds it if missing): `GET /tls/ask in local mode is not a route (SPA fallback or 404, never 200)`.
+`GET /tls/ask in local mode is not a route (SPA fallback or 404, never 200)`: WP2 owns and ships this assertion (02 tests, `test/router.test.ts` internal listener case, plus `/tls` in `API_PREFIXES` so Fastify answers 404 JSON); WP6 has no edit right on `test/server.test.ts` (contract 1.2) and files an issue against WP2 if the assertion is missing.
 
 `test/image.int.test.ts` (integrator only, container `io-imagetest`): `docker build --build-arg VERSION=test -t instacloud:test .`; run in local mode with the socket and a tmp data dir on port 18080; `/healthz` ok; `docker exec io-imagetest docker version` succeeds; `ls /app/ui/dist/index.html /app/templates/hermes/insta.template.yaml`; `GET /` serves the SPA shell with `window.__INSTA_OSS__`.
 
@@ -199,7 +199,7 @@ CI: `shellcheck -s sh install.sh`; `docker build --build-arg VERSION=ci -t insta
 - Options: `--domain`, `--email`, `--version`, `--tls acme|internal`, `--data-img-gib`; env `INSTA_OSS_*` pass-through.
 - Upgrade = re-run; rollback = re-run with `--version`; `docker compose down` in `/etc/instacloud` stops the stack; branch containers keep running across a stack recreate.
 - Security posture: the daemon container mounts the Docker socket (root on the box); treat the admin password and every `insta_` token as root credentials.
-- Reflinks: check with `xfs_info /var/lib/instacloud | grep reflink=1`; growing the image: `truncate -s +20G /var/lib/instacloud.img && losetup -c <dev> && xfs_growfs /var/lib/instacloud`.
+- Reflinks: check with `xfs_info /var/lib/instacloud | grep reflink=1`; growing the image: `truncate -s +20G /var/lib/instacloud.img && losetup -c <dev> && xfs_growfs /var/lib/instacloud`. `Reflinks: unavailable` is not an install failure: the daemon boots, logs one warning and streams `pg_basebackup` for branch forks (contract decision 23); only `INSTA_OSS_FORK=reflink` in `instad.env` makes it refuse to start on such a box.
 - The auto domain shares certificate rate limits with everyone on sslip.io; production wants a real domain (`--domain`, wildcard or per-host A records to the box).
 - `INSTA_OSS_TLS=internal` for air-gapped or CI boxes; the CA lives at `/var/lib/instacloud/edge/ca.pem` for `curl --cacert`, `PGSSLROOTCERT`, `NODE_EXTRA_CA_CERTS`.
 - Compose container names `io-instad`, `io-edge`, `io-garage`.

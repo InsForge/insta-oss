@@ -42,6 +42,7 @@ Server mode only. `usePoll(api.tokens, [], 30000)`; rows `!revokedAt` sorted by 
 5. Always on: compute and managed rows `Switch checked={!!row.always_on}` -> `PUT .../always-on {enabled}`; postgres rows `Switch checked={!instance.scaleToZero}` -> `PATCH /database/settings?branch&group {scaleToZero: !checked}`; storage none.
 6. Kebab: compute Start/Stop/Suspend/Restart/Rename/Remove; managed Rename/Remove; postgres Rename/Remove; storage Make public/private, Rename, Remove. Row click -> `services/<id>`.
 7. Header: `Deploy` (primary, `DeployDialog`), `Add Service` (`AddServiceDialog`). Empty state when no services: `No services yet. Add a database or storage, or deploy an app or a template.`
+8. Service ids are opaque and branch-scoped (contract decision 49: `GET /services?branch=<b>` returns `<branchId>:<serviceId>` off the default branch and the bare id on it). The UI never parses or compares ids across branches: `useWaking`, health lookups and `services/:sid` links key on `row.id` from the SAME `?branch=` list; every `/services/:sid/*` call keeps sending `?branch=` (the daemon resolves the qualified id first, then the query, so both agree); a branch switch while on `services/:sid` navigates to the list, because that id does not exist on the other branch. React Router accepts the `:` in the path segment.
 
 ### F. Service detail (`services/:sid`)
 
