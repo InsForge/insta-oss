@@ -138,9 +138,22 @@ export const DEPLOY_BUTTON_ASSET = "assets/deploy-button.svg";
 
 // A whole line that is nothing but the linked button image. Anchored, and without /g, so it can
 // be tested line by line without carrying lastIndex between calls.
+//
+// Three bounds keep it from taking something that merely looks like the button:
+//   ^[ ]{0,3}  a paragraph may be indented up to three spaces. FOUR spaces, or a tab, opens an
+//              indented code block, where the same line is a sample rather than an affordance,
+//              and the fence tracking below only covers the fenced spelling of a sample.
+//   (?:...(/)? the asset has to be the LAST path segment, so 'myassets/deploy-button.svg' and a
+//              path that merely ends in the same letters are not it.
+//   (?:[?#]..) and it has to end there, give or take a query or a fragment, so a neighbouring
+//              file like 'deploy-button.svg.bak' stays.
 const DEPLOY_BUTTON_LINE = new RegExp(
-  `^[ \\t]*\\[!\\[[^\\]]*\\]\\([^)\\s]*${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}[^)\\s]*\\)\\]\\([^)\\s]*\\)[ \\t]*$`,
+  `^[ ]{0,3}\\[!\\[[^\\]]*\\]\\((?:[^)\\s]*/)?${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}(?:[?#][^)\\s]*)?\\)\\]\\([^)\\s]*\\)[ \\t]*$`,
 );
+
+// A code fence: up to three spaces, three or more backticks or tildes, then the rest of the line
+// (an info string, on an opening fence).
+const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
 /**
  * Drop the "Deploy on InstaCloud" button from a README on its way to the catalog.
@@ -158,13 +171,27 @@ const DEPLOY_BUTTON_LINE = new RegExp(
 export function stripDeployBadge(text) {
   const lines = String(text ?? "").split("\n");
   const out = [];
-  let fenced = false;
+  // Inside a fence the same line is DOCUMENTATION of the button rather than the button itself,
+  // and the snippet in assets/README.md is exactly that, so the distinction has to survive
+  // publish. Tracked as the OPENING fence's character and length, not as a parity flip:
+  // CommonMark closes a fence only with the same character, at least as long, carrying nothing
+  // else, so a four-backtick block quoting a three-backtick line stays open. A flip read that
+  // inner line as the close and resumed stripping inside the sample.
+  let fence = null;
   for (let i = 0; i < lines.length; i++) {
-    // Inside a fence the same line is DOCUMENTATION of the button rather than the button itself,
-    // and the line-anchored match above tolerates the indentation a fenced sample carries. The
-    // snippet in assets/README.md is exactly that, so the distinction has to survive publish.
-    if (/^[ \t]*(?:`{3,}|~{3,})/.test(lines[i])) fenced = !fenced;
-    if (fenced || !DEPLOY_BUTTON_LINE.test(lines[i])) {
+    const f = FENCE.exec(lines[i]);
+    if (f) {
+      const [, bars, rest] = f;
+      const char = bars[0];
+      if (!fence) {
+        // A backtick fence's info string may not itself contain a backtick, which is what keeps
+        // an inline code span from opening a block.
+        if (char !== "`" || !rest.includes("`")) fence = { char, len: bars.length };
+      } else if (char === fence.char && bars.length >= fence.len && rest.trim() === "") {
+        fence = null;
+      }
+    }
+    if (fence || !DEPLOY_BUTTON_LINE.test(lines[i])) {
       out.push(lines[i]);
       continue;
     }

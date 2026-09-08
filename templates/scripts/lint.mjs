@@ -73,8 +73,8 @@ for (const dir of dirs) {
     // link never surfaces on the gallery where someone would notice it: this is the only place it
     // gets checked. AGENTS.md tells a contributor to start by copying the nearest template, which
     // makes a carried-over <code> in the href the likeliest mistake in this block.
+    const expected = `https://instacloud.com/templates/${dir}`;
     if (text.includes(DEPLOY_BUTTON_ASSET)) {
-      const expected = `https://instacloud.com/templates/${dir}`;
       if (draft) {
         err(dir, `README carries the deploy button, but the template is a draft: ${expected} does not exist until it publishes`);
       }
@@ -89,6 +89,11 @@ for (const dir of dirs) {
       for (const href of linked) {
         if (href !== expected) err(dir, `deploy button links '${href}', expected '${expected}'`);
       }
+    } else if (!draft) {
+      // AGENTS.md says every publishable template carries the button, so enforce that the way the
+      // logo rule is enforced: checking only the buttons that exist let a new template ship
+      // without one and still pass, leaving the docs claiming something CI did not hold.
+      err(dir, `README is missing the deploy button: add it under the title as [![Deploy on InstaCloud](<cdn>/${DEPLOY_BUTTON_ASSET})](${expected}), see assets/README.md`);
     }
   }
 

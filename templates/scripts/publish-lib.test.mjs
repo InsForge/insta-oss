@@ -181,3 +181,62 @@ describe('stripDeployBadge', () => {
     expect(stripDeployBadge(`# pi\n\nTag.\n\n${short}\n\n## Overview\n`)).toBe('# pi\n\nTag.\n\n## Overview\n')
   })
 })
+
+describe('stripDeployBadge bounds', () => {
+  const url = `https://cdn.jsdelivr.net/gh/InsForge/insta-oss@main/${DEPLOY_BUTTON_ASSET}`
+  const button = (u = url) => `[![Deploy on InstaCloud](${u})](https://instacloud.com/templates/n8n)`
+  const wrap = (line) => `# n8n\n\nTag.\n\n${line}\n\n## Overview\n`
+
+  it('strips a paragraph indented up to three spaces', () => {
+    expect(stripDeployBadge(wrap(`   ${button()}`))).toBe('# n8n\n\nTag.\n\n## Overview\n')
+  })
+
+  it('keeps a four-space indent, which is an indented code block', () => {
+    // The fence tracking cannot see this spelling of a code sample, so the indent bound is what
+    // covers it.
+    const text = wrap(`    ${button()}`)
+    expect(stripDeployBadge(text)).toBe(text)
+  })
+
+  it('keeps a tab indent, which is also an indented code block', () => {
+    const text = wrap(`\t${button()}`)
+    expect(stripDeployBadge(text)).toBe(text)
+  })
+
+  it('keeps a different file whose name merely starts the same', () => {
+    const text = wrap(button(`${url}.bak`))
+    expect(stripDeployBadge(text)).toBe(text)
+  })
+
+  it('keeps an asset that is not the last path segment', () => {
+    const text = wrap(button(`https://example.com/my${DEPLOY_BUTTON_ASSET}`))
+    expect(stripDeployBadge(text)).toBe(text)
+  })
+
+  it('strips one carrying a query or a fragment', () => {
+    expect(stripDeployBadge(wrap(button(`${url}?v=2`)))).toBe('# n8n\n\nTag.\n\n## Overview\n')
+    expect(stripDeployBadge(wrap(button(`${url}#icon`)))).toBe('# n8n\n\nTag.\n\n## Overview\n')
+  })
+
+  it('keeps a fence open when a longer one quotes a shorter one', () => {
+    // A four-backtick block quoting a three-backtick sample: the inner line is not a close, so
+    // the button inside is still documentation. A parity flip read it as a close and stripped it.
+    const doc = `# Docs\n\n\`\`\`\`markdown\n\`\`\`\n${button()}\n\`\`\`\n\`\`\`\`\n\nAfter.\n`
+    expect(stripDeployBadge(doc)).toBe(doc)
+  })
+
+  it('still strips a real button after a fenced sample has closed', () => {
+    const before = `# n8n\n\nTag.\n\n\`\`\`markdown\n${button()}\n\`\`\`\n\n${button()}\n\n## Overview\n`
+    expect(stripDeployBadge(before))
+      .toBe(`# n8n\n\nTag.\n\n\`\`\`markdown\n${button()}\n\`\`\`\n\n## Overview\n`)
+  })
+
+  it('does not let an info string with a backtick open a block', () => {
+    // CommonMark: a backtick fence's info string may not contain a backtick, so this line is
+    // prose carrying an inline code span, NOT an open fence. The button below it is therefore
+    // still a real button and still goes.
+    const prose = '```js const a = `x`'
+    expect(stripDeployBadge(`# n8n\n\nTag.\n\n${prose}\n\n${button()}\n\n## Overview\n`))
+      .toBe(`# n8n\n\nTag.\n\n${prose}\n\n## Overview\n`)
+  })
+})
