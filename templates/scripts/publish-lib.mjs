@@ -148,12 +148,63 @@ export const DEPLOY_BUTTON_ASSET = "assets/deploy-button.svg";
 //   (?:[?#]..) and it has to end there, give or take a query or a fragment, so a neighbouring
 //              file like 'deploy-button.svg.bak' stays.
 const DEPLOY_BUTTON_LINE = new RegExp(
-  `^[ ]{0,3}\\[!\\[[^\\]]*\\]\\((?:[^)\\s]*/)?${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}(?:[?#][^)\\s]*)?\\)\\]\\([^)\\s]*\\)[ \\t]*$`,
+  `^[ ]{0,3}\\[!\\[[^\\]]*\\]\\((?:[^)\\s]*/)?${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}(?:[?#][^)\\s]*)?\\)\\]\\(([^)\\s]*)\\)[ \\t]*$`,
 );
 
 // A code fence: up to three spaces, three or more backticks or tildes, then the rest of the line
 // (an info string, on an opening fence).
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/**
+ * The one place that decides what IS the button, so the publisher and the lint cannot drift:
+ * stripDeployBadge removes exactly what this finds, and lint.mjs validates exactly what this
+ * finds. A looser test in either one is a way for a README to pass CI carrying something the
+ * other will not act on.
+ *
+ * @param {string} text
+ * @returns {{ lines: string[], hits: Map<number, string> }} lines, and line index -> href
+ */
+function scanDeployButtons(text) {
+  const lines = String(text ?? "").split("\n");
+  const hits = new Map();
+  // Tracked as the OPENING fence's character and length, not as a parity flip: CommonMark closes
+  // a fence only with the same character, at least as long, carrying nothing else, so a
+  // four-backtick block quoting a three-backtick line stays open.
+  let fence = null;
+  for (let i = 0; i < lines.length; i++) {
+    const f = FENCE.exec(lines[i]);
+    if (f) {
+      const [, bars, rest] = f;
+      const char = bars[0];
+      if (!fence) {
+        // A backtick fence's info string may not itself contain a backtick, which is what keeps
+        // an inline code span from opening a block.
+        if (char !== "`" || !rest.includes("`")) fence = { char, len: bars.length };
+      } else if (char === fence.char && bars.length >= fence.len && rest.trim() === "") {
+        fence = null;
+      }
+      continue; // a fence line is never the button
+    }
+    // Inside a fence the same line is DOCUMENTATION of the button rather than the button itself,
+    // and the snippet in assets/README.md is exactly that.
+    if (fence) continue;
+    const m = DEPLOY_BUTTON_LINE.exec(lines[i]);
+    if (m) hits.set(i, m[1]);
+  }
+  return { lines, hits };
+}
+
+/**
+ * Every deploy button in a README, as the href each one links to. Empty when the asset is only
+ * mentioned: unlinked, indented into a code block, inside a fence, or a neighbouring filename.
+ * Used by lint.mjs so it checks the same affordance publish removes.
+ *
+ * @param {string} text  the README source
+ * @returns {string[]}   one href per button, in document order
+ */
+export function findDeployButtons(text) {
+  return [...scanDeployButtons(text).hits.values()];
+}
 
 /**
  * Drop the "Deploy on InstaCloud" button from a README on its way to the catalog.
@@ -169,29 +220,11 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
  * @returns {string}     the same text with any button line, and the blank line it left behind, gone
  */
 export function stripDeployBadge(text) {
-  const lines = String(text ?? "").split("\n");
+  const { lines, hits } = scanDeployButtons(text);
+  if (!hits.size) return text; // nothing to remove, and no rejoin that could alter the text
   const out = [];
-  // Inside a fence the same line is DOCUMENTATION of the button rather than the button itself,
-  // and the snippet in assets/README.md is exactly that, so the distinction has to survive
-  // publish. Tracked as the OPENING fence's character and length, not as a parity flip:
-  // CommonMark closes a fence only with the same character, at least as long, carrying nothing
-  // else, so a four-backtick block quoting a three-backtick line stays open. A flip read that
-  // inner line as the close and resumed stripping inside the sample.
-  let fence = null;
   for (let i = 0; i < lines.length; i++) {
-    const f = FENCE.exec(lines[i]);
-    if (f) {
-      const [, bars, rest] = f;
-      const char = bars[0];
-      if (!fence) {
-        // A backtick fence's info string may not itself contain a backtick, which is what keeps
-        // an inline code span from opening a block.
-        if (char !== "`" || !rest.includes("`")) fence = { char, len: bars.length };
-      } else if (char === fence.char && bars.length >= fence.len && rest.trim() === "") {
-        fence = null;
-      }
-    }
-    if (fence || !DEPLOY_BUTTON_LINE.test(lines[i])) {
+    if (!hits.has(i)) {
       out.push(lines[i]);
       continue;
     }
