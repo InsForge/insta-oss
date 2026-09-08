@@ -5,7 +5,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { FIXED_REF_RE, checkFixedRef } from "./manifest-refs.mjs";
-import { DEPLOY_BUTTON_ASSET } from "./publish-lib.mjs";
+import { DEPLOY_BUTTON_ASSET, findDeployButtons } from "./publish-lib.mjs";
 
 // Template dirs live beside this script's parent (templates/<code>/): runs from any cwd.
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -73,27 +73,33 @@ for (const dir of dirs) {
     // link never surfaces on the gallery where someone would notice it: this is the only place it
     // gets checked. AGENTS.md tells a contributor to start by copying the nearest template, which
     // makes a carried-over <code> in the href the likeliest mistake in this block.
+    // The button, checked through publish's OWN matcher rather than a second one written here.
+    // A looser test passes a README carrying something publish will never strip: a fenced sample
+    // satisfying the requirement while GitHub shows no button at all, or a neighbouring filename
+    // validated as if it were the button. One matcher, so the two cannot drift.
     const expected = `https://console.instacloud.com/templates/${dir}`;
-    if (text.includes(DEPLOY_BUTTON_ASSET)) {
+    const buttons = findDeployButtons(text);
+    if (buttons.length) {
       if (draft) {
         err(dir, `README carries the deploy button, but the template is a draft: ${expected} does not exist until it publishes`);
       }
       if (!existsSync(join(root, "..", DEPLOY_BUTTON_ASSET))) {
         err(dir, `README references ${DEPLOY_BUTTON_ASSET}, which is not in this repository`);
       }
-      const asset = DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.");
-      const linked = [...text.matchAll(new RegExp(`\\[!\\[[^\\]]*\\]\\([^)\\s]*${asset}[^)\\s]*\\)\\]\\(([^)\\s]*)\\)`, "g"))].map((mt) => mt[1]);
-      if (!linked.length) {
-        err(dir, `deploy button is not a link: wrap it as [![Deploy on InstaCloud](<button url>)](${expected})`);
-      }
-      for (const href of linked) {
+      for (const href of buttons) {
         if (href !== expected) err(dir, `deploy button links '${href}', expected '${expected}'`);
       }
     } else if (!draft) {
-      // AGENTS.md says every publishable template carries the button, so enforce that the way the
-      // logo rule is enforced: checking only the buttons that exist let a new template ship
-      // without one and still pass, leaving the docs claiming something CI did not hold.
-      err(dir, `README is missing the deploy button: add it under the title as [![Deploy on InstaCloud](<cdn>/${DEPLOY_BUTTON_ASSET})](${expected}), see assets/README.md`);
+      // AGENTS.md says every publishable template carries the button, so enforce it the way the
+      // logo rule is enforced. Two different mistakes get two different messages: writing it in a
+      // form publish cannot strip is not the same as not writing it, and telling someone to "add"
+      // one they already wrote would only get a second copy.
+      err(dir, text.includes(DEPLOY_BUTTON_ASSET)
+        ? `README mentions ${DEPLOY_BUTTON_ASSET}, but not as a button publish would strip: it has to be `
+          + `a linked image alone on its line, outside any code fence, indented at most three spaces, `
+          + `with the asset last in the URL. `
+          + `Expected [![Deploy on InstaCloud](<cdn>/${DEPLOY_BUTTON_ASSET})](${expected})`
+        : `README is missing the deploy button: add it under the title as [![Deploy on InstaCloud](<cdn>/${DEPLOY_BUTTON_ASSET})](${expected}), see assets/README.md`);
     }
   }
 
