@@ -203,11 +203,20 @@ function scanDeployButtons(text) {
 //
 // The boundary is "not a path character" rather than "start or slash": a relative reference in
 // markdown, `![x](assets/deploy-button.svg)`, has an opening parenthesis to its left, and a
-// slash-or-start rule would miss it. `/` is absent from the class on purpose, so the slash in
-// `@main/assets/…` is a boundary rather than part of the name.
-const PATH_CHAR = "\\w.~:@+%-";
+// slash-or-start rule would miss it. Unicode-aware, because a non-ASCII name is percent-encoded
+// in a real URL (`%` is in the class) but a relative reference can carry it literally, and
+// `éassets/…` is someone else's file.
+const PATH_CHAR = "\\p{L}\\p{N}_.~:@+%-";
+// The two sides differ over `/`, which is the whole reason they are written out separately: on the
+// LEFT a slash ENDS the previous segment, so `@main/assets/…` is our asset; on the RIGHT it opens
+// another one, so `assets/deploy-button.svg/extra` names something below the file rather than the
+// file. A symmetric class cannot say that, and saying it wrong is what let a longer path through.
+// The slash goes FIRST in the right-hand class on purpose: PATH_CHAR ends in `-`, so appending
+// instead of prepending would read `%-/` as a RANGE (U+0025 to U+002F) and quietly swallow `)`,
+// which is the character every markdown link ends with.
 const ASSET_MENTION = new RegExp(
-  `(?<![${PATH_CHAR}])${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}(?![${PATH_CHAR}])`,
+  `(?<![${PATH_CHAR}])${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}(?![/${PATH_CHAR}])`,
+  "u",
 );
 
 /**

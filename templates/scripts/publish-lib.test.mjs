@@ -317,6 +317,14 @@ describe('mentionsDeployButtonAsset', () => {
     expect(mentionsDeployButtonAsset(`${DEPLOY_BUTTON_ASSET}\n`)).toBe(true)
   })
 
+  it('sees one that ends at the markdown link\'s closing paren', () => {
+    // Regression: building the right-hand class by APPENDING the slash read `%-/` as a range
+    // covering U+0025 to U+002F, which includes `)`. Every link in the snippet ends with one, so
+    // the matcher stopped seeing the documented form while still seeing `…svg?v=2`.
+    expect(mentionsDeployButtonAsset(`[![D](${url})](https://x)`)).toBe(true)
+    expect(mentionsDeployButtonAsset(`![x](${DEPLOY_BUTTON_ASSET})`)).toBe(true)
+  })
+
   it('sees a relative reference with no leading ./', () => {
     // Bounded by "not a path character" rather than "start or slash" for exactly this: the
     // character to the left here is an opening parenthesis.
@@ -336,8 +344,10 @@ describe('mentionsDeployButtonAsset', () => {
       `my${DEPLOY_BUTTON_ASSET}`,        // left: another directory
       `x-${DEPLOY_BUTTON_ASSET}`,        // left: hyphen is a path character
       `foo.${DEPLOY_BUTTON_ASSET}`,      // left: so is a dot
+      `\u00e9${DEPLOY_BUTTON_ASSET}`,   // left: and a letter outside ASCII
       `${DEPLOY_BUTTON_ASSET}.bak`,      // right: a neighbouring file
       `${DEPLOY_BUTTON_ASSET}x`,         // right: .svgx
+      `${DEPLOY_BUTTON_ASSET}/extra`,    // right: something BELOW the file, not the file
     ]) {
       expect(mentionsDeployButtonAsset(`![x](https://example.com/${other})`)).toBe(false)
     }
@@ -351,6 +361,8 @@ describe('mentionsDeployButtonAsset', () => {
     const otherFiles = [
       `[![D](https://x/my${DEPLOY_BUTTON_ASSET})](https://x)`,
       `[![D](${url}.bak)](https://x)`,
+      `[![D](${url}/extra)](https://x)`,
+      `[![D](https://x/\u00e9${DEPLOY_BUTTON_ASSET})](https://x)`,
     ]
     for (const t of strippable) {
       expect(findDeployButtons(t).length).toBeGreaterThan(0)
