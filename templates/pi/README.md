@@ -2,6 +2,8 @@
 
 Coding agent CLI with session history and a browser terminal.
 
+[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/insta-oss@main/assets/deploy-button.svg)](https://instacloud.com/templates/pi)
+
 ## Overview
 
 This template runs the [Pi coding agent](https://github.com/earendil-works/pi) inside a container

@@ -2,6 +2,8 @@
 
 Self-hosted LLM router with fallback across 40+ providers.
 
+[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/insta-oss@main/assets/deploy-button.svg)](https://instacloud.com/templates/9router)
+
 ## Overview
 
 [9Router](https://github.com/decolua/9router) is a self-hosted gateway that sits between your

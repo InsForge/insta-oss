@@ -168,6 +168,10 @@ The published ones show up in the [gallery](https://instacloud.com/templates).
 Adding one is a single pull request here. [templates/README.md](templates/README.md) has the
 layout, and [templates/AGENTS.md](templates/AGENTS.md) has the rules CI enforces.
 
+The **Deploy on InstaCloud** button those READMEs carry is in [assets/](assets/README.md), free
+for any repository to use: one SVG that covers light and dark, sized to sit in the same row as the
+Railway, Zeabur and Sealos buttons, plus the snippet to paste and the script that regenerates it.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the code map and the rules every change follows. Two

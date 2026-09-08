@@ -3,6 +3,8 @@
 Autonomous AI agent from Nous Research, with chat in the browser and messaging channels you
 connect when you want them.
 
+[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/insta-oss@main/assets/deploy-button.svg)](https://instacloud.com/templates/hermes)
+
 ## Overview
 
 This template runs [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research.

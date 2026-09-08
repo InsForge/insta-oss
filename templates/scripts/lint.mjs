@@ -5,6 +5,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { FIXED_REF_RE, checkFixedRef } from "./manifest-refs.mjs";
+import { DEPLOY_BUTTON_ASSET } from "./publish-lib.mjs";
 
 // Template dirs live beside this script's parent (templates/<code>/): runs from any cwd.
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -66,6 +67,33 @@ for (const dir of dirs) {
       } else if (!existsSync(join(root, dir, rel))) {
         err(dir, `README image '${t}' does not exist in the template directory`);
       }
+    }
+
+    // The one-click deploy button. publish.mjs strips it on the way to the catalog, so a wrong
+    // link never surfaces on the gallery where someone would notice it: this is the only place it
+    // gets checked. AGENTS.md tells a contributor to start by copying the nearest template, which
+    // makes a carried-over <code> in the href the likeliest mistake in this block.
+    const expected = `https://instacloud.com/templates/${dir}`;
+    if (text.includes(DEPLOY_BUTTON_ASSET)) {
+      if (draft) {
+        err(dir, `README carries the deploy button, but the template is a draft: ${expected} does not exist until it publishes`);
+      }
+      if (!existsSync(join(root, "..", DEPLOY_BUTTON_ASSET))) {
+        err(dir, `README references ${DEPLOY_BUTTON_ASSET}, which is not in this repository`);
+      }
+      const asset = DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.");
+      const linked = [...text.matchAll(new RegExp(`\\[!\\[[^\\]]*\\]\\([^)\\s]*${asset}[^)\\s]*\\)\\]\\(([^)\\s]*)\\)`, "g"))].map((mt) => mt[1]);
+      if (!linked.length) {
+        err(dir, `deploy button is not a link: wrap it as [![Deploy on InstaCloud](<button url>)](${expected})`);
+      }
+      for (const href of linked) {
+        if (href !== expected) err(dir, `deploy button links '${href}', expected '${expected}'`);
+      }
+    } else if (!draft) {
+      // AGENTS.md says every publishable template carries the button, so enforce that the way the
+      // logo rule is enforced: checking only the buttons that exist let a new template ship
+      // without one and still pass, leaving the docs claiming something CI did not hold.
+      err(dir, `README is missing the deploy button: add it under the title as [![Deploy on InstaCloud](<cdn>/${DEPLOY_BUTTON_ASSET})](${expected}), see assets/README.md`);
     }
   }
 

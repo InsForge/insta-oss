@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, join, relative, resolve as resolvePath, sep } from "node:path";
 import yaml from "js-yaml";
-import { ghcrGateMessage, ghcrRetryVerdict, parseGhcrRef, rewriteReadme } from "./publish-lib.mjs";
+import { ghcrGateMessage, ghcrRetryVerdict, parseGhcrRef, rewriteReadme, stripDeployBadge } from "./publish-lib.mjs";
 
 const url = process.env.INSTA_PLATFORM_URL?.replace(/\/+$/, "");
 if (!url) fail("INSTA_PLATFORM_URL must be set");
@@ -86,7 +86,9 @@ process.exit(failures ? 1 : 0);
 function readmeOf(dir) {
   const p = join(dir, "README.md");
   if (!existsSync(p)) return undefined;
-  return absolutizeReadme(readFileSync(p, "utf8"), dir);
+  // stripDeployBadge runs OUTSIDE absolutizeReadme because that one returns the text unchanged
+  // when there is no commit to pin to, and the button has to come out either way.
+  return absolutizeReadme(stripDeployBadge(readFileSync(p, "utf8")), dir);
 }
 
 function absolutizeReadme(text, dir) {

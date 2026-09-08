@@ -2,6 +2,8 @@
 
 OpenAI's lightweight coding agent in a browser terminal.
 
+[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/insta-oss@main/assets/deploy-button.svg)](https://instacloud.com/templates/codex)
+
 ## Overview
 
 This template runs [Codex](https://github.com/openai/codex), OpenAI's terminal coding agent,
