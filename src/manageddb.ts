@@ -100,6 +100,24 @@ export const managedServiceId = (type: ManagedDbType, name: string): string => `
 export const managedContainerName = (ref: string, type: ManagedDbType, name: string): string =>
   `io-${ref}-${MANAGED_DB[type].idPrefix}-${name}`
 
+// ---- region WP2 (router) ----
+// bundle(host, port, password, tls); MANAGED_DB[t].sni
+// ---- end region WP2 ----
+// ---- region WP4 (data dir) ----
+// dataPaths
+// ---- end region WP4 ----
+// ---- region WP5 (templates/parity) ----
+// Naming helpers shared by every package (contract 00 section 7). Handles are READ from state when a
+// row carries them (databases[id].container, buckets[id].bucket) and derived here only at provision.
+/** Postgres container for one database service on a branch: `io-<ref>-pg-<name>`. */
+export const pgContainerName = (ref: string, name: string): string => `io-${ref}-pg-${name}`
+/** Bucket for one storage service on a branch: `io-<ref>-<name>` (legacy single bucket: `io-<ref>`). */
+export const bucketName = (ref: string, name: string): string => `io-${ref}-${name}`
+/** App container for one compute group on a branch: `io-<ref>-app-<group>`. */
+export const appContainerName = (ref: string, group: string): string => `io-${ref}-app-${group}`
+// WP5 adds: parseServiceId (strips the branch qualifier), pgServiceId, storageServiceId, CANONICAL_KEYS
+// ---- end region WP5 ----
+
 /** Resolve a managed service id (rd-* | my-* | mo-*) to its type + name, or null. */
 export function parseManagedServiceId(sid: string): { type: ManagedDbType; name: string } | null {
   for (const type of MANAGED_DB_TYPES) {

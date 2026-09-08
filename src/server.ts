@@ -3,10 +3,10 @@
 // pointed at localhost. Single-tenant: no OAuth; a builtin "local" org/user stand in for the
 // account system. Cloud-only surfaces (billing, usage, tokens, members) return 501.
 import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify'
+import { join } from 'node:path'
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyServerFactory } from 'fastify'
 import fastifyStatic from '@fastify/static'
+import { loadConfig, type Config } from './config'
 import type { Engine } from './engine'
 import * as govern from './govern'
 import { isManagedDbType, parseManagedServiceId } from './manageddb'
@@ -22,8 +22,18 @@ const eventOut = (e: AuditEvent) => ({
   id: e.id, branch: e.branch, source: e.source, kind: e.kind, payload: e.payload, created_at: e.createdAt,
 })
 
-export function buildServer(engine: Engine): FastifyInstance {
-  const app = Fastify({ logger: false })
+/** Path prefixes the API owns: a GET outside them falls back to the dashboard shell (SPA routing).
+ *  Each package appends its prefixes on its marked line (contract 00 section 1.1). */
+export const API_PREFIXES: string[] = [
+  '/projects', '/orgs', '/me', '/tokens', '/healthz', '/regions', '/images', '/invitations',
+  // WP1: '/api', '/auth', '/tls'
+  // WP5: '/templates', '/template-deployments'
+]
+
+/** `serverFactory` is forwarded straight into Fastify() so the router (WP2) can hand it the shared
+ *  listener; undefined until then. `cfg` is the boot config (tests pass their own). */
+export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { serverFactory?: FastifyServerFactory } = {}): FastifyInstance {
+  const app = Fastify({ logger: false, ...(opts.serverFactory ? { serverFactory: opts.serverFactory } : {}) })
 
   // Tolerate bodyless POSTs sent as application/json (the CLI does this on approve/deny).
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
@@ -52,12 +62,8 @@ export function buildServer(engine: Engine): FastifyInstance {
   }
 
   app.get('/healthz', async () => ({ ok: true }))
-  app.get('/me', async () => ({ user: LOCAL_USER }))
   app.get('/orgs', async () => ({ orgs: [LOCAL_ORG] }))
   app.post('/orgs', async (_req, reply) => notCloud(reply, 'org management'))
-  app.get('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
-  app.post('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
-  app.delete('/tokens/:tid', async (_req, reply) => notCloud(reply, 'agent tokens'))
   app.get('/orgs/:id/billing', async (_req, reply) => notCloud(reply, 'billing'))
   // Billing sub-surfaces too — the MCP sweep found checkout/portal falling to bare 404s.
   app.get('/orgs/:id/billing/cycle', async (_req, reply) => notCloud(reply, 'billing'))
@@ -498,17 +504,10 @@ export function buildServer(engine: Engine): FastifyInstance {
   // Machine scaling / instance specs are cloud pricing concepts — clean 501, never a bare 404.
   app.post('/projects/:id/services/:sid/scale', async (_req, reply) => notCloud(reply, 'machine scaling'))
   app.post('/projects/:id/services/:sid/upgrade', async (_req, reply) => notCloud(reply, 'instance spec upgrades'))
-  // Same family: limits are tier caps, always-on is the scale-to-zero lever, and the service
-  // PATCH bundles both. Locally nothing scales to zero and nothing enforces a quota.
-  app.get('/projects/:id/services/:sid/limits', async (_req, reply) => notCloud(reply, 'machine limits'))
-  app.put('/projects/:id/services/:sid/limits', async (_req, reply) => notCloud(reply, 'machine limits'))
-  app.put('/projects/:id/services/:sid/always-on', async (_req, reply) => notCloud(reply, 'always-on (scale-to-zero is a cloud lever; local containers already stay up)'))
+  // The service PATCH bundles limits + always-on (both real routes once WP3 lands, region C below).
   app.patch('/projects/:id/services/:sid', async (_req, reply) => notCloud(reply, 'service spec patching'))
-  // Cloud deploy plumbing: custom domains need real DNS + certs, deploy tokens mint Fly builder
-  // credentials (local source deploys will be `docker build`, roadmap Phase 4).
-  app.post('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
-  app.get('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
-  app.delete('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
+  // Cloud deploy plumbing: deploy tokens mint Fly builder credentials (local source deploys will be
+  // `docker build`, roadmap Phase 4). Custom domains: region B below.
   app.post('/projects/:id/deploy-token', async (_req, reply) => notCloud(reply, 'deploy tokens (remote builders)'))
   // Managed backups ride the cloud's database infra; locally the database is your container.
   app.post('/projects/:id/backups', async (_req, reply) => notCloud(reply, 'managed backups (locally: pg_dump with the DATABASE_URL from `insta secrets`)'))
@@ -666,11 +665,40 @@ export function buildServer(engine: Engine): FastifyInstance {
     return reply.code(201).send({ ok: true })
   })
 
+  // ---- package regions (contract 00 section 1.3): new routes go here, right before the dashboard
+  // block. The 501 stubs each region replaces were moved in by the scaffold, so the owner deletes
+  // them inside its own region. Region A = WP1, B = WP2, C = WP3, D = WP5.
+
+  // ---- region A (WP1 identity/config) ----
+  app.get('/me', async () => ({ user: LOCAL_USER }))
+  app.get('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
+  app.post('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
+  app.delete('/tokens/:tid', async (_req, reply) => notCloud(reply, 'agent tokens'))
+  // ---- end region A ----
+
+  // ---- region B (WP2 router) ----
+  // Custom domains need real DNS + certs (the router's edge, WP2).
+  app.post('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
+  app.get('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
+  app.delete('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
+  // ---- end region B ----
+
+  // ---- region C (WP3 scheduler) ----
+  // Limits are tier caps, always-on is the scale-to-zero lever. Locally nothing scales to zero and
+  // nothing enforces a quota until the scheduler lands.
+  app.get('/projects/:id/services/:sid/limits', async (_req, reply) => notCloud(reply, 'machine limits'))
+  app.put('/projects/:id/services/:sid/limits', async (_req, reply) => notCloud(reply, 'machine limits'))
+  app.put('/projects/:id/services/:sid/always-on', async (_req, reply) => notCloud(reply, 'always-on (scale-to-zero is a cloud lever; local containers already stay up)'))
+  // ---- end region C ----
+
+  // ---- region D (WP5 templates/parity) ----
+  // ---- end region D ----
+
   // ---- local dashboard: serve ui/dist when built (same origin as the API — localhost trust,
   // no CORS, no auth). API routes above always win; unknown non-API GETs fall back to the SPA.
-  const uiDist = process.env.INSTA_OSS_UI_DIST ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'ui', 'dist')
+  const uiDist = cfg.uiDist
   const isApiPath = (url: string): boolean =>
-    ['/projects', '/orgs', '/me', '/tokens', '/healthz', '/regions', '/images', '/invitations'].some((p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`))
+    API_PREFIXES.some((p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`))
   if (existsSync(join(uiDist, 'index.html'))) {
     app.register(fastifyStatic, { root: uiDist, wildcard: false })
     app.setNotFoundHandler((req, reply) => {

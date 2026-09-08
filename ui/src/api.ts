@@ -128,3 +128,8 @@ export function relTime(iso?: string): string {
   if (s < 86400) return `${Math.round(s / 3600)} hr${Math.round(s / 3600) === 1 ? '' : 's'} ago`
   return `${Math.round(s / 86400)} d ago`
 }
+
+// ---- region WP7 ----
+// Types and api methods for the serverless routes (templates, credentials, sleep/wake, domains, auth)
+// are appended below this marker (WP7 owns the file; the marker is for the dashboard-side contract
+// tests other packages read).

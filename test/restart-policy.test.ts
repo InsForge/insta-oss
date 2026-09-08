@@ -38,7 +38,7 @@ test('a deploy whose service is up starts it', async () => {
 
 test('branch postgres survives docker restarts', async () => {
   calls.length = 0
-  await new LocalPostgres().provision('p-main', 'io-p-main')
+  await new LocalPostgres().provision({ container: 'io-p-main-pg-db', network: 'io-p-main', dataDir: '' })
   const runs = calls.filter((a) => a[0] === 'run')
   expect(runs.length).toBeGreaterThan(0)
   expect(runs.every(restartArgs('run'))).toBe(true)

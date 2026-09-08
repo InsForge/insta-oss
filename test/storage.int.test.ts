@@ -3,15 +3,20 @@ import { test, expect, beforeAll, afterAll } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { loadConfig } from '../src/config'
 import { Engine } from '../src/engine'
 import { LocalPostgres } from '../src/adapters/postgres'
 import { DockerCompute } from '../src/adapters/compute'
 import { LocalGarage } from '../src/adapters/garage'
 import { LocalManagedDb } from '../src/adapters/manageddb'
 
-const storage = new LocalGarage()
-const engine = new Engine(new LocalPostgres(), new DockerCompute(), storage, new LocalManagedDb())
+const cfg = loadConfig()
+const storage = new LocalGarage({ configPath: cfg.garageConfigPath, hostEndpoint: cfg.s3HostEndpoint, mode: cfg.mode, domain: cfg.domain })
+const engine = new Engine(new LocalPostgres(), new DockerCompute(), storage, new LocalManagedDb(), { cfg })
 let projectId = ''
+// bucket handles are io-<ref>-<name>
+const MAIN_BUCKET = 'io-sttest-main-store'
+const FEAT_BUCKET = 'io-sttest-feat-store'
 
 const teardown = async () => { try { if (projectId) await engine.destroyProject(projectId) } catch {} }
 
@@ -24,16 +29,16 @@ test('branch create copies the bucket; clone writes never touch the source bucke
   const mainNet = 'io-sttest-main'
   const featNet = 'io-sttest-feat'
 
-  await storage.putObject(mainNet, 'sttest-main', 'hello.txt', 'from-main')
+  await storage.putObject(mainNet, MAIN_BUCKET, 'hello.txt', 'from-main')
 
   await engine.createBranch(projectId, 'feat')
 
   // clone received the object
-  expect(await storage.getObject(featNet, 'sttest-feat', 'hello.txt')).toBe('from-main')
+  expect(await storage.getObject(featNet, FEAT_BUCKET, 'hello.txt')).toBe('from-main')
 
   // write only to the clone → source bucket unchanged
-  await storage.putObject(featNet, 'sttest-feat', 'only-in-feat.txt', 'x')
-  const mainList = await storage.listObjects(mainNet, 'sttest-main')
+  await storage.putObject(featNet, FEAT_BUCKET, 'only-in-feat.txt', 'x')
+  const mainList = await storage.listObjects(mainNet, MAIN_BUCKET)
   expect(mainList).toContain('hello.txt')
   expect(mainList).not.toContain('only-in-feat.txt')
 })
@@ -47,13 +52,13 @@ test('branch credentials are scoped: a branch key cannot touch another branch bu
     // same path the app takes: plain S3 with the branch's minted key
     import('../src/docker').then(({ docker }) => docker(['run', '--rm', '--network', main.network,
       '-e', 'RCLONE_CONFIG_G_TYPE=s3', '-e', 'RCLONE_CONFIG_G_PROVIDER=Other',
-      '-e', `RCLONE_CONFIG_G_ENDPOINT=${main.s3.AWS_ENDPOINT_URL_S3}`, '-e', 'RCLONE_CONFIG_G_REGION=garage',
+      '-e', `RCLONE_CONFIG_G_ENDPOINT=${main.s3!.AWS_ENDPOINT_URL_S3}`, '-e', 'RCLONE_CONFIG_G_REGION=garage',
       '-e', `RCLONE_CONFIG_G_ACCESS_KEY_ID=${creds.AWS_ACCESS_KEY_ID}`, '-e', `RCLONE_CONFIG_G_SECRET_ACCESS_KEY=${creds.AWS_SECRET_ACCESS_KEY}`,
       'rclone/rclone', ...args]))
   // own bucket readable
-  expect((await rcloneAs(main.s3, ['ls', `g:${main.bucket}`])).toString()).toContain('hello.txt')
+  expect((await rcloneAs(main.s3!, ['ls', `g:${main.bucket}`])).toString()).toContain('hello.txt')
   // foreign bucket: denied
-  await expect(rcloneAs(main.s3, ['ls', `g:${feat.bucket}`])).rejects.toThrow(/AccessDenied|Forbidden|exit/)
+  await expect(rcloneAs(main.s3!, ['ls', `g:${feat.bucket}`])).rejects.toThrow(/AccessDenied|Forbidden|exit/)
 })
 
 test('object ops round-trip on the host port: list → presigned GET → upload POST → delete', async () => {
@@ -75,12 +80,12 @@ test('object ops round-trip on the host port: list → presigned GET → upload 
   form.append('file', new Blob([body], { type: 'text/plain' }), 'posted.txt')
   const posted = await fetch(up.url, { method: 'POST', body: form })
   expect(posted.status, await posted.text().catch(() => '')).toBeLessThan(300)
-  expect(await storage.getObject('io-sttest-main', 'sttest-main', 'posted.txt')).toBe(body)
+  expect(await storage.getObject('io-sttest-main', MAIN_BUCKET, 'posted.txt')).toBe(body)
 
   // single + bulk delete
   expect(await engine.deleteServiceObject(projectId, 'st-store', { key: 'posted.txt' })).toEqual({ deleted: true })
-  await storage.putObject('io-sttest-main', 'sttest-main', 'b1.txt', 'x')
-  await storage.putObject('io-sttest-main', 'sttest-main', 'b2.txt', 'y')
+  await storage.putObject('io-sttest-main', MAIN_BUCKET, 'b1.txt', 'x')
+  await storage.putObject('io-sttest-main', MAIN_BUCKET, 'b2.txt', 'y')
   const bulk = await engine.deleteServiceObjects(projectId, 'st-store', { keys: ['b1.txt', 'b2.txt'] })
   expect(bulk.deleted).toBe(2)
   expect(bulk.failed).toEqual([])

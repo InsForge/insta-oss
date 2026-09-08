@@ -21,6 +21,8 @@ const DEFAULTS: Record<GatedAction, Decision> = {
   'service.remove': 'allow',
   'service.setAccess': 'allow',
   'service.rename': 'allow',
+  // Cloud gates PUT limits (and a template deploy that declares a volume) on it; WP3 adds the routes.
+  'service.upgrade': 'allow',
 }
 
 export type GateResult =

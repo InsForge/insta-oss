@@ -18,3 +18,8 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
+        env:
+          RUN_DOCKER_TESTS: '1'
+          INSTA_OSS_SCHEDULER: '0'
+      # ---- WP4 ----
+      # ---- WP6 ----

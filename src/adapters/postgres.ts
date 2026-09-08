@@ -1,44 +1,61 @@
 import { docker } from '../docker'
-import type { DatabaseAdapter } from '../types'
+import type { DatabaseAdapter, PgTarget, ServiceLimits } from '../types'
 
 const PASS = 'insta'
 const DB = 'app'
 const IMAGE = 'postgres:16-alpine'
-const pgName = (ref: string): string => `io-${ref}-pg`
 
-// One Postgres container per branch; `ref` identifies the branch. Branch model = copy:
-// cloneInto pipes pg_dump of the source into the (already provisioned) destination.
+// One Postgres container per branch database. Handles are container names the engine passes in
+// (`io-<ref>-pg-<name>`). Scaffold interim (WP4 rewrites this file): `dataDir` is ignored when '' (data
+// stays in the container layer), the password is the constant above, and `fork` = provision the
+// destination then pipe pg_dump of the source into it (today's copy model).
 export class LocalPostgres implements DatabaseAdapter {
-  async provision(ref: string, network: string): Promise<{ url: string }> {
+  async provision(t: PgTarget, _opts: { publishLoopback?: boolean; limits?: ServiceLimits } = {}): Promise<{ url: string }> {
     // Preload pg_stat_statements so `insta` query-stats observability works; the official image
     // treats leading-dash args as postgres server flags.
-    await docker(['run', '-d', '--restart', 'unless-stopped', '--name', pgName(ref), '--network', network,
-      '-e', `POSTGRES_PASSWORD=${PASS}`, '-e', `POSTGRES_DB=${DB}`, IMAGE,
-      '-c', 'shared_preload_libraries=pg_stat_statements'])
-    await this.waitReady(ref)
-    return { url: `postgres://postgres:${PASS}@${pgName(ref)}:5432/${DB}` }
+    await docker(['run', '-d', '--restart', 'unless-stopped', '--name', t.container, '--network', t.network,
+      '-e', `POSTGRES_PASSWORD=${PASS}`, '-e', `POSTGRES_DB=${DB}`,
+      // ---- args WP2 ----
+      // ---- args WP3 ----
+      // ---- args WP4 ----
+      IMAGE, '-c', 'shared_preload_libraries=pg_stat_statements'])
+    await this.waitReady(t.container)
+    return { url: `postgres://postgres:${PASS}@${t.container}:5432/${DB}` }
   }
 
-  async query(ref: string, sql: string): Promise<string> {
-    const out = await docker(['exec', '-i', pgName(ref), 'psql', '-U', 'postgres', '-d', DB,
+  /** Scaffold interim: provision `dst`, then pg_dump the source into it. Returns the clone's own URL
+   *  (the destination's password, as today: a dump carries no role passwords). */
+  async fork(
+    src: PgTarget & { url: string }, dst: PgTarget,
+    opts: { publishLoopback?: boolean; limits?: ServiceLimits; ensureSourceRunning?: () => Promise<void> } = {},
+  ): Promise<{ url: string; method: 'reflink' | 'basebackup'; ms: number }> {
+    const t0 = Date.now()
+    await opts.ensureSourceRunning?.()
+    const { url } = await this.provision(dst, { publishLoopback: opts.publishLoopback, limits: opts.limits })
+    const dump = await docker(['exec', src.container, 'pg_dump', '-U', 'postgres', '-d', DB])
+    await docker(['exec', '-i', dst.container, 'psql', '-U', 'postgres', '-d', DB, '-q'], { input: dump })
+    return { url, method: 'basebackup', ms: Date.now() - t0 }
+  }
+
+  async query(container: string, sql: string): Promise<string> {
+    const out = await docker(['exec', '-i', container, 'psql', '-U', 'postgres', '-d', DB,
       '-v', 'ON_ERROR_STOP=1', '-tAc', sql])
     return out.toString().trim()
   }
 
-  async cloneInto(srcRef: string, dstRef: string): Promise<void> {
-    const dump = await docker(['exec', pgName(srcRef), 'pg_dump', '-U', 'postgres', '-d', DB])
-    await docker(['exec', '-i', pgName(dstRef), 'psql', '-U', 'postgres', '-d', DB, '-q'], { input: dump })
+  async destroy(container: string): Promise<void> {
+    try { await docker(['rm', '-f', container]) } catch { /* already gone */ }
   }
 
-  async destroy(ref: string): Promise<void> {
-    try { await docker(['rm', '-f', pgName(ref)]) } catch { /* already gone */ }
+  async rename(container: string, to: string): Promise<void> {
+    await docker(['rename', container, to])
   }
 
-  private async waitReady(ref: string, tries = 40): Promise<void> {
+  private async waitReady(container: string, tries = 40): Promise<void> {
     for (let i = 0; i < tries; i++) {
-      try { await docker(['exec', pgName(ref), 'pg_isready', '-U', 'postgres', '-d', DB]); return } catch { /* retry */ }
+      try { await docker(['exec', container, 'pg_isready', '-U', 'postgres', '-d', DB]); return } catch { /* retry */ }
       await new Promise((r) => setTimeout(r, 1000))
     }
-    throw new Error(`postgres for "${ref}" never became ready`)
+    throw new Error(`postgres "${container}" never became ready`)
   }
 }

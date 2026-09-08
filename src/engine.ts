@@ -2,11 +2,12 @@
 // project → branches (main = default); branch create = provision new stack + copy data +
 // redeploy the same app image(s); compute = the user's custom image(s), one per group.
 import { randomBytes, randomUUID } from 'node:crypto'
+import { loadConfig, type Config } from './config'
 import { docker } from './docker'
-import { MANAGED_DB, CANONICAL_MANAGED_KEYS, suffixBundle, managedServiceId, managedContainerName, isManagedDbType } from './manageddb'
+import { MANAGED_DB, CANONICAL_MANAGED_KEYS, suffixBundle, managedServiceId, managedContainerName, isManagedDbType, pgContainerName, bucketName, appContainerName } from './manageddb'
 import * as observe from './observe'
 import { loadState, mutate } from './state'
-import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret } from './types'
+import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret, DataDirOps, PgTarget, ServiceKey, ServiceLimits } from './types'
 
 const DEFAULT_BRANCH = 'main'
 const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
@@ -20,8 +21,38 @@ const DB_VOLUME_DEFAULT_GIB = 10
 const DB_CAP = { cpuMilli: 8000, memoryMib: 8192, volumeGib: VOLUME_CAP_GIB }
 const VOLUME_MOUNT_PATH = '/data'
 
+/** The scheduler surface the engine drives (contract 00 section 1.1). The scaffold ships a no-op
+ *  stub (region WP3 below); WP3 replaces it with the real `Scheduler`. */
+export interface SchedulerLike {
+  register(keys: ServiceKey[]): void
+  forget(keys: ServiceKey[]): void
+  rekey(from: ServiceKey, to: ServiceKey): void
+}
+
+/** Constructor options (contract 00 section 7). Every field has a default so `new Engine(db, compute,
+ *  storage, managedDb)` keeps working; main.ts passes what it built at boot. */
+export interface EngineOptions {
+  cfg?: Config                       // default loadConfig()
+  data?: DataDirOps                  // scaffold default: the no-op Engine.NOOP_DATA; WP4 default: new DataDir(cfg)
+  router?: { invalidate(): void }    // default no-op; main.ts sets engine.router after constructing the Router (WP2)
+  // WP3 adds: upstream?: UpstreamLike; scheduler?: Scheduler (in its region of this interface)
+  // WP5 adds: templates?: TemplateCatalog
+}
+
 export class Engine {
-  constructor(private db: DatabaseAdapter, private compute: ComputeAdapter, private storage: StorageAdapter, private managedDb: ManagedDbAdapter) {}
+  readonly cfg: Config
+  /** Invalidated after every mutate that changes hosts or lanes (decision 54). A public assignable
+   *  field: main.ts constructs the Router AFTER the engine and sets it (WP2). */
+  router: { invalidate(): void }
+
+  constructor(
+    private db: DatabaseAdapter, private compute: ComputeAdapter, private storage: StorageAdapter, private managedDb: ManagedDbAdapter,
+    opts: EngineOptions = {},
+  ) {
+    this.cfg = opts.cfg ?? loadConfig()
+    this.data = opts.data ?? Engine.NOOP_DATA
+    this.router = opts.router ?? { invalidate() { /* no router until WP2 */ } }
+  }
 
   /** Serialize container work per app. `deploy` re-asserts the standing lifecycle intent after
    *  replacing the container, and `lifecycle` changes that intent — both read state, then act on the
@@ -63,44 +94,77 @@ export class Engine {
     return this.listBranches(projectId).find((b) => b.name === name)
   }
 
-  private async provisionBranch(project: Project, name: string, isDefault: boolean, cloneOf: string | null): Promise<Branch> {
+  /** The postgres handle of a branch's single database service (scaffold: derived; WP5 reads
+   *  `databases[id].container` from the row). */
+  private pgContainer(project: Project, branch: Branch | string): string { return pgContainerName(this.ref(project, branch), 'db') }
+  /** The bucket handle of a branch's single storage service: read from the row when present (legacy
+   *  rows carry `io-<ref>`), derived only before the row exists. */
+  private bucketOf(project: Project, branch: Branch): string { return branch.bucket ?? bucketName(this.ref(project, branch), 'store') }
+
+  /** Provision one branch stack. `source` null = fresh (initdb); a Branch = fork its database
+   *  (adapter-level: reflink or dump/restore). `branchId` is minted by the caller so the lane
+   *  reservation and the op lock have an owner from the start (decision 51). WP5 rewrites this method
+   *  over registrations; the hooks it calls (contract 7.2) are already in place. */
+  private async provisionBranch(project: Project, name: string, isDefault: boolean, source: Branch | null, branchId: string): Promise<Branch> {
     const network = this.net(project, name)
     try { await docker(['network', 'create', network]) } catch { /* exists */ }
     const ref = this.ref(project, name)
-    const { url } = await this.db.provision(ref, network)
+    // WP2 hook: lane reservations, written before any await ({} until the router lands).
+    const lanes = this.allocLanes(project, branchId, ['pg-db', ...(project.managedServices ?? []).map((m) => m.id)])
+    const pg: PgTarget = { container: pgContainerName(ref, 'db'), network, dataDir: this.layout().pg(ref, 'db') }
+    const pgOpts = { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, 'pg-db') }
+    let url: string
+    if (source) {
+      const srcRef = this.ref(project, source)
+      const src = { container: this.pgContainer(project, source), network: source.network, dataDir: this.layout().pg(srcRef, 'db'), url: source.dbUrl ?? '' }
+      // WP3 hook: a sleeping source is woken before a basebackup-style fork reads it.
+      url = (await this.db.fork(src, pg, { ...pgOpts, ensureSourceRunning: () => this.wake(this.serviceKey(source, 'pg-db'), { door: 'api' }) })).url
+    } else {
+      url = (await this.db.provision(pg, pgOpts)).url
+    }
     let st: { bucket: string; env: Record<string, string> }
-    try { st = await this.storage.provision(ref, network) }
+    try { st = await this.storage.provision(ref, network, 'store') }
     catch (e) {
       // compensate: don't orphan the db container if storage fails
-      await this.db.destroy(ref).catch(() => {})
+      await this.db.destroy(pg.container).catch(() => {})
       await docker(['network', 'rm', network]).catch(() => {})
+      this.releaseLanes(branchId)
       throw e
     }
     // Managed databases: every branch gets a FRESH empty instance with a fresh password — no data
     // clones from the parent (cloud parity: platform materialize() for managed Fly databases).
     const managed: Record<string, { password: string }> = {}
-    const provisioned: Array<{ type: ManagedDbType; name: string }> = []
+    const provisioned: string[] = []
     try {
       for (const m of project.managedServices ?? []) {
         const password = randomBytes(32).toString('base64url')
-        await this.managedDb.provision(ref, network, m.type, m.name, password)
-        provisioned.push({ type: m.type, name: m.name })
+        const container = managedContainerName(ref, m.type, m.name)
+        await this.managedDb.provision(
+          { container, network, type: m.type, name: m.name, password, dataDir: this.layout().md(ref, m.type, m.dataId ?? m.name) },
+          { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, m.id) },
+        )
+        provisioned.push(container)
         managed[m.id] = { password }
       }
     } catch (e) {
       // compensate: tear down the whole half-provisioned branch stack
-      for (const p of provisioned) await this.managedDb.destroy(ref, p.type, p.name).catch(() => {})
-      await this.storage.destroy(ref, network).catch(() => {})
-      await this.db.destroy(ref).catch(() => {})
+      for (const c of provisioned) await this.managedDb.destroy(c).catch(() => {})
+      await this.storage.destroy(st.bucket, network).catch(() => {})
+      await this.db.destroy(pg.container).catch(() => {})
       await docker(['network', 'rm', network]).catch(() => {})
+      this.releaseLanes(branchId)
       throw e
     }
     const b: Branch = {
-      id: randomUUID(), projectId: project.id, name, isDefault, status: 'ready', ref,
-      network, dbUrl: url, bucket: st.bucket, s3: st.env, cloneOf, createdAt: Date.now(), apps: {},
+      id: branchId, projectId: project.id, name, isDefault, status: 'ready', ref,
+      network, dbUrl: url, bucket: st.bucket, s3: st.env, cloneOf: source?.name ?? null, createdAt: Date.now(), apps: {},
       ...(Object.keys(managed).length ? { managed } : {}),
+      ...(Object.keys(lanes).length ? { lanes } : {}),
     }
     mutate((s) => { s.branches[b.id] = b })
+    // WP3 hook: the scheduler learns the branch's database keys (no-op stub until WP3).
+    this.scheduler.register(['pg-db', ...Object.keys(managed)].map((sid) => this.serviceKey(b, sid)))
+    this.router.invalidate()
     return b
   }
 
@@ -115,7 +179,7 @@ export class Engine {
     const project: Project = { id: randomUUID(), name, status: 'ready', createdAt: Date.now(), refSlug }
     mutate((s) => { s.projects[project.id] = project })
     try {
-      const defaultBranch = await this.provisionBranch(project, DEFAULT_BRANCH, true, null)
+      const defaultBranch = await this.provisionBranch(project, DEFAULT_BRANCH, true, null, randomUUID())
       this.emit(project.id, DEFAULT_BRANCH, 'resource', 'project.created', { name })
       return { project, defaultBranch }
     } catch (e) {
@@ -132,12 +196,15 @@ export class Engine {
     if (!source) throw new Error(`source branch "${from ?? DEFAULT_BRANCH}" not found`)
     if (this.getBranchByName(projectId, name)) throw new Error(`branch "${name}" already exists`)
 
-    const b = await this.provisionBranch(project, name, false, source.name)
-    await this.db.cloneInto(this.ref(project, source), this.ref(project, name))
-    await this.storage.cloneInto(this.ref(project, source), this.ref(project, name), b.network)
+    // The database forks inside provisionBranch (db.fork); the bucket copies here; compute redeploys.
+    const b = await this.provisionBranch(project, name, false, source, randomUUID())
+    // WP4 hook: /data volumes fork BEFORE the redeploy loop ([] until the data dir lands).
+    await this.forkVolumes(project, source, b)
+    await this.storage.cloneInto(this.bucketOf(project, source), this.bucketOf(project, b), b.network)
     // compute = redeploy: same image, SAME listen port, allocated host mapping.
     for (const [group, app] of Object.entries(source.apps)) {
-      await this.deployAllocatingPort(projectId, name, group, app)
+      // WP3 hook: a clone of a non-always-on service starts asleep (false until the scheduler lands).
+      await this.deployAllocatingPort(projectId, name, group, app, { startAsleep: this.startAsleepFor(project, b, group) })
     }
     // platform parity: the parent branch's user-defined (branch-scoped) secrets clone onto the new branch
     mutate((st) => {
@@ -147,6 +214,8 @@ export class Engine {
       // the DB volume-size setting travels with the clone (it describes the copied database)
       if (source.dbVolumeGib !== undefined) st.branches[b.id].dbVolumeGib = source.dbVolumeGib
     })
+    // WP3 hook: the clone's databases sleep until first use (no-op until the scheduler lands).
+    await this.sleepNewBranch(project, b)
     this.emit(projectId, name, 'resource', 'branch.created', { from: source.name })
     return b
   }
@@ -189,30 +258,28 @@ export class Engine {
     return { id: renamed.id, name: renamed.name, is_default: renamed.isDefault, status: renamed.status }
   }
 
-  async deploy(projectId: string, branchName: string, opts: { image: string; port?: number; hostPort?: number; group?: string }): Promise<{ url: string; branch: string; group: string }> {
+  async deploy(projectId: string, branchName: string, opts: { image: string; port?: number; hostPort?: number; group?: string; startAsleep?: boolean }): Promise<{ url: string; branch: string; group: string }> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     const b = this.getBranchByName(projectId, branchName)
     if (!b) throw new Error(`branch "${branchName}" not found`)
     const group = opts.group ?? 'default'
-    return this.serialize(`${b.id}:${group}`, () => this.deployLocked(projectId, b.id, group, opts))
+    return this.withOp([this.serviceKey(b, `cp-${group}`)], () => this.deployLocked(projectId, b.id, group, opts))
   }
 
   // Takes a branch ID, not a Branch: anything read before the chain is a pre-queue snapshot, and an
   // op that ran ahead of this one has already moved it (its image, its host mapping, its intent).
+  // The adapter argument object is assembled through the owner hooks of contract 7.2 (WP2 host
+  // port/aliases/containerize/url, WP3 limits/afterDeploy, WP4 volume, WP5 envFor): those packages
+  // replace hook bodies in their regions and never edit this method again.
   private async deployLocked(
     projectId: string, branchId: string, group: string,
-    opts: { image: string; port?: number; hostPort?: number },
+    opts: { image: string; port?: number; hostPort?: number; startAsleep?: boolean },
   ): Promise<{ url: string; branch: string; group: string }> {
     const project = this.getProject(projectId)!
     const b = loadState().branches[branchId]
     if (!b) throw new Error('branch not found')
     const port = opts.port ?? 8080
-    // a redeploy keeps the branch app's existing host address; only brand-new apps default to port.
-    // Older state records lack hostPort — recover it from the recorded URL.
-    const prior = b.apps[group]
-    const priorHost = prior?.hostPort ?? (prior?.url ? Number(new URL(prior.url).port) || undefined : undefined)
-    const hostPort = opts.hostPort ?? priorHost ?? port
     // The group's /data volume, if one was attached at service creation. Named per-branch (each
     // branch is isolated; a clone starts with an EMPTY volume — compute state lives in db/storage)
     // and keyed by the volume's stable id so a service rename never detaches the data.
@@ -229,14 +296,23 @@ export class Engine {
     // container stays `created`, and state() reports it `stopped`, contradicting the intent the
     // re-assert just preserved. The brief run is the cost of suspend being a pause.
     const standing = b.apps[group]?.desiredState
-    const { url } = await this.compute.deploy(this.ref(project, b), {
-      image: opts.image, port, hostPort, network: b.network, group,
-      start: standing !== 'stopped',
-      ...(vol ? { volume: { name: `io-${this.ref(project, b)}-data-${vol.id}` } } : {}),
+    const key = this.serviceKey(b, `cp-${group}`)
+    const hostPort = this.localHostPort(b, group, { hostPort: opts.hostPort, port })
+    const started = standing !== 'stopped' && !opts.startAsleep
+    const { url: adapterUrl } = await this.compute.deploy(this.ref(project, b), {
+      image: opts.image, port, network: b.network, group,
+      hostPort,                                                    // WP2 (local mode only)
+      hostAliases: this.hostAliasesFor(project, b),                // WP2
+      volume: this.volumeMount(project, b, group),                 // WP4
+      limits: this.limitsFor(project, `cp-${group}`),              // WP3
       // minted credentials (db + storage + managed databases) reach every compute deploy; user
       // secrets are scoped (project-wide + branch-unbound + bound to THIS group)
-      envVars: { ...b.s3, DATABASE_URL: b.dbUrl, ...this.managedSecretsFor(projectId, b), ...this.deploySecretsFor(projectId, b.name, group) },
+      envVars: this.containerize(this.envFor(project, b, group)), // WP5 envFor, WP2 containerize
+      start: started,
     })
+    // The recorded URL is the serviceUrl hook's (WP2: the router URL, deterministic before deploy);
+    // the scaffold body reads the adapter's informational url off the row about to be written.
+    const url = this.serviceUrl(project, { ...b, apps: { ...b.apps, [group]: { ...b.apps[group], image: opts.image, port, hostPort, url: adapterUrl } } }, group)
     // Spread, not replace: desiredState is the user's standing intent and this write is not the
     // place to clear it. A `stop` landing while a deploy is in flight would otherwise be undone by
     // the deploy's own state write — and `restart` makes that reachable from an operation that
@@ -253,6 +329,8 @@ export class Engine {
       const op = standing === 'suspended' ? this.compute.suspend : this.compute.stop
       await op?.call(this.compute, this.ref(project, b), group).catch(() => { /* best-effort */ })
     }
+    this.afterDeploy(key, { started, startAsleep: opts.startAsleep }) // WP3
+    this.router.invalidate()                                          // WP2
     this.emit(projectId, b.name, 'resource', 'deploy', { image: opts.image, group, url })
     return { url, branch: b.name, group }
   }
@@ -260,11 +338,11 @@ export class Engine {
   /** Deploy an app spec onto a branch with an allocated host mapping. The naive parent+1000
    *  collides as soon as a second branch exists (or the OS holds the port — e.g. macOS AirPlay
    *  on 5000), so allocate from state and retry on bind failures. */
-  private async deployAllocatingPort(projectId: string, branchName: string, group: string, app: { image: string; port: number }): Promise<void> {
+  private async deployAllocatingPort(projectId: string, branchName: string, group: string, app: { image: string; port: number }, extra: { startAsleep?: boolean } = {}): Promise<void> {
     let lastErr: unknown
     for (const candidate of this.freeHostPorts(app.port, 5)) {
       try {
-        await this.deploy(projectId, branchName, { image: app.image, port: app.port, hostPort: candidate, group })
+        await this.deploy(projectId, branchName, { image: app.image, port: app.port, hostPort: candidate, group, ...extra })
         return
       } catch (e) {
         lastErr = e
@@ -291,7 +369,12 @@ export class Engine {
   secrets(projectId: string, branchName: string): Record<string, string> {
     const b = this.getBranchByName(projectId, branchName)
     if (!b) throw new Error(`branch "${branchName}" not found`)
-    return { DATABASE_URL: b.dbUrl, ...b.s3, ...this.managedSecretsFor(projectId, b), ...this.userSecretsFor(projectId, branchName) }
+    return { ...this.mintedSecretsFor(projectId, b), ...this.userSecretsFor(projectId, branchName) }
+  }
+
+  /** The branch's minted credentials: DATABASE_URL, the S3 bundle, the managed-database bundles. */
+  private mintedSecretsFor(projectId: string, b: Branch): Record<string, string> {
+    return { ...(b.dbUrl !== undefined ? { DATABASE_URL: b.dbUrl } : {}), ...b.s3, ...this.managedSecretsFor(projectId, b) }
   }
 
   /** Minted managed-database credentials for a branch, on the cloud's naming contract: every
@@ -376,7 +459,7 @@ export class Engine {
 
   /** host:port of a branch's S3 server, from its minted endpoint credential. */
   private s3Host(b: Branch): string | undefined {
-    try { return new URL(b.s3.AWS_ENDPOINT_URL_S3).host } catch { return undefined }
+    try { return new URL(b.s3?.AWS_ENDPOINT_URL_S3 ?? '').host } catch { return undefined }
   }
 
   /** Every compute group name: registered on the project plus any group already deployed. */
@@ -421,53 +504,72 @@ export class Engine {
     const branch = branchName ? branches.find((b) => b.name === branchName) : branches.find((b) => b.isDefault)
     if (branchName && !branch) throw new Error(`branch "${branchName}" not found`)
     const groups = new Set<string>(this.computeGroupNames(projectId))
-    let running: Set<string> | null = null
-    try {
-      const out = await docker(['ps', '--format', '{{.Names}}'])
-      running = new Set(out.toString().trim().split('\n').filter(Boolean))
-    } catch { /* docker unavailable — omit runtime rather than guess */ }
-    const ref = branch ? this.ref(project, branch) : undefined
+    // ONE docker read per listing; rowRuntime (WP3 hook) reads the snapshot per row.
+    await this.snapshotRunning()
     const iso = (ms?: number): string | undefined => (ms ? new Date(ms).toISOString() : undefined)
-    const runtimeOf = (container: string): string | undefined =>
-      running ? (running.has(container) ? 'online' : 'stopped') : undefined
+    const rt = (serviceId: string): string | undefined => (branch ? this.rowRuntime(this.serviceKey(branch, serviceId)) : undefined)
     return [
       { id: 'pg-db', type: 'postgres', name: 'db', status: 'ready',
-        endpoint: ref ? `io-${ref}-pg:5432` : undefined,
-        runtime: ref ? runtimeOf(`io-${ref}-pg`) : undefined,
+        ...this.rowNetwork(project, branch, { id: 'pg-db', type: 'postgres', name: 'db' }),
+        runtime: rt('pg-db'),
         updated_at: iso(branch?.createdAt) },
       // Storage endpoint/container derive from the branch's OWN minted creds, so branches
       // provisioned by an older storage adapter still report their real server.
       { id: 'st-store', type: 'storage', name: 'store', status: 'ready',
         public: branch?.storagePublic ?? false,
-        endpoint: branch ? `${this.s3Host(branch) ?? 'storage'}/${branch.bucket}` : undefined,
-        runtime: branch ? runtimeOf(this.s3Host(branch)?.split(':')[0] ?? '') : undefined,
+        ...this.rowNetwork(project, branch, { id: 'st-store', type: 'storage', name: 'store' }),
+        runtime: branch ? this.runtimeOf(this.s3Host(branch)?.split(':')[0] ?? '') : undefined,
         updated_at: iso(branch?.createdAt) },
       // Managed databases (redis/mysql/mongodb): one private container per branch. `port` +
       // `volume_gib` are what the CLI renders (`tcp/6379  vol 1Gi`); the volume size is the
       // cloud's fixed 1Gi, advisory locally like every other recorded size.
-      ...this.managedList(projectId).map((m) => {
-        const container = ref ? managedContainerName(ref, m.type, m.name) : undefined
-        return {
-          id: m.id, type: m.type, name: m.name, status: 'ready',
-          port: MANAGED_DB[m.type].port, volume_gib: MANAGED_DB[m.type].volumeGib,
-          endpoint: container ? `${container}:${MANAGED_DB[m.type].port}` : undefined,
-          runtime: container ? runtimeOf(container) : undefined,
-          updated_at: iso(m.createdAt),
-        }
-      }),
+      ...this.managedList(projectId).map((m) => ({
+        id: m.id, type: m.type, name: m.name, status: 'ready',
+        port: MANAGED_DB[m.type].port, volume_gib: MANAGED_DB[m.type].volumeGib,
+        ...this.rowNetwork(project, branch, { id: m.id, type: m.type, name: m.name }),
+        runtime: rt(m.id),
+        updated_at: iso(m.createdAt),
+      })),
       ...[...groups].sort().map((g) => {
         const app = branch?.apps[g]
         return {
           id: `cp-${g}`, type: 'compute', name: g, status: 'ready', machine_count: 1,
           volume_gib: project.computeVolumes?.[g]?.sizeGib ?? null, // platform Service.volume_gib (compute only)
           desired_state: app?.desiredState ?? 'running',
-          domain: app?.url,
-          endpoint: app ? app.url.replace(/^https?:\/\//, '') : undefined,
-          runtime: app && ref ? runtimeOf(`io-${ref}-app-${g}`) : app ? undefined : 'none',
+          ...this.rowNetwork(project, branch, { id: `cp-${g}`, type: 'compute', name: g }),
+          runtime: branch ? rt(`cp-${g}`) : app ? undefined : 'none',
           updated_at: iso(app?.updatedAt),
         }
       }),
     ]
+  }
+
+  /** The `docker ps` snapshot services() takes: running container names, or null when docker is
+   *  unreadable (runtime is then omitted rather than guessed). */
+  private running: Set<string> | null = null
+  private async snapshotRunning(): Promise<void> {
+    try {
+      const out = await docker(['ps', '--format', '{{.Names}}'])
+      this.running = new Set(out.toString().trim().split('\n').filter(Boolean))
+    } catch { this.running = null }
+  }
+  private runtimeOf(container: string): string | undefined {
+    return this.running ? (this.running.has(container) ? 'online' : 'stopped') : undefined
+  }
+
+  /** Resolve a `${branchId}:${serviceId}` key to its branch, project and container (scaffold helper
+   *  for the runtime hooks; WP3's `targetOf` supersedes it). */
+  private keyTarget(key: ServiceKey): { project: Project; branch: Branch; serviceId: string; container: string; app?: Branch['apps'][string] } | undefined {
+    const i = key.indexOf(':')
+    const branch = loadState().branches[key.slice(0, i)]
+    const project = branch ? this.getProject(branch.projectId) : undefined
+    if (!branch || !project) return undefined
+    const serviceId = key.slice(i + 1)
+    const ref = this.ref(project, branch)
+    if (serviceId.startsWith('pg-')) return { project, branch, serviceId, container: pgContainerName(ref, serviceId.slice(3)) }
+    if (serviceId.startsWith('cp-')) return { project, branch, serviceId, container: appContainerName(ref, serviceId.slice(3)), app: branch.apps[serviceId.slice(3)] }
+    const m = this.managedList(project.id).find((x) => x.id === serviceId)
+    return m ? { project, branch, serviceId, container: managedContainerName(ref, m.type, m.name) } : undefined
   }
 
   /** Names-only secret inventory as project→branch→service→secrets (SecretTree contract shape).
@@ -489,7 +591,7 @@ export class Engine {
         isDefault: b.isDefault,
         services: [
           { type: 'postgres', name: 'db', secrets: ['DATABASE_URL', ...bound(b.name, 'postgres/db')].sort() },
-          { type: 'storage', name: 'store', secrets: [...Object.keys(b.s3), ...bound(b.name, 'storage/store')].sort() },
+          { type: 'storage', name: 'store', secrets: [...Object.keys(b.s3 ?? {}), ...bound(b.name, 'storage/store')].sort() },
           ...this.managedList(projectId).map((m) => ({
             type: m.type, name: m.name,
             secrets: [...this.mintedManagedNames(m), ...bound(b.name, `${m.type}/${m.name}`)].sort(),
@@ -556,7 +658,7 @@ export class Engine {
     service: Record<string, unknown> | undefined; state: string
   }> {
     const t = this.computeTarget(projectId, serviceId, branchName)
-    return this.serialize(`${t.branch.id}:${t.group}`, () => this.lifecycleLocked(projectId, serviceId, verb, t.branch.id, t.group))
+    return this.withOp([this.serviceKey(t.branch, `cp-${t.group}`)], () => this.lifecycleLocked(projectId, serviceId, verb, t.branch.id, t.group))
   }
 
   // Branch ID, not a Branch — same reason as deployLocked: a snapshot taken before the chain is one
@@ -592,7 +694,7 @@ export class Engine {
     service: Record<string, unknown> | undefined; state: string
   }> {
     const t = this.computeTarget(projectId, serviceId, branchName)
-    return this.serialize(`${t.branch.id}:${t.group}`, () => this.restartLocked(projectId, serviceId, t.branch.id, t.group))
+    return this.withOp([this.serviceKey(t.branch, `cp-${t.group}`)], () => this.restartLocked(projectId, serviceId, t.branch.id, t.group))
   }
 
   private async restartLocked(projectId: string, serviceId: string, branchId: string, group: string): Promise<{
@@ -634,7 +736,7 @@ export class Engine {
     const branch = branchName ? this.getBranchByName(projectId, branchName) : this.listBranches(projectId).find((b) => b.isDefault)
     if (!branch) throw new Error(`branch "${branchName}" not found`)
     if (!this.storage.setAccess) throw new Error('access control is not supported by this storage adapter')
-    await this.storage.setAccess(this.ref(project, branch), branch.network, isPublic)
+    await this.storage.setAccess(this.bucketOf(project, branch), branch.network, isPublic)
     mutate((s) => { s.branches[branch.id].storagePublic = isPublic })
     this.emit(projectId, branch.name, 'resource', 'service.setAccess', { service: serviceId, public: isPublic })
     return (await this.services(projectId, branch.name)).find((x) => x.id === serviceId)
@@ -643,11 +745,11 @@ export class Engine {
   // ---- storage objects (platform parity: `insta storage list|get|delete`, console browser) ----
 
   /** Resolve an object-operation target: a storage service id + the branch's credential env. */
-  private objectTarget(projectId: string, serviceId: string, branchName?: string): Branch {
+  private objectTarget(projectId: string, serviceId: string, branchName?: string): Branch & { s3: Record<string, string> } {
     const svc = this.serviceOf(projectId, serviceId)
     if (svc.type !== 'storage') throw new Error('object operations are only supported for storage services')
     const { branch } = this.branchOrThrow(projectId, branchName)
-    return branch
+    return { ...branch, s3: branch.s3 ?? {} }
   }
 
   private objectOps(): Required<Pick<StorageAdapter, 'listBucketObjects' | 'presignObjectGet' | 'presignObjectPost' | 'removeObject' | 'removeObjects'>> {
@@ -726,24 +828,19 @@ export class Engine {
         return [name, state ?? 'unknown'] as const
       }))
     } catch { /* docker unreadable — every service reports unknown rather than a guess */ }
-    const health = (container: string, desired: 'running' | 'stopped' | 'suspended'): { status: string; machines: number; failing: number } => {
+    // Per row: the WP3 healthOverlay hook maps one container's docker state (+ sleep bookkeeping).
+    const health = (container: string, desired: 'running' | 'stopped' | 'suspended', sleptAt: number | null | undefined, serviceId: string): { status: string; machines: number; failing: number } => {
       if (!states) return { status: 'unknown', machines: 0, failing: 0 }
-      const state = states.get(container)
-      if (!state) return { status: 'none', machines: 0, failing: 0 }
-      const status = state === 'running' ? 'healthy'
-        : state === 'paused' ? 'standby'
-        : state === 'restarting' || state === 'created' ? 'starting'
-        : desired === 'running' ? 'crashed' : 'standby' // exited/dead against intent = crashed
-      return { status, machines: 1, failing: status === 'crashed' ? 1 : 0 }
+      return this.healthOverlay(states.get(container), desired, sleptAt, this.serviceKey(branch, serviceId))
     }
     return {
       services: [
-        { serviceId: 'pg-db', ...health(`io-${ref}-pg`, 'running') },
-        ...this.managedList(projectId).map((m) => ({ serviceId: m.id, ...health(managedContainerName(ref, m.type, m.name), 'running') })),
+        { serviceId: 'pg-db', ...health(this.pgContainer(project, branch), 'running', undefined, 'pg-db') },
+        ...this.managedList(projectId).map((m) => ({ serviceId: m.id, ...health(managedContainerName(ref, m.type, m.name), 'running', branch.managed?.[m.id]?.sleptAt, m.id) })),
         ...this.computeGroupNames(projectId).map((g) => {
           const app = branch.apps[g]
           if (!app) return { serviceId: `cp-${g}`, status: 'none', machines: 0, failing: 0 }
-          return { serviceId: `cp-${g}`, ...health(`io-${ref}-app-${g}`, app.desiredState ?? 'running') }
+          return { serviceId: `cp-${g}`, ...health(appContainerName(ref, g), app.desiredState ?? 'running', app.sleptAt, `cp-${g}`) }
         }),
       ],
     }
@@ -861,15 +958,20 @@ export class Engine {
     const clash = (loadState().userSecrets[projectId] ?? []).find((u) => wouldMint.includes(u.name))
     if (clash) throw new Error(`service would mint secret names already used by user secrets: ${clash.name}`)
     const entry = { id: managedServiceId(type, name), type, name, createdAt: Date.now() }
-    const provisioned: Array<{ branch: Branch; password: string }> = []
+    const provisioned: Array<{ branch: Branch; password: string; container: string }> = []
     try {
       for (const b of this.listBranches(projectId)) {
         const password = randomBytes(32).toString('base64url')
-        await this.managedDb.provision(this.ref(project, b), b.network, type, name, password)
-        provisioned.push({ branch: b, password })
+        const ref = this.ref(project, b)
+        const container = managedContainerName(ref, type, name)
+        await this.managedDb.provision(
+          { container, network: b.network, type, name, password, dataDir: this.layout().md(ref, type, name) },
+          { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, entry.id) },
+        )
+        provisioned.push({ branch: b, password, container })
       }
     } catch (e) {
-      for (const p of provisioned) await this.managedDb.destroy(this.ref(project, p.branch), type, name).catch(() => {})
+      for (const p of provisioned) await this.managedDb.destroy(p.container).catch(() => {})
       throw e
     }
     mutate((st) => {
@@ -877,6 +979,7 @@ export class Engine {
       pr.managedServices = [...(pr.managedServices ?? []), entry]
       for (const p of provisioned) (st.branches[p.branch.id].managed ??= {})[entry.id] = { password: p.password }
     })
+    this.scheduler.register(provisioned.map((p) => this.serviceKey(p.branch, entry.id))) // WP3
     this.emit(projectId, null, 'resource', 'service.added', { type, name })
     return this.managedRow(entry)
   }
@@ -888,14 +991,16 @@ export class Engine {
     if (!project) throw new Error('project not found')
     const m = this.managedList(projectId).find((x) => x.id === serviceId)
     if (!m) throw new Error('service not found')
-    for (const b of this.listBranches(projectId)) {
-      await this.managedDb.destroy(this.ref(project, b), m.type, m.name).catch(() => {})
+    const branches = this.listBranches(projectId)
+    for (const b of branches) {
+      await this.managedDb.destroy(managedContainerName(this.ref(project, b), m.type, m.name)).catch(() => {})
       mutate((st) => { delete st.branches[b.id].managed?.[serviceId] })
     }
     mutate((st) => {
       const pr = st.projects[projectId]
       pr.managedServices = (pr.managedServices ?? []).filter((x) => x.id !== serviceId)
     })
+    this.scheduler.forget(branches.map((b) => this.serviceKey(b, serviceId))) // WP3
     this.emit(projectId, null, 'resource', 'service.removed', { type: m.type, name: m.name })
   }
 
@@ -915,7 +1020,9 @@ export class Engine {
     const newId = managedServiceId(m.type, newName)
     for (const b of this.listBranches(projectId)) {
       if (!b.managed?.[serviceId]) continue
-      await this.managedDb.rename(this.ref(project, b), m.type, m.name, newName)
+      const ref = this.ref(project, b)
+      await this.managedDb.rename(managedContainerName(ref, m.type, m.name), managedContainerName(ref, m.type, newName))
+      this.scheduler.rekey(this.serviceKey(b, serviceId), this.serviceKey(b, newId)) // WP3
     }
     mutate((st) => {
       const pr = st.projects[projectId]
@@ -1018,7 +1125,7 @@ export class Engine {
     const gib = branch.dbVolumeGib ?? DB_VOLUME_DEFAULT_GIB
     return {
       id: 'pg-db', name: 'db', state: branch.status,
-      host: `io-${this.ref(project, branch)}-pg`, port: 5432,
+      host: this.pgContainer(project, branch), port: 5432,
       connectionPooling: false, deletionProtection: false, scaleToZero: false,
       volumeSize: `${gib}Gi`, volumeGib: gib,
       storageSize: `${gib}Gi`, storageGiB: gib, // DEPRECATED aliases — dropped when the platform drops them
@@ -1058,7 +1165,7 @@ export class Engine {
 
   /** The branch's connection URL with the database name swapped. */
   private connStringFor(branch: Branch, database: string): string {
-    const u = new URL(branch.dbUrl)
+    const u = new URL(branch.dbUrl ?? '')
     return `${u.protocol}//${u.username}:${u.password}@${u.host}/${database}`
   }
 
@@ -1067,8 +1174,8 @@ export class Engine {
   async dbSetPassword(projectId: string, password: string | undefined, branchName?: string): Promise<{ connString: string; password: string }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
     const pw = password ?? randomBytes(24).toString('base64url')
-    await this.db.query(this.ref(project, branch), `alter user postgres with password '${pw.replace(/'/g, "''")}'`)
-    const u = new URL(branch.dbUrl)
+    await this.db.query(this.pgContainer(project, branch), `alter user postgres with password '${pw.replace(/'/g, "''")}'`)
+    const u = new URL(branch.dbUrl ?? '')
     const connString = `${u.protocol}//${u.username}:${encodeURIComponent(pw)}@${u.host}${u.pathname}`
     mutate((st) => { st.branches[branch.id].dbUrl = connString })
     this.emit(projectId, branch.name, 'resource', 'db.password.set', { generated: !password })
@@ -1077,14 +1184,14 @@ export class Engine {
 
   async dbListDatabases(projectId: string, branchName?: string): Promise<{ databases: Array<{ name: string; connString: string }> }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    const rows = JSON.parse(await this.db.query(this.ref(project, branch), observe.DB_DATABASES_SQL)) as Array<{ name: string }>
+    const rows = JSON.parse(await this.db.query(this.pgContainer(project, branch), observe.DB_DATABASES_SQL)) as Array<{ name: string }>
     return { databases: rows.map((r) => ({ name: r.name, connString: this.connStringFor(branch, r.name) })) }
   }
 
   async dbCreateDatabase(projectId: string, name: string, branchName?: string): Promise<{ name: string; connString: string }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
     if (!Engine.DB_NAME_RE.test(name)) throw new Error('database name must match ^[A-Za-z0-9._-]+$')
-    await this.db.query(this.ref(project, branch), `create database ${this.quoteIdent(name)}`)
+    await this.db.query(this.pgContainer(project, branch), `create database ${this.quoteIdent(name)}`)
     this.emit(projectId, branch.name, 'resource', 'db.database.create', { name })
     return { name, connString: this.connStringFor(branch, name) }
   }
@@ -1094,12 +1201,12 @@ export class Engine {
     if (!Engine.DB_NAME_RE.test(name)) throw new Error('database name must match ^[A-Za-z0-9._-]+$')
     // 'app' is the local substrate's fixed primary (adapters/postgres.ts DB); the URL-derived
     // name covers adapters that mint a different primary.
-    const primary = new URL(branch.dbUrl).pathname.slice(1) || 'app'
+    const primary = new URL(branch.dbUrl ?? '').pathname.slice(1) || 'app'
     if (name === primary || name === 'app' || name === 'postgres' || name.startsWith('template')) {
       throw new Error(`cannot delete ${name === primary || name === 'app' ? 'the primary database' : 'a system database'} (${name})`)
     }
     // WITH (FORCE): a control plane must not be blocked by an app holding a connection open.
-    await this.db.query(this.ref(project, branch), `drop database ${this.quoteIdent(name)} with (force)`)
+    await this.db.query(this.pgContainer(project, branch), `drop database ${this.quoteIdent(name)} with (force)`)
     this.emit(projectId, branch.name, 'resource', 'db.database.delete', { name })
   }
 
@@ -1107,7 +1214,7 @@ export class Engine {
    *  real pg_available_extensions, not a curated allowlist; the daemon's own two are `required`. */
   async dbExtensions(projectId: string, branchName?: string): Promise<{ available: Array<{ name: string; required?: boolean }>; enabled: string[] }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    const r = JSON.parse(await this.db.query(this.ref(project, branch), observe.DB_EXTENSIONS_SQL)) as { available: Array<{ name: string }>; enabled: string[] }
+    const r = JSON.parse(await this.db.query(this.pgContainer(project, branch), observe.DB_EXTENSIONS_SQL)) as { available: Array<{ name: string }>; enabled: string[] }
     return {
       available: r.available.map((a) => (Engine.REQUIRED_EXTENSIONS.includes(a.name) ? { name: a.name, required: true } : { name: a.name })),
       enabled: r.enabled,
@@ -1116,7 +1223,7 @@ export class Engine {
 
   async dbPatchExtensions(projectId: string, patch: { enable?: string[]; disable?: string[] }, branchName?: string): Promise<{ available: Array<{ name: string; required?: boolean }>; enabled: string[] }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    const ref = this.ref(project, branch)
+    const container = this.pgContainer(project, branch)
     const view = await this.dbExtensions(projectId, branch.name)
     const known = new Set(view.available.map((a) => a.name))
     for (const name of [...(patch.enable ?? []), ...(patch.disable ?? [])]) {
@@ -1125,8 +1232,8 @@ export class Engine {
     for (const name of patch.disable ?? []) {
       if (Engine.REQUIRED_EXTENSIONS.includes(name)) throw new Error(`extension ${name} is required by the platform and cannot be disabled`)
     }
-    for (const name of patch.enable ?? []) await this.db.query(ref, `create extension if not exists ${this.quoteIdent(name)}`)
-    for (const name of patch.disable ?? []) await this.db.query(ref, `drop extension if exists ${this.quoteIdent(name)}`)
+    for (const name of patch.enable ?? []) await this.db.query(container, `create extension if not exists ${this.quoteIdent(name)}`)
+    for (const name of patch.disable ?? []) await this.db.query(container, `drop extension if exists ${this.quoteIdent(name)}`)
     this.emit(projectId, branch.name, 'resource', 'db.extensions.update', { enable: patch.enable ?? [], disable: patch.disable ?? [] })
     return this.dbExtensions(projectId, branch.name)
   }
@@ -1135,7 +1242,22 @@ export class Engine {
    *  unused indexes — same sections the cloud serves, read straight off the branch container. */
   async dbInsight(projectId: string, branchName?: string): Promise<observe.DbInsight> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    return observe.toDbInsight(await this.db.query(this.ref(project, branch), observe.DB_INSIGHT_SQL))
+    return observe.toDbInsight(await this.db.query(this.pgContainer(project, branch), observe.DB_INSIGHT_SQL))
+  }
+
+  /** Tear down one branch's containers, bucket and network (shared by branch and project delete).
+   *  After the containers: data directories (WP4), scheduler keys (WP3), custom domains (WP2). */
+  private async teardownBranch(project: Project, b: Branch): Promise<void> {
+    const ref = this.ref(project, b)
+    await this.compute.destroy(ref)
+    await this.db.destroy(this.pgContainer(project, b))
+    await this.storage.destroy(this.bucketOf(project, b), b.network)
+    const managed = this.managedList(project.id)
+    for (const m of managed) await this.managedDb.destroy(managedContainerName(ref, m.type, m.name)).catch(() => {})
+    try { await docker(['network', 'rm', b.network]) } catch { /* gone */ }
+    for (const root of this.layout().branchRoots(ref)) await this.data.remove(root)                        // WP4
+    this.scheduler.forget(['pg-db', ...managed.map((m) => m.id), ...Object.keys(b.apps).map((g) => `cp-${g}`)].map((sid) => this.serviceKey(b, sid))) // WP3
+    this.releaseDomainsFor(project.id, b.id)                                                                  // WP2
   }
 
   async destroyBranch(projectId: string, branchId: string): Promise<void> {
@@ -1143,13 +1265,9 @@ export class Engine {
     const b = loadState().branches[branchId]
     if (!project || !b || b.projectId !== projectId) throw new Error('branch not found')
     if (b.isDefault) throw new Error('cannot delete the default branch')
-    const ref = this.ref(project, b)
-    await this.compute.destroy(ref)
-    await this.db.destroy(ref)
-    await this.storage.destroy(ref, b.network)
-    for (const m of this.managedList(projectId)) await this.managedDb.destroy(ref, m.type, m.name).catch(() => {})
-    try { await docker(['network', 'rm', b.network]) } catch { /* gone */ }
+    await this.teardownBranch(project, b)
     mutate((s) => { delete s.branches[branchId] })
+    this.router.invalidate()
     this.emit(projectId, b.name, 'resource', 'branch.deleted', {})
   }
 
@@ -1157,15 +1275,11 @@ export class Engine {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     for (const b of this.listBranches(projectId)) {
-      const ref = this.ref(project, b)
-      await this.compute.destroy(ref)
-      await this.db.destroy(ref)
-      await this.storage.destroy(ref, b.network)
-      for (const m of this.managedList(projectId)) await this.managedDb.destroy(ref, m.type, m.name).catch(() => {})
-      try { await docker(['network', 'rm', b.network]) } catch { /* gone */ }
+      await this.teardownBranch(project, b)
       mutate((s) => { delete s.branches[b.id] })
     }
     mutate((s) => { delete s.projects[projectId] })
+    this.router.invalidate()
   }
 
   // ---- observability (docker + SQL backed; cloud response shapes) ----
@@ -1185,14 +1299,14 @@ export class Engine {
    *  the compute fan-out must not absorb database containers). */
   private observedContainers(project: Project, branch: Branch, component: ObservedComponent, group?: string): string[] {
     const ref = this.ref(project, branch)
-    if (component === 'db') return [`io-${ref}-pg`]
+    if (component === 'db') return [this.pgContainer(project, branch)]
     if (component !== 'compute') {
       return this.managedList(project.id)
         .filter((m) => m.type === component && (!group || m.name === group) && branch.managed?.[m.id])
         .map((m) => managedContainerName(ref, m.type, m.name))
     }
     const groups = group ? [group] : Object.keys(branch.apps).sort()
-    return groups.filter((g) => branch.apps[g]).map((g) => `io-${ref}-app-${g}`)
+    return groups.filter((g) => branch.apps[g]).map((g) => appContainerName(ref, g))
   }
 
   /** Runtime logs via `docker logs --tail` — same LogsResult shape as the cloud (which serves
@@ -1240,13 +1354,13 @@ export class Engine {
   /** Point-in-time DB metrics — runs SQL against the branch database (same query as the cloud). */
   async dbMetricsSnapshot(projectId: string, branchName?: string): Promise<observe.DbMetricsSnapshot> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    return observe.toDbMetrics(await this.db.query(this.ref(project, branch), observe.DB_METRICS_SQL))
+    return observe.toDbMetrics(await this.db.query(this.pgContainer(project, branch), observe.DB_METRICS_SQL))
   }
 
   /** Currently running queries (pg_stat_activity, ≤100). */
   async dbActivity(projectId: string, branchName?: string): Promise<{ queries: observe.DbActivityRow[] }> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    return { queries: observe.toDbActivity(await this.db.query(this.ref(project, branch), observe.DB_ACTIVITY_SQL)) }
+    return { queries: observe.toDbActivity(await this.db.query(this.pgContainer(project, branch), observe.DB_ACTIVITY_SQL)) }
   }
 
   /** Top statements by execution time (pg_stat_statements; preloaded on newly-provisioned branch
@@ -1254,10 +1368,10 @@ export class Engine {
    *  "enabled on demand" path when the extension can't load). */
   async dbQueryStats(projectId: string, branchName: string | undefined, opts: { limit?: number; sort?: observe.QueryStatSort } = {}): Promise<observe.DbQueryStats> {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    const ref = this.ref(project, branch)
+    const container = this.pgContainer(project, branch)
     try {
-      await this.db.query(ref, 'create extension if not exists pg_stat_statements')
-      const rows = await this.db.query(ref, observe.queryStatsSql(opts.limit ?? 20, opts.sort ?? 'total'))
+      await this.db.query(container, 'create extension if not exists pg_stat_statements')
+      const rows = await this.db.query(container, observe.queryStatsSql(opts.limit ?? 20, opts.sort ?? 'total'))
       return { extensionReady: true, stats: observe.toQueryStats(rows) }
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e)
@@ -1288,4 +1402,159 @@ export class Engine {
       resources,
     }
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // Package regions (contract 00 sections 1.3 and 7.1). Every `filled by WPn` hook below is an
+  // identity / no-op that returns TODAY's value; the owning package replaces the body inside its
+  // own region and never edits the callers above (the 7.2 edit points already go through them).
+  // ---------------------------------------------------------------------------------------------
+
+  // ---- region WP1 (identity/config) ----
+  // ---- end region WP1 ----
+
+  // ---- region WP2 (router) ----
+  /** filled by WP2: lane ports reserved in ONE synchronous mutate before provisioning awaits
+   *  (decision 51). Scaffold: no lanes, so `{}`. */
+  allocLanes(_project: Project, _branchId: string, _serviceIds: string[]): Record<string, number> { return {} }
+  /** filled by WP2: drop the branch's laneReservations on compensation. Scaffold: no-op. */
+  releaseLanes(_branchId: string): void { /* no lane reservations until WP2 */ }
+  /** filled by WP2: 409 on a minted-hostname collision. Scaffold: no minted hosts, so no-op. */
+  assertHostFree(_label: string): void { /* no minted hostnames until WP2 */ }
+  /** filled by WP2: the lane a client dials for a database service. Scaffold: the stored container
+   *  host and port with `tls: false`, so DSNs stay in today's container-host form. */
+  laneAddress(project: Project, branch: Branch, serviceId: string): { host: string; port: number; tls: boolean } {
+    const ref = this.ref(project, branch)
+    if (serviceId.startsWith('pg-')) return { host: pgContainerName(ref, serviceId.slice(3)), port: 5432, tls: false }
+    const m = this.managedList(project.id).find((x) => x.id === serviceId)
+    if (m) return { host: managedContainerName(ref, m.type, m.name), port: MANAGED_DB[m.type].port, tls: false }
+    const group = serviceId.replace(/^cp-/, '')
+    return { host: appContainerName(ref, group), port: branch.apps[group]?.port ?? 8080, tls: false }
+  }
+  /** filled by WP2: `https://<host>` | `http://<host>:<port>`, deterministic before deploy. Scaffold:
+   *  today's `http://localhost:<hostPort>`, the adapter's informational url recorded on the row. */
+  serviceUrl(_project: Project, branch: Branch, group: string): string {
+    const app = branch.apps[group]
+    return app?.url ?? `http://localhost:${app?.hostPort ?? app?.port ?? 8080}`
+  }
+  /** filled by WP2: local mode rewrites 127.0.0.1 to host.docker.internal in DSN/endpoint values.
+   *  Scaffold: identity (today's env reaches the container unchanged). */
+  containerize(env: Record<string, string>): Record<string, string> { return env }
+  /** filled by WP2: every hostname a container must resolve to the box (`--add-host`). Scaffold: none. */
+  hostAliasesFor(_project: Project, _branch: Branch): string[] { return [] }
+  /** filled by WP2: local mode publishes a loopback host port; server mode publishes nothing.
+   *  Scaffold: today's allocator. A redeploy keeps the app's existing host address; only brand-new
+   *  apps default to the listen port. Older records lack hostPort, so it is recovered from the URL. */
+  localHostPort(branch: Branch, group: string, opts: { hostPort?: number; port: number }): number | undefined {
+    const prior = branch.apps[group]
+    const priorHost = prior?.hostPort ?? (prior?.url ? Number(new URL(prior.url).port) || undefined : undefined)
+    return opts.hostPort ?? priorHost ?? opts.port
+  }
+  /** filled by WP2: the services() row's `domain`/`endpoint`. Scaffold: today's values (everything is
+   *  local: container:port, or the app's host url). */
+  rowNetwork(project: Project, branch: Branch | undefined, row: { id: string; type: string; name: string }): { domain?: string; endpoint?: string } {
+    if (!branch) return {}
+    const ref = this.ref(project, branch)
+    if (row.type === 'postgres') return { endpoint: `${pgContainerName(ref, row.name)}:5432` }
+    if (row.type === 'storage') return { endpoint: `${this.s3Host(branch) ?? 'storage'}/${this.bucketOf(project, branch)}` }
+    if (isManagedDbType(row.type)) return { endpoint: `${managedContainerName(ref, row.type, row.name)}:${MANAGED_DB[row.type].port}` }
+    const app = branch.apps[row.name]
+    return app ? { domain: app.url, endpoint: app.url.replace(/^https?:\/\//, '') } : {}
+  }
+  /** filled by WP2: drop the custom domains of a project / branch / group. Scaffold: no-op. */
+  releaseDomainsFor(_projectId: string, _branchId?: string, _group?: string): void { /* no custom domains until WP2 */ }
+  // ---- end region WP2 ----
+
+  // ---- region WP3 (scheduler) ----
+  private static readonly NOOP_SCHEDULER: SchedulerLike = {
+    register() { /* no scheduler until WP3 */ }, forget() { /* no scheduler until WP3 */ }, rekey() { /* no scheduler until WP3 */ },
+  }
+  /** filled by WP3: the real Scheduler (unstarted; main.ts starts it). Scaffold: the no-op stub. */
+  readonly scheduler: SchedulerLike = Engine.NOOP_SCHEDULER
+  /** filled by WP3 (already final): `${branchId}:${serviceId}`, contract section 4 ServiceKey. */
+  serviceKey(branch: Branch, serviceId: string): ServiceKey { return `${branch.id}:${serviceId}` }
+  /** filled by WP3: THE per-key operation lock (decision 52; exclusive per key, sorted acquisition,
+   *  re-entrant, sweep-visible). Scaffold: today's per-app serialize() chain applied to each key in
+   *  sorted order, so container ops stay mutually exclusive from day one. Registers on the chain
+   *  synchronously (before any await), which the mid-deploy lifecycle test pins. */
+  withOp<T>(keys: ServiceKey[], fn: () => Promise<T>): Promise<T> {
+    const sorted = [...new Set(keys)].sort()
+    const run = sorted.reduceRight<() => Promise<T>>((inner, key) => () => this.serialize(key, inner), fn)
+    return run()
+  }
+  /** filled by WP3: start a sleeping service and wait for readiness. Scaffold: nothing sleeps. */
+  async wake(_key: ServiceKey, _opts: { door: 'traffic' | 'api' | 'deploy' }): Promise<void> { /* nothing sleeps until WP3 */ }
+  /** filled by WP3: `!effectiveAlwaysOn(project, target, 'cp-' + group)`. Scaffold: clones start running. */
+  startAsleepFor(_project: Project, _target: Branch, _group: string): boolean { return false }
+  /** filled by WP3: onUp / onAsleep / onStopped bookkeeping after a deploy. Scaffold: no-op. */
+  afterDeploy(_key: ServiceKey, _o: { started: boolean; startAsleep?: boolean }): void { /* no scheduler until WP3 */ }
+  /** filled by WP3: a clone's pg + managed keys sleep unless always-on. Scaffold: no-op. */
+  async sleepNewBranch(_project: Project, _branch: Branch): Promise<void> { /* no scheduler until WP3 */ }
+  /** filled by WP3: the services() `runtime` column from scheduler.stateOf. Scaffold: today's `docker
+   *  ps` derived value (online | stopped, `none` for an undeployed compute group, omitted when docker
+   *  is unreadable), read from the snapshot services() took. */
+  rowRuntime(key: ServiceKey): string | undefined {
+    const t = this.keyTarget(key)
+    if (!t) return undefined
+    if (t.serviceId.startsWith('cp-') && !t.app) return 'none'
+    return this.runtimeOf(t.container)
+  }
+  /** filled by WP3: one runtime-health row from a container's docker state plus sleep bookkeeping.
+   *  Scaffold: today's mapping. running = healthy; paused = standby; restarting/created = starting;
+   *  exited against a running intent = crashed, otherwise standby; no container = none. */
+  healthOverlay(dockerState: string | undefined, desired: string, _sleptAt: number | null | undefined, _key: ServiceKey): { status: string; machines: number; failing: number } {
+    if (!dockerState) return { status: 'none', machines: 0, failing: 0 }
+    const status = dockerState === 'running' ? 'healthy'
+      : dockerState === 'paused' ? 'standby'
+      : dockerState === 'restarting' || dockerState === 'created' ? 'starting'
+      : desired === 'running' ? 'crashed' : 'standby'
+    return { status, machines: 1, failing: status === 'crashed' ? 1 : 0 }
+  }
+  /** filled by WP3: the cgroup ceiling recorded for a service. Scaffold: none. */
+  limitsFor(_project: Project, _serviceId: string): ServiceLimits | undefined { return undefined }
+  // ---- end region WP3 ----
+
+  // ---- region WP4 (data dir) ----
+  /** filled by WP4: the `data` default becomes `new DataDir(cfg)`. Scaffold: a no-op DataDirOps, so
+   *  WP5's data.ensureDir / data.remove calls compile and do nothing until WP4 lands (contract 1.1). */
+  private static readonly NOOP_DATA: DataDirOps = {
+    probe: async () => ({ dataDir: '', reflink: false, engine: 'inprocess' }),
+    ensureDir: async () => { /* no data dir until WP4 */ },
+    clonePostgres: async () => ({ method: 'reflink', ms: 0 }),
+    cloneTree: async () => ({ method: 'copy', ms: 0 }),
+    remove: async () => { /* no data dir until WP4 */ },
+    copyFromContainerVolume: async () => { /* no data dir until WP4 */ },
+    hasPgData: async () => false,
+    isEmptyOrMissing: async () => true,
+  }
+  readonly data: DataDirOps
+  /** filled by WP4: true while migrateLegacyData runs (the sweep is inert). */
+  booting = false
+  /** filled by WP4: host paths under <dataDir>. Scaffold: every path '' (data lives in docker volumes
+   *  and container layers, as today); branchRoots is empty so teardown removes nothing. */
+  layout(): { pg(ref: string, dataId: string): string; vol(ref: string, volId: string): string; md(ref: string, type: ManagedDbType, dataId: string): string; branchRoots(ref: string): string[] } {
+    return { pg: () => '', vol: () => '', md: () => '', branchRoots: () => [] }
+  }
+  /** filled by WP4: the compute group's /data bind mount (ensureDir 0o777 first). Scaffold: today's
+   *  docker NAMED-VOLUME name, keyed by the volume's stable id so a rename never detaches the data,
+   *  mounted verbatim by the compute adapter's `-v <name>:/data` line. */
+  volumeMount(project: Project, branch: Branch, group: string): { hostPath: string } | undefined {
+    const vol = project.computeVolumes?.[group]
+    return vol ? { hostPath: `io-${this.ref(project, branch)}-data-${vol.id}` } : undefined
+  }
+  /** filled by WP4: reflink/copy every /data volume of the source branch onto the target. Scaffold:
+   *  a clone starts with EMPTY volumes (compute state lives in db/storage), as today. */
+  async forkVolumes(_project: Project, _source: Branch, _target: Branch): Promise<Array<{ group: string; method: 'reflink' | 'copy'; ms: number }>> { return [] }
+  // ---- end region WP4 ----
+
+  // ---- region WP5 (templates/parity) ----
+  /** filled by WP5: minted (suffixed + canonical) + user secrets + bindings, before containerize.
+   *  Scaffold: today's deploy env, minted credentials (db + storage + managed databases) plus the
+   *  user secrets scoped to THIS group (project-wide + branch-unbound + bound to compute/<group>). */
+  envFor(project: Project, branch: Branch, group: string): Record<string, string> {
+    return {
+      ...branch.s3, ...(branch.dbUrl !== undefined ? { DATABASE_URL: branch.dbUrl } : {}),
+      ...this.managedSecretsFor(project.id, branch), ...this.deploySecretsFor(project.id, branch.name, group),
+    }
+  }
+  // ---- end region WP5 ----
 }

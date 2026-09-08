@@ -1,5 +1,5 @@
 import { docker } from '../docker'
-import type { ComputeAdapter } from '../types'
+import type { ComputeAdapter, ServiceLimits } from '../types'
 
 const appName = (ref: string, group: string): string => `io-${ref}-app-${group}`
 
@@ -11,23 +11,33 @@ export class DockerCompute implements ComputeAdapter {
 
   async deploy(
     ref: string,
-    opts: { image: string; port: number; hostPort?: number; envVars: Record<string, string>; network?: string; group: string; volume?: { name: string }; start?: boolean },
+    opts: {
+      image: string; port: number; envVars: Record<string, string>; network?: string; group: string; start?: boolean
+      hostPort?: number; hostAliases?: string[]; volume?: { hostPath: string }; limits?: ServiceLimits
+    },
   ): Promise<{ url: string }> {
     const name = appName(ref, opts.group)
     if (!opts.network) throw new Error('DockerCompute requires the branch network')
     const hostPort = opts.hostPort ?? opts.port
     try { await docker(['rm', '-f', name]) } catch { /* not running yet */ }
     const envArgs = Object.entries(opts.envVars).flatMap(([k, v]) => ['-e', `${k}=${v}`])
-    // named volume mounted at /data (platform parity) — docker creates it on first use, and it
-    // survives redeploys because only the container is replaced, never the volume
-    const volArgs = opts.volume ? ['-v', `${opts.volume.name}:/data`] : []
+    // Scaffold interim: `hostPath` is a docker NAMED-VOLUME name mounted at /data (platform parity);
+    // docker creates it on first use and it survives redeploys because only the container is
+    // replaced. WP4 replaces this with `--mount type=bind,src=<hostPath>,dst=/data` (decision 56).
+    const volArgs = opts.volume ? ['-v', `${opts.volume.hostPath}:/data`] : []
     // create + conditional start, not `run -d`: a redeploy of a service the user stopped must not
-    // run its entrypoint for the length of the redeploy. `--restart unless-stopped` is unaffected —
+    // run its entrypoint for the length of the redeploy. `--restart unless-stopped` is unaffected:
     // it only ever restarts containers that were RUNNING when the daemon went down, so one created
     // and never started stays down.
-    // host-side mapping may differ (branch clones); the app's listen port never changes
     await docker(['create', '--restart', 'unless-stopped', '--name', name, '--network', opts.network,
-      ...envArgs, ...volArgs, '-p', `${hostPort}:${opts.port}`, opts.image])
+      ...envArgs,
+      // ---- args WP2 ---- (`-p 127.0.0.1:<hostPort>:<port>` only when hostPort is set; `--add-host <h>:host-gateway` per hostAliases)
+      // host-side mapping may differ (branch clones); the app's listen port never changes
+      '-p', `${hostPort}:${opts.port}`,
+      // ---- args WP3 ---- (`--init`; `--cpus` / `--memory` / `--memory-swap` when limits)
+      // ---- args WP4 ---- (`--mount type=bind,src=<hostPath>,dst=/data` replaces volArgs)
+      ...volArgs,
+      opts.image])
     if (opts.start !== false) await docker(['start', name])
     return { url: `http://localhost:${hostPort}` }
   }
@@ -37,7 +47,7 @@ export class DockerCompute implements ComputeAdapter {
     const out = await docker(['ps', '-aq', '--filter', `name=io-${ref}-app-`])
     const ids = out.toString().trim().split('\n').filter(Boolean)
     if (ids.length) await docker(['rm', '-f', ...ids])
-    // …then this branch's /data volumes (never orphan resources; containers must go first).
+    // ...then this branch's /data volumes (never orphan resources; containers must go first).
     const vols = (await docker(['volume', 'ls', '-q', '--filter', `name=io-${ref}-data-`])).toString().trim().split('\n').filter(Boolean)
     if (vols.length) await docker(['volume', 'rm', '-f', ...vols])
   }
@@ -50,7 +60,8 @@ export class DockerCompute implements ComputeAdapter {
     await docker(['start', name])
   }
 
-  async stop(ref: string, group: string): Promise<void> {
+  // `graceSec` is read by WP3 (`docker stop -t`); ignored in the scaffold.
+  async stop(ref: string, group: string, _opts: { graceSec?: number } = {}): Promise<void> {
     const name = appName(ref, group)
     await docker(['unpause', name]).catch(() => { /* not paused */ })
     await docker(['stop', name])
@@ -64,6 +75,7 @@ export class DockerCompute implements ComputeAdapter {
     await docker(['rename', appName(ref, from), appName(ref, to)])
   }
 
+  // Scaffold interim only (decision 53): WP3 deletes it; liveState then reads scheduler.stateOf.
   async state(ref: string, group: string): Promise<string> {
     try {
       const s = (await docker(['inspect', '-f', '{{.State.Status}}', appName(ref, group)])).toString().trim()

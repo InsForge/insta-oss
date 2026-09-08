@@ -1,5 +1,6 @@
 // Contract tests: the daemon must serve the exact shapes the stock `insta` CLI consumes.
-// Fake adapters — no Docker needed. docker() is mocked (engine only uses it for networks).
+// Fake adapters (test/fakes.ts) — no Docker needed. docker() is mocked (engine only uses it for
+// networks and the ps snapshots). Package regions sit at the END of this file (contract 00 §1.3).
 import { test, expect, beforeEach, vi } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -10,82 +11,13 @@ vi.mock('../src/docker', () => ({ docker: vi.fn(async () => Buffer.from('')) }))
 import { docker as dockerFn } from '../src/docker'
 import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
-import type { DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter } from '../src/types'
-
-const calls: string[] = []
-const db: DatabaseAdapter = {
-  provision: async (ref) => { calls.push(`db.provision:${ref}`); return { url: `pg://${ref}` } },
-  // Answers the observability SQL with canned JSON (order matters: metrics SQL also mentions pg_stat_activity).
-  query: async (_ref, sql) => {
-    calls.push(`db.query:${sql.split(/\s+/).slice(0, 3).join(' ')}`)
-    if (sql.includes('drop database "ghost"')) throw new Error('database "ghost" does not exist')
-    if (sql.includes('pg_ls_waldir')) return JSON.stringify({
-      sizes: { databaseBytes: 9000, tablesBytes: 5000, indexesBytes: 2000, walBytes: 100 },
-      tables: [{ name: 'users', liveRows: 10, dataBytes: 4096, indexBytes: 1024, seqScans: 5, idxScans: 7 }],
-      vacuum: { totalDeadRows: 2, tables: [{ name: 'users', deadRows: 2, deadPct: 16.7, lastVacuum: null, xidAge: 55 }] },
-      unusedIndexes: [{ name: 'idx_dead', table: 'users', sizeBytes: 512, scans: 0 }],
-    })
-    if (sql.includes('pg_available_extensions')) return JSON.stringify({
-      available: [{ name: 'pg_stat_statements' }, { name: 'plpgsql' }, { name: 'vector' }],
-      enabled: ['pg_stat_statements', 'plpgsql'],
-    })
-    if (sql.includes('not datistemplate')) return JSON.stringify([{ name: 'app' }, { name: 'postgres' }])
-    if (sql.includes('row_to_json')) return JSON.stringify({ total: 3, active: 1, idle: 2, max: 100, db_size_bytes: 123456, deadlocks: 0, inserted: 10, updated: 5, deleted: 1, blks_hit: 90, blks_read: 10 })
-    if (sql.includes('pg_stat_statements')) return JSON.stringify([{ queryId: 'q1', query: 'select 1', calls: 3, totalMs: 9, meanMs: 3, rows: 3 }])
-    if (sql.includes('pg_stat_activity')) return JSON.stringify([{ pid: 42, state: 'active', durationMs: 12.5, query: 'select 1' }])
-    return ''
-  },
-  cloneInto: async (s, d) => { calls.push(`db.clone:${s}->${d}`) },
-  destroy: async (ref) => { calls.push(`db.destroy:${ref}`) },
-}
-const compute: ComputeAdapter = {
-  supportsVolumes: true,
-  deploy: async (ref, o) => {
-    calls.push(`deploy:${ref}:${o.group}:${o.image}:s3=${o.envVars.BUCKET_NAME ?? 'none'}:p=${o.port}->${o.hostPort}`)
-    // Recorded separately, and only when explicitly false, so the deploy line above stays the exact
-    // string the older assertions match.
-    if (o.start === false) calls.push(`deploy.nostart:${ref}:${o.group}`)
-    if (o.volume) calls.push(`deploy.volume:${ref}:${o.group}:${o.volume.name}`)
-    return { url: `http://localhost:${o.hostPort}` }
-  },
-  destroy: async (ref) => { calls.push(`compute.destroy:${ref}`) },
-  start: async (ref, group) => { calls.push(`compute.start:${ref}:${group}`) },
-  stop: async (ref, group) => { calls.push(`compute.stop:${ref}:${group}`) },
-  suspend: async (ref, group) => { calls.push(`compute.suspend:${ref}:${group}`) },
-  state: async () => 'running',
-  rename: async (ref, from_, to) => { calls.push(`compute.rename:${ref}:${from_}->${to}`) },
-}
-const storage: StorageAdapter = {
-  provision: async (ref) => { calls.push(`st.provision:${ref}`); return { bucket: `io-${ref}`, env: { BUCKET_NAME: `io-${ref}`, AWS_ACCESS_KEY_ID: 'k', AWS_SECRET_ACCESS_KEY: 's', AWS_ENDPOINT_URL_S3: 'http://io-minio:9000', AWS_REGION: 'local' } } },
-  cloneInto: async (src, dst) => { calls.push(`st.clone:${src}->${dst}`) },
-  destroy: async (ref) => { calls.push(`st.destroy:${ref}`) },
-  setAccess: async (ref, _network, isPublic) => { calls.push(`st.access:${ref}:${isPublic}`) },
-  listBucketObjects: async (env, o) => {
-    calls.push(`st.list:${env.BUCKET_NAME}:prefix=${o.prefix ?? ''}:limit=${o.limit}`)
-    return { objects: [{ key: 'a.txt', size: 3, lastModified: '2026-08-18T00:00:00Z', etag: '"x"' }], ...(o.cursor ? {} : { nextCursor: 'page2' }) }
-  },
-  presignObjectGet: async (env, key, disposition) => {
-    calls.push(`st.presignGet:${env.BUCKET_NAME}:${key}:${disposition}`)
-    return { url: `http://127.0.0.1:3900/${env.BUCKET_NAME}/${key}?sig`, expiresAt: '2026-08-18T00:01:00Z' }
-  },
-  presignObjectPost: async (env, key, contentType, size) => {
-    calls.push(`st.presignPost:${env.BUCKET_NAME}:${key}:${contentType}:${size}`)
-    return { url: `http://127.0.0.1:3900/${env.BUCKET_NAME}`, fields: { key, policy: 'p' }, expiresAt: '2026-08-18T00:05:00Z' }
-  },
-  removeObject: async (env, key) => { calls.push(`st.rm:${env.BUCKET_NAME}:${key}`) },
-  removeObjects: async (env, keys) => { calls.push(`st.rmN:${env.BUCKET_NAME}:${keys.join(',')}`); return { deleted: keys.length, failed: [] } },
-}
-const managed: ManagedDbAdapter = {
-  provision: async (ref, _network, type, name) => { calls.push(`md.provision:${ref}:${type}:${name}`) },
-  destroy: async (ref, type, name) => { calls.push(`md.destroy:${ref}:${type}:${name}`) },
-  rename: async (ref, type, from_, to) => { calls.push(`md.rename:${ref}:${type}:${from_}->${to}`) },
-}
+import type { ComputeAdapter, StorageAdapter } from '../src/types'
+import { calls, db, compute, storage, managed, makeEngine, resetFakes } from './fakes'
 
 let app: ReturnType<typeof buildServer>
 beforeEach(() => {
-  process.env.INSTA_OSS_STATE = join(mkdtempSync(join(tmpdir(), 'io-')), 'state.json')
-  calls.length = 0
-  app = buildServer(new Engine(db, compute, storage, managed))
+  resetFakes()
+  app = buildServer(makeEngine())
 })
 
 const post = (url: string, payload?: unknown) => app.inject({ method: 'POST', url, payload })
@@ -113,8 +45,8 @@ test('project create returns {project, defaultBranch, resources[].kind} and prov
   expect(body.project.name).toBe('demo')
   expect(body.defaultBranch.name).toBe('main')
   expect(body.resources.map((x: { kind: string }) => x.kind)).toEqual(expect.arrayContaining(['postgres', 'storage', 'compute']))
-  expect(calls).toContain('db.provision:demo-main')
-  expect(calls).toContain('st.provision:demo-main')
+  expect(calls).toContain('db.provision:io-demo-main-pg-db')
+  expect(calls).toContain('st.provision:demo-main:store')
 })
 
 test('branch create clones data + redeploys apps; branches list has is_default/status', async () => {
@@ -123,8 +55,8 @@ test('branch create clones data + redeploys apps; branches list has is_default/s
   const r = await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
   expect(r.statusCode).toBe(201)
   expect(r.json().branch.name).toBe('feat')
-  expect(calls).toContain('db.clone:demo-main->demo-feat')
-  expect(calls).toContain('st.clone:demo-main->demo-feat') // storage branching = bucket copy
+  expect(calls).toContain('db.fork:io-demo-main-pg-db->io-demo-feat-pg-db')
+  expect(calls).toContain('st.clone:io-demo-main-store->io-demo-feat-store') // storage branching = bucket copy
   // redeploy wired to the CLONE's bucket; SAME listen port (3000), shifted host mapping (4000)
   expect(calls).toContain('deploy:demo-feat:default:app:1:s3=io-demo-feat:p=3000->4000')
 
@@ -215,22 +147,33 @@ test('cloud-only surfaces (billing/usage/tokens) return 501 with a clear message
   expect((await get('/projects/x/logs')).statusCode).toBe(404)
 })
 
+// The 501 sweep, split per region (contract 00 §1.1): a package deletes rows ONLY from its own
+// sub-array when it lands the real route; NOT_CLOUD_REST stays cloud-only for good.
+const NOT_CLOUD_WP1: Array<[string, string]> = [
+  ['POST', '/tokens'], ['DELETE', '/tokens/t1'],
+]
+const NOT_CLOUD_WP2: Array<[string, string]> = [
+  ['POST', '/projects/x/compute/domain'], ['GET', '/projects/x/compute/domain'], ['DELETE', '/projects/x/compute/domain'],
+]
+const NOT_CLOUD_WP3: Array<[string, string]> = [
+  ['GET', '/projects/x/services/cp-x/limits'], ['PUT', '/projects/x/services/cp-x/limits'],
+  ['PUT', '/projects/x/services/cp-x/always-on'],
+]
+const NOT_CLOUD_REST: Array<[string, string]> = [
+  ['GET', '/projects/x/usage/daily'], ['GET', '/projects/x/utilisation'],
+  ['GET', '/orgs/local/members'], ['PUT', '/orgs/local/members/u1'], ['DELETE', '/orgs/local/members/u1'],
+  ['POST', '/orgs/local/invitations'], ['GET', '/orgs/local/invitations'], ['DELETE', '/orgs/local/invitations/i1'],
+  ['POST', '/invitations/accept'],
+  ['GET', '/images/inspect'],
+  ['PATCH', '/projects/x/services/cp-x'],
+  ['POST', '/projects/x/deploy-token'],
+  ['POST', '/projects/x/backups'], ['GET', '/projects/x/backups'], ['DELETE', '/projects/x/backups/b1'], ['POST', '/projects/x/backups/b1/restore'],
+  ['GET', '/orgs/local/billing/cycle'], ['GET', '/orgs/local/billing/overview'],
+  ['POST', '/orgs/local/billing/checkout'], ['POST', '/orgs/local/billing/portal'],
+]
+
 test('every cloud-only or not-yet route answers a clean 501, never a bare 404', async () => {
-  const cloudOnly: Array<[string, string]> = [
-    ['GET', '/projects/x/usage/daily'], ['GET', '/projects/x/utilisation'],
-    ['GET', '/orgs/local/members'], ['PUT', '/orgs/local/members/u1'], ['DELETE', '/orgs/local/members/u1'],
-    ['POST', '/orgs/local/invitations'], ['GET', '/orgs/local/invitations'], ['DELETE', '/orgs/local/invitations/i1'],
-    ['POST', '/invitations/accept'],
-    ['POST', '/tokens'], ['DELETE', '/tokens/t1'],
-    ['GET', '/images/inspect'],
-    ['GET', '/projects/x/services/cp-x/limits'], ['PUT', '/projects/x/services/cp-x/limits'],
-    ['PUT', '/projects/x/services/cp-x/always-on'], ['PATCH', '/projects/x/services/cp-x'],
-    ['POST', '/projects/x/compute/domain'], ['GET', '/projects/x/compute/domain'], ['DELETE', '/projects/x/compute/domain'],
-    ['POST', '/projects/x/deploy-token'],
-    ['POST', '/projects/x/backups'], ['GET', '/projects/x/backups'], ['DELETE', '/projects/x/backups/b1'], ['POST', '/projects/x/backups/b1/restore'],
-    ['GET', '/orgs/local/billing/cycle'], ['GET', '/orgs/local/billing/overview'],
-    ['POST', '/orgs/local/billing/checkout'], ['POST', '/orgs/local/billing/portal'],
-  ]
+  const cloudOnly: Array<[string, string]> = [...NOT_CLOUD_WP1, ...NOT_CLOUD_WP2, ...NOT_CLOUD_WP3, ...NOT_CLOUD_REST]
   for (const [method, url] of cloudOnly) {
     const r = await app.inject({ method: method as 'GET', url })
     expect(r.statusCode, `${method} ${url}`).toBe(501)
@@ -351,7 +294,7 @@ test('services carry dashboard fields (runtime/endpoint/updated_at) and are bran
 
   const main = (await get(`/projects/${id}/services`)).json().services // defaults to the default branch
   const db = main.find((s: { id: string }) => s.id === 'pg-db')
-  expect(db.endpoint).toBe('io-demo-main-pg:5432')
+  expect(db.endpoint).toBe('io-demo-main-pg-db:5432')
   expect(db.runtime).toBe('stopped') // fake docker ps lists nothing
   const cp = main.find((s: { id: string }) => s.id === 'cp-default')
   expect(cp.endpoint).toBe('localhost:3000')
@@ -685,7 +628,7 @@ test('storage access mode flips public/private; scale/upgrade stay clean 501s', 
   const r = await put(`/projects/${id}/services/st-store/access`, { public: true })
   expect(r.statusCode).toBe(200)
   expect(r.json().service).toMatchObject({ id: 'st-store', public: true })
-  expect(calls).toContain('st.access:demo-main:true')
+  expect(calls).toContain('st.access:io-demo-main-store:true')
   expect((await get(`/projects/${id}/services`)).json().services.find((s: { id: string }) => s.id === 'st-store').public).toBe(true)
   expect((await put(`/projects/${id}/services/pg-db/access`, { public: true })).statusCode).toBe(400)
   expect((await put(`/projects/${id}/services/st-store/access`, {})).statusCode).toBe(400)
@@ -956,7 +899,7 @@ test('managed db add: 201 row shape the CLI renders; per-branch container; still
   const r = await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
   expect(r.statusCode).toBe(201)
   expect(r.json().service).toMatchObject({ id: 'rd-cache', type: 'redis', name: 'cache', status: 'ready', port: 6379, volume_gib: 1 })
-  expect(calls).toContain('md.provision:demo-main:redis:cache')
+  expect(calls).toContain('md.provision:io-demo-main-rd-cache')
 
   const services = (await get(`/projects/${id}/services`)).json().services
   const row = services.find((s: { id: string }) => s.id === 'rd-cache')
@@ -1000,7 +943,7 @@ test('branch create gives managed dbs a FRESH empty instance + fresh password (n
   const id = await createProject()
   await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
   await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
-  expect(calls).toContain('md.provision:demo-feat:redis:cache')
+  expect(calls).toContain('md.provision:io-demo-feat-rd-cache')
   const main = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
   const feat = (await get(`/projects/${id}/secrets?branch=feat`)).json().secrets
   expect(feat.REDIS_URL).toContain('io-demo-feat-rd-cache:6379')
@@ -1031,8 +974,8 @@ test('managed db remove: destroys on every branch, drops rows + secrets; rename 
   const rn = await post(`/projects/${id}/services/rd-cache/rename`, { name: 'kv' })
   expect(rn.statusCode).toBe(200)
   expect(rn.json().service).toMatchObject({ id: 'rd-kv', name: 'kv', type: 'redis' })
-  expect(calls).toContain('md.rename:demo-main:redis:cache->kv')
-  expect(calls).toContain('md.rename:demo-feat:redis:cache->kv')
+  expect(calls).toContain('md.rename:io-demo-main-rd-cache->io-demo-main-rd-kv')
+  expect(calls).toContain('md.rename:io-demo-feat-rd-cache->io-demo-feat-rd-kv')
   const s = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
   expect(s.REDIS_URL_KV).toContain('io-demo-main-rd-kv:6379')
   expect(s.REDIS_URL_CACHE).toBeUndefined()
@@ -1052,8 +995,8 @@ test('managed db remove: destroys on every branch, drops rows + secrets; rename 
   // remove sweeps every branch
   const del = await del_(`/projects/${id}/services/rd-kv`)
   expect(del.statusCode).toBe(200)
-  expect(calls).toContain('md.destroy:demo-main:redis:kv')
-  expect(calls).toContain('md.destroy:demo-feat:redis:kv')
+  expect(calls).toContain('md.destroy:io-demo-main-rd-kv')
+  expect(calls).toContain('md.destroy:io-demo-feat-rd-kv')
   const after = (await get(`/projects/${id}/services`)).json().services
   expect(after.find((x: { id: string }) => x.id === 'rd-kv')).toBeUndefined()
   expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.REDIS_URL).toBeUndefined()
@@ -1211,7 +1154,7 @@ test('runtime-health: one docker read maps pg + managed + compute to the cloud v
 
   vi.mocked(dockerFn).mockImplementation(async (args: readonly string[]) => {
     if (args[0] === 'ps' && args[1] === '-a') {
-      return Buffer.from('io-demo-main-pg\trunning\nio-demo-main-rd-cache\tpaused\nio-demo-main-app-web\texited\n')
+      return Buffer.from('io-demo-main-pg-db\trunning\nio-demo-main-rd-cache\tpaused\nio-demo-main-app-web\texited\n')
     }
     return Buffer.from('')
   })
@@ -1269,7 +1212,7 @@ test('project rename: display name only; resources AND future branches keep the 
   expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.DATABASE_URL).toBe('pg://demo-main')
   // a branch created AFTER the rename still keys on the frozen slug, not the new name
   await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
-  expect(calls).toContain('db.provision:demo-feat')
+  expect(calls).toContain('db.fork:io-demo-main-pg-db->io-demo-feat-pg-db')
 
   // guards: junk names 400, duplicate display name 409
   expect((await patch(`/projects/${id}`, { name: '  ' })).statusCode).toBe(400)
@@ -1313,3 +1256,21 @@ test('metrics/logs target managed-db containers per type; junk components 400', 
   expect(bad.json().error).toBe('component must be db|compute|redis|mysql|mongodb')
   expect((await get(`/projects/${id}/logs?component=junk`)).statusCode).toBe(400)
 })
+
+// ---- package regions (contract 00 §1.3): each package appends its contract tests between its own
+// markers; existing assertions above change only at the lines its plan lists.
+
+// ---- region WP1 (identity/config) ----
+// ---- end region WP1 ----
+
+// ---- region WP2 (router) ----
+// ---- end region WP2 ----
+
+// ---- region WP3 (scheduler) ----
+// ---- end region WP3 ----
+
+// ---- region WP4 (data dir) ----
+// ---- end region WP4 ----
+
+// ---- region WP5 (templates/parity) ----
+// ---- end region WP5 ----
