@@ -73,7 +73,7 @@ for (const dir of dirs) {
     // link never surfaces on the gallery where someone would notice it: this is the only place it
     // gets checked. AGENTS.md tells a contributor to start by copying the nearest template, which
     // makes a carried-over <code> in the href the likeliest mistake in this block.
-    const expected = `https://instacloud.com/templates/${dir}`;
+    const expected = `https://console.instacloud.com/templates/${dir}`;
     if (text.includes(DEPLOY_BUTTON_ASSET)) {
       if (draft) {
         err(dir, `README carries the deploy button, but the template is a draft: ${expected} does not exist until it publishes`);

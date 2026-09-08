@@ -159,11 +159,11 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
  * Drop the "Deploy on InstaCloud" button from a README on its way to the catalog.
  *
  * The button is authored for GitHub, where a template directory has no deploy affordance of its
- * own. The gallery serves this same text at instacloud.com/templates/<code>, which is the page
- * the button LINKS TO, and which already carries its own Deploy Now button: republished verbatim
- * it renders as a second button pointing at the page the reader is already on. The gallery's
- * markdown renderer also parses no raw HTML, so there is no <picture> or conditional-comment
- * escape hatch to hide it with. Stripping at publish keeps one README serving both surfaces.
+ * own. The gallery serves this same text on a page whose rail already carries a Deploy Now to the
+ * same console deploy route, so republished verbatim the button is a second, identical call to
+ * action sitting in the middle of the prose. The gallery's markdown renderer also parses no raw
+ * HTML, so there is no <picture> or conditional-comment escape hatch to hide it with. Stripping
+ * at publish keeps one README serving both surfaces.
  *
  * @param {string} text  the README source
  * @returns {string}     the same text with any button line, and the blank line it left behind, gone
