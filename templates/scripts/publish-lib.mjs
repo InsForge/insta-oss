@@ -210,13 +210,30 @@ function scanDeployButtons(text) {
 // `eassets/…`, `\u00e9assets/…` and `e\u0301assets/…` are all somebody else's file without the
 // class having to know what a combining acute is.
 //
-// Left: nothing (start of input), a slash, which ENDS the previous segment, or a delimiter that
-// markdown or HTML puts next to a URL. That covers `](${cdn}/assets/…)`, `](assets/…)`,
-// `src="assets/…"` and a bare path at the start of a line.
-const LEFT_BOUND = "\\s/()\\[\\]{}<>\"'`|,;=!*\\\\";
-// Right: the same delimiters, plus the `?` and `#` that open a query or a fragment, and NOT a
-// slash: `assets/deploy-button.svg/extra` names something BELOW the file rather than the file.
-const RIGHT_BOUND = "\\s()\\[\\]{}<>\"'`|,;=!*?#\\\\";
+// What terminates the path is MARKDOWN and HTML syntax, not URL syntax. Several characters RFC
+// 3986 allows in a path are punctuation too, `! $ & ' ( ) * + , ; = : @`, and treating those as
+// boundaries reported a different file as this one: `deploy-button.svg!x` is a legal filename,
+// and not ours. So this names only what actually ends a URL where a README puts one.
+//
+// Two of them are kept anyway, because the demands genuinely conflict. `)` is legal in a path,
+// but CommonMark requires parentheses inside a link destination to be balanced or escaped, so an
+// unbalanced one IS the end of the destination; a filename that really contains one arrives
+// percent-encoded or wrapped in <>. A quote is legal in a path too, and is also how an HTML
+// attribute closes. Both are resolved the same way, by which mistake costs more: this list feeds
+// the DRAFT check, where failing to see a button ships a live link to a route that does not exist
+// yet, and seeing one too many costs an author one message about a filename nobody has. So where
+// the two readings collide, it errs toward seeing.
+//
+// The sides are also split by direction, not just by the slash: an OPENING delimiter can only
+// precede the path and a CLOSING one can only follow it, so neither list carries the other's.
+//
+// Left: nothing (start of input), a slash, which ENDS the previous segment, or what opens a
+// destination or an attribute value. Covers `](<cdn>/assets/...)`, `](assets/...)`,
+// `src="assets/..."` and a bare path at the start of a line.
+const LEFT_BOUND = "\\s/(\\[{<\"'`|=";
+// Right: what closes one, plus the `?` and `#` that open a query or a fragment, and NOT a
+// slash: `assets/deploy-button.svg/extra` names something BELOW the file, not the file.
+const RIGHT_BOUND = "\\s)\\]}>\"'`|?#";
 const ASSET_MENTION = new RegExp(
   `(?:^|[${LEFT_BOUND}])${DEPLOY_BUTTON_ASSET.replace(/[.]/g, "\\.")}(?:$|[${RIGHT_BOUND}])`,
   "u",

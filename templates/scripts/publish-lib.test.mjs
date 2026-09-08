@@ -352,6 +352,31 @@ describe('mentionsDeployButtonAsset', () => {
     expect(mentionsDeployButtonAsset(`![x](${url}#icon)`)).toBe(true)
   })
 
+  it('does NOT treat a legal path character as the end of the path', () => {
+    // RFC 3986 allows all of these in a path, so a filename can contain them and a file that
+    // does is not ours. They are punctuation as well, which is what made them look like
+    // boundaries: `deploy-button.svg!x` was read as our asset followed by prose.
+    for (const ch of ["!", "$", "&", "*", "+", ",", ";", "=", ":", "@"]) {
+      expect(mentionsDeployButtonAsset(`![x](${url}${ch}x)`)).toBe(false)
+    }
+  })
+
+  it("still bounds on a quote, which RFC 3986 would allow in a path", () => {
+    // The one deliberate exception to the rule above, and the two demands genuinely conflict: a
+    // single quote is legal in a path AND is how an HTML attribute closes. Bounding on it means
+    // `deploy-button.svg'x` reads as ours, which costs a draft author one error message about a
+    // filename nobody has. NOT bounding on it means <img src='...'> stops being seen, which costs
+    // a draft a live button pointing at a route that does not exist yet. The asymmetry decides
+    // it: this check exists to catch what a reader can click, so it errs toward seeing.
+    expect(mentionsDeployButtonAsset(`<img src='${DEPLOY_BUTTON_ASSET}'>`)).toBe(true)
+    expect(mentionsDeployButtonAsset(`![x](${url}'x)`)).toBe(true)
+  })
+
+  it('sees one in a markdown table cell', () => {
+    // Every template README documents its variables in a GFM table, so a pipe has to bound.
+    expect(mentionsDeployButtonAsset(`| \`${DEPLOY_BUTTON_ASSET}\` |`)).toBe(true)
+  })
+
   it('does NOT see a different file, bounded on EITHER side', () => {
     // Every one of these renders as some other file, and findDeployButtons already leaves them
     // alone. The right-hand cases are the ones the first version of this bound got wrong.
