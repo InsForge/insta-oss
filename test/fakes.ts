@@ -13,13 +13,11 @@ import { initStatePath } from '../src/state'
 
 export const calls: string[] = []
 
-// Today's fake DSN is `pg://<ref>` (asserted verbatim by the secrets tests); the ref is the postgres
-// container handle minus its `io-` prefix and `-pg-db` suffix.
-const refOfPg = (container: string): string => container.replace(/^io-/, '').replace(/-pg-db$/, '')
-
+// The fake DSN is the contract §6 container-host form (what WP2's laneAddress rewrites host:port
+// of and WP5's credentials bundle reads); a fork keeps the source's password, host swapped.
 export const db: DatabaseAdapter = {
-  provision: async (t) => { calls.push(`db.provision:${t.container}`); return { url: `pg://${refOfPg(t.container)}` } },
-  fork: async (src, dst) => { calls.push(`db.fork:${src.container}->${dst.container}`); return { url: `pg://${refOfPg(dst.container)}`, method: 'reflink', ms: 1 } },
+  provision: async (t) => { calls.push(`db.provision:${t.container}`); return { url: `postgres://postgres:pw@${t.container}:5432/app` } },
+  fork: async (src, dst) => { calls.push(`db.fork:${src.container}->${dst.container}`); return { url: src.url.replace(src.container, dst.container), method: 'reflink', ms: 1 } },
   // Answers the observability SQL with canned JSON (order matters: metrics SQL also mentions pg_stat_activity).
   query: async (_container, sql) => {
     calls.push(`db.query:${sql.split(/\s+/).slice(0, 3).join(' ')}`)
@@ -68,9 +66,9 @@ export const compute: ComputeAdapter = {
 }
 
 export const storage: StorageAdapter = {
-  // The bucket HANDLE is `io-<ref>-<name>` (what cloneInto/destroy/setAccess receive); the env's
-  // BUCKET_NAME stays today's `io-<ref>` because the deploy/object assertions match it verbatim.
-  provision: async (ref, _network, name) => { calls.push(`st.provision:${ref}:${name}`); return { bucket: `io-${ref}-${name}`, env: { BUCKET_NAME: `io-${ref}`, AWS_ACCESS_KEY_ID: 'k', AWS_SECRET_ACCESS_KEY: 's', AWS_ENDPOINT_URL_S3: 'http://io-minio:9000', AWS_REGION: 'local' } } },
+  // The bucket HANDLE is `io-<ref>-<name>` (what cloneInto/destroy/setAccess receive) and, as in the
+  // real adapter, the env's BUCKET_NAME is that same bucket (contract §6).
+  provision: async (ref, _network, name) => { const bucket = `io-${ref}-${name}`; calls.push(`st.provision:${ref}:${name}`); return { bucket, env: { BUCKET_NAME: bucket, AWS_ACCESS_KEY_ID: 'k', AWS_SECRET_ACCESS_KEY: 's', AWS_ENDPOINT_URL_S3: 'http://io-minio:9000', AWS_REGION: 'local' } } },
   cloneInto: async (srcBucket, dstBucket) => { calls.push(`st.clone:${srcBucket}->${dstBucket}`) },
   destroy: async (bucket) => { calls.push(`st.destroy:${bucket}`) },
   setAccess: async (bucket, _network, isPublic) => { calls.push(`st.access:${bucket}:${isPublic}`) },

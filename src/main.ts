@@ -11,7 +11,7 @@ import { LocalGarage } from './adapters/garage'
 import { LocalManagedDb } from './adapters/manageddb'
 import { docker } from './docker'
 import { loadConfig } from './config'
-import { initStatePath, acquireLock, releaseLock } from './state'
+import { initStatePath, acquireLock } from './state'
 
 async function main(): Promise<void> {
   // config (WP1: --reset-admin runs here and exits)
@@ -66,23 +66,18 @@ async function main(): Promise<void> {
   // version banner
   // ---- end region WP6 ----
 
-  // signals (WP1: bounded close so the compose stop_grace_period is respected and the lock is released)
-  let stopping = false
-  const shutdown = async (): Promise<void> => {
-    if (stopping) return
-    stopping = true
-    // ---- region WP2 (stop) ----
-    // await router.stop()
-    // ---- end region WP2 (stop) ----
-    // ---- region WP3 (stop) ----
-    // await engine.scheduler.stop()
-    // ---- end region WP3 (stop) ----
-    await Promise.race([app.close(), new Promise((r) => setTimeout(r, 10_000))]).catch(() => { /* best-effort */ })
-    releaseLock()
-    process.exit(0)
-  }
-  process.on('SIGTERM', () => { void shutdown() })
-  process.on('SIGINT', () => { void shutdown() })
+  // signals (WP1: bounded close so the compose stop_grace_period is respected and the lock is released).
+  // Scaffold: NO handlers (today's default signal exit); WP1 lands the bodies, the inner markers stay.
+  // const shutdown = async () => {
+  //   // ---- region WP2 (stop) ----
+  //   // await router.stop()
+  //   // ---- end region WP2 (stop) ----
+  //   // ---- region WP3 (stop) ----
+  //   // await engine.scheduler.stop()
+  //   // ---- end region WP3 (stop) ----
+  //   await app.close(); releaseLock(); process.exit(0)
+  // }
+  // process.on('SIGTERM', () => { void shutdown() }); process.on('SIGINT', () => { void shutdown() })
 }
 
 main().catch((e: unknown) => { console.error(e instanceof Error ? e.message : String(e)); process.exit(1) })

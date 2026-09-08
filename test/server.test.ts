@@ -12,6 +12,7 @@ import { docker as dockerFn } from '../src/docker'
 import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
 import type { ComputeAdapter, StorageAdapter } from '../src/types'
+import { mutate } from '../src/state'
 import { calls, db, compute, storage, managed, makeEngine, resetFakes } from './fakes'
 
 let app: ReturnType<typeof buildServer>
@@ -58,7 +59,7 @@ test('branch create clones data + redeploys apps; branches list has is_default/s
   expect(calls).toContain('db.fork:io-demo-main-pg-db->io-demo-feat-pg-db')
   expect(calls).toContain('st.clone:io-demo-main-store->io-demo-feat-store') // storage branching = bucket copy
   // redeploy wired to the CLONE's bucket; SAME listen port (3000), shifted host mapping (4000)
-  expect(calls).toContain('deploy:demo-feat:default:app:1:s3=io-demo-feat:p=3000->4000')
+  expect(calls).toContain('deploy:demo-feat:default:app:1:s3=io-demo-feat-store:p=3000->4000')
 
   const branches = (await get(`/projects/${id}/branches`)).json().branches
   expect(branches.map((b: { name: string }) => b.name).sort()).toEqual(['feat', 'main'])
@@ -74,8 +75,8 @@ test('secrets returns the branch bundle (seam) and is gateable', async () => {
   const id = await createProject()
   const r = await get(`/projects/${id}/secrets?branch=main`)
   expect(r.statusCode).toBe(200)
-  expect(r.json().secrets.DATABASE_URL).toBe('pg://demo-main')
-  expect(r.json().secrets.BUCKET_NAME).toBe('io-demo-main') // S3 bundle rides the same seam
+  expect(r.json().secrets.DATABASE_URL).toBe('postgres://postgres:pw@io-demo-main-pg-db:5432/app')
+  expect(r.json().secrets.BUCKET_NAME).toBe('io-demo-main-store') // S3 bundle rides the same seam
 
   await app.inject({ method: 'PUT', url: `/projects/${id}/policy/secrets.read`, payload: { decision: 'approve' } })
   const gatedRes = await get(`/projects/${id}/secrets?branch=main`)
@@ -137,7 +138,7 @@ test('manifest detail: project/branches/resources with ref.url', async () => {
 })
 
 test('cloud-only surfaces (billing/usage/tokens) return 501 with a clear message', async () => {
-  for (const url of ['/tokens', '/orgs/local/billing', '/projects/x/usage']) {
+  for (const url of ['/orgs/local/billing', '/projects/x/usage']) {
     const r = await get(url)
     expect(r.statusCode).toBe(501)
     expect(r.json().error).toMatch(/cloud-only/)
@@ -150,7 +151,7 @@ test('cloud-only surfaces (billing/usage/tokens) return 501 with a clear message
 // The 501 sweep, split per region (contract 00 §1.1): a package deletes rows ONLY from its own
 // sub-array when it lands the real route; NOT_CLOUD_REST stays cloud-only for good.
 const NOT_CLOUD_WP1: Array<[string, string]> = [
-  ['POST', '/tokens'], ['DELETE', '/tokens/t1'],
+  ['GET', '/tokens'], ['POST', '/tokens'], ['DELETE', '/tokens/t1'],
 ]
 const NOT_CLOUD_WP2: Array<[string, string]> = [
   ['POST', '/projects/x/compute/domain'], ['GET', '/projects/x/compute/domain'], ['DELETE', '/projects/x/compute/domain'],
@@ -282,7 +283,7 @@ test('redeploying to a branch keeps its allocated host port (regression: collide
   await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' }) // feat allocated 3000->4000
   calls.length = 0
   await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'feat', port: 3000 }) // redeploy new image
-  expect(calls).toContain('deploy:demo-feat:default:app:2:s3=io-demo-feat:p=3000->4000') // NOT ->3000
+  expect(calls).toContain('deploy:demo-feat:default:app:2:s3=io-demo-feat-store:p=3000->4000') // NOT ->3000
 })
 
 // ---- dashboard additions ----
@@ -406,7 +407,7 @@ test('branch merge is structural + additive: missing compute groups materialize 
     { type: 'compute', name: 'default', reason: 'exists' },
   ]))
   // the new group runs against MAIN's own resources — no data or creds carried from feat
-  expect(calls.some((c) => c.startsWith('deploy:demo-main:worker:worker:1:s3=io-demo-main'))).toBe(true)
+  expect(calls.some((c) => c.startsWith('deploy:demo-main:worker:worker:1:s3=io-demo-main-store'))).toBe(true)
   // re-merge is idempotent
   expect((await post(`/projects/${id}/branches/main/merge`, { from: 'feat' })).json().created).toEqual([])
   // errors: same branch / unknown source → 400; unknown target → 404
@@ -1012,7 +1013,7 @@ test('object list: shape + paging params + storage.read gate', async () => {
     objects: [{ key: 'a.txt', size: 3, lastModified: '2026-08-18T00:00:00Z', etag: '"x"' }],
     nextCursor: 'page2',
   })
-  expect(calls).toContain('st.list:io-demo-main:prefix=img/:limit=5')
+  expect(calls).toContain('st.list:io-demo-main-store:prefix=img/:limit=5')
 
   await put(`/projects/${id}/policy/storage.read`, { decision: 'approve' })
   const gatedRes = await get(`/projects/${id}/services/st-store/objects`)
@@ -1026,9 +1027,9 @@ test('object download presign: {url, expiresAt}; key required; branch-scoped cre
   expect((await get(`/projects/${id}/services/st-store/objects/download`)).statusCode).toBe(400)
   const r = await get(`/projects/${id}/services/st-store/objects/download?key=a.txt&branch=feat&disposition=inline`)
   expect(r.statusCode).toBe(200)
-  expect(r.json().url).toContain('io-demo-feat/a.txt') // the FEAT bucket, not main's
+  expect(r.json().url).toContain('io-demo-feat-store/a.txt') // the FEAT bucket, not main's
   expect(r.json().expiresAt).toBeTruthy()
-  expect(calls).toContain('st.presignGet:io-demo-feat:a.txt:inline')
+  expect(calls).toContain('st.presignGet:io-demo-feat-store:a.txt:inline')
 })
 
 test('object upload presign: {url, fields, expiresAt}; validates body; storage.write gate; 5GiB cap', async () => {
@@ -1038,7 +1039,7 @@ test('object upload presign: {url, fields, expiresAt}; validates body; storage.w
   const r = await post(`/projects/${id}/services/st-store/objects/upload`, { key: 'x.txt', contentType: 'text/plain', size: 10 })
   expect(r.statusCode).toBe(200)
   expect(r.json().fields.key).toBe('x.txt')
-  expect(calls).toContain('st.presignPost:io-demo-main:x.txt:text/plain:10')
+  expect(calls).toContain('st.presignPost:io-demo-main-store:x.txt:text/plain:10')
 
   await put(`/projects/${id}/policy/storage.write`, { decision: 'deny' })
   expect((await post(`/projects/${id}/services/st-store/objects/upload`, { key: 'x.txt', contentType: 'text/plain', size: 10 })).statusCode).toBe(403)
@@ -1049,7 +1050,7 @@ test('object delete: single {deleted:true} + bulk {deleted, failed}; storage.del
   const one = await del_(`/projects/${id}/services/st-store/objects?key=a.txt`)
   expect(one.statusCode).toBe(200)
   expect(one.json()).toEqual({ deleted: true })
-  expect(calls).toContain('st.rm:io-demo-main:a.txt')
+  expect(calls).toContain('st.rm:io-demo-main-store:a.txt')
 
   const bulk = await post(`/projects/${id}/services/st-store/objects/delete`, { keys: ['a.txt', 'b.txt'] })
   expect(bulk.statusCode).toBe(200)
@@ -1180,7 +1181,7 @@ test('branch rename: metadata-only — resources keep their frozen ref; guards d
 
   // the seam still mints the FROZEN ref's resources, and branch-scoped secrets followed the name
   const secrets = (await get(`/projects/${id}/secrets?branch=exp`)).json().secrets
-  expect(secrets.DATABASE_URL).toBe('pg://demo-feat')
+  expect(secrets.DATABASE_URL).toBe('postgres://postgres:pw@io-demo-feat-pg-db:5432/app')
   expect(secrets.FEAT_ONLY).toBe('v')
   expect((await get(`/projects/${id}/secrets?branch=feat`)).statusCode).toBe(404) // old name gone
 
@@ -1209,7 +1210,7 @@ test('project rename: display name only; resources AND future branches keep the 
   expect((await get('/orgs/local/projects')).json().projects[0].name).toBe('Shop Backend')
 
   // existing resources keep serving under the frozen slug
-  expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.DATABASE_URL).toBe('pg://demo-main')
+  expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.DATABASE_URL).toBe('postgres://postgres:pw@io-demo-main-pg-db:5432/app')
   // a branch created AFTER the rename still keys on the frozen slug, not the new name
   await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
   expect(calls).toContain('db.fork:io-demo-main-pg-db->io-demo-feat-pg-db')
@@ -1259,6 +1260,26 @@ test('metrics/logs target managed-db containers per type; junk components 400', 
 
 // ---- package regions (contract 00 §1.3): each package appends its contract tests between its own
 // markers; existing assertions above change only at the lines its plan lists.
+
+// Scaffold (decision 17): the postgres handle is READ from the row. A branch provisioned before the
+// scaffold has no `databases` entry and still runs today's `io-<ref>-pg` container, which every read
+// and the teardown must keep hitting until WP4's boot migration renames it.
+test('a pre-scaffold branch row (no databases) keeps resolving its legacy io-<ref>-pg container', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  mutate((s) => { for (const b of Object.values(s.branches)) if (b.projectId === id) delete b.databases })
+
+  expect((await get(`/projects/${id}/database/instance`)).json().host).toBe('io-demo-main-pg')
+  const services = (await get(`/projects/${id}/services?branch=feat`)).json().services
+  expect(services.find((s: { id: string }) => s.id === 'pg-db').endpoint).toBe('io-demo-feat-pg:5432')
+  // the legacy DSN still comes off `dbUrl`
+  expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.DATABASE_URL).toBe('postgres://postgres:pw@io-demo-main-pg-db:5432/app')
+
+  const feat = (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === 'feat')
+  await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${feat.id}` })
+  expect(calls).toContain('db.destroy:io-demo-feat-pg')
+  expect(calls).not.toContain('db.destroy:io-demo-feat-pg-db')
+})
 
 // ---- region WP1 (identity/config) ----
 // ---- end region WP1 ----

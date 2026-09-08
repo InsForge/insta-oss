@@ -35,8 +35,12 @@ export interface EngineOptions {
   cfg?: Config                       // default loadConfig()
   data?: DataDirOps                  // scaffold default: the no-op Engine.NOOP_DATA; WP4 default: new DataDir(cfg)
   router?: { invalidate(): void }    // default no-op; main.ts sets engine.router after constructing the Router (WP2)
-  // WP3 adds: upstream?: UpstreamLike; scheduler?: Scheduler (in its region of this interface)
-  // WP5 adds: templates?: TemplateCatalog
+  // ---- region WP3 (scheduler) ----
+  // upstream?: UpstreamLike; scheduler?: Scheduler
+  // ---- end region WP3 ----
+  // ---- region WP5 (templates/parity) ----
+  // templates?: TemplateCatalog
+  // ---- end region WP5 ----
 }
 
 export class Engine {
@@ -94,9 +98,15 @@ export class Engine {
     return this.listBranches(projectId).find((b) => b.name === name)
   }
 
-  /** The postgres handle of a branch's single database service (scaffold: derived; WP5 reads
-   *  `databases[id].container` from the row). */
-  private pgContainer(project: Project, branch: Branch | string): string { return pgContainerName(this.ref(project, branch), 'db') }
+  /** The postgres handle of a branch's single database service: READ from the row (decision 17);
+   *  a row provisioned before the scaffold has no `databases` and still runs today's `io-<ref>-pg`
+   *  container until WP4's boot migration renames it. A string ref is the provision-time path. */
+  private pgContainer(project: Project, branch: Branch | string): string {
+    if (typeof branch === 'string') return pgContainerName(this.ref(project, branch), 'db')
+    return branch.databases?.['pg-db']?.container ?? `io-${this.ref(project, branch)}-pg`
+  }
+  /** The stored DSN of the branch's single database service (legacy rows carry it on `dbUrl`). */
+  private pgUrl(branch: Branch): string | undefined { return branch.databases?.['pg-db']?.url ?? branch.dbUrl }
   /** The bucket handle of a branch's single storage service: read from the row when present (legacy
    *  rows carry `io-<ref>`), derived only before the row exists. */
   private bucketOf(project: Project, branch: Branch): string { return branch.bucket ?? bucketName(this.ref(project, branch), 'store') }
@@ -114,13 +124,21 @@ export class Engine {
     const pg: PgTarget = { container: pgContainerName(ref, 'db'), network, dataDir: this.layout().pg(ref, 'db') }
     const pgOpts = { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, 'pg-db') }
     let url: string
-    if (source) {
-      const srcRef = this.ref(project, source)
-      const src = { container: this.pgContainer(project, source), network: source.network, dataDir: this.layout().pg(srcRef, 'db'), url: source.dbUrl ?? '' }
-      // WP3 hook: a sleeping source is woken before a basebackup-style fork reads it.
-      url = (await this.db.fork(src, pg, { ...pgOpts, ensureSourceRunning: () => this.wake(this.serviceKey(source, 'pg-db'), { door: 'api' }) })).url
-    } else {
-      url = (await this.db.provision(pg, pgOpts)).url
+    try {
+      if (source) {
+        const srcRef = this.ref(project, source)
+        const src = { container: this.pgContainer(project, source), network: source.network, dataDir: this.layout().pg(srcRef, 'db'), url: this.pgUrl(source) ?? '' }
+        // WP3 hook: a sleeping source is woken before a basebackup-style fork reads it.
+        url = (await this.db.fork(src, pg, { ...pgOpts, ensureSourceRunning: () => this.wake(this.serviceKey(source, 'pg-db'), { door: 'api' }) })).url
+      } else {
+        url = (await this.db.provision(pg, pgOpts)).url
+      }
+    } catch (e) {
+      // compensate: a fork that failed after provisioning its destination must not orphan it
+      await this.db.destroy(pg.container).catch(() => {})
+      await docker(['network', 'rm', network]).catch(() => {})
+      this.releaseLanes(branchId)
+      throw e
     }
     let st: { bucket: string; env: Record<string, string> }
     try { st = await this.storage.provision(ref, network, 'store') }
@@ -158,6 +176,9 @@ export class Engine {
     const b: Branch = {
       id: branchId, projectId: project.id, name, isDefault, status: 'ready', ref,
       network, dbUrl: url, bucket: st.bucket, s3: st.env, cloneOf: source?.name ?? null, createdAt: Date.now(), apps: {},
+      // the postgres handle is recorded at provision and READ afterwards (decision 17); `dbUrl`
+      // stays alongside until WP5's migrateState folds the legacy fields into `databases`
+      databases: { 'pg-db': { url, container: pg.container, dataId: 'db' } },
       ...(Object.keys(managed).length ? { managed } : {}),
       ...(Object.keys(lanes).length ? { lanes } : {}),
     }
@@ -317,7 +338,8 @@ export class Engine {
     // place to clear it. A `stop` landing while a deploy is in flight would otherwise be undone by
     // the deploy's own state write — and `restart` makes that reachable from an operation that
     // checked the intent moments earlier. Matches the platform, whose desired_state survives a deploy.
-    mutate((s) => { s.branches[b.id].apps[group] = { ...s.branches[b.id].apps[group], image: opts.image, port, hostPort, url, updatedAt: Date.now() } })
+    const host = this.mintedHost(project, b, group)                                                     // WP2
+    mutate((s) => { s.branches[b.id].apps[group] = { ...s.branches[b.id].apps[group], image: opts.image, port, hostPort, url, ...(host !== undefined ? { host } : {}), updatedAt: Date.now() } })
     // ...and the container has to HONOUR that intent, or preserving it just makes the row lie:
     // DockerCompute.deploy always `docker run`s the replacement, so a service the user stopped would
     // come back up while the row still read `stopped`. Re-assert on the container only — the state
@@ -566,7 +588,7 @@ export class Engine {
     if (!branch || !project) return undefined
     const serviceId = key.slice(i + 1)
     const ref = this.ref(project, branch)
-    if (serviceId.startsWith('pg-')) return { project, branch, serviceId, container: pgContainerName(ref, serviceId.slice(3)) }
+    if (serviceId.startsWith('pg-')) return { project, branch, serviceId, container: branch.databases?.[serviceId]?.container ?? this.pgContainer(project, branch) }
     if (serviceId.startsWith('cp-')) return { project, branch, serviceId, container: appContainerName(ref, serviceId.slice(3)), app: branch.apps[serviceId.slice(3)] }
     const m = this.managedList(project.id).find((x) => x.id === serviceId)
     return m ? { project, branch, serviceId, container: managedContainerName(ref, m.type, m.name) } : undefined
@@ -1424,7 +1446,7 @@ export class Engine {
    *  host and port with `tls: false`, so DSNs stay in today's container-host form. */
   laneAddress(project: Project, branch: Branch, serviceId: string): { host: string; port: number; tls: boolean } {
     const ref = this.ref(project, branch)
-    if (serviceId.startsWith('pg-')) return { host: pgContainerName(ref, serviceId.slice(3)), port: 5432, tls: false }
+    if (serviceId.startsWith('pg-')) return { host: branch.databases?.[serviceId]?.container ?? this.pgContainer(project, branch), port: 5432, tls: false }
     const m = this.managedList(project.id).find((x) => x.id === serviceId)
     if (m) return { host: managedContainerName(ref, m.type, m.name), port: MANAGED_DB[m.type].port, tls: false }
     const group = serviceId.replace(/^cp-/, '')
@@ -1436,6 +1458,9 @@ export class Engine {
     const app = branch.apps[group]
     return app?.url ?? `http://localhost:${app?.hostPort ?? app?.port ?? 8080}`
   }
+  /** filled by WP2: the bare minted hostname recorded on `apps[g].host` at deploy (`labelFor(...) +
+   *  '.' + cfg.domain`, decision 55). Scaffold: undefined, so today's row shape is unchanged. */
+  mintedHost(_project: Project, _branch: Branch, _group: string): string | undefined { return undefined }
   /** filled by WP2: local mode rewrites 127.0.0.1 to host.docker.internal in DSN/endpoint values.
    *  Scaffold: identity (today's env reaches the container unchanged). */
   containerize(env: Record<string, string>): Record<string, string> { return env }
@@ -1454,7 +1479,7 @@ export class Engine {
   rowNetwork(project: Project, branch: Branch | undefined, row: { id: string; type: string; name: string }): { domain?: string; endpoint?: string } {
     if (!branch) return {}
     const ref = this.ref(project, branch)
-    if (row.type === 'postgres') return { endpoint: `${pgContainerName(ref, row.name)}:5432` }
+    if (row.type === 'postgres') return { endpoint: `${branch.databases?.[row.id]?.container ?? this.pgContainer(project, branch)}:5432` }
     if (row.type === 'storage') return { endpoint: `${this.s3Host(branch) ?? 'storage'}/${this.bucketOf(project, branch)}` }
     if (isManagedDbType(row.type)) return { endpoint: `${managedContainerName(ref, row.type, row.name)}:${MANAGED_DB[row.type].port}` }
     const app = branch.apps[row.name]
