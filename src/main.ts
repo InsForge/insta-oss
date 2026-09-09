@@ -14,6 +14,9 @@ import { resetAdmin } from './auth'
 import { loadConfig, type Config } from './config'
 import { mkdirSync } from 'node:fs'
 import { acquireLock, initStatePath, loadState, releaseLock } from './state'
+// ---- region WP4 (data dir) ----
+import { capabilitiesLine, sharedDataDir } from './datadir'
+// ---- end region WP4 ----
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) })
 
@@ -51,7 +54,17 @@ async function main(): Promise<void> {
   cfg = Object.freeze({ ...cfg, extraListenHosts: await bridgeGateway(cfg) })
 
   // ---- region WP4 (probe) ----
-  // DataDir + probe(); passed as EngineOptions.data
+  // The data directory, plus one clone attempt to learn whether this filesystem reflinks. An
+  // unwritable data dir is fatal; a filesystem that cannot clone costs one warning and slower forks
+  // (decision 23). `INSTA_OSS_FORK=reflink` is the operator asking to fail instead.
+  const data = sharedDataDir(cfg)
+  const caps = await data.probe()
+  if (cfg.data.fork === 'reflink' && !caps.reflink) {
+    console.error(`error: INSTA_OSS_FORK=reflink but ${cfg.dataDir} does not support reflinks`)
+    process.exit(1)
+  }
+  console.log(capabilitiesLine(cfg, caps))
+  if (caps.warning) console.warn(`warning: ${caps.warning}`)
   // ---- end region WP4 (probe) ----
   // ---- region WP3 (upstream) ----
   // Upstream + DockerRuntime; passed as EngineOptions.upstream
@@ -64,7 +77,14 @@ async function main(): Promise<void> {
   const engine = new Engine(new LocalPostgres(), new DockerCompute(), storage, new LocalManagedDb(), { cfg })
 
   // ---- region WP4 (migrate) ----
-  // engine.booting; migrateLegacyData
+  // One boot migration of installs that stored data in docker volumes, BEFORE the router and the
+  // scheduler start (contract 1.1): it stops and re-creates containers, so nothing may be watching
+  // them or waking them meanwhile. `booting` keeps the sleep sweep inert until it finishes.
+  engine.setDataCapabilities(caps)
+  engine.booting = true
+  try { await engine.migrateLegacyData() }
+  catch (e) { console.warn(`warning: data migration did not finish: ${e instanceof Error ? e.message : String(e)}`) }
+  finally { engine.booting = false }
   // ---- end region WP4 (migrate) ----
   // ---- region WP5 (executor) ----
   // executor; abandonStale; migrateLegacyContainers

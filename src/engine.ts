@@ -2,9 +2,13 @@
 // project → branches (main = default); branch create = provision new stack + copy data +
 // redeploy the same app image(s); compute = the user's custom image(s), one per group.
 import { randomBytes, randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { loadConfig, type Config } from './config'
+import { dataLayout, ensureDirSync, lazyDataDirOps, probedCapabilities } from './datadir'
+import { migrateLegacyData } from './datadir-migrate'
 import { docker } from './docker'
-import { MANAGED_DB, CANONICAL_MANAGED_KEYS, suffixBundle, managedServiceId, managedContainerName, isManagedDbType, pgContainerName, bucketName, appContainerName } from './manageddb'
+import { MANAGED_DB, CANONICAL_MANAGED_KEYS, suffixBundle, managedServiceId, managedContainerName, isManagedDbType, pgContainerName, bucketName, appContainerName, dataPaths } from './manageddb'
 import * as observe from './observe'
 import { loadState, mutate } from './state'
 import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret, DataDirOps, PgTarget, ServiceKey, ServiceLimits } from './types'
@@ -126,16 +130,22 @@ export class Engine {
     let url: string
     try {
       if (source) {
+        this.assertMigrated(source)                                                                       // WP4
         const srcRef = this.ref(project, source)
-        const src = { container: this.pgContainer(project, source), network: source.network, dataDir: this.layout().pg(srcRef, 'db'), url: this.pgUrl(source) ?? '' }
+        const src = { container: this.pgContainer(project, source), network: source.network, dataDir: this.layout().pg(srcRef, source.databases?.['pg-db']?.dataId ?? 'db'), url: this.pgUrl(source) ?? '' }
         // WP3 hook: a sleeping source is woken before a basebackup-style fork reads it.
-        url = (await this.db.fork(src, pg, { ...pgOpts, ensureSourceRunning: () => this.wake(this.serviceKey(source, 'pg-db'), { door: 'api' }) })).url
+        const forked = await this.db.fork(src, pg, { ...pgOpts, ensureSourceRunning: () => this.wake(this.serviceKey(source, 'pg-db'), { door: 'api' }) })
+        url = forked.url
+        // WP4: the copy method and duration travel to the branch.created payload (decision 39).
+        this.forkResults.set(branchId, { method: forked.method, ms: forked.ms })
       } else {
         url = (await this.db.provision(pg, pgOpts)).url
       }
     } catch (e) {
-      // compensate: a fork that failed after provisioning its destination must not orphan it
+      // compensate: a fork that failed after provisioning its destination must not orphan it, and a
+      // half-written data directory must not survive to be cloned over (WP4)
       await this.db.destroy(pg.container).catch(() => {})
+      await this.data.remove(pg.dataDir).catch(() => {})
       await docker(['network', 'rm', network]).catch(() => {})
       this.releaseLanes(branchId)
       throw e
@@ -145,6 +155,7 @@ export class Engine {
     catch (e) {
       // compensate: don't orphan the db container if storage fails
       await this.db.destroy(pg.container).catch(() => {})
+      await this.data.remove(pg.dataDir).catch(() => {})                                                  // WP4
       await docker(['network', 'rm', network]).catch(() => {})
       this.releaseLanes(branchId)
       throw e
@@ -157,8 +168,11 @@ export class Engine {
       for (const m of project.managedServices ?? []) {
         const password = randomBytes(32).toString('base64url')
         const container = managedContainerName(ref, m.type, m.name)
+        // WP4: `md/<ref>/<prefix>-<dataId>` plus one sub-directory per path the image writes, all
+        // created before the container starts (a missing bind source fails the start).
+        const dataDir = await this.ensureManagedDirs(ref, m.type, m.dataId ?? m.name)
         await this.managedDb.provision(
-          { container, network, type: m.type, name: m.name, password, dataDir: this.layout().md(ref, m.type, m.dataId ?? m.name) },
+          { container, network, type: m.type, name: m.name, password, dataDir },
           { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, m.id) },
         )
         provisioned.push(container)
@@ -169,6 +183,7 @@ export class Engine {
       for (const c of provisioned) await this.managedDb.destroy(c).catch(() => {})
       await this.storage.destroy(st.bucket, network).catch(() => {})
       await this.db.destroy(pg.container).catch(() => {})
+      for (const root of this.layout().branchRoots(ref)) await this.data.remove(root).catch(() => {})      // WP4
       await docker(['network', 'rm', network]).catch(() => {})
       this.releaseLanes(branchId)
       throw e
@@ -181,6 +196,7 @@ export class Engine {
       databases: { 'pg-db': { url, container: pg.container, dataId: 'db' } },
       ...(Object.keys(managed).length ? { managed } : {}),
       ...(Object.keys(lanes).length ? { lanes } : {}),
+      dataVersion: 1,                                                                                     // WP4
     }
     mutate((s) => { s.branches[b.id] = b })
     // WP3 hook: the scheduler learns the branch's database keys (no-op stub until WP3).
@@ -219,8 +235,9 @@ export class Engine {
 
     // The database forks inside provisionBranch (db.fork); the bucket copies here; compute redeploys.
     const b = await this.provisionBranch(project, name, false, source, randomUUID())
-    // WP4 hook: /data volumes fork BEFORE the redeploy loop ([] until the data dir lands).
-    await this.forkVolumes(project, source, b)
+    // WP4 hook: /data volumes fork BEFORE the redeploy loop, so each new container starts on its
+    // own copy rather than sharing the source's bytes.
+    const volumes = await this.forkVolumes(project, source, b)
     await this.storage.cloneInto(this.bucketOf(project, source), this.bucketOf(project, b), b.network)
     // compute = redeploy: same image, SAME listen port, allocated host mapping.
     for (const [group, app] of Object.entries(source.apps)) {
@@ -237,7 +254,11 @@ export class Engine {
     })
     // WP3 hook: the clone's databases sleep until first use (no-op until the scheduler lands).
     await this.sleepNewBranch(project, b)
-    this.emit(projectId, name, 'resource', 'branch.created', { from: source.name })
+    // WP4: how the database and each /data volume were copied (decision 39), so `insta events`
+    // shows whether the box reflinked or fell back to streaming and copying.
+    const db = this.forkResults.get(b.id)
+    this.forkResults.delete(b.id)
+    this.emit(projectId, name, 'resource', 'branch.created', { from: source.name, ...(db ? { db } : {}), volumes })
     return b
   }
 
@@ -493,8 +514,10 @@ export class Engine {
     return [...groups].sort()
   }
 
-  /** The project's registered managed databases (empty when none). */
-  private managedList(projectId: string): Array<{ id: string; type: ManagedDbType; name: string; createdAt: number }> {
+  /** The project's registered managed databases (empty when none). `dataId` is WP4's immutable
+   *  directory key (decision 16); rows from before the data dir carry none until the boot migration
+   *  backfills one. */
+  private managedList(projectId: string): Array<{ id: string; type: ManagedDbType; name: string; createdAt: number; dataId?: string }> {
     return this.getProject(projectId)?.managedServices ?? []
   }
 
@@ -948,8 +971,9 @@ export class Engine {
     const vol = project.computeVolumes?.[name]
     for (const b of this.listBranches(projectId)) {
       if (!b.apps[name]) continue
-      await docker(['rm', '-f', `io-${this.ref(project, b)}-app-${name}`]).catch(() => {})
-      if (vol) await docker(['volume', 'rm', '-f', `io-${this.ref(project, b)}-data-${vol.id}`]).catch(() => {})
+      await docker(['rm', '-f', '-v', `io-${this.ref(project, b)}-app-${name}`]).catch(() => {})
+      // WP4: the /data bytes are a directory under the data dir; remove it AFTER the container.
+      if (vol) await this.data.remove(this.layout().vol(this.ref(project, b), vol.id)).catch(() => {})
       mutate((st) => { delete st.branches[b.id].apps[name] })
     }
     mutate((st) => {
@@ -979,21 +1003,25 @@ export class Engine {
     const wouldMint = this.mintedManagedNames({ type, name })
     const clash = (loadState().userSecrets[projectId] ?? []).find((u) => wouldMint.includes(u.name))
     if (clash) throw new Error(`service would mint secret names already used by user secrets: ${clash.name}`)
-    const entry = { id: managedServiceId(type, name), type, name, createdAt: Date.now() }
-    const provisioned: Array<{ branch: Branch; password: string; container: string }> = []
+    // WP4: an immutable directory key, minted once and stored, so a rename never detaches the data
+    // (decision 16). The directory is `md/<ref>/<prefix>-<dataId>` on every branch.
+    const entry = { id: managedServiceId(type, name), type, name, createdAt: Date.now(), dataId: randomUUID().slice(0, 8) }
+    const provisioned: Array<{ branch: Branch; password: string; container: string; dataDir: string }> = []
     try {
       for (const b of this.listBranches(projectId)) {
         const password = randomBytes(32).toString('base64url')
         const ref = this.ref(project, b)
         const container = managedContainerName(ref, type, name)
+        const dataDir = await this.ensureManagedDirs(ref, type, entry.dataId)
         await this.managedDb.provision(
-          { container, network: b.network, type, name, password, dataDir: this.layout().md(ref, type, name) },
+          { container, network: b.network, type, name, password, dataDir },
           { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, entry.id) },
         )
-        provisioned.push({ branch: b, password, container })
+        provisioned.push({ branch: b, password, container, dataDir })
       }
     } catch (e) {
       for (const p of provisioned) await this.managedDb.destroy(p.container).catch(() => {})
+      for (const p of provisioned) await this.data.remove(p.dataDir).catch(() => {})                       // WP4
       throw e
     }
     mutate((st) => {
@@ -1015,7 +1043,10 @@ export class Engine {
     if (!m) throw new Error('service not found')
     const branches = this.listBranches(projectId)
     for (const b of branches) {
-      await this.managedDb.destroy(managedContainerName(this.ref(project, b), m.type, m.name)).catch(() => {})
+      const ref = this.ref(project, b)
+      await this.managedDb.destroy(managedContainerName(ref, m.type, m.name)).catch(() => {})
+      // WP4: the data goes with the container (same irreversibility class as the compute service).
+      await this.data.remove(this.layout().md(ref, m.type, m.dataId ?? m.name)).catch(() => {})
       mutate((st) => { delete st.branches[b.id].managed?.[serviceId] })
     }
     mutate((st) => {
@@ -1132,7 +1163,8 @@ export class Engine {
       if (app.desiredState === 'stopped' || app.desiredState === 'suspended') {
         await this.lifecycle(projectId, serviceId, app.desiredState === 'suspended' ? 'suspend' : 'stop', b.name).catch(() => {})
       }
-      await docker(['volume', 'rm', '-f', `io-${this.ref(project!, b)}-data-${vol.id}`]).catch(() => {})
+      // WP4: the redeploy above dropped the mount; now the bytes go too.
+      await this.data.remove(this.layout().vol(this.ref(project!, b), vol.id)).catch(() => {})
     }
     this.emit(projectId, null, 'resource', 'service.volume', { service: serviceId, sizeGib: null, removed: true })
     const service = (await this.services(projectId)).find((s) => s.id === serviceId)
@@ -1277,7 +1309,11 @@ export class Engine {
     const managed = this.managedList(project.id)
     for (const m of managed) await this.managedDb.destroy(managedContainerName(ref, m.type, m.name)).catch(() => {})
     try { await docker(['network', 'rm', b.network]) } catch { /* gone */ }
-    for (const root of this.layout().branchRoots(ref)) await this.data.remove(root)                        // WP4
+    // WP4: the branch's bytes, after every container that held them. A remove failure is logged and
+    // never fails the delete (an unreadable directory must not wedge `insta branch delete`).
+    for (const root of this.layout().branchRoots(ref)) {
+      await this.data.remove(root).catch((e) => console.warn(`could not remove ${root}: ${e instanceof Error ? e.message : String(e)}`))
+    }
     this.scheduler.forget(['pg-db', ...managed.map((m) => m.id), ...Object.keys(b.apps).map((g) => `cp-${g}`)].map((sid) => this.serviceKey(b, sid))) // WP3
     this.releaseDomainsFor(project.id, b.id)                                                                  // WP2
   }
@@ -1539,36 +1575,91 @@ export class Engine {
   // ---- end region WP3 ----
 
   // ---- region WP4 (data dir) ----
-  /** filled by WP4: the `data` default becomes `new DataDir(cfg)`. Scaffold: a no-op DataDirOps, so
-   *  WP5's data.ensureDir / data.remove calls compile and do nothing until WP4 lands (contract 1.1). */
-  private static readonly NOOP_DATA: DataDirOps = {
-    probe: async () => ({ dataDir: '', reflink: false, engine: 'inprocess' }),
-    ensureDir: async () => { /* no data dir until WP4 */ },
-    clonePostgres: async () => ({ method: 'reflink', ms: 0 }),
-    cloneTree: async () => ({ method: 'copy', ms: 0 }),
-    remove: async () => { /* no data dir until WP4 */ },
-    copyFromContainerVolume: async () => { /* no data dir until WP4 */ },
-    hasPgData: async () => false,
-    isEmptyOrMissing: async () => true,
-  }
+  /** The engine's default `DataDirOps`: the process-wide `DataDir`, resolved on the first CALL, not
+   *  at class definition, so constructing an Engine still reads no config and touches no disk.
+   *  `main.ts` passes the instance it probed at boot; tests pass a recorder. (The name is the
+   *  scaffold's; the body is no longer a no-op.) */
+  private static readonly NOOP_DATA: DataDirOps = lazyDataDirOps()
   readonly data: DataDirOps
-  /** filled by WP4: true while migrateLegacyData runs (the sweep is inert). */
+  /** True while migrateLegacyData runs: the sleep sweep stays inert while containers are being
+   *  stopped and recreated by the migration (decision 24). */
   booting = false
-  /** filled by WP4: host paths under <dataDir>. Scaffold: every path '' (data lives in docker volumes
-   *  and container layers, as today); branchRoots is empty so teardown removes nothing. */
+  /** Host paths under `cfg.dataDir`, keyed by IMMUTABLE ids: a rename must never detach data
+   *  (decision 16, contract 00 section 12). */
   layout(): { pg(ref: string, dataId: string): string; vol(ref: string, volId: string): string; md(ref: string, type: ManagedDbType, dataId: string): string; branchRoots(ref: string): string[] } {
-    return { pg: () => '', vol: () => '', md: () => '', branchRoots: () => [] }
+    return dataLayout(this.cfg.dataDir)
   }
-  /** filled by WP4: the compute group's /data bind mount (ensureDir 0o777 first). Scaffold: today's
-   *  docker NAMED-VOLUME name, keyed by the volume's stable id so a rename never detaches the data,
-   *  mounted verbatim by the compute adapter's `-v <name>:/data` line. */
+  /** The compute group's /data bind mount. Created before the deploy, 0777 because a user image may
+   *  run as any uid (the parent tree is 0700, so the box is not open). A missing bind source makes
+   *  `--mount type=bind` fail the start, which is why this is not lazy. */
   volumeMount(project: Project, branch: Branch, group: string): { hostPath: string } | undefined {
     const vol = project.computeVolumes?.[group]
-    return vol ? { hostPath: `io-${this.ref(project, branch)}-data-${vol.id}` } : undefined
+    if (!vol) return undefined
+    const hostPath = this.layout().vol(this.ref(project, branch), vol.id)
+    ensureDirSync(hostPath, 0o777)
+    return { hostPath }
   }
-  /** filled by WP4: reflink/copy every /data volume of the source branch onto the target. Scaffold:
-   *  a clone starts with EMPTY volumes (compute state lives in db/storage), as today. */
-  async forkVolumes(_project: Project, _source: Branch, _target: Branch): Promise<Array<{ group: string; method: 'reflink' | 'copy'; ms: number }>> { return [] }
+  /** Reflink (or plain-copy) every /data volume of the source branch onto the target. Runs BEFORE
+   *  the clone's redeploy loop, so the new containers start on their own copy. The source app keeps
+   *  running: the copy is crash-consistent, exactly like the database clone. */
+  async forkVolumes(project: Project, source: Branch, target: Branch): Promise<Array<{ group: string; method: 'reflink' | 'copy'; ms: number }>> {
+    const out: Array<{ group: string; method: 'reflink' | 'copy'; ms: number }> = []
+    const srcRef = this.ref(project, source)
+    const dstRef = this.ref(project, target)
+    for (const group of Object.keys(source.apps)) {
+      const vol = project.computeVolumes?.[group]
+      if (!vol) continue
+      const from = this.layout().vol(srcRef, vol.id)
+      if (!existsSync(from)) continue
+      const to = this.layout().vol(dstRef, vol.id)
+      await this.data.ensureDir(to, 0o777)
+      const r = await this.data.cloneTree(from, to)
+      out.push({ group, method: r.method, ms: r.ms })
+    }
+    return out
+  }
+  /** The boot probe's answer (decision 23): `warning` is set when the probe degraded to copying. */
+  dataCapabilities(): { dataDir: string; reflink: boolean; engine: 'inprocess' | 'helper' | 'cp-c'; warning?: string } {
+    return this.dataCaps ?? probedCapabilities()
+  }
+  private dataCaps: { dataDir: string; reflink: boolean; engine: 'inprocess' | 'helper' | 'cp-c'; warning?: string } | undefined
+  /** main.ts hands the boot probe's result to the engine so `insta` can report it without probing
+   *  again. */
+  setDataCapabilities(caps: { dataDir: string; reflink: boolean; engine: 'inprocess' | 'helper' | 'cp-c'; warning?: string }): void {
+    this.dataCaps = caps
+  }
+  /** One boot migration of branches still storing data in docker volumes and container layers
+   *  (decision 24). Resumable and idempotent; a branch it could not finish keeps
+   *  `dataVersion: undefined`, and `createBranch` from such a branch throws. */
+  async migrateLegacyData(): Promise<{ migrated: string[]; skipped: string[]; failed: Array<{ ref: string; error: string }> }> {
+    return migrateLegacyData({
+      cfg: this.cfg,
+      data: this.data,
+      layout: () => this.layout(),
+      ref: (branch) => this.ref(this.getProject(branch.projectId)!, branch),
+      query: (container, sql) => this.db.query(container, sql),
+      provisionManaged: (t, opts) => this.managedDb.provision(t, opts),
+      redeploy: (projectId, branchName, group, opts) => this.deploy(projectId, branchName, { ...opts, group }).then(() => undefined),
+    })
+  }
+  /** The per-branch guard the plan's message names: a fork of a branch whose bytes still live in a
+   *  docker volume would clone an empty directory. */
+  private assertMigrated(branch: Branch): void {
+    if (branch.dataVersion !== 1) {
+      throw new Error(`branch ${branch.name} still stores data in docker volumes; restart the daemon to retry the migration`)
+    }
+  }
+  /** Every managed sub-directory of one service, created before the container starts (a missing
+   *  bind source fails `--mount type=bind`). */
+  private async ensureManagedDirs(ref: string, type: ManagedDbType, dataId: string): Promise<string> {
+    const dir = this.layout().md(ref, type, dataId)
+    await this.data.ensureDir(dir, 0o700)
+    for (const p of dataPaths(type)) await this.data.ensureDir(join(dir, p.sub), 0o700)
+    return dir
+  }
+  /** The fork result of the branch currently being provisioned, read once by `createBranch` for the
+   *  `branch.created` payload (decision 39) and then dropped. */
+  private forkResults = new Map<string, { method: 'reflink' | 'basebackup'; ms: number }>()
   // ---- end region WP4 ----
 
   // ---- region WP5 (templates/parity) ----

@@ -722,9 +722,9 @@ test('compute volume: attach at create, mounted at /data on deploy, GET/PUT mirr
   expect(services.find((s: { id: string }) => s.id === 'cp-api').volume_gib).toBe(5)
   expect(services.find((s: { id: string }) => s.id === 'cp-plain').volume_gib).toBeNull()
 
-  // deploy mounts a per-branch named volume at /data
+  // deploy bind-mounts the branch's own directory under the data dir at /data (WP4, decision 56)
   await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
-  expect(calls.some((c) => c.startsWith('deploy.volume:demo-main:api:io-demo-main-data-'))).toBe(true)
+  expect(calls.some((c) => /^deploy\.volume:demo-main:api:\/.+\/vol\/demo-main\/[0-9a-f]{8}$/.test(c))).toBe(true)
 
   // GET …/volume: {volume:{sizeGib,mountPath}|null, cap:{volumeGib}}
   expect((await get(`/projects/${id}/services/cp-api/volume`)).json())
@@ -774,7 +774,7 @@ test('attach-after-create (platform #185 parity): PUT on a volumeless service at
   expect((await put(`/projects/${id}/services/cp-later2/volume`, { sizeGib: 101 })).statusCode).toBe(400)
   // the disk materializes on the next deploy — mounted by volume id, cloud-identical flow
   await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'later' })
-  expect(calls.some((c) => c.startsWith('deploy.volume:demo-main:later:io-demo-main-data-'))).toBe(true)
+  expect(calls.some((c) => /^deploy\.volume:demo-main:later:\/.+\/vol\/demo-main\/[0-9a-f]{8}$/.test(c))).toBe(true)
   // from here it is an ordinary volume: a grow is a grow, not another attach
   const grow = await put(`/projects/${id}/services/cp-later/volume`, { sizeGib: 3 })
   expect(grow.statusCode).toBe(200)
