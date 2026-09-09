@@ -407,7 +407,12 @@ export class Scheduler {
       // container that is shutting down.
       this.sleeping.add(key)
       try {
-        const live = (await this.runtime.containers()).get(t.container)?.state
+        const entry = (await this.runtime.containers()).get(t.container)
+        const live = entry?.state
+        // The re-read under the lock is also the freshest truth there is: keep the snapshot in step,
+        // so a container that has gone away is not reported running until the next sweep.
+        if (entry) this.stateCache.set(t.container, entry)
+        else this.stateCache.delete(t.container)
         if (live === 'paused') return false
         if (live === undefined) return false
         if (live !== 'running') {
