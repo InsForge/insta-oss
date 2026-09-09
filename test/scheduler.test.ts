@@ -508,6 +508,20 @@ test('eviction picks the least recently active service and stops once free memor
   expect(h.events.map((e) => e.payload.reason)).toEqual(['memory'])
 })
 
+test('a 0 RAM floor disables the pressure pass everywhere: the sweep and a wake both stop nothing', async () => {
+  const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '0', INSTA_OSS_IDLE_COMPUTE_SEC: '0', INSTA_OSS_IDLE_DB_SEC: '0' })
+  const idle = h.add(K)
+  const waking = h.add(K2)
+  h.runtime.put(waking.container, 'exited')
+  await h.sched.sweep()
+  pressure(h, 1)                                       // as far under any floor as it gets
+  vi.advanceTimersByTime(60_000)
+  await h.sched.sweep()
+  await h.sched.wake(K2, { door: 'api' })
+  expect(calls.filter((c) => c.startsWith('runtime.stop:'))).toEqual([])
+  expect(idle.sleptAt ?? null).toBeNull()
+})
+
 test('eviction skips alwaysOn, paused, user-stopped, excluded and not-running services', async () => {
   const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '20' })
   const always = h.add('b:cp-always', { alwaysOn: true, container: 'io-x-app-always' })

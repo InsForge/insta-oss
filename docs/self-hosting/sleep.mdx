@@ -115,7 +115,7 @@ Set these in `/etc/instacloud/instad.env`, then `cd /etc/instacloud && docker co
 | `INSTA_OSS_RAM_FLOOR_PCT` | 15 | free-memory floor for pressure eviction, 0 disables it |
 | `INSTA_OSS_MEM_BUDGET_MB` | unset | assumed total memory, needed for eviction on macOS |
 | `INSTA_OSS_ALWAYS_ON_DEFAULT` | false | make every new service always-on |
-| `INSTA_OSS_SCHEDULER` | 1 | set to 0 to turn sleeping off entirely |
+| `INSTA_OSS_SCHEDULER` | 1 | set to 0 to turn the sweeper off, so nothing sleeps on a timer |
 
 An idle window of 0 turns sleeping off for that kind of service without turning off the sweeper.
 

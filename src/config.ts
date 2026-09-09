@@ -63,7 +63,7 @@ export interface Config {
     stopGraceDbSec: number        // INSTA_OSS_STOP_GRACE_DB_SEC 30
     wakeTimeoutSec: number        // INSTA_OSS_WAKE_TIMEOUT_SEC 60 (router hold bound and scheduler readiness bound)
     wakeProtectSec: number        // INSTA_OSS_WAKE_PROTECT_SEC 60
-    ramFloorPct: number           // INSTA_OSS_RAM_FLOOR_PCT    15 (1..90)
+    ramFloorPct: number           // INSTA_OSS_RAM_FLOOR_PCT    15 (0..90; 0 disables the pressure pass)
     memBudgetMb: number | null    // INSTA_OSS_MEM_BUDGET_MB    null (synthetic total for tests/e2e; null = /proc/meminfo)
     alwaysOnDefault: boolean      // INSTA_OSS_ALWAYS_ON_DEFAULT false
   }
@@ -244,7 +244,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, argv: readonly 
       stopGraceDbSec: int(env, 'INSTA_OSS_STOP_GRACE_DB_SEC', 30),
       wakeTimeoutSec: int(env, 'INSTA_OSS_WAKE_TIMEOUT_SEC', 60, 1),
       wakeProtectSec: int(env, 'INSTA_OSS_WAKE_PROTECT_SEC', 60),
-      ramFloorPct: int(env, 'INSTA_OSS_RAM_FLOOR_PCT', 15, 1, 90),
+      ramFloorPct: int(env, 'INSTA_OSS_RAM_FLOOR_PCT', 15, 0, 90),
       memBudgetMb,
       alwaysOnDefault: bool(env, 'INSTA_OSS_ALWAYS_ON_DEFAULT', false),
     },

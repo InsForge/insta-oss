@@ -85,7 +85,9 @@ test('bool() and int() validation: 1|true|0|false; integers within range; port r
   expect(() => loadConfig({ INSTA_OSS_SCHEDULER: 'yes' }, [])).toThrow(/INSTA_OSS_SCHEDULER must be 1\|true\|0\|false/)
   expect(loadConfig({ INSTA_OSS_IDLE_COMPUTE_SEC: '0' }, []).sleep.idleComputeSec).toBe(0)
   expect(() => loadConfig({ INSTA_OSS_IDLE_COMPUTE_SEC: '1.5' }, [])).toThrow(/INSTA_OSS_IDLE_COMPUTE_SEC must be an integer/)
-  expect(() => loadConfig({ INSTA_OSS_RAM_FLOOR_PCT: '95' }, [])).toThrow(/1\.\.90/)
+  expect(() => loadConfig({ INSTA_OSS_RAM_FLOOR_PCT: '95' }, [])).toThrow(/0\.\.90/)
+  // 0 is legal and is the documented off switch for memory-pressure eviction (decision 12).
+  expect(loadConfig({ INSTA_OSS_RAM_FLOOR_PCT: '0' }, []).sleep.ramFloorPct).toBe(0)
   expect(loadConfig({ INSTA_OSS_MEM_BUDGET_MB: '2048' }, []).sleep.memBudgetMb).toBe(2048)
   expect(loadConfig({ INSTA_OSS_LANE_PORT_RANGE: '30000-30010' }, []).lanes.portRange).toEqual([30000, 30010])
   expect(() => loadConfig({ INSTA_OSS_LANE_PORT_RANGE: '30010-30000' }, [])).toThrow(/INSTA_OSS_LANE_PORT_RANGE/)

@@ -451,6 +451,10 @@ export class Scheduler {
    *  victims, so two services that do not fit together cannot ping-pong on every request. An empty
    *  pool means the wake proceeds anyway and the kernel is the last resort. */
   async evictForRoom(needBytes: number, exclude: Set<ServiceKey>): Promise<void> {
+    // The documented off switch: a floor of 0 means no pressure eviction anywhere, on the sweep's
+    // pass and on the wake path alike (decision 12), so a low-RAM runner never stops a container
+    // an e2e or a Docker suite is testing.
+    if (this.cfg.sleep.ramFloorPct <= 0) return
     const first = this.runtime.memory()
     if (!first) return
     const floor = first.totalBytes * (this.cfg.sleep.ramFloorPct / 100)

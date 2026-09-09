@@ -1,5 +1,5 @@
 // Integration (real Docker): sleep is a clean `docker stop` and wake really brings the service back.
-// The fake-adapter suite (test/scheduler.test.ts) pins the DECISIONS; this file pins the four things
+// The fake-adapter suite (test/scheduler.test.ts) pins the DECISIONS; this file pins the six things
 // only a real container can answer:
 //
 //   1. a Postgres told to stop within its grace shuts down cleanly ("database system is shut down"),
@@ -9,12 +9,17 @@
 //   3. `docker update` applies a cgroup ceiling to a STOPPED container, which is what makes
 //      `insta compute limits` work on a sleeping service;
 //   4. stopping a signal-forwarding container finishes well inside the grace, instead of costing the
-//      whole window and a SIGKILL.
+//      whole window and a SIGKILL;
+//   5. the ticker sleeps a really idle container on its own, and traffic never wakes a stopped one;
+//   6. the pressure pass stops the least recently active container when the budget says the box is
+//      full.
 //
 // Run by the integrator only (`RUN_DOCKER_TESTS=1`), one Docker file at a time. This file runs the
-// TICKER (`INSTA_OSS_SCHEDULER` unset) with `INSTA_OSS_RAM_FLOOR_PCT=0`, so the idle sweep is live
-// but no pressure pass can stop the containers under test; the eviction case sets a synthetic
-// `INSTA_OSS_MEM_BUDGET_MB` instead of touching the host's real memory.
+// TICKER (`INSTA_OSS_SCHEDULER=1`, set explicitly) with `INSTA_OSS_RAM_FLOOR_PCT=0`, so the idle
+// sweep is live but no pressure pass can stop the containers under test: a floor of 0 is the off
+// switch for eviction on the sweep and on the wake path alike (decision 12). The eviction case owns
+// its own config, with a floor of 90 and a synthetic `INSTA_OSS_MEM_BUDGET_MB` instead of the
+// host's real memory.
 import { test, expect, afterAll, beforeAll } from 'vitest'
 import { docker } from '../src/docker'
 import { loadConfig } from '../src/config'
