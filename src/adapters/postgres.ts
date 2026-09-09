@@ -86,6 +86,14 @@ export class LocalPostgres implements DatabaseAdapter {
         return { url: swapHost(src.url, dst.container), method: 'reflink', ms }
       } catch (e) {
         if (!(e instanceof NoReflinkError) && !(e instanceof TornCopyError)) throw e
+        // `INSTA_OSS_FORK=reflink` is the operator asking to FAIL rather than copy, which is how
+        // main.ts already reads it at boot when the probe says this data dir cannot clone. The
+        // probe is not the last word, though: a clone can still turn out impossible (a dst on
+        // another mount, a `cp -c` that exits non-zero), and falling through there would stream a
+        // pg_basebackup behind their back, which is the one thing the strict setting forbids.
+        if (this.cfg.data.fork === 'reflink') {
+          throw new NoReflinkError(`INSTA_OSS_FORK=reflink: cannot clone ${src.container} into ${dst.dataDir} by reflink (${firstLine(e)}); refusing to fall back to pg_basebackup`)
+        }
         // NoReflinkError: this filesystem cannot clone after all. TornCopyError: the copy caught the
         // source mid-write twice. Both fall through to the stream.
       }
