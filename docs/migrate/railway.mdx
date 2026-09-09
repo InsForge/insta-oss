@@ -15,16 +15,41 @@ InstaCloud offers:
 
 ## Migration steps
 
-Here is how the two platforms line up:
+We will migrate [Railway's own Django template](https://github.com/railwayapp-templates/django), a Python service with a Postgres database. Substitute your own names as you go.
+
+Two files tell you what has to move. `railway.json` says how it was built:
+
+```json
+{
+  "build":  { "builder": "RAILPACK" },
+  "deploy": { "startCommand": "python manage.py migrate && python manage.py collectstatic --noinput && gunicorn mysite.wsgi" }
+}
+```
+
+And `mysite/settings.py` says how it reaches the database:
+
+```python
+'NAME':     os.environ["PGDATABASE"],
+'USER':     os.environ["PGUSER"],
+'PASSWORD': os.environ["PGPASSWORD"],
+'HOST':     os.environ["PGHOST"],
+'PORT':     os.environ["PGPORT"],
+```
+
+Each of those moves differently:
 
 | On Railway | On InstaCloud |
 |---|---|
-| Service | **compute** service |
-| Railway Postgres | **postgres** service |
-| Variables | project secrets |
-| `${{Postgres.DATABASE_URL}}` reference | a binding from the postgres service |
-| Volume | `insta compute volume`, mounted at `/data` |
-| Cron service | `pg_cron`, or a scheduler in an always-on service |
+| the service, built by Railpack | a **compute** service, built with nixpacks |
+| the Postgres service | a **postgres** service |
+| the five `PG*` variables | one bound `DATABASE_URL` |
+| a `${{Postgres.DATABASE_URL}}` reference | a binding |
+| other variables | plain project secrets |
+| a volume | `insta compute volume`, mounted at `/data` |
+
+**One code change first.** InstaCloud hands Postgres to your app as a single `DATABASE_URL`, so an app reading the five `PG*` variables needs to read the DSN instead. In Django that is `dj-database-url`, and most other stacks take a DSN directly. Make the change in the repo now, so your first deploy on InstaCloud is already correct.
+
+Workers and cron services are at the end of the page.
 
 ### 1. Set up your coding agent
 
@@ -56,7 +81,7 @@ railway volume files download /path/to/file ./local-copy
 ### 3. Ask your agent to migrate
 
 ```text title="Prompt" wrap
-Migrate my Railway project to InstaCloud, including the Postgres data. The repo is <owner/repo>. Follow the insta skill's migration runbook, and stop before moving DNS.
+Migrate my Railway service mysite and its Postgres data to InstaCloud. The repo is railwayapp-templates/django. Follow the insta skill's migration runbook, and stop before moving DNS.
 ```
 
 Your agent follows the migration runbook in the `insta` skill: it adds one compute service per Railway service, wires the database credential, deploys your repo, moves the data, and checks that it landed. It will ask you to approve the actions that touch production.
@@ -88,10 +113,10 @@ There is nothing to migrate for this one. For most people it is the reason to mo
 Everything your agent does is a command you can run. The [CLI reference](/reference/cli/overview) has all of them, and these are the ones this migration turns on:
 
 ```bash
-insta services add compute app
+insta services add compute mysite
 insta services add postgres db
-insta secrets bind DATABASE_URL postgres/db --to compute/app
-insta compute connect-repo <owner/repo> app
+insta secrets bind DATABASE_URL postgres/db --to compute/mysite
+insta compute connect-repo railwayapp-templates/django mysite
 insta secrets set <NAME>                       # value read from stdin
 ```
 
@@ -102,7 +127,7 @@ pg_dump --no-owner --no-privileges "$RAILWAY_DATABASE_URL" \
   | grep -v -E '^SET transaction_timeout' \
   | psql -v ON_ERROR_STOP=1 "$(insta db url --group db)"
 
-insta compute restart app
+insta compute restart mysite
 ```
 
 The `grep` drops one setting that Railway's Postgres writes and InstaCloud's does not recognise.
@@ -110,8 +135,8 @@ The `grep` drops one setting that Railway's Postgres writes and InstaCloud's doe
 If you had a volume, attach one and redeploy before you copy the files in. It mounts at `/data`, and only on the deploy after you attach it.
 
 ```bash
-insta compute volume app --size 10
-insta compute restart app
+insta compute volume mysite --size 10
+insta compute restart mysite
 ```
 
 ## Workers and cron services
