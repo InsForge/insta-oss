@@ -1,97 +1,116 @@
 ---
 title: "Migrate from Render"
-description: "Move a Render web service, its environment, and its Postgres onto InstaCloud."
+description: "Move a Render web service and its Postgres onto InstaCloud."
 ---
 
-A Render web service becomes an InstaCloud **compute** service, and Render Postgres becomes a **postgres** service. Environment variables become project secrets that you bind into the app.
+This guide takes you from a running Render service to the same app running on InstaCloud, with its data. You will spend most of it telling your coding agent what to do.
 
-## TL;DR
+InstaCloud offers:
+
+- **Postgres with real branching.** Give a feature, or an agent task, its own database and its own compute, then merge the structure back.
+- **Built for coding agents.** A CLI and an MCP server your agent drives directly, with an approval gate on the actions that matter.
+- **Flexible deployments.** A GitHub repo with no Dockerfile needed, your own Dockerfile, or an image from any registry.
+- **Managed services alongside.** Postgres, Redis, MySQL, MongoDB, and object storage in one project.
+- **Real support.** An active community on [Discord](https://discord.com/invite/MPxwj5xVvW).
+
+## Migration steps
+
+Here is how the two platforms line up:
+
+| On Render | On InstaCloud |
+|---|---|
+| Web service | **compute** service |
+| Render Postgres | **postgres** service |
+| Environment variables | project secrets |
+| `DATABASE_URL` injected for you | bound from the postgres service |
+| Background worker | a second compute service |
+| Cron job | `pg_cron`, or a scheduler in an always-on service |
+
+### 1. Set up your coding agent
 
 ```bash
 npx -y insta@latest setup agent --create
+```
+
+That installs the `insta` CLI, creates a project, links this directory to it, and registers the `insta` skill with every coding agent on this machine. The skill is what carries the migration runbook.
+
+You can also create the project in the [console](https://console.instacloud.com) and connect an agent from its Quick Start page.
+
+{/* screenshot: console, project Quick Start page with the connect-agent one-liner */}
+
+### 2. Collect what your agent cannot reach
+
+Two things do not exist anywhere your agent can read:
+
+- **Values that live only on Render.** In `render.yaml`, anything set with `generateValue` or `sync: false`. Copy them from your service's **Environment** page.
+- **Your DNS provider login**, for the last step.
+
+### 3. Ask your agent to migrate
+
+```text title="Prompt" wrap
+Migrate my Render service <service-name> and its Postgres database to InstaCloud. The repo is <owner/repo>. Follow the insta skill's migration runbook, and stop before moving DNS.
+```
+
+Your agent works through the runbook in the `insta` skill, which has a condition that has to hold before each step runs:
+
+1. Add a **compute** service and a **postgres** service.
+2. Bind `DATABASE_URL` from the postgres service, rather than copying the string across, so a rotated credential reaches the app on its own.
+3. Connect your repo and deploy it. Render built with a buildpack, so there is probably no Dockerfile, and InstaCloud detects the runtime with nixpacks on the server.
+4. Copy the remaining environment variables, skipping `RENDER_*` and `PORT`, which the platform supplies.
+5. Stop the writers on both sides, then move the database.
+6. Check row counts, sequences, constraints and indexes against Render, rather than trusting the exit code.
+7. Restart the app so it resolves the new database, and confirm at the machine rather than at the binding.
+
+The ordering is the part that matters. Once InstaCloud is taking writes, going back to Render quietly discards them, so the source stops first.
+
+{/* screenshot: console, project canvas with a compute service and a postgres service deployed */}
+
+### 4. Move the domain
+
+```text title="Prompt" wrap
+Attach <your-domain> to the compute service and give me the DNS records to publish.
+```
+
+Publish the records at your provider, then ask your agent to check the domain. Keep the Render service suspended, and do not delete it, until the old records have aged out of resolver caches.
+
+### 5. Branch the database
+
+Now that you are here, branch your database along with your code. Ask for a branch per feature, or per agent task, and each one gets its own Postgres and its own compute.
+
+```text title="Prompt" wrap
+Create a branch called <name> and deploy the current code to it.
+```
+
+There is nothing to migrate for this one. For most people it is the reason to move.
+
+## Prefer to run it yourself?
+
+Everything your agent does is a command you can run. The [CLI reference](/reference/cli/overview) has all of them, and these are the ones this migration turns on:
+
+```bash
 insta services add compute app
 insta services add postgres db
 insta secrets bind DATABASE_URL postgres/db --to compute/app
 insta compute connect-repo <owner/repo> app
-insta compute set-domain <your-domain> --group app
+insta secrets set <NAME>                       # value read from stdin
 ```
 
-<Steps>
-  <Step title="1. Inventory the Render service" titleSize="h2">
-    The Render CLI is interactive by default. Add `-o json --confirm` to script it.
+The database move is the one worth seeing in full. Scale Render to zero first, including workers and cron jobs, so nothing is still writing:
 
-    ```bash
-    render services -o json --confirm     # services and databases in one call
-    ```
+```bash
+pg_dump --no-owner --no-privileges "$RENDER_DATABASE_URL" \
+  | grep -v -E '^SET transaction_timeout' \
+  | psql -v ON_ERROR_STOP=1 "$(insta db url --group db)"
 
-    If your repo has a `render.yaml`, read it as well. Anything set with `generateValue` or `sync: false` has no copy outside Render, so collect those values now.
-  </Step>
+insta compute restart app
+```
 
-  <Step title="2. Create the project and services" titleSize="h2">
-    ```bash
-    npx -y insta@latest setup agent --create
-    insta services add compute app
-    insta services add postgres db        # plus redis/mysql/mongodb/storage to match
-    ```
-  </Step>
-
-  <Step title="3. Bind the database and deploy" titleSize="h2">
-    Bind the credentials your app needs, then point InstaCloud at your repo.
-
-    ```bash
-    insta secrets bind DATABASE_URL postgres/db --to compute/app
-    insta compute connect-repo <owner/repo> app
-    ```
-
-    `connect-repo` builds on the server and detects your runtime with nixpacks, so you do not need a Dockerfile. Add `--root-dir` for a monorepo. If you already publish an image, use `insta deploy --image <ref> --port <n>` instead.
-
-    Then copy the remaining environment variables. Skip `RENDER_*` and `PORT`, which the platform supplies, and skip anything you bound above.
-
-    ```bash
-    insta secrets set <NAME>              # value read from stdin
-    ```
-  </Step>
-
-  <Step title="4. Move the data" titleSize="h2">
-    Scale the Render web service to zero first, along with any worker and cron job, so nothing is still writing.
-
-    ```bash
-    pg_dump --no-owner --no-privileges "$RENDER_DATABASE_URL" \
-      | grep -v -E '^SET transaction_timeout' \
-      | psql -v ON_ERROR_STOP=1 "$(insta db url --group db)"
-    ```
-
-    The `grep` drops one setting that Render's Postgres writes and InstaCloud's does not recognise. Then compare a few row counts before you carry on.
-
-    ```bash
-    psql "$(insta db url --group db)" -c \
-      "select relname, n_live_tup from pg_stat_user_tables order by n_live_tup desc limit 5"
-    ```
-  </Step>
-
-  <Step title="5. Restart, then move the domain" titleSize="h2">
-    A restart re-resolves the environment, so the app picks up its new database.
-
-    ```bash
-    insta compute restart app
-    insta compute set-domain <your-domain> --group app
-    insta compute check-domain <your-domain> --group app
-    ```
-
-    `set-domain` returns the DNS records to publish at your provider. Publish them, then run `check-domain` again. Keep Render frozen until the old records age out.
-
-    <Warning>
-      If you stopped the InstaCloud service at any point, `insta compute start` on its own brings the machine back with its old environment, and the app keeps writing to the old database. Run `restart` after `start`.
-    </Warning>
-  </Step>
-</Steps>
+The `grep` drops one setting that Render's Postgres writes and InstaCloud's does not recognise.
 
 ## Workers and cron jobs
 
-A Render background worker becomes a second compute service. Give it a port to listen on, and leave always-on enabled, because a suspended worker has no traffic to wake it.
+A Render background worker becomes a second compute service. Give it a port to listen on and leave always-on enabled, because a suspended worker has no traffic to wake it.
 
 Render cron jobs have no direct equivalent. Use `pg_cron`, which InstaCloud's Postgres ships, or run a scheduler inside an always-on service.
 
-## Need more?
-
-Your coding agent has the full runbook, including rollback and the check at each step, in the `insta` skill that `setup agent` installs. Ask it to migrate the service and it will follow that instead of this summary.
+And that is it. Stuck anywhere? Come to [Discord](https://discord.com/invite/MPxwj5xVvW).
