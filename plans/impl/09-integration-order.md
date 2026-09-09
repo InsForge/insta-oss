@@ -113,6 +113,15 @@ every branch. What remains uncovered there is the WebSocket passthrough of 02's 
 `test/router.test.ts` covers against a fake upstream. Steps 11 and 12 need a Linux host and a
 throwaway VM.
 
+Both sides of both capability branches are now measured, not assumed. The three suites were re-run
+on a Linux host (docker 28 in a privileged container, its data dir on overlayfs) as well as on the
+APFS laptop, and all three are green on both: fork 3 tests, datadir-migrate 2 tests, router 6 tests.
+The Linux host takes the side the macOS laptop cannot, so between the two runs the reflink clone and
+the `basebackup` fallback are both exercised under `auto`, the strict `INSTA_OSS_FORK=reflink`
+refusal fires from a real probe answer as well as from the simulated one, and the server-mode pg
+lane dials a container IP on the branch network, which is the production upstream path. That is the
+same shape of host `ci.yml` runs on, so nothing in these three files is laptop-only.
+
 One real defect that pass found, fixed on this branch: with `INSTA_OSS_FORK=reflink` the postgres
 adapter fell through to `pg_basebackup` whenever a clone raised `NoReflinkError`, so the one setting
 that exists to forbid a silent stream permitted one. `main.ts` already refuses at boot when the
