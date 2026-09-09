@@ -29,6 +29,8 @@ afterAll(teardown)
 test('branch create copies data and is isolated', async () => {
   const { project } = await engine.createProject('citest')
   projectId = project.id
+  // Project create provisions nothing (WP5): the container arrives with the postgres service.
+  expect(await engine.addDbService(projectId, 'db')).toMatchObject({ id: 'pg-db', type: 'postgres', name: 'db', pg_version: 16 })
 
   await pg.query(MAIN, 'CREATE TABLE notes(id serial primary key, body text);')
   await pg.query(MAIN, "INSERT INTO notes(body) VALUES ('from-main');")
