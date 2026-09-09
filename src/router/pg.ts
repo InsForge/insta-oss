@@ -23,8 +23,9 @@ export interface PgLaneDeps extends WakeDeps {
   beginHold(key: ServiceKey): void
   endHold(key: ServiceKey): void
   signal: AbortSignal
-  /** Server mode only: the per-host contexts from the edge's store plus the always-present default. */
-  secureContext?: SecureContext | null
+  /** Server mode only: the context for a client that sends no SNI, read per connection so a
+   *  certificate the edge issues after the lane is listening needs no restart. */
+  secureContext?: () => SecureContext | null
   sniCallback?: (servername: string, cb: (err: Error | null, ctx?: SecureContext) => void) => void
   log?(msg: string): void
 }
@@ -154,9 +155,10 @@ function terminate(deps: PgLaneDeps, c: Socket): Promise<Negotiated | null> {
   return new Promise((resolve) => {
     const tls = new TLSSocket(c, {
       isServer: true,
-      // The default context is `api.<domain>`, which the installer's first request always creates:
-      // a client that sends no SNI still completes the handshake and can be told why (decision 21).
-      secureContext: deps.secureContext ?? undefined,
+      // The default context is `api.<domain>`, which the installer's first request creates: a client
+      // that sends no SNI still completes the handshake and can be told why (decision 21). Read per
+      // connection, because the router starts before the edge has issued anything.
+      secureContext: deps.secureContext?.() ?? undefined,
       SNICallback: deps.sniCallback,
       minVersion: 'TLSv1.2',
     })

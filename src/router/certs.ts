@@ -60,6 +60,15 @@ export class Certs {
     return this.certDir !== null && findCertFiles(this.certDir, host) !== null
   }
 
+  /** The bytes behind a stored certificate, for `tls.Server.setSecureContext` on a lane that is
+   *  already listening. No issuance attempt: the caller has just had one from `certFor`. */
+  materialFor(host: string): { cert: Buffer; key: Buffer } | null {
+    if (!this.certDir) return null
+    const files = findCertFiles(this.certDir, host)
+    if (!files) return null
+    try { return { cert: readFileSync(files.crt), key: readFileSync(files.key) } } catch { return null }
+  }
+
   /** The context for `host`: cached by the .crt mtime; missing -> trigger issuance once, re-walk;
    *  still missing -> null (the lane then falls back to the default context so the client completes
    *  the handshake and receives a readable error instead of an alert). */
@@ -93,12 +102,15 @@ export class Certs {
    *  the lanes listen on 0.0.0.0, and a miss costs a directory walk plus a 15 s issuance handshake,
    *  so a scanner sending fresh servernames would otherwise buy that work for the price of a packet.
    *  It stays optional because the pg lane's own tests build a Certs with no table behind it. */
-  sniCallback(fallback: SecureContext | null, owns?: (host: string) => boolean): (servername: string, cb: (err: Error | null, ctx?: SecureContext) => void) => void {
+  sniCallback(fallback: SecureContext | null | (() => SecureContext | null), owns?: (host: string) => boolean): (servername: string, cb: (err: Error | null, ctx?: SecureContext) => void) => void {
+    // A function reads the router's CURRENT default. The lanes are built before the edge has issued
+    // `api.<domain>`, so a context captured here would stay null for the life of the process.
+    const fb = (): SecureContext | undefined => (typeof fallback === 'function' ? fallback() : fallback) ?? undefined
     return (servername, cb) => {
       const host = String(servername ?? '').toLowerCase().replace(/\.$/, '')
-      if (owns && !owns(host)) { cb(null, fallback ?? undefined); return }
+      if (owns && !owns(host)) { cb(null, fb()); return }
       this.certFor(host).then(
-        (ctx) => cb(null, ctx ?? fallback ?? undefined),
+        (ctx) => cb(null, ctx ?? fb()),
         (e) => cb(e instanceof Error ? e : new Error(String(e))),
       )
     }

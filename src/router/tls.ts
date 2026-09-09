@@ -26,8 +26,9 @@ export interface SniLaneDeps extends WakeDeps {
  *  lane is closed after the handshake (a clean close beats a TLS alert: the client sees the port). */
 export function createSniLane(deps: SniLaneDeps, kind: ManagedDbType, bind: string, port: number): TlsServer {
   const log = deps.log ?? ((m: string) => console.warn(m))
-  // The default context is `api.<domain>`, present from install time, so a client with no SNI
-  // completes the handshake and gets a close instead of an opaque handshake failure (decision 21).
+  // The default context is `api.<domain>`, so a client with no SNI completes the handshake and gets
+  // a close instead of an opaque handshake failure (decision 21). `tls.Server` reads it once, so the
+  // Router pushes a later certificate in with `setSecureContext` (refreshDefaultContext).
   const server = createServer({ secureContext: deps.secureContext ?? undefined, SNICallback: deps.sniCallback, minVersion: 'TLSv1.2' })
   server.on('secureConnection', (sock: TLSSocket) => { void handle(sock) })
   server.on('tlsClientError', () => { /* a scanner or a client with no trust: nothing to log per packet */ })

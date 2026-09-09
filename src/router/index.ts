@@ -7,7 +7,7 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import type { Duplex } from 'node:stream'
-import type { SecureContext } from 'node:tls'
+import type { SecureContext, Server as TlsServer } from 'node:tls'
 import { isDaemonHost, type Config } from '../config'
 import { loadState, mutate, onSave, stateRev } from '../state'
 import type { ManagedDbType, ServiceKey } from '../types'
@@ -76,6 +76,8 @@ export class Router {
   private readonly lanes = new Map<string, LaneEntry>()
   private internal: Server | null = null
   private defaultContext: SecureContext | null = null
+  /** The SNI lanes, so a certificate that arrives after they are listening can be pushed into them. */
+  private readonly tlsLanes = new Set<TlsServer>()
   private readonly sockets = new Set<Duplex>()
   /** Per-key in-flight counts: one shared ticker stamps every key with a count above zero, so a
    *  thousand streaming clients cost one timer instead of a thousand (02 section 3.3). */
@@ -206,10 +208,11 @@ export class Router {
   async start(): Promise<void> {
     const server = this.cfg.mode === 'server'
     if (server) {
-      // Present since install time (the installer's first `curl https://api.<domain>/healthz`), so a
-      // client that sends no SNI completes the handshake and can be told what is wrong.
-      this.defaultContext = await this.certs.certFor(`api.${this.cfg.domain}`)
-      if (!this.defaultContext) this.log(`router: no certificate for api.${this.cfg.domain} yet; TLS lanes will refuse clients that send no SNI`)
+      // One issuance attempt here, and `reconcile` picks the certificate up later: the daemon and the
+      // edge start together, so on a fresh box the store is empty AND the edge is usually not
+      // answering yet when this runs, and the installer's own first request comes later still.
+      await this.refreshDefaultContext(true)
+      if (!this.defaultContext) this.log(`router: no certificate for api.${this.cfg.domain} yet; until the edge issues one, a TLS lane client that sends no SNI is refused`)
     }
 
     // The local Linux bridge gateway: containers reach the API and the HTTP lane through it.
@@ -237,6 +240,7 @@ export class Router {
     if (this.ticker) { clearInterval(this.ticker); this.ticker = null }
     for (const lane of this.lanes.values()) lane.close()
     this.lanes.clear()
+    this.tlsLanes.clear()
     if (this.internal) { this.internal.close(); this.internal = null }
     for (const s of this.extraHttp) s.close()
     this.extraHttp.length = 0
@@ -278,7 +282,7 @@ export class Router {
     const s = createPgLane({
       cfg: this.cfg, upstream: this.deps.upstream, stateOf: this.deps.stateOf, wake: this.deps.wake,
       table: () => this.table(), touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
-      signal: this.abort.signal, secureContext: this.defaultContext, sniCallback: this.certs.sniCallback(this.defaultContext, (h) => this.table().byHost(h) !== undefined), log: this.log,
+      signal: this.abort.signal, secureContext: () => this.defaultContext, sniCallback: this.certs.sniCallback(() => this.defaultContext, (h) => this.table().byHost(h) !== undefined), log: this.log,
     }, this.cfg.lanes.bind, port)
     s.on('connection', (c: Socket) => this.track(c))
     return s
@@ -288,10 +292,31 @@ export class Router {
     const s = createSniLane({
       cfg: this.cfg, upstream: this.deps.upstream, stateOf: this.deps.stateOf, wake: this.deps.wake,
       table: () => this.table(), touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
-      signal: this.abort.signal, secureContext: this.defaultContext, sniCallback: this.certs.sniCallback(this.defaultContext, (h) => this.table().byHost(h) !== undefined), log: this.log,
+      signal: this.abort.signal, secureContext: this.defaultContext, sniCallback: this.certs.sniCallback(() => this.defaultContext, (h) => this.table().byHost(h) !== undefined), log: this.log,
     }, kind, bind, port)
     s.on('connection', (c: Socket) => this.track(c))
+    this.tlsLanes.add(s)
+    s.once('close', () => this.tlsLanes.delete(s))
     return s
+  }
+
+  /** The certificate a TLS lane presents to a client that sends NO SNI. Start is only the first
+   *  attempt: on a fresh box nothing has asked the edge for `api.<domain>` yet, so every reconcile
+   *  looks again and the SNI lanes already listening are updated in place. Only the start attempt
+   *  asks the edge to issue; a later one reads the store, so a box whose ACME is failing does not
+   *  pay a 15 s handshake on every service it adds. */
+  private async refreshDefaultContext(issue = false): Promise<void> {
+    if (this.cfg.mode !== 'server' || this.defaultContext) return
+    const host = `api.${this.cfg.domain}`
+    if (!issue && !this.certs.certExists(host)) return
+    const ctx = await this.certs.certFor(host)
+    if (!ctx) return
+    this.defaultContext = ctx
+    const material = this.certs.materialFor(host)
+    if (!material) return
+    for (const s of this.tlsLanes) {
+      try { s.setSecureContext(material) } catch { /* closing: a lane opened later gets it at creation */ }
+    }
   }
 
   /** Per-service lanes: local mode every database, server mode MySQL only. */
@@ -310,6 +335,7 @@ export class Router {
 
   private async reconcile(): Promise<void> {
     if (this.stopped) return
+    await this.refreshDefaultContext()
     const wanted = this.wantedPerService()
     for (const [id, lane] of this.lanes) {
       if (!id.startsWith('svc:')) continue
