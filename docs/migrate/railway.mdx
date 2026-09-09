@@ -1,0 +1,152 @@
+---
+title: "Migrate from Railway"
+description: "Move a Railway project — services, variables, Postgres, and volumes — onto InstaCloud."
+---
+
+Railway's model is close to InstaCloud's: both think in services, variables, and per-environment infrastructure. That makes the concepts map almost one to one. The export is the fiddly part — Railway has no single command that dumps a project, so you walk it service by service.
+
+## TL;DR
+
+```bash
+npx -y insta@latest setup agent --create        # install the CLI, link this dir to a new project
+insta services add compute app
+insta services add postgres db
+insta secrets bind DATABASE_URL postgres/db --to compute/app
+insta build . --port <listen-port>              # offline check: will this build?
+insta deploy . --port <listen-port>             # needs a Dockerfile — alternatives below
+# copy variables (step 3), then the data (step 4)
+insta compute restart app
+insta compute set-domain app <your-domain>
+```
+
+<Steps>
+  <Step title="Inventory the Railway project" titleSize="h2">
+    Railway has no "list services" command, so work from the project canvas and target each service in turn.
+
+    ```bash
+    railway link                      # pick the project and environment
+    railway service                   # pick the service you are migrating
+    railway variable list             # its variables
+    railway volume list               # does it have a volume?
+    ```
+
+    <Warning>
+      Railway variables can be **reference variables** — values like `${{Postgres.DATABASE_URL}}` that Railway resolves at deploy time. Those are templates, not values. Confirm what `railway variable list` prints for them, and resolve any that come back as `${{…}}` to their literal value before copying, or your app will receive the template text.
+    </Warning>
+  </Step>
+
+  <Step title="Create the project and its services" titleSize="h2">
+    ```bash
+    npx -y insta@latest setup agent --create
+    insta services add compute app
+    insta services add postgres db          # plus redis/mysql/mongodb/storage to match
+    ```
+
+    One compute service per Railway service. A new project starts empty — nothing is provisioned until you ask.
+  </Step>
+
+  <Step title="Bind, get the app running, then copy the variables" titleSize="h2">
+    Nothing is auto-injected into compute — bind what the app needs first.
+
+    ```bash
+    insta secrets bind DATABASE_URL postgres/db --to compute/app
+    ```
+
+    Then get the code running. Check locally first — this is offline and deploys nothing:
+
+    ```bash
+    insta build . --port <listen-port>
+    ```
+
+    Only a `deployable` verdict means `insta deploy .` will build it. A Railway app usually has no Dockerfile — Railpack did that job — so expect the Dockerfile check to come back `needs-attention` — the report prints the install and start commands it detected, and those are what you base one on. The `insta` skill carries per-framework Dockerfile templates.
+
+    <Warning>
+      Do **not** save the Dockerfile that `insta build --explain` prints as your `Dockerfile`. It is not standalone: it `COPY`s `.nixpacks/` support files your directory does not have.
+    </Warning>
+
+    With a Dockerfile in place:
+
+    ```bash
+    insta deploy . --port <listen-port>
+    ```
+
+    **Two alternatives if you would rather not write one.** Connect the app's GitHub repo in the [console](https://console.instacloud.com) — that build runs server-side and detects the runtime for you, the same job buildpacks were doing, and a public repo needs no GitHub App installation. On this route connect the repo **before** binding: the connection creates its own compute service rather than attaching to the one above, so bind the credentials to the service it makes. Or `insta deploy --image <registry/image> --port <n>` if you already publish an image.
+
+    Deploy once before the rest of the variables are in: the first deploy is what makes the binding live. Then bring them over, one per call:
+
+    ```bash
+    insta secrets set <NAME>                 # value read from stdin
+    ```
+
+    Two groups get skipped. **Railway's own** (`RAILWAY_*`, `PORT`) are supplied by the platform. **Anything you bound** in the previous step — `DATABASE_URL`, `REDIS_URL`, the `AWS_*` storage credentials — comes from the service that minted it, and InstaCloud refuses a plain secret that collides with a binding, so copying those in makes the import fail rather than overwrite anything.
+
+    <Warning>
+      **Values read on stdin are trimmed.** A value whose leading or trailing whitespace is meaningful is silently corrupted that way; pass it as an argument instead — `insta secrets set NAME "  padded  "` preserves it byte-for-byte, at the cost of the value appearing in your shell history. An **empty** value is refused either way. Find both cases first and handle them by hand.
+    </Warning>
+
+    <Warning>
+      `--port` must equal the port your server actually listens on. `PORT` is injected for you, so an app that reads `$PORT` is fine; a hardcoded port boots "successfully" and refuses every request.
+    </Warning>
+  </Step>
+
+  <Step title="Move the Postgres data" titleSize="h2">
+    Stop the writers first. Railway has no maintenance mode, so scale the service's replicas to zero (or pause it) in the dashboard, and do the same for any worker or cron service — a paused web service with a live worker is still writing.
+
+    ```bash
+    set -o pipefail
+    pg_dump --no-owner --no-privileges "<railway-postgres-url>" \
+      | psql -v ON_ERROR_STOP=1 "$(insta db url)"
+    ```
+
+    <Warning>
+      Both flags are load-bearing. `psql` continues past errors by default, and a shell pipeline reports only its last command's status — without `ON_ERROR_STOP=1` and `pipefail`, a half-restored database exits `0` and looks like success.
+    </Warning>
+
+    Then verify: row counts on your largest tables, and the newest row in anything append-only.
+  </Step>
+
+  <Step title="Move a volume, if you have one" titleSize="h2">
+    Creating a volume on InstaCloud gives you an **empty** disk — nothing is copied for you.
+
+    ```bash
+    railway volume files download /path/to/file ./local-copy   # pull from the Railway volume
+    insta compute volume app --size 10                         # attach a /data disk (10Gi is the free cap)
+    insta compute restart app                                  # the disk mounts on the next deploy
+    ```
+
+    The disk mounts at `/data`, and only on the deploy *after* you attach it — so redeploy before you try to write to it. Copy the files in through your app or a one-off command (`insta compute exec app -- <cmd>`), then verify the contents before cutting over.
+
+    <Note>
+      A volume-bearing service keeps one machine and stops instead of suspending when idle, so its first request after a quiet period is a cold boot — slower than a volume-free service.
+    </Note>
+  </Step>
+
+  <Step title="Point the app at the new database" titleSize="h2">
+    ```bash
+    insta compute restart app
+    ```
+
+    A restart re-runs the image already recorded — no rebuild — and re-resolves the environment. Until it happens, the running machine still holds the env it was deployed with. Confirm the app reads **and writes** the new database.
+  </Step>
+
+  <Step title="Move the domain" titleSize="h2">
+    ```bash
+    insta compute set-domain app <your-domain>
+    insta compute check-domain app
+    ```
+
+    Once traffic is served from InstaCloud and you have soaked for a while, delete the Railway project.
+  </Step>
+</Steps>
+
+## Workers and cron services
+
+**Worker services** become a second compute service. Give the worker a port and let it listen — one line is enough (`require('net').createServer().listen(process.env.PORT)`) — and leave always-on enabled, because a suspended worker has no incoming traffic to wake it.
+
+**Cron services** have no direct equivalent. Run an in-process scheduler inside your web service (node-cron, APScheduler, whenever), keep that service always-on, and note that replicas each run every tick — two replicas means every job fires twice.
+
+## What this guide does not cover
+
+Rolling back after the new database has taken writes, verifying values survived the copy byte for byte, moving objects out of a Railway bucket, and zero-downtime cutovers via logical replication.
+
+Your coding agent has the full runbook — the ordered cutover with its pass conditions and rollback boundary — in the `insta` skill installed by `setup agent`. Ask it to migrate the project and it will follow that procedure rather than this summary.

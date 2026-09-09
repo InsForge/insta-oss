@@ -88,6 +88,14 @@
             ]
           },
           {
+            "group": "Migrate",
+            "icon": "right-left",
+            "pages": [
+              "migrate/heroku",
+              "migrate/railway"
+            ]
+          },
+          {
             "group": "Agent-native",
             "icon": "robot",
             "pages": [
