@@ -121,6 +121,7 @@ test('project.delete defaults to approve: 202 → approve → retry succeeds →
   const second = await app.inject({ method: 'DELETE', url: `/projects/${id}` })
   expect(second.statusCode).toBe(200) // consumed the grant
   expect(second.json().teardown).toMatchObject({ failed: 0 })
+  expect(second.json().teardown.destroyed).toBeGreaterThan(0)   // `failed: 0` alone passes on a no-op
   expect((await get('/orgs/local/projects')).json().projects).toHaveLength(0)
 })
 
@@ -241,6 +242,11 @@ test('services add: compute, a SECOND postgres and a public bucket; duplicates 4
   expect(calls).toContain('db.provision:io-demo-main-pg-analytics')
   // The name is taken now, on every branch.
   expect((await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics' })).statusCode).toBe(409)
+  // Default private, which is a documented promise: no access call is made at all.
+  const priv = await post(`/projects/${id}/services`, { type: 'storage', name: 'quiet' })
+  expect(priv.statusCode).toBe(201)
+  expect(priv.json().service).toMatchObject({ id: 'st-quiet', type: 'storage', name: 'quiet', public: false })
+  expect(calls.some((c) => c.startsWith('st.access:io-demo-main-quiet'))).toBe(false)
   const st = await post(`/projects/${id}/services`, { type: 'storage', name: 'blobs', public: true })
   expect(st.statusCode).toBe(201)
   expect(st.json().service).toMatchObject({ id: 'st-blobs', type: 'storage', name: 'blobs', public: true })
@@ -257,6 +263,7 @@ test('services remove: compute, postgres and storage all tear down and report th
   const del = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/cp-api` })
   expect(del.statusCode).toBe(200)
   expect(del.json().teardown).toMatchObject({ failed: 0 })
+  expect(del.json().teardown.destroyed).toBeGreaterThan(0)
   const { services } = (await get(`/projects/${id}/services`)).json()
   expect(services.some((s: { name: string }) => s.name === 'api')).toBe(false)
 
@@ -264,6 +271,7 @@ test('services remove: compute, postgres and storage all tear down and report th
   const pg = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/pg-db` })
   expect(pg.statusCode).toBe(200)
   expect(pg.json().teardown).toMatchObject({ failed: 0 })
+  expect(pg.json().teardown.destroyed).toBeGreaterThan(0)
   expect(calls).toContain('db.destroy:io-demo-main-pg-db')
   const st = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/st-store` })
   expect(st.statusCode).toBe(200)
