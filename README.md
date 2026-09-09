@@ -26,6 +26,16 @@ minimum stops there rather than failing later under load. As root:
 curl -fsSL https://get.instacloud.com | sh
 ```
 
+The daemon image is not published yet, so until the first release the one-liner has nothing to
+pull. Build it on the box and point the installer at it:
+
+```bash
+curl -fsSL https://get.docker.com | sudo sh          # only when the box has no Docker yet
+git clone https://github.com/InsForge/insta-oss.git && cd insta-oss
+sudo docker build -t instacloud:dev .
+sudo INSTA_OSS_IMAGE=instacloud:dev sh install.sh
+```
+
 The script installs Docker if it is missing, prepares a reflink-capable data directory, and
 starts three containers: the daemon, the TLS edge, and the object store. It prints where to go:
 

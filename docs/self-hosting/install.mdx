@@ -31,6 +31,24 @@ The raw URL is the documented fallback:
 curl -fsSL https://raw.githubusercontent.com/InsForge/insta-oss/main/install.sh | sh
 ```
 
+## Build the image yourself
+
+The daemon image is not published yet, so the one-liner above has nothing to pull. Until a release
+exists, build the image on the box and point the installer at it with `INSTA_OSS_IMAGE`:
+
+```bash
+curl -fsSL https://get.docker.com | sudo sh          # only when the box has no Docker yet
+git clone https://github.com/InsForge/insta-oss.git
+cd insta-oss
+sudo docker build -t instacloud:dev .
+sudo INSTA_OSS_IMAGE=instacloud:dev sh install.sh
+```
+
+`INSTA_OSS_IMAGE` may carry a tag, and that tag is the version, so there is nothing else to pin.
+The installer pulls with pull failures ignored, finds the tag already in the local Docker, and
+starts it. The upgrade is the same commands again: pull the branch, rebuild the tag, re-run the
+script. The build needs about 1 GiB of free memory and a minute on a 2 vCPU box.
+
 ## What the script does
 
 1. Renders and exits for any `--print-*` flag, with no root and no side effects.
@@ -104,6 +122,7 @@ Postgres containers against empty directories.
 | `--domain <host>` | `INSTA_OSS_DOMAIN` | your own apex, instead of the automatic sslip.io name |
 | `--email <addr>` | `INSTA_OSS_ACME_EMAIL` | the ACME account address |
 | `--version <vX.Y.Z>` | `INSTA_OSS_VERSION` | pin the image; omit for the newest release |
+| | `INSTA_OSS_IMAGE` | the daemon image, `name` or `name:tag`; a tag here is the version. Use it to run an image you built yourself |
 | `--tls acme\|internal` | `INSTA_OSS_TLS` | public certificates, or an internal issuer for a private box |
 | `--data-img-gib <n>` | `INSTA_OSS_DATA_IMG_GIB` | size of the loop image when one is created |
 | `--data-dir <path>` | `INSTA_OSS_DATA_DIR` | required to change the data directory of an existing install |

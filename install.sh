@@ -16,6 +16,9 @@
 #   --domain <name>                  INSTA_OSS_DOMAIN               <public-ip-with-dashes>.sslip.io
 #   --email <addr>                   INSTA_OSS_ACME_EMAIL           (none) ACME contact
 #   --version <vX.Y.Z>               INSTA_OSS_VERSION              newest GitHub release
+#   (no flag)                        INSTA_OSS_IMAGE                ghcr.io/insforge/instacloud (a tag
+#                                    here is the version: build your own with
+#                                    `docker build -t instacloud:dev .`)
 #   --tls acme|internal              INSTA_OSS_TLS                  acme (internal = Caddy's own CA)
 #   --data-img-gib <n>               INSTA_OSS_DATA_IMG_GIB         free space minus 5 GiB
 #   --data-dir <path>                INSTA_OSS_DATA_DIR             /var/lib/instacloud (the flag is
@@ -75,7 +78,7 @@ resolve() {
 }
 # The header comment is the usage text; under `curl ... | sh` there is no file to read, so point at it.
 usage() {
-  if [ -r "$0" ]; then sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+  if [ -r "$0" ]; then sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
   else log 'usage: see the header comment of install.sh (https://github.com/InsForge/insta-oss/blob/main/install.sh)'
   fi
 }
