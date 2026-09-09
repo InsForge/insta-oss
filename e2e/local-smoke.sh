@@ -89,13 +89,22 @@ resolves e2e-probe.localhost || HAVE_LOCALHOST_DNS=0
 OK "preflight (localhost wildcard dns: $HAVE_LOCALHOST_DNS)"
 
 STEP "1. daemon"
-cd "$ROOT"   # step 9 deploys a template by relative path, and the daemon runs from here
+cd "$ROOT"   # the daemon is started from the checkout: `npx tsx src/main.ts`
 if [ "$START_DAEMON" = "1" ]; then
   mkdir -p "$DATA"
   INSTA_OSS_MODE=local INSTA_OSS_DATA_DIR=$DATA INSTA_OSS_PORT=$PORT \
     npx tsx src/main.ts >"$LOG" 2>&1 &
   DAEMON_PID=$!
 fi
+# ...and every CLI call runs from a scratch directory beside the data dir, never from the checkout:
+# `insta project create` links the directory it runs in, writing .insta/ and appending to .gitignore,
+# and a smoke run has to leave the repository clean. Step 9's template path is absolute for the same
+# reason; the daemon reads that directory itself, so it must be valid wherever the daemon runs.
+TPL=$ROOT/e2e/fixtures/tpl-hello
+WORK=$DATA-work
+rm -rf "$WORK"
+mkdir -p "$WORK"
+cd "$WORK"
 wait_for 90 curl -sf "$API/healthz" || FAIL "daemon never became healthy, see $LOG"
 OK "healthz"
 
@@ -283,7 +292,7 @@ printf '%s\n' "$CATALOG" | grep -q 'n8n' || FAIL "n8n is missing from the catalo
 printf '%s\n' "$CATALOG" | grep -q 'hermes' || FAIL "hermes is missing from the catalog"
 insta template info n8n --json | jsel 'd.template.upstream.pinned' | grep -q '[0-9]' \
   || FAIL "template info does not report a pinned upstream version"
-DEPLOY_JSON=$(insta template deploy ./e2e/fixtures/tpl-hello --branch main --yes --json)
+DEPLOY_JSON=$(insta template deploy "$TPL" --branch main --yes --json)
 DSTATUS=$(printf '%s\n' "$DEPLOY_JSON" | jsel 'd.status')
 [ "$DSTATUS" = "succeeded" ] || FAIL "template deploy status is '$DSTATUS'"
 HELLO_URL=$(printf '%s\n' "$DEPLOY_JSON" | jsel 'd.services[0].url')
@@ -293,7 +302,7 @@ wait_for 90 curl -sf "$HELLO_URL/" || FAIL "$HELLO_URL never answered"
 SVCS=$(insta services list)
 printf '%s\n' "$SVCS" | grep -q 'compute/hello' || FAIL "the template service is missing"
 OK "template deployed from a directory and answers"
-if insta template deploy ./e2e/fixtures/tpl-hello --branch main --yes --json >/dev/null 2>&1; then
+if insta template deploy "$TPL" --branch main --yes --json >/dev/null 2>&1; then
   SVCS=$(insta services list)
   if printf '%s\n' "$SVCS" | grep -q 'hello-2'; then
     OK "a second deploy names itself hello-2"
