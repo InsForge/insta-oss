@@ -1511,7 +1511,8 @@ export class Engine {
   async dbSetPassword(projectId: string, password: string | undefined, branchName?: string, group?: string): Promise<{ connString: string; password: string }> {
     const t = this.dbTarget(projectId, branchName, group)
     const pw = password ?? randomBytes(24).toString('base64url')
-    await this.db.query(t.container, `alter user postgres with password '${pw.replace(/'/g, "''")}'`)
+    // WP3 (decision 48): management is an explicit operation, so it WAKES a sleeping instance.
+    await this.pgManage(t.branch, t.serviceId, () => this.db.query(t.container, `alter user postgres with password '${pw.replace(/'/g, "''")}'`))
     const u = new URL(t.url)
     const connString = `${u.protocol}//${u.username}:${encodeURIComponent(pw)}@${u.host}${u.pathname}`
     mutate((st) => {
@@ -1526,14 +1527,14 @@ export class Engine {
 
   async dbListDatabases(projectId: string, branchName?: string, group?: string): Promise<{ databases: Array<{ name: string; connString: string }> }> {
     const t = this.dbTarget(projectId, branchName, group)
-    const rows = JSON.parse(await this.db.query(t.container, observe.DB_DATABASES_SQL)) as Array<{ name: string }>
+    const rows = JSON.parse(await this.pgManage(t.branch, t.serviceId, () => this.db.query(t.container, observe.DB_DATABASES_SQL))) as Array<{ name: string }>
     return { databases: rows.map((r) => ({ name: r.name, connString: this.connStringFor(t.url, r.name) })) }
   }
 
   async dbCreateDatabase(projectId: string, name: string, branchName?: string, group?: string): Promise<{ name: string; connString: string }> {
     const t = this.dbTarget(projectId, branchName, group)
     if (!Engine.DB_NAME_RE.test(name)) throw new Error('database name must match ^[A-Za-z0-9._-]+$')
-    await this.db.query(t.container, `create database ${this.quoteIdent(name)}`)
+    await this.pgManage(t.branch, t.serviceId, () => this.db.query(t.container, `create database ${this.quoteIdent(name)}`))
     this.emit(projectId, t.branch.name, 'resource', 'db.database.create', { name })
     return { name, connString: this.connStringFor(t.url, name) }
   }
@@ -1548,7 +1549,7 @@ export class Engine {
       throw new Error(`cannot delete ${name === primary || name === 'app' ? 'the primary database' : 'a system database'} (${name})`)
     }
     // WITH (FORCE): a control plane must not be blocked by an app holding a connection open.
-    await this.db.query(t.container, `drop database ${this.quoteIdent(name)} with (force)`)
+    await this.pgManage(t.branch, t.serviceId, () => this.db.query(t.container, `drop database ${this.quoteIdent(name)} with (force)`))
     this.emit(projectId, t.branch.name, 'resource', 'db.database.delete', { name })
   }
 
@@ -1556,7 +1557,7 @@ export class Engine {
    *  real pg_available_extensions, not a curated allowlist; the daemon's own two are `required`. */
   async dbExtensions(projectId: string, branchName?: string, group?: string): Promise<{ available: Array<{ name: string; required?: boolean }>; enabled: string[] }> {
     const t = this.dbTarget(projectId, branchName, group)
-    const r = JSON.parse(await this.db.query(t.container, observe.DB_EXTENSIONS_SQL)) as { available: Array<{ name: string }>; enabled: string[] }
+    const r = JSON.parse(await this.pgManage(t.branch, t.serviceId, () => this.db.query(t.container, observe.DB_EXTENSIONS_SQL))) as { available: Array<{ name: string }>; enabled: string[] }
     return {
       available: r.available.map((a) => (Engine.REQUIRED_EXTENSIONS.includes(a.name) ? { name: a.name, required: true } : { name: a.name })),
       enabled: r.enabled,
@@ -1574,8 +1575,10 @@ export class Engine {
     for (const name of patch.disable ?? []) {
       if (Engine.REQUIRED_EXTENSIONS.includes(name)) throw new Error(`extension ${name} is required by the platform and cannot be disabled`)
     }
-    for (const name of patch.enable ?? []) await this.db.query(container, `create extension if not exists ${this.quoteIdent(name)}`)
-    for (const name of patch.disable ?? []) await this.db.query(container, `drop extension if exists ${this.quoteIdent(name)}`)
+    await this.pgManage(t.branch, t.serviceId, async () => {
+      for (const name of patch.enable ?? []) await this.db.query(container, `create extension if not exists ${this.quoteIdent(name)}`)
+      for (const name of patch.disable ?? []) await this.db.query(container, `drop extension if exists ${this.quoteIdent(name)}`)
+    })
     this.emit(projectId, t.branch.name, 'resource', 'db.extensions.update', { enable: patch.enable ?? [], disable: patch.disable ?? [] })
     return this.dbExtensions(projectId, t.branch.name, group)
   }
@@ -1583,7 +1586,9 @@ export class Engine {
   /** Deep database health (DbInsight shape): size breakdown, per-table stats, vacuum health,
    *  unused indexes — same sections the cloud serves, read straight off the branch container. */
   async dbInsight(projectId: string, branchName?: string, group?: string): Promise<observe.DbInsight> {
-    return observe.toDbInsight(await this.db.query(this.dbTarget(projectId, branchName, group).container, observe.DB_INSIGHT_SQL))
+    const t = this.dbTarget(projectId, branchName, group)
+    this.assertPgAwake(t.branch, t.serviceId)                                   // WP3: never wakes
+    return observe.toDbInsight(await this.db.query(t.container, observe.DB_INSIGHT_SQL))
   }
 
   /** Tear down one branch's containers, bucket and network (shared by branch and project delete).
@@ -1714,19 +1719,25 @@ export class Engine {
 
   /** Point-in-time DB metrics — runs SQL against the branch database (same query as the cloud). */
   async dbMetricsSnapshot(projectId: string, branchName?: string, group?: string): Promise<observe.DbMetricsSnapshot> {
-    return observe.toDbMetrics(await this.db.query(this.dbTarget(projectId, branchName, group).container, observe.DB_METRICS_SQL))
+    const t = this.dbTarget(projectId, branchName, group)
+    this.assertPgAwake(t.branch, t.serviceId)                                   // WP3: never wakes
+    return observe.toDbMetrics(await this.db.query(t.container, observe.DB_METRICS_SQL))
   }
 
   /** Currently running queries (pg_stat_activity, ≤100). */
   async dbActivity(projectId: string, branchName?: string, group?: string): Promise<{ queries: observe.DbActivityRow[] }> {
-    return { queries: observe.toDbActivity(await this.db.query(this.dbTarget(projectId, branchName, group).container, observe.DB_ACTIVITY_SQL)) }
+    const t = this.dbTarget(projectId, branchName, group)
+    this.assertPgAwake(t.branch, t.serviceId)                                   // WP3: never wakes
+    return { queries: observe.toDbActivity(await this.db.query(t.container, observe.DB_ACTIVITY_SQL)) }
   }
 
   /** Top statements by execution time (pg_stat_statements; preloaded on newly-provisioned branch
    *  databases — older containers report extensionReady:false, exactly like the cloud's
    *  "enabled on demand" path when the extension can't load). */
   async dbQueryStats(projectId: string, branchName: string | undefined, opts: { limit?: number; sort?: observe.QueryStatSort; group?: string } = {}): Promise<observe.DbQueryStats> {
-    const container = this.dbTarget(projectId, branchName, opts.group).container
+    const t = this.dbTarget(projectId, branchName, opts.group)
+    this.assertPgAwake(t.branch, t.serviceId)                                   // WP3: never wakes
+    const container = t.container
     try {
       await this.db.query(container, 'create extension if not exists pg_stat_statements')
       const rows = await this.db.query(container, observe.queryStatsSql(opts.limit ?? 20, opts.sort ?? 'total'))
