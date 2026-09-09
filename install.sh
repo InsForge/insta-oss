@@ -309,7 +309,8 @@ $(env | sed -n 's/^\(INSTA_OSS_[A-Z0-9_]*\)=.*/\1/p')"
 render_compose() {
   cat <<EOF
 # compose.yml: written by install.sh on every run; overrides go in compose.override.yml.
-# The image and the CA file come from instad.env (docker compose --env-file instad.env ...). The
+# The image and the CA file come from instad.env, which install.sh also symlinks to .env in this
+# directory, so a plain \`docker compose up -d\` here interpolates them without --env-file. The
 # data directory does NOT: it is written in here as the concrete path this run resolved, because
 # compose interpolation lets the CALLING SHELL outrank --env-file, so an INSTA_OSS_DATA_DIR left
 # over in an operator's environment would silently point every bind below (the daemon's own data,
@@ -617,7 +618,12 @@ chmod 600 "$_tmp"
 mv -f "$_tmp" "$ENV_FILE"
 render_compose > "$CFG/compose.yml"
 render_caddyfile > "$CFG/Caddyfile"
-log "wrote $ENV_FILE (0600), $CFG/compose.yml, $CFG/Caddyfile"
+# docker compose interpolates ${VAR} from the shell and from a .env file in the project directory,
+# never from env_file. Without this symlink every documented bare command here (`docker compose
+# down`, `up -d`, `stop instad`) resolves the image to ':' and `up` fails with "invalid reference
+# format", which is how an operator who edited instad.env ends up unable to start the stack again.
+ln -sfn instad.env "$CFG/.env"
+log "wrote $ENV_FILE (0600), $CFG/compose.yml, $CFG/Caddyfile, $CFG/.env -> instad.env"
 
 # ---- 8. up ----
 log "pulling $IMAGE:$VERSION, caddy and garage"
