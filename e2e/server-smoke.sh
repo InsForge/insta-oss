@@ -26,7 +26,9 @@ IMAGE=${E2E_IMAGE:-traefik/whoami:v1.10}
 PROJECT=e2e-server-$RUN
 API=https://api.$DOMAIN
 CA=/var/lib/instacloud/edge/ca.pem
-INSTALL_LOG=${E2E_INSTALL_LOG:-$ROOT/install.log}
+# Outside the checkout, like the CLI scratch directory below: a smoke run has to leave the
+# repository clean, and this file is written before /var/lib/instacloud exists.
+INSTALL_LOG=${E2E_INSTALL_LOG:-${RUNNER_TEMP:-/tmp}/insta-oss-server-$RUN.log}
 export INSTA_OSS_DOMAIN="$DOMAIN"
 export INSTA_OSS_TLS="$TLS"
 export API
@@ -43,6 +45,8 @@ cleanup() {
   if command -v insta >/dev/null 2>&1; then
     allow_delete >/dev/null 2>&1 || true
   fi
+  cd /
+  [ -z "${WORK:-}" ] || rm -rf "$WORK"
   if [ "${E2E_UNINSTALL:-0}" = "1" ]; then
     ( cd /etc/instacloud && docker compose --env-file instad.env down -v ) || true
     umount /var/lib/instacloud 2>/dev/null || true
@@ -73,11 +77,23 @@ for c in io-instad io-edge io-garage; do
   [ "$(cstate $c)" = "running" ] || FAIL "$c is not running, state $(cstate $c)"
 done
 OK "the three stack containers are up"
+# Every CLI call from here on runs from a scratch directory, never from the checkout: `insta
+# project create` links the directory it runs in, writing .insta/ and appending to .gitignore, and
+# a smoke run has to leave the repository clean. Step 9's template path is absolute for the same
+# reason. install.sh itself keeps running in a subshell that cds to the checkout.
+TPL=$ROOT/e2e/fixtures/tpl-hello
+WORK=${RUNNER_TEMP:-/tmp}/insta-oss-server-$RUN-work
+rm -rf "$WORK"
+mkdir -p "$WORK"
+cd "$WORK"
 FSTYPE=$(findmnt -no FSTYPE /var/lib/instacloud)
 if [ "$FSTYPE" = "xfs" ] && xfs_info /var/lib/instacloud | grep -q 'reflink=1'; then
-  cp --reflink=always "$INSTALL_LOG" /var/lib/instacloud/.e2e-reflink-probe \
+  # Both ends inside the data directory: a reflink cannot cross a filesystem, and the install log
+  # is not on this one.
+  head -c 4096 /dev/urandom > /var/lib/instacloud/.e2e-reflink-src
+  cp --reflink=always /var/lib/instacloud/.e2e-reflink-src /var/lib/instacloud/.e2e-reflink-probe \
     || FAIL "reflink copy failed on a reflink filesystem"
-  rm -f /var/lib/instacloud/.e2e-reflink-probe
+  rm -f /var/lib/instacloud/.e2e-reflink-src /var/lib/instacloud/.e2e-reflink-probe
   REFLINK=1
   OK "data dir is xfs with reflink=1"
 else
@@ -269,7 +285,7 @@ STEP "9. templates over https"
 insta template list | grep -q 'n8n' || FAIL "n8n is missing from the catalog"
 CODE=$(NOAUTH=1 api_code GET /templates)
 [ "$CODE" = "200" ] || FAIL "GET /templates without a bearer answered $CODE, expected 200"
-DEPLOY_JSON=$(insta template deploy ./e2e/fixtures/tpl-hello --branch main --yes --json)
+DEPLOY_JSON=$(insta template deploy "$TPL" --branch main --yes --json)
 DSTATUS=$(printf '%s\n' "$DEPLOY_JSON" | jsel 'd.status')
 [ "$DSTATUS" = "succeeded" ] || FAIL "template deploy status is '$DSTATUS'"
 HELLO_URL=$(printf '%s\n' "$DEPLOY_JSON" | jsel 'd.services[0].url')

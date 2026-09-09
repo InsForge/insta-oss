@@ -25,10 +25,16 @@ two jobs run on separate VMs, and `E2E_RUN_ID` keeps the project names apart.
 Both scripts delete their project on the way out, including on failure, and then assert that no
 container, network or data directory survived.
 
+Neither writes into the checkout. `insta project create` links the directory it runs in, writing
+`.insta/` and appending to `.gitignore`, so both scripts run every CLI call from a scratch
+directory outside the repository and put their daemon or install log there too. A run that fails
+half way leaves the repository as clean as one that passes.
+
 ## Inputs
 
-Local: `INSTA_OSS_PORT`, `E2E_RUN_ID`, `E2E_START_DAEMON`, `E2E_IMAGE`.
-Server: `E2E_RUN_ID`, `INSTA_OSS_IMAGE`, `INSTA_OSS_DOMAIN`, `INSTA_OSS_TLS`, `E2E_UNINSTALL`.
+Local: `INSTA_OSS_PORT`, `E2E_RUN_ID`, `E2E_START_DAEMON`, `E2E_IMAGE`, `E2E_LOG`.
+Server: `E2E_RUN_ID`, `INSTA_OSS_IMAGE`, `INSTA_OSS_DOMAIN`, `INSTA_OSS_TLS`, `E2E_UNINSTALL`,
+`E2E_INSTALL_LOG`.
 
 Both shorten the idle windows (`INSTA_OSS_IDLE_COMPUTE_SEC=15`, `INSTA_OSS_IDLE_DB_SEC=20`,
 `INSTA_OSS_SWEEP_SEC=2`, `INSTA_OSS_CREATE_GRACE_SEC=0`) so the sleep step takes seconds, and set
