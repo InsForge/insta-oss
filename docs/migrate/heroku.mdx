@@ -71,7 +71,7 @@ insta compute set-domain app <your-domain>
     insta deploy . --port <listen-port>
     ```
 
-    **Two alternatives if you would rather not write one.** Connect the app's GitHub repo in the [console](https://console.instacloud.com) — that build runs server-side and detects the runtime for you, the same job buildpacks were doing, and a public repo needs no GitHub App installation. On this route connect the repo **before** binding: the connection creates its own compute service rather than attaching to the one above, so bind the credentials to the service it makes. Or `insta deploy --image <registry/image> --port <n>` if you already publish an image.
+    **Two alternatives if you would rather not write one.** Connect the app's GitHub repo in the [console](https://console.instacloud.com) — that build runs server-side and detects the runtime for you, the same job buildpacks were doing, and a public repo needs no GitHub App installation. Since `insta` 0.0.64 this is a CLI lane too — `insta compute connect-repo <owner/repo> app` attaches the repo to the compute service you already made and builds its Dockerfile, or detects the runtime with nixpacks when there is none. Or `insta deploy --image <registry/image> --port <n>` if you already publish an image.
 
     Do this before the config vars are in: the first deploy is what makes the binding live, and it gives you a URL to check.
 
