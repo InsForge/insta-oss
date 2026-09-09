@@ -225,6 +225,7 @@ export class Engine {
     const rollback = async (): Promise<void> => {
       for (const c of madeManaged) await this.managedDb.destroy(c).catch(() => {})
       for (const b of madeBuckets) await this.storage.destroy(b, network).catch(() => {})
+      if (this.storage.detachFrom) await this.storage.detachFrom(network).catch(() => {})
       for (const d of madeDbs) await this.db.destroy(d.container).catch(() => {})
       // A half-written data directory must not survive to be cloned over (WP4).
       for (const root of this.layout().branchRoots(ref)) await this.data.remove(root).catch(() => {})
@@ -1598,6 +1599,10 @@ export class Engine {
     await count(t, () => this.compute.destroy(ref))
     for (const d of this.dbList(project.id)) await count(t, () => this.db.destroy(this.pgContainer(project, b, d.id)))
     for (const x of this.stList(project.id)) await count(t, () => this.storage.destroy(this.bucketOf(project, b, x.id), b.network))
+    // The object store is ONE container for the whole box, attached to this branch's network: it is
+    // detached once, after every bucket on the network is gone (a per-bucket detach would strand the
+    // purge of the next one), and before `network rm`, which refuses while anything is attached.
+    if (this.storage.detachFrom) await this.storage.detachFrom(b.network).catch(() => {})
     const managed = this.managedList(project.id)
     for (const m of managed) await count(t, () => this.managedDb.destroy(managedContainerName(ref, m.type, m.name)))
     try { await docker(['network', 'rm', b.network]) } catch { /* gone */ }
@@ -2626,6 +2631,15 @@ export class Engine {
   }
 
   /** One storage service's handle on one branch (bucket + its minted credential env). */
+  /** Per-service teardown: the shared object store stays on the branch network while ANY other
+   *  bucket on it is live, so the detach happens only with the last one (the row is already gone
+   *  from state when this runs). */
+  private async detachIfLastBucket(branch: Branch): Promise<void> {
+    if (!this.storage.detachFrom) return
+    if (Object.keys(loadState().branches[branch.id]?.buckets ?? {}).length > 0) return
+    await this.storage.detachFrom(branch.network).catch(() => {})
+  }
+
   private bucketHandle(project: Project, branch: Branch, serviceId: string): { bucket: string; env: Record<string, string>; public?: boolean } | undefined {
     const row = branch.buckets?.[serviceId]
     if (row) return row
@@ -2952,6 +2966,7 @@ export class Engine {
         for (const d of done) {
           await this.storage.destroy(d.bucket, d.branch.network).catch(() => {})
           mutate((s) => { delete s.branches[d.branch.id].buckets?.[entry.id] })
+          await this.detachIfLastBucket(d.branch)
         }
         mutate((s) => {
           const pr = s.projects[projectId]
@@ -2980,6 +2995,7 @@ export class Engine {
         delete st.branches[b.id].buckets?.[serviceId]
         st.branches[b.id].bindings = (st.branches[b.id].bindings ?? []).filter((x) => x.source !== `storage/${reg.name}`)
       })
+      await this.detachIfLastBucket(b)
     }
     mutate((st) => {
       const pr = st.projects[projectId]

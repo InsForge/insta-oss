@@ -81,6 +81,7 @@ export const storage: StorageAdapter = {
   provision: async (ref, _network, name) => { const bucket = `io-${ref}-${name}`; calls.push(`st.provision:${ref}:${name}`); return { bucket, env: { BUCKET_NAME: bucket, AWS_ACCESS_KEY_ID: 'k', AWS_SECRET_ACCESS_KEY: 's', AWS_ENDPOINT_URL_S3: 'http://io-minio:9000', AWS_REGION: 'local' } } },
   cloneInto: async (srcBucket, dstBucket) => { calls.push(`st.clone:${srcBucket}->${dstBucket}`) },
   destroy: async (bucket) => { calls.push(`st.destroy:${bucket}`) },
+  detachFrom: async (network) => { calls.push(`st.detach:${network}`) },
   setAccess: async (bucket, _network, isPublic) => { calls.push(`st.access:${bucket}:${isPublic}`) },
   listBucketObjects: async (env, o) => {
     calls.push(`st.list:${env.BUCKET_NAME}:prefix=${o.prefix ?? ''}:limit=${o.limit}`)

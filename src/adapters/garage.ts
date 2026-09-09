@@ -216,6 +216,13 @@ export class LocalGarage implements StorageAdapter {
     for (const id of await this.keyIds(bucket).catch(() => [] as string[])) {
       await this.garage(['key', 'delete', '--yes', id]).catch(() => { /* gone */ })
     }
+  }
+
+  /** Detach the shared Garage from a branch network. This belongs to the BRANCH, not to a bucket:
+   *  every storage service on a branch shares one network, so disconnecting when a single bucket is
+   *  destroyed would cut S3 for the others (and would strand the rclone purge of the next bucket in
+   *  a teardown). Callers detach once, after the last bucket on that network is gone. */
+  async detachFrom(network: string): Promise<void> {
     await docker(['network', 'disconnect', network, GARAGE]).catch(() => { /* not attached */ })
   }
 

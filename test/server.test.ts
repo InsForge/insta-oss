@@ -267,6 +267,26 @@ test('services remove: compute, postgres and storage all tear down and report th
   expect((await app.inject({ method: 'DELETE', url: `/projects/${id}/services/pg-ghost` })).statusCode).toBe(404)
 })
 
+test('removing ONE of two storage services leaves the shared object store on the branch network', async () => {
+  const id = await createProject()
+  expect((await post(`/projects/${id}/services`, { type: 'storage', name: 'blobs' })).statusCode).toBe(201)
+  calls.length = 0
+  // Buckets are per service, the object store container is one per box: the branch keeps it while
+  // any other bucket on that network is live.
+  const first = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/st-store` })
+  expect(first.statusCode).toBe(200)
+  expect(calls).toContain('st.destroy:io-demo-main-store')
+  expect(calls.some((c) => c.startsWith('st.detach:'))).toBe(false)
+  // The survivor is still a real bucket with its endpoint minted.
+  const secrets = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets as Record<string, string>
+  expect(secrets.BUCKET_NAME).toBe('io-demo-main-blobs')
+  expect(secrets.AWS_ENDPOINT_URL_S3).toBeTruthy()
+  // ...and the LAST bucket takes the attachment with it.
+  const last = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/st-blobs` })
+  expect(last.statusCode).toBe(200)
+  expect(calls).toContain('st.detach:io-demo-main')
+})
+
 // ---- user-defined secrets (insta secrets set/unset) ----
 
 test('secrets set/unset: project-wide + branch override, merged into the bundle + deploy env', async () => {

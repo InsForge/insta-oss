@@ -152,6 +152,9 @@ export interface StorageAdapter {
   provision(ref: string, network: string, name: string): Promise<{ bucket: string; env: Record<string, string> }>
   cloneInto(srcBucket: string, dstBucket: string, network: string): Promise<void>
   destroy(bucket: string, network: string): Promise<void>
+  /** Release whatever the PROVIDER attached to a branch network (the shared object store is one
+   *  container for the whole box), once the last bucket on that network is gone. */
+  detachFrom?(network: string): Promise<void>
   setAccess?(bucket: string, network: string, isPublic: boolean): Promise<void>
   listBucketObjects?(env: Record<string, string>, opts: { prefix?: string; cursor?: string; limit: number }): Promise<ObjectListing>
   presignObjectGet?(env: Record<string, string>, key: string, disposition: 'attachment' | 'inline'): Promise<{ url: string; expiresAt: string }>
