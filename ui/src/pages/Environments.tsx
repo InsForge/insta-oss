@@ -46,8 +46,8 @@ function NewEnvironmentDialog({ projectId, from, onClose, onDone }: {
         {from.map((b) => <option key={b}>{b}</option>)}
       </select>
       <p className="mt-3 text-xs text-muted-foreground">
-        An environment is a full isolated clone: its own Postgres (data copied), its own bucket (objects copied),
-        and a redeploy of every app — nothing it does touches the source environment
+        An environment is a full isolated clone: its own Postgres (data forked at the file level), its own bucket
+        (objects copied), and a redeploy of every app; a new environment starts asleep unless a service is always on
         (<code className="font-mono">insta branch create</code> on the CLI).
       </p>
       <ErrorNote error={error} />

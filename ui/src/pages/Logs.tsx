@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { EmptyState, Tab, Tabs, cn } from '@insforge/ui'
-import { ScrollText } from 'lucide-react'
+import { Moon, ScrollText } from 'lucide-react'
 import { api, type LogLine } from '../api'
 import { usePoll } from '../hooks'
+import { healthFor } from '../lib/status'
 
 type Component = 'compute' | 'db'
 
@@ -47,6 +48,13 @@ export function Logs() {
   const { projectId, branch } = useParams() as { projectId: string; branch: string }
   const [component, setComponent] = useState<Component>('compute')
   const { data, error } = usePoll(() => api.logs(projectId, component, branch), [projectId, branch, component])
+  const { data: services } = usePoll(() => api.services(projectId, branch), [projectId, branch], 15000)
+  const { data: health } = usePoll(() => api.runtimeHealth(projectId, branch), [projectId, branch], 15000)
+
+  // Reading logs never wakes anything (docker keeps the tail of a stopped container), so say why
+  // the tail stops where it does when the component behind this tab is asleep.
+  const wanted = (services ?? []).filter((s) => (component === 'compute' ? s.type === 'compute' : s.type === 'postgres'))
+  const standby = wanted.length > 0 && wanted.every((s) => healthFor(health, s.id)?.status === 'standby')
 
   return (
     <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
@@ -57,6 +65,12 @@ export function Logs() {
           <Tab value="db">Database</Tab>
         </Tabs>
       </div>
+
+      {standby && (
+        <p className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Moon className="size-3.5" /> Sleeping; showing the last lines before it went to sleep.
+        </p>
+      )}
 
       {!data && !error && (
         <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-4">

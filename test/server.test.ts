@@ -1282,6 +1282,23 @@ test('a pre-scaffold branch row (no databases) keeps resolving its legacy io-<re
 })
 
 // ---- region WP1 (identity/config) ----
+// WP7 (plan 07 tests, added in region WP1 as that plan directs): every SPA route the dashboard
+// owns must reach the shell, and an API prefix must never be shadowed by one of them.
+test('dashboard serving: identity and gallery routes reach the SPA shell', async () => {
+  const { mkdirSync, writeFileSync } = await import('node:fs')
+  const dist = mkdtempSync(join(tmpdir(), 'io-ui-'))
+  mkdirSync(dist, { recursive: true })
+  writeFileSync(join(dist, 'index.html'), '<html>dash</html>')
+  process.env.INSTA_OSS_UI_DIST = dist
+  const ui = buildServer(new Engine(db, compute, storage, managed))
+  delete process.env.INSTA_OSS_UI_DIST
+
+  for (const url of ['/setup', '/login', '/account/tokens', '/p/x/main/templates']) {
+    expect((await ui.inject({ method: 'GET', url })).body).toContain('dash')
+  }
+  // `/tokens` is an API prefix: the gallery and account routes never shadow a JSON route.
+  expect((await ui.inject({ method: 'GET', url: '/tokens' })).body).not.toContain('dash')
+})
 // ---- end region WP1 ----
 
 // ---- region WP2 (router) ----
