@@ -27,11 +27,17 @@ insta compute set-domain app <your-domain>
     railway link                      # pick the project and environment
     railway service                   # pick the service you are migrating
     railway variable list             # its variables
-    railway volume list               # does it have a volume?
+    railway status --json             # services, volumes and buckets in one call
     ```
 
+    <Note>
+      **`railway status` reports only *live* deployments.** A stopped Postgres whose volume still holds your data looks identical to one that was never provisioned — `latestDeployment` is `null` for both. Check `railway deployment list` per service before concluding a database is unused, or you will leave data behind.
+    </Note>
+
     <Warning>
-      Railway variables can be **reference variables** — values like `${{Postgres.DATABASE_URL}}` that Railway resolves at deploy time. Those are templates, not values. Confirm what `railway variable list` prints for them, and resolve any that come back as `${{…}}` to their literal value before copying, or your app will receive the template text.
+      **`railway variable list` resolves references — you will never see `${{…}}`.** Railway expands reference variables (`${{Postgres.DATABASE_URL}}`, `${{RAILWAY_PRIVATE_DOMAIN}}`) before printing, in both the table and `--json`, and no flag shows the raw form. The trap is the opposite of what it looks like: a resolved `DATABASE_URL` is a **literal pointing at Railway's Postgres**, so copying it verbatim leaves your migrated app still talking to the database you are leaving. Skip every connection string you are binding below rather than copying it.
+
+      If you do need to know which values *were* references, the raw form is only reachable through the API — `railway api` with `variables(… unrendered: true)` — and that query returns a **smaller** key set, because the `RAILWAY_*` built-ins exist only at render time and are not stored variables you should migrate at all.
     </Warning>
   </Step>
 
@@ -107,6 +113,10 @@ insta compute set-domain app <your-domain>
 
   <Step title="Move a volume, if you have one" titleSize="h2">
     Creating a volume on InstaCloud gives you an **empty** disk — nothing is copied for you.
+
+    <Warning>
+      **A Railway volume cannot be read while its service is stopped.** There is no offline browse: `railway service files list` refuses with *"has no active deployment"*, so auditing or downloading the contents means starting the service first. Plan that into the cutover window rather than discovering it after you have stopped everything.
+    </Warning>
 
     ```bash
     railway volume files download /path/to/file ./local-copy   # pull from the Railway volume
