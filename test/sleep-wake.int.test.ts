@@ -192,6 +192,10 @@ test('memory pressure evicts the least recently active service, with a synthetic
     INSTA_OSS_MODE: 'local',
     INSTA_OSS_RAM_FLOOR_PCT: '90',
     INSTA_OSS_MEM_BUDGET_MB: '1',
+    // The pool excludes anything active within `2 * touchDebounceMs` (contract section 13), which
+    // at the 5 s default is longer than this test can hold a container still without the idle pass
+    // taking it first. 50 ms puts the whole window inside the 3 s idle window.
+    INSTA_OSS_TOUCH_DEBOUNCE_MS: '50',
     INSTA_OSS_SCHEDULER: '0',
   }, [])
   const tinyRuntime = new DockerRuntime(tiny, upstream)
@@ -202,6 +206,12 @@ test('memory pressure evicts the least recently active service, with a synthetic
 
   await sched.wake(APP_KEY, { door: 'api' })
   expect(await state(APP)).toBe('running')
+  // The daemon runs ONE scheduler whose ledger has seen every service; this second one exists only
+  // to carry a different floor and budget, so it gets the same registrations. A key it has never
+  // seen is stamped `now` on first sight and is therefore never a victim, which is the right
+  // default for a service the daemon knows nothing about yet.
+  tinySched.register([PG_KEY, APP_KEY])
+  await new Promise((r) => setTimeout(r, 2 * tiny.lanes.touchDebounceMs + 50))
   await tinySched.sweep()                                  // one sweep: stats, then the pressure pass
   // Whatever it picked, it picked by activity and it stopped something rather than nothing.
   expect(await state(APP)).toBe('exited')
