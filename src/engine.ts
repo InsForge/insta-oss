@@ -701,8 +701,9 @@ export class Engine {
     const branch = branchName ? branches.find((b) => b.name === branchName) : branches.find((b) => b.isDefault)
     if (branchName && !branch) throw new Error(`branch "${branchName}" not found`)
     const groups = new Set<string>(this.computeGroupNames(projectId))
-    // ONE docker read per listing; rowRuntime (WP3 hook) reads the snapshot per row.
-    await this.snapshotRunning()
+    // ONE docker read per listing, through the scheduler's Runtime seam: `rowRuntime` and the
+    // object-store row then read that snapshot (decision 53 — there is no second `docker ps`).
+    await this.scheduler.refreshStates()
     const iso = (ms?: number): string | undefined => (ms ? new Date(ms).toISOString() : undefined)
     const rt = (serviceId: string): string | undefined => (branch ? this.rowRuntime(this.serviceKey(branch, serviceId)) : undefined)
     const id = (serviceId: string): string => (branch ? this.qualifiedId(branch, serviceId) : serviceId)
@@ -755,32 +756,11 @@ export class Engine {
     ]
   }
 
-  /** The `docker ps` snapshot services() takes: running container names, or null when docker is
-   *  unreadable (runtime is then omitted rather than guessed). */
-  private running: Set<string> | null = null
-  private async snapshotRunning(): Promise<void> {
-    try {
-      const out = await docker(['ps', '--format', '{{.Names}}'])
-      this.running = new Set(out.toString().trim().split('\n').filter(Boolean))
-    } catch { this.running = null }
-  }
+  /** The `runtime` column of a row that has no ServiceKey (the object store): the last snapshot the
+   *  scheduler took, read by container name. A name docker has never listed is not running. */
   private runtimeOf(container: string): string | undefined {
-    return this.running ? (this.running.has(container) ? 'online' : 'stopped') : undefined
-  }
-
-  /** Resolve a `${branchId}:${serviceId}` key to its branch, project and container (scaffold helper
-   *  for the runtime hooks; WP3's `targetOf` supersedes it). */
-  private keyTarget(key: ServiceKey): { project: Project; branch: Branch; serviceId: string; container: string; app?: Branch['apps'][string] } | undefined {
-    const i = key.indexOf(':')
-    const branch = loadState().branches[key.slice(0, i)]
-    const project = branch ? this.getProject(branch.projectId) : undefined
-    if (!branch || !project) return undefined
-    const serviceId = key.slice(i + 1)
-    const ref = this.ref(project, branch)
-    if (serviceId.startsWith('pg-')) return { project, branch, serviceId, container: this.pgContainer(project, branch, serviceId) }
-    if (serviceId.startsWith('cp-')) return { project, branch, serviceId, container: appContainerName(ref, serviceId.slice(3)), app: branch.apps[serviceId.slice(3)] }
-    const m = this.managedList(project.id).find((x) => x.id === serviceId)
-    return m ? { project, branch, serviceId, container: managedContainerName(ref, m.type, m.name) } : undefined
+    if (!container) return undefined
+    return this.scheduler.containerState(container) === 'running' ? 'online' : 'stopped'
   }
 
   /** Names-only secret inventory as project→branch→service→secrets (SecretTree contract shape).
@@ -1416,13 +1396,19 @@ export class Engine {
     const t = this.dbTarget(projectId, branchName, group)
     const branch = t.branch
     const gib = branch.dbVolumeGib ?? DB_VOLUME_DEFAULT_GIB
-    // `host`/`port` stay the container's until WP3 lands (contract 7.2 gives that row's lane
-    // address, routeKey and scale-to-zero fields to WP3, with WP2's laneAddress underneath); WP5
-    // only makes the row name WHICH postgres service it describes.
+    // WP3 edit point: `scaleToZero`, `idleTimeoutSecs` and the cpu/memory ceiling are real now, and
+    // `host`/`port` are the row's LANE address (WP2), which is what a client actually dials.
+    const row = branch.databases?.[t.serviceId]
+    const lane = this.laneAddress(t.project, branch, t.serviceId)
+    const limits = row?.limits
     return {
       id: t.serviceId, name: t.serviceId.replace(/^pg-/, ''), state: branch.status,
-      host: t.container, port: 5432,
-      connectionPooling: false, deletionProtection: false, scaleToZero: false,
+      host: lane.host, port: lane.port,
+      routeKey: this.labelFor('postgres', t.serviceId.replace(/^pg-/, ''), this.ref(t.project, branch)),
+      connectionPooling: false, deletionProtection: false,
+      scaleToZero: row?.scaleToZero ?? true,
+      idleTimeoutSecs: row?.idleTimeoutSec ?? this.cfg.sleep.idleDbSec,
+      ...(limits ? { cpuMilli: limits.cpu * 1000, memoryMib: limits.memoryMb } : { cpuMilli: null, memoryMib: null }),
       volumeSize: `${gib}Gi`, volumeGib: gib,
       storageSize: `${gib}Gi`, storageGiB: gib, // DEPRECATED aliases — dropped when the platform drops them
       cap: { ...DB_CAP },
@@ -1430,11 +1416,18 @@ export class Engine {
   }
 
   /** PATCH database/settings: volumeSize ('10Gi', whole Gi, grow-only) is accepted, persisted,
-   *  and echoed — advisory locally, the postgres container's disk is unbounded. Other settings
-   *  (pooling, scale-to-zero, idle timeout, cpu/memory ceilings) are cloud provider levers with
-   *  no local analog: accepted and ignored so one script runs unchanged on both targets. */
-  dbSettings(projectId: string, patch: { volumeSize?: string; storageSize?: string }, branchName?: string, group?: string): Record<string, unknown> {
-    const { branch } = this.dbTarget(projectId, branchName, group)
+   *  and echoed — advisory locally, the postgres container's disk is unbounded. `scaleToZero`,
+   *  `idleTimeout`, `cpu` and `memory` are REAL here (WP3): they are the instance's own sleep and
+   *  ceiling levers, per branch, because the database is a per-branch container. Connection pooling
+   *  stays a cloud lever with no local analog: accepted and ignored. */
+  async dbSettings(
+    projectId: string,
+    patch: { volumeSize?: string; storageSize?: string; scaleToZero?: boolean; idleTimeout?: number | string; cpu?: number | string; memory?: number | string },
+    branchName?: string, group?: string,
+  ): Promise<Record<string, unknown>> {
+    const t = this.dbTarget(projectId, branchName, group)
+    const { branch } = t
+    await this.patchDbScheduling(t, patch)
     const raw = patch.volumeSize ?? patch.storageSize // storageSize = deprecated platform alias
     if (raw !== undefined) {
       const m = /^(\d+)Gi$/.exec(String(raw).trim())
@@ -1449,6 +1442,54 @@ export class Engine {
       }
     }
     return this.dbInstance(projectId, branchName, group)
+  }
+
+  /** The scheduler half of `PATCH database/settings` (WP3): the sleep lever, the idle window and
+   *  the cgroup ceiling of ONE postgres service on ONE branch. Each field is optional and only a
+   *  real change writes state or moves a container. */
+  private async patchDbScheduling(
+    t: { project: Project; branch: Branch; serviceId: string; container: string },
+    patch: { scaleToZero?: boolean; idleTimeout?: number | string; cpu?: number | string; memory?: number | string },
+  ): Promise<void> {
+    const row = t.branch.databases?.[t.serviceId]
+    if (!row) return
+    const write = (fn: (r: NonNullable<Branch['databases']>[string]) => void): void => {
+      mutate((s) => {
+        const target = s.branches[t.branch.id].databases?.[t.serviceId]
+        if (target) fn(target)
+      })
+    }
+    if (patch.scaleToZero !== undefined) {
+      if (typeof patch.scaleToZero !== 'boolean') throw new Error('scaleToZero must be a boolean')
+      if (patch.scaleToZero !== (row.scaleToZero ?? true)) {
+        write((r) => { r.scaleToZero = patch.scaleToZero })
+        this.emit(t.project.id, t.branch.name, 'resource', 'service.alwaysOn', { service: t.serviceId, enabled: !patch.scaleToZero })
+      }
+    }
+    if (patch.idleTimeout !== undefined) {
+      const secs = Number(patch.idleTimeout)
+      if (!Number.isInteger(secs) || secs < 0) throw new Error('idleTimeout must be a whole number of seconds (0 disables sleep)')
+      if (secs !== row.idleTimeoutSec) write((r) => { r.idleTimeoutSec = secs })
+    }
+    if (patch.cpu !== undefined || patch.memory !== undefined) {
+      const current = row.limits
+      const cpu = patch.cpu !== undefined ? this.parseCpuQuantity(patch.cpu) : current?.cpu
+      const memoryMb = patch.memory !== undefined ? this.parseMemoryQuantity(patch.memory) : current?.memoryMb
+      if (memoryMb === undefined) throw new Error('memory is required when setting a cpu ceiling for the first time')
+      const limits = this.validateLimits(memoryMb, cpu)
+      const key = this.serviceKey(t.branch, t.serviceId)
+      await this.withOp([key], async () => {
+        try { await this.scheduler.runtimeUpdate(t.container, limits) }
+        catch (e) {
+          const m = e instanceof Error ? e.message : String(e)
+          const err = new Error(`resize failed on the compute provider: ${m} (applied to 0/1 machines; the stored ceiling is unchanged)`)
+          Object.assign(err, { status: 502 })
+          throw err
+        }
+        write((r) => { r.limits = limits })
+      })
+      this.emit(t.project.id, t.branch.name, 'resource', 'service.limits', { service: t.serviceId, ...limits })
+    }
   }
 
   // ---- database management (password / databases / extensions / insight — cloud parity) ----
