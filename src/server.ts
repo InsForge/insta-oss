@@ -10,7 +10,9 @@ import { registerAuth } from './auth'
 import { loadConfig, type Config } from './config'
 import type { Engine } from './engine'
 import * as govern from './govern'
-import { isManagedDbType, parseManagedServiceId } from './manageddb'
+import { isManagedDbType, parseServiceId } from './manageddb'
+import { GateRefused, TemplateError } from './templates/executor'
+import { ManifestError, MissingTemplateVariablesError } from './templates/manifest'
 import { loadState } from './state'
 import { isGatedAction, type Approval, type AuditEvent, type GatedAction } from './types'
 
@@ -28,7 +30,7 @@ const eventOut = (e: AuditEvent) => ({
 export const API_PREFIXES: string[] = [
   '/projects', '/orgs', '/me', '/tokens', '/healthz', '/regions', '/images', '/invitations',
   '/api', '/auth', '/tls',
-  // WP5: '/templates', '/template-deployments'
+  '/templates', '/template-deployments',
 ]
 
 /** True when the API owns `url`: a GET outside these prefixes falls back to the dashboard shell
@@ -139,21 +141,23 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   // Point-in-time DB signals — run SQL against the branch database (same queries as the cloud).
   app.get('/projects/:id/database/metrics', async (req, reply) => {
     const { id } = req.params as { id: string }
-    try { return await engine.dbMetricsSnapshot(id, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbMetricsSnapshot(id, q.branch, q.group) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
   })
 
   app.get('/projects/:id/database/activity', async (req, reply) => {
     const { id } = req.params as { id: string }
-    try { return await engine.dbActivity(id, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbActivity(id, q.branch, q.group) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
   })
 
   app.get('/projects/:id/database/query-stats', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const q = req.query as { branch?: string; limit?: string; sort?: string }
+    const q = req.query as { branch?: string; limit?: string; sort?: string; group?: string }
     const sort = (['total', 'mean', 'calls'] as const).find((s) => s === q.sort)
-    try { return await engine.dbQueryStats(id, q.branch, { limit: q.limit ? Number(q.limit) : undefined, sort }) }
+    try { return await engine.dbQueryStats(id, q.branch, { limit: q.limit ? Number(q.limit) : undefined, sort, group: q.group }) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
   })
 
@@ -162,14 +166,16 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     if (!name) return reply.code(400).send({ error: 'name required' })
     try {
       const { project, defaultBranch } = await engine.createProject(name)
+      // EMPTY, like the cloud (provisioning/service.ts provisionProject): a project starts with a
+      // branch and nothing in it; services arrive through `insta services add`.
       return reply.code(201).send({
         project: { id: project.id, name: project.name, status: project.status },
         defaultBranch: { id: defaultBranch.id, name: defaultBranch.name },
-        resources: [{ kind: 'postgres' }, { kind: 'storage' }, { kind: 'compute' }],
+        resources: [],
       })
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e)
-      return reply.code(m.includes('already exists') ? 409 : 400).send({ error: m })
+      return reply.code(m.includes('already exists') ? 409 : provisionCode(m)).send({ error: m })
     }
   })
 
@@ -186,8 +192,9 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     const { id } = req.params as { id: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     if (!gated(id, 'project.delete', reply)) return reply
-    await engine.destroyProject(id)
-    return {}
+    // The cloud's teardown summary, from the same envelope every delete route answers with
+    // (decision 50; platform server.ts:1300 TeardownSummary).
+    return { teardown: await engine.destroyProject(id) }
   })
 
   app.get('/projects/:id/branches', async (req) => ({
@@ -203,14 +210,15 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
       const b = await engine.createBranch(id, name, from)
       return reply.code(201).send({ branch: { id: b.id, name: b.name } })
     } catch (e) {
-      return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) })
+      const m = e instanceof Error ? e.message : String(e)
+      return reply.code(provisionCode(m, 409)).send({ error: m })
     }
   })
 
   app.delete('/projects/:id/branches/:bid', async (req, reply) => {
     const { id, bid } = req.params as { id: string; bid: string }
     if (!gated(id, 'branch.delete', reply)) return reply
-    try { await engine.destroyBranch(id, bid); return {} }
+    try { return { teardown: await engine.destroyBranch(id, bid) } }
     catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 
@@ -298,39 +306,35 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
 
   app.post('/projects/:id/services', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const body = (req.body ?? {}) as { type?: string; name?: string; branch?: string; public?: boolean; volumeGib?: number }
+    const body = (req.body ?? {}) as { type?: string; name?: string; branch?: string; public?: boolean; volumeGib?: number; port?: number; alwaysOn?: boolean; image?: string }
     if (!body.type || !body.name) return reply.code(400).send({ error: 'type and name required' })
     if (!gated(id, 'service.add', reply)) return reply
-    // Contract parity: postgres/storage add succeeds idempotently (insta-oss has one of each,
-    // auto-provisioned) — the same `services add postgres|storage|compute` script runs on both.
-    if (body.type === 'postgres' || body.type === 'storage') {
-      try {
-        const service = engine.fixedService(id, body.type)
-        // `services add storage <name> --public` provisions the bucket public on the cloud;
-        // here the bucket already exists, so apply the access mode to it.
-        if (body.type === 'storage' && body.public === true) {
-          return reply.code(201).send({ service: await engine.setServiceAccess(id, service.id, true, body.branch) })
-        }
-        return reply.code(201).send({ service })
-      } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
+    // Every type is a project-level registration materialised on every branch: postgres gets its
+    // own container per branch, storage its own bucket, managed databases a fresh private instance
+    // with fresh credentials (no data clone), compute a group whose container arrives on first
+    // deploy. `image` is accepted and ignored — the image reaches a service through deploy.
+    const add = async (): Promise<unknown> => {
+      if (body.type === 'postgres') return engine.addDbService(id, body.name!)
+      if (body.type === 'storage') return engine.addStorageService(id, body.name!, { ...(body.public !== undefined ? { public: body.public } : {}) })
+      if (isManagedDbType(body.type!)) return engine.addManagedService(id, body.type as 'redis' | 'mysql' | 'mongodb', body.name!)
+      // volumeGib (compute only) attaches a persistent /data volume (also attachable later via
+      // PUT …/volume, and deletable via DELETE …/volume — cloud parity).
+      return engine.addComputeService(id, body.name!, body.volumeGib, {
+        ...(body.alwaysOn !== undefined ? { alwaysOn: body.alwaysOn } : {}),
+        ...(body.port !== undefined ? { port: body.port } : {}),
+      })
     }
-    // Managed databases (redis | mysql | mongodb): a fresh private instance per branch, fresh
-    // credentials, no data clone — cloud parity (platform #235/#236).
-    if (isManagedDbType(body.type)) {
-      try { return reply.code(201).send({ service: await engine.addManagedService(id, body.type, body.name) }) }
-      catch (e) {
-        const m = e instanceof Error ? e.message : String(e)
-        const code = m.includes('already exists') || m.includes('already used') ? 409 : m.includes('not found') ? 404 : 400
-        return reply.code(code).send({ error: m })
-      }
+    if (!['postgres', 'storage', 'compute'].includes(body.type) && !isManagedDbType(body.type)) {
+      return reply.code(400).send({ error: `unknown service type: ${body.type}` })
     }
-    if (body.type !== 'compute') return reply.code(400).send({ error: `unknown service type: ${body.type}` })
-    // volumeGib (compute only) attaches a persistent /data volume (also attachable later via
-    // PUT …/volume, and deletable via DELETE …/volume — cloud parity).
-    try { return reply.code(201).send({ service: engine.addComputeService(id, body.name, body.volumeGib) }) }
+    try { return reply.code(201).send({ service: await add() }) }
     catch (e) {
       const m = e instanceof Error ? e.message : String(e)
-      return reply.code(m.includes('already exists') ? 409 : 400).send({ error: m })
+      const code = m.includes('already exists') || m.includes('already used') || m.includes('already used by') ? 409
+        : m.includes('is reserved by the daemon') ? 409
+        : m.includes('not found') ? 404
+        : provisionCode(m)
+      return reply.code(code).send({ error: m })
     }
   })
 
@@ -386,20 +390,21 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
   })
 
-  // Rename a service and re-key what derives from its name. Gated — service.rename. The fixed
-  // postgres/storage pair is name-fixed locally (their minted names are unsuffixed).
+  // Rename a service and re-key what derives from its name. Gated — service.rename. Every type is
+  // renamable: a postgres service moves its container and minted hostname while KEEPING its data
+  // directory (the id is immutable, decision 16); a storage rename is a re-key only, because a
+  // bucket handle is baked into every object URL and into the key scoped to it.
   app.post('/projects/:id/services/:sid/rename', async (req, reply) => {
-    const { id, sid } = req.params as { id: string; sid: string }
+    const { id, sid: raw } = req.params as { id: string; sid: string }
     const { name } = (req.body ?? {}) as { name?: string }
     if (!name) return reply.code(400).send({ error: 'name required' })
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
-    if (!sid.startsWith('cp-') && !parseManagedServiceId(sid)) {
-      return reply.code(501).send({ error: 'renaming postgres/storage services is cloud-only — insta-oss provisions one fixed pair (db/store) per project' })
-    }
+    const sid = bareSid(raw)
     if (!gated(id, 'service.rename', reply)) return reply
     try {
-      const service = sid.startsWith('cp-')
-        ? await engine.renameComputeService(id, sid.slice(3), name)
+      const service = sid.startsWith('cp-') ? await engine.renameComputeService(id, sid.slice(3), name)
+        : sid.startsWith('pg-') ? await engine.renameDbService(id, sid, name)
+        : sid.startsWith('st-') ? await engine.renameStorageService(id, sid, name)
         : await engine.renameManagedService(id, sid, name)
       return { service }
     } catch (e) {
@@ -445,14 +450,16 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
 
   app.get('/projects/:id/database/instance', async (req, reply) => {
     const { id } = req.params as { id: string }
-    try { return engine.dbInstance(id, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return engine.dbInstance(id, q.branch, q.group) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
   })
 
   app.patch('/projects/:id/database/settings', async (req, reply) => {
     const { id } = req.params as { id: string }
     const body = (req.body ?? {}) as { volumeSize?: string; storageSize?: string }
-    try { return engine.dbSettings(id, body, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return engine.dbSettings(id, body, q.branch, q.group) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
   })
 
@@ -468,48 +475,55 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   app.post('/projects/:id/database/password', async (req, reply) => {
     const { id } = req.params as { id: string }
     const { password } = (req.body ?? {}) as { password?: string }
+    const q = req.query as { branch?: string; group?: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     if (!gated(id, 'secrets.read', reply)) return reply
-    try { return await engine.dbSetPassword(id, password, (req.query as { branch?: string }).branch) }
+    try { return await engine.dbSetPassword(id, password, q.branch, q.group) }
     catch (e) { return dbErr(reply, e) }
   })
 
   app.get('/projects/:id/database/databases', async (req, reply) => {
     const { id } = req.params as { id: string }
-    try { return await engine.dbListDatabases(id, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbListDatabases(id, q.branch, q.group) }
     catch (e) { return dbErr(reply, e) }
   })
 
   app.post('/projects/:id/database/databases', async (req, reply) => {
     const { id } = req.params as { id: string }
     const { name } = (req.body ?? {}) as { name?: string }
+    const q = req.query as { branch?: string; group?: string }
     if (!name) return reply.code(400).send({ error: 'name required' })
-    try { return reply.code(201).send(await engine.dbCreateDatabase(id, name, (req.query as { branch?: string }).branch)) }
+    try { return reply.code(201).send(await engine.dbCreateDatabase(id, name, q.branch, q.group)) }
     catch (e) { return dbErr(reply, e) }
   })
 
   app.delete('/projects/:id/database/databases/:database', async (req, reply) => {
     const { id, database } = req.params as { id: string; database: string }
-    try { await engine.dbDeleteDatabase(id, database, (req.query as { branch?: string }).branch); return { ok: true } }
+    const q = req.query as { branch?: string; group?: string }
+    try { await engine.dbDeleteDatabase(id, database, q.branch, q.group); return { ok: true } }
     catch (e) { return dbErr(reply, e) }
   })
 
   app.get('/projects/:id/database/extensions', async (req, reply) => {
     const { id } = req.params as { id: string }
-    try { return await engine.dbExtensions(id, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbExtensions(id, q.branch, q.group) }
     catch (e) { return dbErr(reply, e) }
   })
 
   app.patch('/projects/:id/database/extensions', async (req, reply) => {
     const { id } = req.params as { id: string }
     const body = (req.body ?? {}) as { enable?: string[]; disable?: string[] }
-    try { return await engine.dbPatchExtensions(id, body, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbPatchExtensions(id, body, q.branch, q.group) }
     catch (e) { return dbErr(reply, e) }
   })
 
   app.get('/projects/:id/database/insight', async (req, reply) => {
     const { id } = req.params as { id: string }
-    try { return await engine.dbInsight(id, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbInsight(id, q.branch, q.group) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
   })
 
@@ -628,16 +642,18 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     catch (e) { return objErr(reply, e) }
   })
 
+  // Remove a service of ANY type, on every branch, and answer the cloud's teardown summary
+  // (decision 50): how many containers, buckets and directories went, and how many refused to.
   app.delete('/projects/:id/services/:sid', async (req, reply) => {
-    const { id, sid } = req.params as { id: string; sid: string }
-    if (!sid.startsWith('cp-') && !parseManagedServiceId(sid)) {
-      return reply.code(501).send({ error: 'removing postgres/storage services is cloud-only — insta-oss provisions one of each per project' })
-    }
+    const { id, sid: raw } = req.params as { id: string; sid: string }
+    const sid = bareSid(raw)
     if (!gated(id, 'service.remove', reply)) return reply
     try {
-      if (sid.startsWith('cp-')) await engine.removeComputeService(id, sid.slice(3))
-      else await engine.removeManagedService(id, sid)
-      return {}
+      const teardown = sid.startsWith('cp-') ? await engine.removeComputeService(id, sid.slice(3))
+        : sid.startsWith('pg-') ? await engine.removeDbService(id, sid)
+        : sid.startsWith('st-') ? await engine.removeStorageService(id, sid)
+        : await engine.removeManagedService(id, sid)
+      return { teardown }
     } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 
@@ -738,6 +754,88 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   // ---- end region C ----
 
   // ---- region D (WP5 templates/parity) ----
+  // The bundled template registry and the deployment routes, plus per-service credentials.
+
+  /** A branch-qualified service id (`<branchId>:pg-db`, decision 49) stripped to its bare id. The
+   *  engine resolves the branch from the SAME qualifier, so a route that needs only the id (a
+   *  project-level remove or rename) takes this and nothing else. */
+  const bareSid = (sid: string): string => (parseServiceId(sid)?.serviceId ?? sid)
+
+  /** A provisioning failure's status: 507 when dockerd is out of network subnets (the message the
+   *  engine rethrows), the caller's default otherwise. */
+  const provisionCode = (m: string, fallback = 400): number => (m.includes('no free network subnets') ? 507 : fallback)
+
+  // Public in server mode (cloud `security: []`, openapi.yaml:7702 and 7727), and CDN-cacheable
+  // the same way the cloud's are.
+  app.get('/templates', async (req, reply) => {
+    const q = req.query as { query?: string; category?: string }
+    reply.header('cache-control', 'public, max-age=300')
+    return engine.templates.listTemplates({ query: q.query, category: q.category })
+  })
+
+  app.get('/templates/:code', async (req, reply) => {
+    const { code } = req.params as { code: string }
+    reply.header('cache-control', 'public, max-age=300')
+    try { return engine.templates.getTemplate(code) }
+    catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : `template not found: ${code}` }) }
+  })
+
+  // Deploy a template. Gated service.add + secrets.write + deploy, and service.upgrade when the
+  // manifest declares a volume (decision 45) — the gate list is manifest-dependent, so it runs
+  // INSIDE create(), after the idempotency decision: an echo of a finished deployment must not be
+  // refusable by a policy changed since, and must never consume a single-use approval.
+  app.post('/projects/:id/template-deployments', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const b = (req.body ?? {}) as Record<string, unknown>
+    let refused = false
+    try {
+      const out = await engine.executor.create(id, {
+        templateCode: (b.templateCode ?? b.code) as string | undefined,
+        templateVersion: b.templateVersion as string | undefined,
+        manifest: b.manifest,
+        branchId: b.branchId as string | undefined,
+        branch: b.branch as string | undefined,
+        variables: b.variables as Record<string, string> | undefined,
+        deploymentId: b.deploymentId as string | undefined,
+      }, async (actions) => {
+        for (const action of actions) {
+          if (!gated(id, action, reply)) { refused = true; throw new GateRefused() }
+        }
+      })
+      return reply.code(202).send({ deploymentId: out.deployment.id, deployment: out.deployment })
+    } catch (e) {
+      // The gate already answered (403 or 202 approval_required): nothing more to send.
+      if (refused && e instanceof GateRefused) return reply
+      // The machine-readable half of "you forgot these": callers prompt from the list and retry.
+      if (e instanceof MissingTemplateVariablesError) {
+        return reply.code(400).send({ error: 'missing_variables', missing: e.missing, missingVariables: e.missing })
+      }
+      const m = e instanceof Error ? e.message : String(e)
+      const status = e instanceof TemplateError ? e.status : e instanceof ManifestError ? 400 : provisionCode(m)
+      return reply.code(status).send({ error: m })
+    }
+  })
+
+  // Unwrapped, like the cloud (platform server.ts:2721): the CLI's watcher reads the row directly.
+  app.get('/template-deployments/:did', async (req, reply) => {
+    const { did } = req.params as { did: string }
+    try { return engine.executor.get(did) }
+    catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : 'template deployment not found' }) }
+  })
+
+  // One service's credential bundle on one branch, in the host-facing lane form. The branch comes
+  // from a qualified sid FIRST, then ?branch, then the default (decision 49): the CLI lists
+  // ?branch=<b>, takes the id it is given, and calls this with no branch at all.
+  app.get('/projects/:id/services/:sid/credentials', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'secrets.read', reply)) return reply
+    try {
+      const credentials = engine.credentials(id, sid, (req.query as { branch?: string }).branch)
+      engine.emit(id, null, 'govern', 'secrets.read', { service: bareSid(sid) })
+      return { credentials }
+    } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
+  })
   // ---- end region D ----
 
   // ---- local dashboard: serve ui/dist when built (same origin as the API — localhost trust,
