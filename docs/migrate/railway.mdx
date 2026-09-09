@@ -60,11 +60,7 @@ Create a Railway project token first, under **Project Settings → Tokens**. Rai
 Migrate my Railway service mysite and its Postgres data to InstaCloud. The repo is railwayapp-templates/django, and my Railway project token is in RAILWAY_TOKEN. Follow the insta skill's migration runbook, and stop before moving DNS.
 ```
 
-Your agent reads the project, provisions the services it maps onto, binds the database credential, deploys the repo, moves the data, and checks that it landed. It will ask you to approve the actions that touch production.
-
-Two things it will hand back to you, because Railway has no command for either. **Scale the service to zero** in the dashboard when your agent says to: Railway has no maintenance mode, and every worker and cron service needs the same treatment. And if you have a **volume**, download it while the service is still running, because Railway refuses to read a volume whose service is stopped.
-
-One thing is worth knowing, because it is the reason the runbook exists. Nothing on Railway can still be writing when the data moves. Once the new database has writes of its own, going back to Railway quietly loses them.
+It will ask you to approve anything that touches production, and it will hand two jobs back to you, because Railway has no command for either: scaling every service to zero, and downloading a volume if you have one.
 
 {/* screenshot: console, project with a compute service and a postgres service deployed */}
 

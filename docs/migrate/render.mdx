@@ -70,9 +70,7 @@ Get a Render API key first, under **Account Settings → API Keys** in the Rende
 Migrate my Render service mysite and its Postgres database mysitedb to InstaCloud. The repo is render-examples/django, and my Render API key is in RENDER_API_KEY. Follow the insta skill's migration runbook, and stop before moving DNS.
 ```
 
-Your agent reads your `render.yaml`, provisions the services it maps onto, binds the database credential, deploys the repo, moves the data, and checks that it landed. It will ask you to approve the actions that touch production.
-
-One thing is worth knowing, because it is the reason the runbook exists. Your agent stops Render from taking writes before InstaCloud starts taking them. Once the new database has writes of its own, going back to Render quietly loses them.
+It will ask you to approve anything that touches production, and it will ask you to scale Render to zero at the right moment, since only you can do that.
 
 {/* screenshot: console, project with a compute service and a postgres service deployed */}
 
