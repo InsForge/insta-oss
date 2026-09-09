@@ -78,44 +78,13 @@ Publish the records at your DNS provider, then ask your agent to check the domai
 
 ### 5. Branch the database
 
-Railway gives you environments. InstaCloud branches the database with them, so a branch is a real Postgres of its own rather than a second copy you keep in sync by hand.
+A branch gets its own Postgres and its own compute, created by one command. A schema change, a destructive test, or a second agent working in parallel therefore cannot reach your production data, which is what makes it safe to hand an agent a migration in the first place. It is the closest thing here to a Railway environment, except that an agent makes one per task rather than you duplicating one in the dashboard.
 
 ```text title="Prompt" wrap
 Create a branch called <name> and deploy the current code to it.
 ```
 
-There is nothing to migrate for this one. For most people it is the reason to move.
-
-## Prefer to run it yourself?
-
-Everything your agent does is a command you can run. The [CLI reference](/reference/cli/overview) has all of them, and this is the shape of it:
-
-```bash
-insta services add compute mysite --port <n>
-insta services add postgres db
-insta secrets bind DATABASE_URL postgres/db --to compute/mysite
-insta compute connect-repo railwayapp-templates/django mysite
-insta secrets set <NAME>                       # value read from stdin
-```
-
-Scale Railway to zero first, including workers and cron services, then move the data:
-
-```bash
-pg_dump --no-owner --no-privileges "$RAILWAY_DATABASE_URL" \
-  | grep -v -E '^SET transaction_timeout' \
-  | psql -v ON_ERROR_STOP=1 "$(insta db url --group db)"
-
-insta compute restart mysite
-```
-
-The `grep` drops one setting that Railway's Postgres writes and InstaCloud's does not recognise.
-
-Had a volume? Attach one and redeploy before you copy the files in. It mounts at `/data`, and only on the deploy after you attach it.
-
-```bash
-insta compute volume mysite --size 10
-insta compute restart mysite
-```
+Schema moves forward through migration files, not by merging databases. `insta branch merge` creates the services a branch added and nothing else crosses over, so keep every schema change in a migration file and it replays on the branch, then on main.
 
 ## Workers and cron services
 
@@ -123,4 +92,4 @@ A Railway worker becomes a second compute service. Give it a port to listen on a
 
 Railway cron services have no direct equivalent. Use `pg_cron`, which InstaCloud's Postgres ships, or run a scheduler inside an always-on service.
 
-And that is it. Stuck anywhere? Come to [Discord](https://discord.com/invite/MPxwj5xVvW).
+And that is it. Everything your agent ran is a command you can run yourself, and the [CLI reference](/reference/cli/overview) has all of them. Stuck anywhere? Come to [Discord](https://discord.com/invite/MPxwj5xVvW).

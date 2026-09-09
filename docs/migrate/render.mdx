@@ -86,37 +86,13 @@ Publish the records at your DNS provider, then ask your agent to check the domai
 
 ### 5. Branch the database
 
-Now that you are here, branch your database along with your code.
+A branch gets its own Postgres and its own compute. A schema change, a destructive test, or a second agent working in parallel therefore cannot reach your production data, which is what makes it safe to hand an agent a migration in the first place. Render has the same idea in preview environments, tied to a pull request and configured through a Blueprint. Here it is one command, so an agent can take a branch for a task before any pull request exists.
 
 ```text title="Prompt" wrap
 Create a branch called <name> and deploy the current code to it.
 ```
 
-There is nothing to migrate for this one. For most people it is the reason to move.
-
-## Prefer to run it yourself?
-
-Everything your agent does is a command you can run. The [CLI reference](/reference/cli/overview) has all of them, and this is the shape of it:
-
-```bash
-insta services add compute mysite --port <n>
-insta services add postgres mysitedb
-insta secrets bind DATABASE_URL postgres/mysitedb --to compute/mysite
-insta compute connect-repo render-examples/django mysite
-insta secrets set SECRET_KEY                   # value read from stdin
-```
-
-Scale Render to zero first, including workers and cron jobs, then move the data:
-
-```bash
-pg_dump --no-owner --no-privileges "$RENDER_DATABASE_URL" \
-  | grep -v -E '^SET transaction_timeout' \
-  | psql -v ON_ERROR_STOP=1 "$(insta db url --group mysitedb)"
-
-insta compute restart mysite
-```
-
-The `grep` drops one setting that Render's Postgres writes and InstaCloud's does not recognise.
+Schema moves forward through migration files, not by merging databases. `insta branch merge` creates the services a branch added and nothing else crosses over, so keep every schema change in a migration file and it replays on the branch, then on main.
 
 ## Workers and cron jobs
 
@@ -124,4 +100,4 @@ A Render background worker becomes a second compute service. Give it a port to l
 
 Render cron jobs have no direct equivalent. Use `pg_cron`, which InstaCloud's Postgres ships, or run a scheduler inside an always-on service.
 
-And that is it. Stuck anywhere? Come to [Discord](https://discord.com/invite/MPxwj5xVvW).
+And that is it. Everything your agent ran is a command you can run yourself, and the [CLI reference](/reference/cli/overview) has all of them. Stuck anywhere? Come to [Discord](https://discord.com/invite/MPxwj5xVvW).
