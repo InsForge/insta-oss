@@ -76,6 +76,8 @@ export class Router {
   private readonly lanes = new Map<string, LaneEntry>()
   private internal: Server | null = null
   private defaultContext: SecureContext | null = null
+  /** The same certificate as bytes: what `tls.Server.setSecureContext` takes. */
+  private defaultMaterial: { cert: Buffer; key: Buffer } | null = null
   /** The SNI lanes, so a certificate that arrives after they are listening can be pushed into them. */
   private readonly tlsLanes = new Set<TlsServer>()
   private readonly sockets = new Set<Duplex>()
@@ -292,7 +294,7 @@ export class Router {
     const s = createSniLane({
       cfg: this.cfg, upstream: this.deps.upstream, stateOf: this.deps.stateOf, wake: this.deps.wake,
       table: () => this.table(), touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
-      signal: this.abort.signal, secureContext: this.defaultContext, sniCallback: this.certs.sniCallback(() => this.defaultContext, (h) => this.table().byHost(h) !== undefined), log: this.log,
+      signal: this.abort.signal, defaultMaterial: this.defaultMaterial, sniCallback: this.certs.sniCallback(() => this.defaultContext, (h) => this.table().byHost(h) !== undefined), log: this.log,
     }, kind, bind, port)
     s.on('connection', (c: Socket) => this.track(c))
     this.tlsLanes.add(s)
@@ -314,6 +316,7 @@ export class Router {
     this.defaultContext = ctx
     const material = this.certs.materialFor(host)
     if (!material) return
+    this.defaultMaterial = material
     for (const s of this.tlsLanes) {
       try { s.setSecureContext(material) } catch { /* closing: a lane opened later gets it at creation */ }
     }

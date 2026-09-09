@@ -17,7 +17,11 @@ export interface SniLaneDeps extends WakeDeps {
   beginHold(key: ServiceKey): void
   endHold(key: ServiceKey): void
   signal: AbortSignal
-  secureContext?: SecureContext | null
+  /** The certificate the lane presents when the ClientHello carries NO SNI, as bytes. It is not a
+   *  `SecureContext`, because `tls.createServer` IGNORES a `secureContext` option: `tls.Server`
+   *  builds its own default from cert/key and `setSecureContext` is the only way to replace it.
+   *  Null on a box the edge has not issued `api.<domain>` for yet; the Router pushes it in later. */
+  defaultMaterial?: { cert: Buffer; key: Buffer } | null
   sniCallback?: (servername: string, cb: (err: Error | null, ctx?: SecureContext) => void) => void
   log?(msg: string): void
 }
@@ -26,10 +30,12 @@ export interface SniLaneDeps extends WakeDeps {
  *  lane is closed after the handshake (a clean close beats a TLS alert: the client sees the port). */
 export function createSniLane(deps: SniLaneDeps, kind: ManagedDbType, bind: string, port: number): TlsServer {
   const log = deps.log ?? ((m: string) => console.warn(m))
-  // The default context is `api.<domain>`, so a client with no SNI completes the handshake and gets
-  // a close instead of an opaque handshake failure (decision 21). `tls.Server` reads it once, so the
-  // Router pushes a later certificate in with `setSecureContext` (refreshDefaultContext).
-  const server = createServer({ secureContext: deps.secureContext ?? undefined, SNICallback: deps.sniCallback, minVersion: 'TLSv1.2' })
+  // The default certificate is `api.<domain>`, so a client with no SNI completes the handshake and
+  // gets a close instead of an opaque handshake failure (decision 21). It has to go in through
+  // `setSecureContext`; the Router calls the same method again for a certificate that arrives after
+  // the lane is already listening (refreshDefaultContext).
+  const server = createServer({ SNICallback: deps.sniCallback, minVersion: 'TLSv1.2' })
+  if (deps.defaultMaterial) server.setSecureContext(deps.defaultMaterial)
   server.on('secureConnection', (sock: TLSSocket) => { void handle(sock) })
   server.on('tlsClientError', () => { /* a scanner or a client with no trust: nothing to log per packet */ })
   server.on('error', (e) => log(`router: ${kind} lane ${bind}:${port}: ${e.message}`))

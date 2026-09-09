@@ -778,10 +778,23 @@ test('the redis SNI lane treats -LOADING as not ready and +PONG as ready', async
     stateOf: () => (fake.addrs.size ? 'running' : 'asleep'),
     wake: async () => { wakes++; fake.addrs.set('io-demo-main-rd-cache', { host: '127.0.0.1', port: upPort }) },
     touch: () => { /* stamped */ }, beginHold: () => { /* held */ }, endHold: () => { /* released */ },
-    upstream: fake, signal: ctrl.signal, secureContext: defaultCtx, sniCallback: certs.sniCallback(defaultCtx),
+    upstream: fake, signal: ctrl.signal, defaultMaterial: certs.materialFor('api.router.test'), sniCallback: certs.sniCallback(defaultCtx),
     log: () => { /* quiet */ },
   }, 'redis', '127.0.0.1', 0)
   const port = await listenEphemeral(lane)
+
+  // A ClientHello with NO SNI must still complete the handshake on the default certificate: the
+  // client then reads a close and can see the port, instead of an opaque alert with nothing behind
+  // it. `tls.createServer` ignores a `secureContext` option, so this only holds while the lane
+  // installs the certificate with `setSecureContext` (decision 21).
+  const bare = tlsConnect({ host: '127.0.0.1', port, rejectUnauthorized: false })
+  const bareHandshake = await new Promise<boolean>((resolve) => {
+    bare.once('secureConnect', () => resolve(true))
+    bare.once('error', () => resolve(false))
+    setTimeout(() => resolve(false), 3000)
+  })
+  expect(bareHandshake).toBe(true)
+  bare.destroy()
 
   const c = tlsConnect({ host: '127.0.0.1', port, servername: 'redis-cache-demo-main.router.test', rejectUnauthorized: false })
   const spliced = await new Promise<boolean>((resolve) => {
