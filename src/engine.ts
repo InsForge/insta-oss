@@ -2001,13 +2001,14 @@ export class Engine {
     const fromLegacyUrl = prior && !prior.host && prior.url ? Number(new URL(prior.url).port) || undefined : undefined
     // A port the caller named and the port the row already holds are honoured as they are: a
     // redeploy has to keep the port it published, and a caller who asked for one gets docker's own
-    // error if it is busy. Only the DEFAULT can collide by accident, and it does: the container's
-    // own port is the same number for every instance, so a second deploy of one template, or two
-    // apps that both listen on 3000, would fail at `docker start` with "port is already allocated".
+    // error if it is busy. The DEFAULT is never the container's own port: it is the same number for
+    // every instance (two apps on 3000, a second deploy of one template), it squats a well known
+    // host port the box may already be using, and a privileged one (an image serving 80) cannot be
+    // published at all where docker runs inside a VM. It comes out of the lane range instead, which
+    // is one loopback port space with the database lanes.
     const pinned = opts.hostPort ?? prior?.hostPort ?? fromLegacyUrl
     if (pinned !== undefined) return pinned
-    const taken = this.takenLanePorts(loadState(), { branchId: branch.id, group })
-    return taken.has(opts.port) ? this.nextLanePort(taken) : opts.port
+    return this.nextLanePort(this.takenLanePorts(loadState(), { branchId: branch.id, group }))
   }
 
   /** The services() row's network columns: `domain` is the bare hostname, `endpoint` is `host[:port]`
