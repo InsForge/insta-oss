@@ -16,7 +16,8 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@fastify/static": "^7.0.4",
-    "fastify": "^4.28.0"
+    "fastify": "^4.28.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
