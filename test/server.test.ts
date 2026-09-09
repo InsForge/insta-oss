@@ -723,7 +723,7 @@ test('database metrics/activity/query-stats run SQL with the cloud shapes', asyn
   expect((await get('/projects/nope/database/metrics')).statusCode).toBe(404)
 })
 
-test('service rename: re-keys group, containers, bindings; conflicts 409; pg/storage 501', async () => {
+test('service rename: re-keys group, containers, bindings; conflicts 409; postgres moves its container', async () => {
   const id = await createProject()
   await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
   await put(`/projects/${id}/secrets/API_KEY`, { value: 'v', branch: 'main', service: 'compute/api' })

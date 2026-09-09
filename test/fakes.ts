@@ -138,4 +138,8 @@ export function resetFakes(): void {
 // ---- region WP4 (data dir) ----
 // ---- end region WP4 ----
 // ---- region WP5 (templates/parity) ----
+// No new fake: WP5 drives the SAME four adapters, once per registered service instead of once per
+// branch, so `db.provision:<container>` / `st.provision:<ref>:<name>` / `st.access:<bucket>:<bool>`
+// above already record every call it makes. The template catalog reads the real `templates/`
+// directory and the executor's health probe is injected per test (test/templates.test.ts).
 // ---- end region WP5 ----
