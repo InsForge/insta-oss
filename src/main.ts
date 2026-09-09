@@ -17,6 +17,10 @@ import { acquireLock, initStatePath, loadState, releaseLock } from './state'
 // ---- region WP4 (data dir) ----
 import { capabilitiesLine, sharedDataDir } from './datadir'
 // ---- end region WP4 ----
+// ---- region WP3 (scheduler) ----
+import { DockerRuntime } from './scheduler'
+import { Upstream } from './upstream'
+// ---- end region WP3 ----
 // ---- region WP5 (templates/parity) ----
 import { TemplateCatalog } from './templates/catalog'
 // ---- end region WP5 ----
@@ -75,7 +79,11 @@ async function main(): Promise<void> {
   if (caps.warning) console.warn(`warning: ${caps.warning}`)
   // ---- end region WP4 (probe) ----
   // ---- region WP3 (upstream) ----
-  // Upstream + DockerRuntime; passed as EngineOptions.upstream
+  // ONE Upstream for the whole daemon (decision 57): the runtime probes through it, the scheduler
+  // invalidates it after every sleep and wake, and the router reads it back off the engine, so no
+  // lane can dial an address the container no longer owns.
+  const upstream = new Upstream(cfg)
+  const runtime = new DockerRuntime(cfg, upstream)
   // ---- end region WP3 (upstream) ----
   // ---- region WP5 (catalog) ----
   // The bundled template registry. Reads no file until a route asks, so a missing or unreadable
@@ -84,7 +92,7 @@ async function main(): Promise<void> {
   // ---- end region WP5 (catalog) ----
 
   const storage = new LocalGarage({ configPath: cfg.garageConfigPath, hostEndpoint: cfg.s3HostEndpoint, mode: cfg.mode, domain: cfg.domain })
-  const engine = new Engine(new LocalPostgres(), new DockerCompute(), storage, new LocalManagedDb(), { cfg, templates })
+  const engine = new Engine(new LocalPostgres(), new DockerCompute(), storage, new LocalManagedDb(), { cfg, templates, upstream, runtime })
 
   // ---- region WP4 (migrate) ----
   // One boot migration of installs that stored data in docker volumes, BEFORE the router and the
@@ -132,7 +140,10 @@ async function main(): Promise<void> {
   await router.start()
   // ---- end region WP2 (start) ----
   // ---- region WP3 (start) ----
-  // engine.scheduler.start()
+  // Last: the boot reconcile stamps every service with a full idle window and the ticker begins.
+  // After the lanes, so a wake it triggers has somewhere to answer (and after the data migration,
+  // which `engine.booting` kept the sweep out of).
+  engine.scheduler.start()
   // ---- end region WP3 (start) ----
 
   if (cfg.mode === 'server') {
@@ -165,7 +176,9 @@ async function main(): Promise<void> {
     await router.stop()
     // ---- end region WP2 (stop) ----
     // ---- region WP3 (stop) ----
-    // await engine.scheduler.stop()
+    // After the lanes, before app.close(): the ticker stops and an in-flight sweep is awaited, so
+    // no `docker stop` is left running into the compose grace.
+    await engine.scheduler.stop()
     // ---- end region WP3 (stop) ----
     await Promise.race([app.close(), sleep(10_000)])
     releaseLock()
