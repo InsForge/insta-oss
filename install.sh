@@ -25,7 +25,8 @@
 #   -y                               accepted; the script never prompts
 # Every other INSTA_OSS_* variable present in the environment is written into instad.env as is.
 # Precedence for every value: flag, then environment, then the existing instad.env, then default.
-# Requirements: root, Linux, x86_64 or aarch64, 2 vCPU, 2 GiB RAM, 15 GiB free, ports 80/443/5432.
+# Requirements: root, Linux, x86_64 or aarch64, 2 vCPU, 2 GiB RAM, 15 GiB free disk, and the ports
+# 80, 443, 8080, 8081, 5432, 6379 and 27017 free (each refusal names the key that moves it).
 set -eu
 
 # ---- constants ----
@@ -74,7 +75,7 @@ resolve() {
 }
 # The header comment is the usage text; under `curl ... | sh` there is no file to read, so point at it.
 usage() {
-  if [ -r "$0" ]; then sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+  if [ -r "$0" ]; then sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
   else log 'usage: see the header comment of install.sh (https://github.com/InsForge/insta-oss/blob/main/install.sh)'
   fi
 }
@@ -511,7 +512,12 @@ fi
 # `branch create` fails with "could not find an available, non-overlapping IPv4 address pool".
 ensure_pools() {
   if [ -f "$DAEMON_JSON" ] && grep -q '"default-address-pools"' "$DAEMON_JSON"; then
-    warn "$DAEMON_JSON already sets default-address-pools ($POOL_BASES): left as is; each branch needs one network"
+    _p=$(printf '%s' "$POOL_BASES" | sed 's/  *$//')
+    # The pools this script writes are the normal state of an installed box, so seeing them on an
+    # upgrade is not a warning. Anything else is: it caps the box at that many branch networks.
+    if [ "$_p" = "$POOL_BASE_DEFAULT" ]; then log "$DAEMON_JSON already sets default-address-pools ($_p)"
+    else warn "$DAEMON_JSON already sets default-address-pools ($_p): left as is; each branch needs one network"
+    fi
     return
   fi
   if [ -f "$DAEMON_JSON" ] && [ -n "$(tr -d ' \t\r\n{}' < "$DAEMON_JSON")" ]; then
@@ -598,7 +604,7 @@ chmod 700 "$DATA"
 # operator copies out of this script and a name that resolves somewhere else is silent.
 NAT_NOTE=''
 if [ "$DOMAIN_AUTO" = 1 ]; then
-  log "domain: $DOMAIN (auto, from the public IP; pass --domain to use your own)"
+  log "domain: $DOMAIN (auto, from the address it detected; pass --domain to use your own)"
 else
   log "domain: $DOMAIN"
 fi
