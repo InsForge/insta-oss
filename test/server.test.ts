@@ -203,6 +203,10 @@ test('every cloud-only or not-yet route answers a clean 501, never a bare 404', 
   }
   const notYetRoutes: Array<[string, string]> = [
     ['GET', '/projects/x/deploy-events'],
+    // `insta secrets bind` / `unbind` / `bindings` / `sources` all reach these three.
+    ['GET', '/projects/x/secret-bindings'],
+    ['PUT', '/projects/x/secret-bindings/MY_VAR'],
+    ['DELETE', '/projects/x/secret-bindings/MY_VAR'],
   ]
   for (const [method, url] of notYetRoutes) {
     const r = await app.inject({ method: method as 'GET', url })
