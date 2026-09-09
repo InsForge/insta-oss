@@ -72,6 +72,13 @@ assertions, both contract-backed:
   branch and project rename cases, the legacy row, the two-postgres case, and the `templates.test.ts`
   binding case) now pins the lane form, and where the hostname used to carry the service identity
   the assertion compares against that service's own `credentials` answer instead.
+- The same rule for `AWS_ENDPOINT_URL_S3`: host-facing (`INSTA_OSS_S3_HOST_ENDPOINT`, local
+  `http://127.0.0.1:3900`) in `secrets` and `credentials`, the stored `http://io-garage:3900` in a
+  deploy env, which is what contract section 10 says and what `e2e/local-smoke.sh` needs for its s3
+  round trip from the host. Two Docker-suite consequences for this pass: `test/storage.int.test.ts`
+  drives its in-container rclone with the in-container endpoint explicitly (and asserts the bundle is
+  host-facing), and `io-garage` is one exported constant (`GARAGE_CONTAINER` in `src/manageddb.ts`),
+  which is what `test/install.test.ts` now checks for decision 46.
 
 ## Docker test sequence (integrator, final pass on the assembled branch)
 
