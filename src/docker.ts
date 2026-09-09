@@ -1,5 +1,44 @@
 import { spawn } from 'node:child_process'
 
+/** Flags whose NEXT argument is a secret: `-e K=V` carries every credential a service runs with
+ *  (DATABASE_URL, POSTGRES_PASSWORD, PGPASSWORD, the S3 keys), and `psql -tAc <sql>` carries the
+ *  statement, which for `alter user postgres with password '...'` is the new password in clear. */
+const SECRET_VALUE_FLAGS: ReadonlySet<string> = new Set(['-e', '--env', '-c', '-tAc', '-Atc', '--command'])
+/** A DSN with an inline password, wherever it appears (a positional `pg_dump <url>`, an `--option=`). */
+const DSN_RE = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^:/?#\s]+:)[^@\s]+@/g
+
+const redactPair = (arg: string): string => {
+  const eq = arg.indexOf('=')
+  return eq === -1 ? '[redacted]' : `${arg.slice(0, eq)}=[redacted]`
+}
+
+/**
+ * The argv as it may be shown to a human. A failed `docker create`/`exec` message is not only
+ * logged: it becomes the 500 body of `POST /deploy`, and the template executor PERSISTS it on the
+ * deployment row in state.json. Redaction here is what keeps a credential out of all three.
+ */
+export function redactDockerArgs(args: readonly string[]): string {
+  const out: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (SECRET_VALUE_FLAGS.has(a) && i + 1 < args.length) {
+      out.push(a, redactPair(args[i + 1]))
+      i++
+      continue
+    }
+    if (a.startsWith('--env=')) { out.push(`--env=${redactPair(a.slice(6))}`); continue }
+    out.push(a.replace(DSN_RE, '$1[redacted]@'))
+  }
+  return out.join(' ')
+}
+
+/** Hard ceiling on what one `docker` call may buffer in the daemon's heap. `docker logs --tail`
+ *  is bounded by its line COUNT, never by their length, so one container writing a single huge
+ *  line would otherwise be an out-of-memory lever on the whole daemon. */
+export const DOCKER_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+/** stderr is only ever quoted into an error message, so it needs far less room than stdout. */
+const MAX_STDERR_BYTES = 64 * 1024
+
 /** Run the `docker` CLI, capture stdout as a Buffer, feed optional stdin. Rejects on non-zero exit.
  *  `mergeStderr` folds stderr into the captured output — `docker logs` replays the container's own
  *  stderr stream there (Postgres logs entirely to stderr), which is data, not error noise. */
@@ -7,15 +46,34 @@ export function docker(args: string[], opts: { input?: Buffer; mergeStderr?: boo
   return new Promise((resolve, reject) => {
     const p = spawn('docker', args, { stdio: ['pipe', 'pipe', 'pipe'] })
     const out: Buffer[] = []
+    let outBytes = 0
+    let overflowed = false
     let err = ''
-    p.stdout.on('data', (d: Buffer) => out.push(d))
-    p.stderr.on('data', (d: Buffer) => { if (opts.mergeStderr) out.push(d); else err += d.toString() })
+    const keep = (d: Buffer): void => {
+      if (overflowed) return
+      if (outBytes + d.length > DOCKER_MAX_OUTPUT_BYTES) {
+        overflowed = true
+        p.kill('SIGKILL')
+        return
+      }
+      out.push(d)
+      outBytes += d.length
+    }
+    p.stdout.on('data', keep)
+    p.stderr.on('data', (d: Buffer) => {
+      if (opts.mergeStderr) keep(d)
+      else if (err.length < MAX_STDERR_BYTES) err += d.toString()
+    })
     p.on('error', reject)
-    p.on('close', (code) =>
-      code === 0
-        ? resolve(Buffer.concat(out))
-        : reject(new Error(`docker ${args.join(' ')} -> exit ${code}: ${err.trim()}`)),
-    )
+    p.on('close', (code) => {
+      if (overflowed) {
+        reject(new Error(`docker ${redactDockerArgs(args)} -> output exceeded ${DOCKER_MAX_OUTPUT_BYTES} bytes`))
+        return
+      }
+      if (code === 0) resolve(Buffer.concat(out))
+      else reject(new Error(`docker ${redactDockerArgs(args)} -> exit ${code}: ${err.trim()}`))
+    })
+    p.stdin.on('error', () => { /* the child exited before it read stdin (killed on overflow) */ })
     p.stdin.end(opts.input ?? undefined)
   })
 }
