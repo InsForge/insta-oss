@@ -135,6 +135,31 @@ insta events                 # service.sleep and service.wake entries
 
 The dashboard shows the same thing as **Sleeping**, with a Wake button.
 
+## Why a public app keeps waking up
+
+On a box with a public domain this is the first thing that looks like a bug, and it is not one.
+
+The edge issues a certificate the first time somebody asks for a hostname over HTTPS. Every
+certificate a public authority issues is published to the certificate transparency logs, and those
+logs are read continuously by scanners. Within minutes of that first request, more requests start
+arriving from hosts nobody invited. They are ordinary HTTP requests, so they count as activity, so
+they wake the service, and an operator watching `docker ps` sees containers coming back on their
+own and concludes scale to zero is broken.
+
+We measured it on a public box. A control service whose hostname never received a public
+certificate slept on schedule twice in a row, while the services with published names were woken
+by traffic nobody sent on purpose.
+
+What to do about it depends on what the service is for.
+
+- A service meant to be public will be woken by scanners. The cost is an extra wake now and then,
+  a second or two of startup each, not a service that never sleeps.
+- A service not meant to be public should not have a public name. Install with `--tls internal`
+  and the edge uses its own CA, which publishes nothing, or keep the name off public DNS.
+- To see what woke something, read `insta events --json`. Every `service.wake` carries the door it
+  came in on, `traffic`, `api` or `deploy`, so a run of `traffic` wakes with no deploy near them is
+  the scanners. The event does not record who sent the request; `insta logs` on the service does.
+
 ## The edge to know about
 
 Activity means traffic. A container that is busy with a long computation and receives nothing from
