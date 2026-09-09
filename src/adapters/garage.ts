@@ -58,6 +58,8 @@ export class LocalGarage implements StorageAdapter {
     if (!existsSync(p)) {
       const server = this.opts.mode === 'server'
       mkdirSync(dirname(p), { recursive: true })
+      // 0600: the file carries `rpc_secret`. Both garage images run as root, so the container
+      // still reads it through the read-only bind (install.sh writes the same file the same way).
       writeFileSync(p, [
         'metadata_dir = "/var/lib/garage/meta"',
         'data_dir = "/var/lib/garage/data"',
@@ -74,7 +76,7 @@ export class LocalGarage implements StorageAdapter {
         `root_domain = "${server ? `.s3.${this.opts.domain}` : '.web.garage.localhost'}"`,
         'index = "index.html"',
         '',
-      ].join('\n'))
+      ].join('\n'), { mode: 0o600 })
     }
     return p
   }

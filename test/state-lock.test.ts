@@ -1,7 +1,7 @@
 // WP1 state.json discipline (plan 01 section 7) and the one-daemon-per-data-dir lock (section 8).
 // No Docker, no server: fs plus the state module.
 import { test, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as st from '../src/state'
@@ -160,4 +160,15 @@ test('resetAdmin on a fresh daemon reports that no admin exists', () => {
   const logs: string[] = []
   expect(resetAdmin(cfg, { log: (m) => logs.push(m), error: () => {} })).toBe(0)
   expect(logs.join()).toContain('no admin exists')
+})
+
+test('state.json is written 0600: it holds every database password, S3 key and operator secret', () => {
+  st.saveState(st.loadState())
+  expect(statSync(file).mode & 0o777).toBe(st.STATE_FILE_MODE)
+  expect(st.STATE_FILE_MODE).toBe(0o600)
+  // A file an older build left world readable is repaired by the next write, because the tmp file
+  // the rename replaces it with is created fresh with the mode.
+  chmodSync(file, 0o644)
+  st.saveState(st.loadState())
+  expect(statSync(file).mode & 0o777).toBe(0o600)
 })

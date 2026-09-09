@@ -642,7 +642,10 @@ fi
 mkdir -p "$CFG"
 TOML=$DATA/garage/garage.toml
 if [ ! -f "$TOML" ]; then
-  render_garage_toml "$(randhex 32)" > "$TOML"
+  # 0600: the file carries rpc_secret. The garage image runs as root, so the read-only bind still
+  # reads it (src/adapters/garage.ts writes the same file with the same mode).
+  (umask 077 && render_garage_toml "$(randhex 32)" > "$TOML")
+  chmod 600 "$TOML"
 elif [ "$DOMAIN_CHANGED" = 1 ]; then
   sed -i "s/^root_domain = .*/root_domain = \".s3.$DOMAIN\"/" "$TOML"
 fi

@@ -13,7 +13,7 @@
 //     write every 30 s; releaseLock() and initStatePath() flush it.
 // Activity stamps, in-flight markers, RSS samples, rate-limiter buckets and wake singleflight maps
 // never touch this file.
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -104,6 +104,14 @@ export function stateRev(): number { return current()?.rev ?? 0 }
 /** Called after every saveState with the saved document and its class; the router subscribes to rebuild its table on 'routing' saves. */
 export function onSave(cb: (s: State, kind: SaveKind) => void): void { subscribers.push(cb) }
 
+/** state.json holds every credential the daemon minted: the Postgres and managed-database
+ *  passwords in their DSNs, the Garage access keys, and every secret an operator set. It is written
+ *  0600, like `config.ts` writes the session secret, rather than left at the default 0644 inside a
+ *  directory whose mode is the only thing protecting it (and which is not 0700 when
+ *  INSTA_OSS_STATE points somewhere the daemon had to create). The tmp file carries the same bytes,
+ *  so it is created with the same mode and the rename keeps it. */
+export const STATE_FILE_MODE = 0o600
+
 /** tmp + rename; bumps rev (default) or auditRev (`{ audit: true }`); trims events to EVENTS_CAP; refreshes the parse cache; notifies subscribers. */
 export function saveState(s: State, opts: { audit?: boolean } = {}): void {
   const kind: SaveKind = opts.audit ? 'audit' : 'routing'
@@ -111,10 +119,13 @@ export function saveState(s: State, opts: { audit?: boolean } = {}): void {
   else s.rev = (s.rev ?? 0) + 1
   if (Array.isArray(s.events) && s.events.length > EVENTS_CAP) s.events = s.events.slice(-EVENTS_CAP)
   const p = statePath()
-  mkdirSync(dirname(p), { recursive: true })
+  mkdirSync(dirname(p), { recursive: true, mode: 0o700 })
   const json = JSON.stringify(s, null, 2)
   const tmp = `${p}.tmp-${process.pid}-${++tmpSeq}`
-  writeFileSync(tmp, json)
+  writeFileSync(tmp, json, { mode: STATE_FILE_MODE })
+  // writeFileSync applies `mode` only when it CREATES the file, and a tmp name is fresh every
+  // time, so this also repairs a state.json an older build left at 0644.
+  chmodSync(tmp, STATE_FILE_MODE)
   renameSync(tmp, p)
   const key = statKey(p)
   cache = key ? { path: p, key, doc: parseDoc(json) } : null

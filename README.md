@@ -17,7 +17,9 @@ branch  = a disposable, fully isolated clone of all three
 
 ## Install on a VPS
 
-Ubuntu 22.04+ or Debian 12+, 2 vCPU, 2 GiB RAM, ports 80, 443 and 5432 free. As root:
+Ubuntu 22.04+ or Debian 12+, 2 vCPU, 2 GiB RAM, 15 GiB free disk, and the ports 80, 443, 8080,
+8081, 5432, 6379 and 27017 free. The installer refuses to start when one of them is taken, and
+each refusal names the key that moves it. As root:
 
 ```bash
 curl -fsSL https://get.instacloud.com | sh
