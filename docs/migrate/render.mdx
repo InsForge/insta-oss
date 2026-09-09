@@ -17,7 +17,7 @@ InstaCloud offers:
 
 We will migrate [Render's own Django example](https://github.com/render-examples/django), a Python web service with a Postgres database. Substitute your own names as you go.
 
-Its `render.yaml` holds the whole shape of the problem:
+Here is its `render.yaml`:
 
 ```yaml
 databases:
@@ -40,16 +40,12 @@ services:
         value: 4
 ```
 
-Each of those moves differently:
-
-| In `render.yaml` | On InstaCloud |
+| On Render | On InstaCloud |
 |---|---|
-| the `mysite` web service | a **compute** service |
-| the `mysitedb` database | a **postgres** service |
-| `runtime: python`, no Dockerfile | nixpacks, detected on the server |
+| Web service | a **compute** service |
+| Render Postgres | a **postgres** service |
+| Environment variables | project secrets |
 | `DATABASE_URL` via `fromDatabase` | a binding, not a copied string |
-| `SECRET_KEY` via `generateValue` | only Render has this one: copy it before you leave |
-| `WEB_CONCURRENCY: 4` | a plain project secret |
 
 Workers and cron jobs are at the end of the page.
 

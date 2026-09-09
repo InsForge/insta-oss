@@ -17,7 +17,7 @@ InstaCloud offers:
 
 We will migrate [Railway's own Django template](https://github.com/railwayapp-templates/django), a Python service with a Postgres database. Substitute your own names as you go.
 
-Two files tell you what has to move. `railway.json` says how it was built:
+Its `railway.json` says how it was built:
 
 ```json
 {
@@ -36,16 +36,13 @@ And `mysite/settings.py` says how it reaches the database:
 'PORT':     os.environ["PGPORT"],
 ```
 
-Each of those moves differently:
-
 | On Railway | On InstaCloud |
 |---|---|
-| the service, built by Railpack | a **compute** service, built with nixpacks |
-| the Postgres service | a **postgres** service |
-| the five `PG*` variables | one bound `DATABASE_URL` |
-| a `${{Postgres.DATABASE_URL}}` reference | a binding |
-| other variables | plain project secrets |
-| a volume | `insta compute volume`, mounted at `/data` |
+| Service | a **compute** service |
+| Railway Postgres | a **postgres** service |
+| Variables | project secrets |
+| A `${{Postgres.DATABASE_URL}}` reference | a binding |
+| Volume | `insta compute volume`, mounted at `/data` |
 
 **One code change first.** InstaCloud hands Postgres to your app as a single `DATABASE_URL`, so an app reading the five `PG*` variables needs to read the DSN instead. In Django that is `dj-database-url`, and most other stacks take a DSN directly. Make the change in the repo now, so your first deploy on InstaCloud is already correct.
 
