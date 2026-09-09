@@ -87,8 +87,11 @@ have work to flush.
   and it is not the same thing as the app being ready to answer: an app that binds its port early
   and mounts its routes later will take the forwarded request and answer it out of its own
   half-built stack, so the first page after a wake can come back 404 or 502 from the app rather
-  than slow. The declared template healthcheck gates a deploy, not a wake. Databases are probed on
-  the wire instead, so they do not have this window.
+  than slow. The declared template healthcheck gates a deploy, not a wake, and for a slow app it
+  would not close the window anyway: the measured case answered its own healthcheck several
+  seconds before it would serve a page. Always-on is the answer, which is why the bundled
+  templates that boot slowly declare it. Databases are probed on the wire instead, so they do not
+  have this window.
 - **`insta compute start`**, and any management call that needs the service up.
 - **A deploy**, which starts the replacement container.
 
