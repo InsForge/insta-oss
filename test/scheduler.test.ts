@@ -239,6 +239,31 @@ test('the create grace comes from the ROW, so a restart does not grant a fresh o
   expect(calls.some((c) => c.startsWith(`runtime.stop:${young.container}`))).toBe(false)
 })
 
+test('a candidate that answers a request while an earlier batch is stopping is left alone, and one failing stop costs only itself', async () => {
+  const h = harness()
+  // Six candidates, so the sweep runs two batches of four and two: the second batch starts only
+  // after the first batch's docker stops have all been awaited.
+  const keys = ['a', 'b', 'c', 'd', 'e', 'f'].map((n) => `11111111-1111-1111-1111-111111111111:cp-${n}` as const)
+  const targets = keys.map((k, i) => h.add(k, { container: `io-x-app-${'abcdef'[i]}` }))
+  vi.advanceTimersByTime(301_000)                                  // every one of them is idle now
+  const late = keys[5]
+  const realStop = h.runtime.stop.bind(h.runtime)
+  h.runtime.stop = async (c, g) => {
+    if (c === targets[0].container) {
+      h.sched.touch(late)                                          // a request lands mid-sweep
+      throw new Error('docker stop timed out')                     // ...and this stop fails
+    }
+    await realStop(c, g)
+  }
+  await h.sched.sweep()
+  const stopped = calls.filter((c) => c.startsWith('runtime.stop:')).map((c) => c.split(':')[1])
+  // The failure cost one service, not the pass: b..e all slept.
+  expect(stopped).toEqual(targets.slice(1, 5).map((t) => t.container))
+  expect(targets[0].sleptAt).toBeNull()
+  // ...and the one that answered a request is NOT stopped on a stamp taken before it did.
+  expect(targets[5].sleptAt).toBeNull()
+})
+
 test('boot performs no eviction: nothing is stopped below the floor until the first sweep tick', async () => {
   const h = harness({ INSTA_OSS_SCHEDULER: '0', INSTA_OSS_RAM_FLOOR_PCT: '15' })
   const t = h.add(K)

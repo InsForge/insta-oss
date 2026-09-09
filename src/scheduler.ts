@@ -380,7 +380,26 @@ export class Scheduler {
       .filter((t) => this.isIdleCandidate(t, now))
       .sort((a, b) => this.rec(a.key).lastActiveAt - this.rec(b.key).lastActiveAt)
     for (let i = 0; i < candidates.length; i += SLEEP_CONCURRENCY) {
-      await Promise.all(candidates.slice(i, i + SLEEP_CONCURRENCY).map((t) => this.sleep(t.key, 'idle')))
+      const batch = candidates.slice(i, i + SLEEP_CONCURRENCY)
+      // allSettled, not all: one docker stop that times out must cost one service on one tick, not
+      // the rest of the pass and the pressure pass behind it (plan 03: errors logged, retried next
+      // pass).
+      const results = await Promise.allSettled(batch.map(async (t) => {
+        // The rule is re-read for each candidate at the moment IT is stopped, not once for the pass:
+        // every earlier batch awaited a stop that can burn the whole grace (10 s compute, 30 s
+        // databases), so with a dozen candidates the third batch starts a minute after `now` was
+        // taken. A service that answered a request in between leaves no other trace the sweep sees
+        // (a running upstream is dialled directly, with no wake and no op), and this check runs in
+        // the same synchronous step that reserves the key's lock, so nothing slips between them.
+        if (!this.isIdleCandidate(t, Date.now())) return false
+        return this.sleep(t.key, 'idle')
+      }))
+      for (const [n, r] of results.entries()) {
+        if (r.status === 'rejected') {
+          const e = r.reason
+          console.warn(`warn: sleep ${batch[n].key} failed: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
     }
     await this.evictForRoom(0, new Set())
   }
