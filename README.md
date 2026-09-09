@@ -222,6 +222,9 @@ On a server, stop the stack instead and keep the data:
 cd /etc/instacloud && docker compose down
 ```
 
+Removing the install completely, data and mounts included, is
+[Uninstall](docs/self-hosting/install.mdx#uninstall).
+
 To remove only the project containers there, filter by project so the stack itself survives:
 
 ```bash

@@ -29,8 +29,10 @@ curl -fsSL https://raw.githubusercontent.com/InsForge/insta-oss/main/install.sh 
 ## What the script does
 
 1. Renders and exits for any `--print-*` flag, with no root and no side effects.
-2. Checks preconditions: root, Linux, a supported architecture, `curl`, `ss`. An existing
-   `/etc/instacloud/instad.env` puts it in upgrade mode.
+2. Checks preconditions: root, Linux, a supported architecture. It installs `curl` and `iproute2`
+   when the box does not have them, before it resolves anything, because it needs `curl` for the
+   release tag and the public address and `ip` and `ss` for the address fallback and the port
+   check. An existing `/etc/instacloud/instad.env` puts it in upgrade mode.
 3. Checks ports and refuses when any of them is taken, naming the holder: 80 and 443 for the edge,
    8080 and 8081 for the daemon, and 5432, 6379 and 27017 for the three database lanes. The daemon
    binds all three lanes at startup and exits if one is busy, so a busy lane port is a refusal, not
@@ -40,7 +42,8 @@ curl -fsSL https://raw.githubusercontent.com/InsForge/insta-oss/main/install.sh 
    `docker0` to the host on 443, 5432, 6379, 27017 and 20000 to 20999. Under `firewalld`: the same
    ports in the `docker` zone. Both are idempotent and every rule is printed. `--print-firewall`
    shows the list without touching anything.
-5. Installs Docker when missing, enables it, and requires `docker compose version`.
+5. Installs Docker when missing, enables it, requires `docker compose version`, and starts the
+   daemon when it is installed but not answering.
 6. Writes `/etc/docker/daemon.json` with `default-address-pools` and restarts Docker, on a fresh
    Docker install or when the file has no such key. See [Docker address
    pools](#docker-address-pools) for why.
@@ -149,6 +152,35 @@ truncate -s +20G /var/lib/instacloud.img
 losetup -c "$(findmnt -no SOURCE /var/lib/instacloud)"
 xfs_growfs /var/lib/instacloud
 ```
+
+## Uninstall
+
+Stop the stack and keep every byte of data:
+
+```bash
+cd /etc/instacloud && docker compose down
+```
+
+Re-running the installer brings it back with the same domain, the same secret and the same data.
+
+Remove the whole install instead, data included. This deletes every project on the box:
+
+```bash
+cd /etc/instacloud && docker compose down
+docker ps -aq --filter name=io- | xargs -r docker rm -f
+docker network ls -q --filter name=io- | xargs -r docker network rm
+rm -rf /etc/instacloud
+umount /var/lib/instacloud 2>/dev/null
+sed -i '\|/var/lib/instacloud|d' /etc/fstab
+rm -rf /var/lib/instacloud /var/lib/instacloud.img
+```
+
+The `umount` and the `sed` matter only when the installer created a loop image, and both are safe
+to run when it did not. Two things are left behind on purpose:
+
+- `/etc/docker/daemon.json`, because taking the address pool back out needs another Docker restart.
+  Delete the file and run `systemctl restart docker` when you want the stock pools again.
+- Docker itself, even when the installer is what put it there.
 
 ## Security posture
 
