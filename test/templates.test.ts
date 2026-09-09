@@ -441,6 +441,38 @@ test('the per-type cap is enforced synchronously, before any service is created'
   expect(Object.keys(loadState().templateDeployments ?? {})).toHaveLength(0)
 })
 
+// The DEFAULT probe (decision 58): one request to the daemon's own HTTP port carrying the service's
+// Host header, which is the router's HTTP lane. It never resolves the public name (on a NAT'd or
+// sslip.io box that name may not point back at this machine) and never speaks TLS.
+test('the default health probe dials 127.0.0.1:<cfg.port> with the service Host, not the public name', async () => {
+  const { createServer } = await import('node:http')
+  const seen: Array<{ url?: string; host?: string; proto?: string }> = []
+  const stand = createServer((req, res) => {
+    seen.push({ url: req.url, host: req.headers.host, proto: req.headers['x-forwarded-proto'] as string | undefined })
+    res.writeHead(200).end('ok')
+  })
+  const port = await new Promise<number>((resolve) => stand.listen(0, '127.0.0.1', () => {
+    const a = stand.address()
+    resolve(typeof a === 'object' && a ? a.port : 0)
+  }))
+  try {
+    // No injected probe: this engine uses the executor's own default.
+    const cfg = fastConfig({ INSTA_OSS_PORT: String(port) })
+    const plain = makeEngine(cfg)
+    const server = buildServer(plain, cfg)
+    const id = (await server.inject({ method: 'POST', url: '/orgs/local/projects', payload: { name: 'demo' } })).json().project.id
+    const manifest = { code: 'probe', version: '1', services: { web: { type: 'web', image: 'i', port: 8080, healthcheck: '/healthz?x=1' } } }
+    const r = await server.inject({ method: 'POST', url: `/projects/${id}/template-deployments`, payload: { manifest, branch: 'main' } })
+    expect(r.statusCode).toBe(202)
+    await plain.executor.idle()
+    expect((await server.inject({ method: 'GET', url: `/template-deployments/${r.json().deploymentId}` })).json().status).toBe('succeeded')
+    expect(seen[0]).toEqual({ url: '/healthz?x=1', host: `web-demo-main.localhost:${port}`, proto: 'http' })
+    await server.close()
+  } finally {
+    stand.close()
+  }
+})
+
 test('GET /template-deployments/:id is 404 for an unknown id', async () => {
   expect((await get('/template-deployments/11111111-2222-4333-8444-555555555555')).statusCode).toBe(404)
   expect((await get('/template-deployments/11111111-2222-4333-8444-555555555555')).json().error).toBe('template deployment not found')
