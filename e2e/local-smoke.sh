@@ -25,7 +25,8 @@ API=http://127.0.0.1:$PORT
 START_DAEMON=${E2E_START_DAEMON:-1}
 DATA=${INSTA_OSS_DATA_DIR:-${RUNNER_TEMP:-/tmp}/insta-oss-$RUN}
 PROJECT=e2e-local-$RUN
-LOG=${E2E_LOG:-$ROOT/daemon.log}
+# Beside the data directory, not in the checkout: a run has to leave the repository clean.
+LOG=${E2E_LOG:-$DATA.log}
 export API
 
 # Short windows so step 7 does not take ten minutes, and no memory-pressure eviction: on a
