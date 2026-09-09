@@ -13,7 +13,7 @@ import { docker } from './docker'
 import { resetAdmin } from './auth'
 import { loadConfig, type Config } from './config'
 import { mkdirSync } from 'node:fs'
-import { networkInterfaces } from 'node:os'
+import { createServer } from 'node:net'
 import { acquireLock, initStatePath, loadState, releaseLock } from './state'
 // ---- region WP4 (data dir) ----
 import { capabilitiesLine, sharedDataDir } from './datadir'
@@ -33,11 +33,20 @@ import { buildTable } from './router/table'
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) })
 
-/** Every IP this process can actually bind. */
-function ownAddresses(): Set<string> {
-  const out = new Set<string>()
-  for (const addrs of Object.values(networkInterfaces())) for (const a of addrs ?? []) out.add(a.address)
-  return out
+/** Can this process bind that address? A throwaway listener on port 0, closed again straight away.
+ *
+ *  `os.networkInterfaces()` cannot answer the question, and answering it from there was wrong on
+ *  every Linux box: libuv hides an interface that is UP but has no carrier, and docker0 has no
+ *  carrier until the first container attaches to the default bridge. instad boots before any branch
+ *  container exists, so the scan missed the gateway EVERY time on a fresh box, the extra listener
+ *  was skipped for the life of the process, and every container then got ECONNREFUSED on its own
+ *  DATABASE_URL and on every minted hostname. The kernel answers the question we actually mean. */
+function canBind(ip: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = createServer()
+    probe.once('error', () => { resolve(false) })
+    probe.listen(0, ip, () => { probe.close(() => { resolve(true) }) })
+  })
 }
 
 /** Local mode on Linux only: the docker bridge gateway, so a container started with
@@ -49,13 +58,13 @@ async function bridgeGateway(cfg: Config): Promise<string[]> {
   try {
     const out = await docker(['network', 'inspect', 'bridge', '-f', '{{(index .IPAM.Config 0).Gateway}}'])
     const ip = out.toString('utf8').trim()
-    if (ip && ownAddresses().has(ip)) return [ip]
+    if (ip && await canBind(ip)) return [ip]
     if (ip) {
       // instad itself in a bridge-networked container sees the HOST's gateway here, and that
       // address lives in the host's namespace: `listen` fails with EADDRNOTAVAIL, and because the
       // extra listener comes up before the boot finishes it would take the whole daemon with it.
       // Only the convenience path is lost; host.docker.internal still reaches us.
-      console.warn(`warn: the docker bridge gateway ${ip} is not an address of this host; containers reach the daemon through host.docker.internal only`)
+      console.warn(`warn: the docker bridge gateway ${ip} cannot be bound by this process; containers reach the daemon through host.docker.internal only`)
       return []
     }
   } catch { /* no bridge network, or a docker without that template: warn and carry on */ }
