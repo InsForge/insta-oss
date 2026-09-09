@@ -10,12 +10,15 @@ const IMAGE = 'postgres:16-alpine'
 // stays in the container layer), the password is the constant above, and `fork` = provision the
 // destination then pipe pg_dump of the source into it (today's copy model).
 export class LocalPostgres implements DatabaseAdapter {
-  async provision(t: PgTarget, _opts: { publishLoopback?: boolean; limits?: ServiceLimits } = {}): Promise<{ url: string }> {
+  async provision(t: PgTarget, opts: { publishLoopback?: boolean; limits?: ServiceLimits } = {}): Promise<{ url: string }> {
     // Preload pg_stat_statements so `insta` query-stats observability works; the official image
     // treats leading-dash args as postgres server flags.
     await docker(['run', '-d', '--restart', 'unless-stopped', '--name', t.container, '--network', t.network,
       '-e', `POSTGRES_PASSWORD=${PASS}`, '-e', `POSTGRES_DB=${DB}`,
       // ---- args WP2 ----
+      // Local mode only: an ephemeral loopback port the daemon finds with `docker port`, because
+      // macOS cannot route to container IPs. Server mode publishes nothing.
+      ...(opts.publishLoopback ? ['-p', '127.0.0.1::5432'] : []),
       // ---- args WP3 ----
       // ---- args WP4 ----
       IMAGE, '-c', 'shared_preload_libraries=pg_stat_statements'])

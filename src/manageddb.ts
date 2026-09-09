@@ -101,7 +101,34 @@ export const managedContainerName = (ref: string, type: ManagedDbType, name: str
   `io-${ref}-${MANAGED_DB[type].idPrefix}-${name}`
 
 // ---- region WP2 (router) ----
-// bundle(host, port, password, tls); MANAGED_DB[t].sni
+/** Which managed types route by TLS SNI on the shared server-mode lane (redis 6379, mongo 27017).
+ *  MySQL greets first and has no SNI, so it gets a plaintext per-service port (decision 38). Kept as
+ *  its own map (the catalog type above is not this region's to extend). */
+export const MANAGED_SNI: Record<ManagedDbType, boolean> = { redis: true, mysql: false, mongodb: true }
+
+/** The credential bundle against a LANE address instead of the container: same keys as
+ *  `MANAGED_DB[type].bundle`, host and port swapped, and the TLS flag folded into the URL
+ *  (`rediss://`, mongo `&tls=true`) when the lane terminates TLS (contract 00 section 10). */
+export function laneBundle(type: ManagedDbType, host: string, port: number, password: string, tls: boolean): Record<string, string> {
+  const pw = encodeURIComponent(password)
+  const portStr = String(port)
+  if (type === 'redis') {
+    return {
+      REDIS_URL: `${tls ? 'rediss' : 'redis'}://default:${pw}@${host}:${portStr}/0`,
+      REDIS_HOST: host, REDIS_PORT: portStr, REDIS_USERNAME: 'default', REDIS_PASSWORD: password,
+    }
+  }
+  if (type === 'mysql') {
+    return {
+      MYSQL_URL: `mysql://insta:${pw}@${host}:${portStr}/app`,
+      MYSQL_HOST: host, MYSQL_PORT: portStr, MYSQL_DATABASE: 'app', MYSQL_USERNAME: 'insta', MYSQL_PASSWORD: password,
+    }
+  }
+  return {
+    MONGODB_URL: `mongodb://root:${pw}@${host}:${portStr}/admin?authSource=admin${tls ? '&tls=true' : ''}`,
+    MONGODB_HOST: host, MONGODB_PORT: portStr, MONGODB_DATABASE: 'admin', MONGODB_USERNAME: 'root', MONGODB_PASSWORD: password,
+  }
+}
 // ---- end region WP2 ----
 // ---- region WP4 (data dir) ----
 // dataPaths

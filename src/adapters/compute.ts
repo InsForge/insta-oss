@@ -18,7 +18,6 @@ export class DockerCompute implements ComputeAdapter {
   ): Promise<{ url: string }> {
     const name = appName(ref, opts.group)
     if (!opts.network) throw new Error('DockerCompute requires the branch network')
-    const hostPort = opts.hostPort ?? opts.port
     try { await docker(['rm', '-f', name]) } catch { /* not running yet */ }
     const envArgs = Object.entries(opts.envVars).flatMap(([k, v]) => ['-e', `${k}=${v}`])
     // Scaffold interim: `hostPath` is a docker NAMED-VOLUME name mounted at /data (platform parity);
@@ -32,14 +31,21 @@ export class DockerCompute implements ComputeAdapter {
     await docker(['create', '--restart', 'unless-stopped', '--name', name, '--network', opts.network,
       ...envArgs,
       // ---- args WP2 ---- (`-p 127.0.0.1:<hostPort>:<port>` only when hostPort is set; `--add-host <h>:host-gateway` per hostAliases)
-      // host-side mapping may differ (branch clones); the app's listen port never changes
-      '-p', `${hostPort}:${opts.port}`,
+      // Local mode publishes on loopback (macOS cannot route to container IPs, and a port open on
+      // 0.0.0.0 would put the app on the LAN); server mode publishes NOTHING and the router dials
+      // the container IP on the branch network. The host-side mapping may differ between branch
+      // clones; the app's listen port never changes.
+      ...(opts.hostPort !== undefined ? ['-p', `127.0.0.1:${opts.hostPort}:${opts.port}`] : []),
+      // Every hostname the branch mints resolves to the box itself from inside the container, so an
+      // app can reach its own router URL, the API and the object store (decision 5).
+      ...(opts.hostAliases ?? []).flatMap((h) => ['--add-host', `${h}:host-gateway`]),
       // ---- args WP3 ---- (`--init`; `--cpus` / `--memory` / `--memory-swap` when limits)
       // ---- args WP4 ---- (`--mount type=bind,src=<hostPath>,dst=/data` replaces volArgs)
       ...volArgs,
       opts.image])
     if (opts.start !== false) await docker(['start', name])
-    return { url: `http://localhost:${hostPort}` }
+    // Informational only: the engine records the router URL (`serviceUrl`) on the row.
+    return { url: `http://localhost:${opts.hostPort ?? opts.port}` }
   }
 
   async destroy(ref: string): Promise<void> {

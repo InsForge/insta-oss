@@ -8,12 +8,14 @@ import type { ManagedDbAdapter, ManagedDbTarget, ServiceLimits } from '../types'
 // engine passes in. Scaffold interim: `dataDir` is ignored when '' (data lives in the container's
 // own layer; WP4 bind-mounts it), `publishLoopback`/`limits` are read by WP2/WP3 at the marked lines.
 export class LocalManagedDb implements ManagedDbAdapter {
-  async provision(t: ManagedDbTarget, _opts: { publishLoopback?: boolean; limits?: ServiceLimits } = {}): Promise<void> {
+  async provision(t: ManagedDbTarget, opts: { publishLoopback?: boolean; limits?: ServiceLimits } = {}): Promise<void> {
     const cfg = MANAGED_DB[t.type]
     const envArgs = Object.entries(cfg.env(t.password)).flatMap(([k, v]) => ['-e', `${k}=${v}`])
     await docker(['run', '-d', '--restart', 'unless-stopped', '--name', t.container,
       '--network', t.network, ...envArgs,
       // ---- args WP2 ----
+      // Local mode only (same reason as postgres): an ephemeral loopback port for `docker port`.
+      ...(opts.publishLoopback ? ['-p', `127.0.0.1::${cfg.port}`] : []),
       // ---- args WP3 ----
       // ---- args WP4 ----
       cfg.image, ...(cfg.cmd ?? [])])

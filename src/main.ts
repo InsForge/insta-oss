@@ -11,7 +11,12 @@ import { LocalGarage } from './adapters/garage'
 import { LocalManagedDb } from './adapters/manageddb'
 import { docker } from './docker'
 import { loadConfig } from './config'
-import { initStatePath, acquireLock } from './state'
+import { initStatePath, acquireLock, loadState } from './state'
+// ---- region WP2 (router) ----
+import { laneReallocator, Router } from './router'
+import { engineRouterDeps, routerUpstream } from './router/deps'
+import { buildTable } from './router/table'
+// ---- end region WP2 ----
 
 async function main(): Promise<void> {
   // config (WP1: --reset-admin runs here and exits)
@@ -45,14 +50,28 @@ async function main(): Promise<void> {
   // executor; abandonStale; migrateLegacyContainers
   // ---- end region WP5 (executor) ----
   // ---- region WP2 (router) ----
-  // new Router(...) (needs engine methods); engine.router = router; serverFactory
+  // The router owns the node:http server; Fastify receives it through `serverFactory` and hands its
+  // request handler back inside that call (`attach`), which is the only place Fastify exposes it.
+  // Dispatch is by Host: daemon names to the API, minted names and custom domains to the HTTP lane
+  // (decision 4). `engine.router = router` closes the loop, so every mutate that changes a hostname
+  // or a lane rebuilds the table and reconciles the listeners.
+  const router = new Router({
+    cfg,
+    table: () => buildTable(loadState(), cfg),
+    upstream: routerUpstream(engine, cfg),
+    reallocLane: laneReallocator(cfg, () => engine.allocLanePort()),
+    ...engineRouterDeps(engine),
+  })
+  engine.router = router
   // ---- end region WP2 (router) ----
 
-  const app = buildServer(engine, cfg)
+  const app = buildServer(engine, cfg, { serverFactory: (handler) => { router.attach(handler); return router.httpServer } })
   await app.listen({ host: cfg.listenHost, port: cfg.port })
 
   // ---- region WP2 (start) ----
-  // await router.start()
+  // Extra listeners come up only after the primary one is bound: a lane that answers before the API
+  // does would hold a wake against a daemon that cannot serve it.
+  await router.start()
   // ---- end region WP2 (start) ----
   // ---- region WP3 (start) ----
   // engine.scheduler.start()
