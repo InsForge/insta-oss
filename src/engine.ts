@@ -2167,12 +2167,16 @@ export class Engine {
     return project.serviceSettings?.[serviceId]?.alwaysOn ?? this.cfg.sleep.alwaysOnDefault
   }
 
-  /** Bookkeeping after a deploy replaced the container: running, asleep from birth, or honouring a
-   *  standing stop. */
+  /** Bookkeeping after a deploy replaced the container: asleep from birth, honouring a standing
+   *  stop or suspend, or running. The standing intent is read back from the row `deployLocked` just
+   *  wrote, because a suspended service's replacement is STARTED and then paused by the re-assert:
+   *  reporting it running until the next sweep would be the container and the row disagreeing. */
   afterDeploy(key: ServiceKey, o: { started: boolean; startAsleep?: boolean }): void {
-    if (o.started) this.scheduler.onUp(key)
-    else if (o.startAsleep) this.scheduler.onAsleep(key, 'branch-create')
-    else this.scheduler.onStopped(key)
+    if (o.startAsleep) { this.scheduler.onAsleep(key, 'branch-create'); return }
+    const desired = this.targetOf(key)?.desiredState ?? 'running'
+    if (desired === 'suspended') { this.scheduler.onPaused(key); return }
+    if (!o.started || desired === 'stopped') { this.scheduler.onStopped(key); return }
+    this.scheduler.onUp(key)
   }
 
   /** A clone's databases sleep until first use: they were provisioned and readied, and nothing has

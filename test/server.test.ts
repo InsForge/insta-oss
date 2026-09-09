@@ -1710,6 +1710,21 @@ test('the sweep sleeps an idle service read out of state.json, and always-on tak
   expect(calls.filter((c) => c.startsWith('runtime.stop:'))).toEqual([])
 }, 20_000)
 
+test('a redeploy leaves the runtime view agreeing with the standing intent, suspend included', async () => {
+  const { id } = await wp3Project()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  // A suspended service's replacement is STARTED (docker cannot pause a created container) and then
+  // paused by the re-assert, so the view has to follow the pause, not the start.
+  await post(`/projects/${id}/services/cp-default/suspend`)
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000 })
+  expect((await get(`/projects/${id}/services/cp-default/state`)).json()).toEqual({ desiredState: 'suspended', state: 'suspended' })
+  expect((await get(`/projects/${id}/services`)).json().services.find((x: { id: string }) => x.id === 'cp-default').runtime).toBe('suspended')
+
+  await post(`/projects/${id}/services/cp-default/stop`)
+  await post(`/projects/${id}/deploy`, { image: 'app:3', branch: 'main', port: 3000 })
+  expect((await get(`/projects/${id}/services/cp-default/state`)).json()).toEqual({ desiredState: 'stopped', state: 'stopped' })
+})
+
 test('GET /policy lists service.upgrade, the action PUT limits gates on', async () => {
   const { id } = await wp3Project()
   expect(Object.keys((await get(`/projects/${id}/policy`)).json().policy)).toContain('service.upgrade')
