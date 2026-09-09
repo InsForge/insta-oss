@@ -101,14 +101,25 @@ Every Docker file uses its own project name and sets `INSTA_OSS_SCHEDULER=0` unl
 
 ### Result of the pass (integrator, on the assembled branch)
 
-Seven of the ten Docker files exist and all seven are green, each run alone in the order above.
-Steps 4 (`test/fork.int.test.ts`), 5 (`test/datadir-migrate.int.test.ts`) and 7
-(`test/router.int.test.ts`) have no file in the tree: WP4 shipped no Docker coverage for the reflink
-fork path or the data-dir migration, and WP2 none for the router lanes, so the reflink and
-`basebackup` fork variants, the migration of a pre-scaffold data directory and the lanes themselves
-are still only covered by fake-adapter suites. Steps 11 and 12 need a Linux host and a throwaway VM.
+All ten Docker files now exist and all ten are green, each run alone in the order above. Steps 4
+(`test/fork.int.test.ts`), 5 (`test/datadir-migrate.int.test.ts`) and 7 (`test/router.int.test.ts`)
+had no file in the tree at the first pass and were written afterwards, on an arm64 macOS laptop
+whose data dir is APFS, so the reflink fork path, the `basebackup` variant, the strict
+`INSTA_OSS_FORK=reflink` refusal, the migration of a pre-scaffold data directory and the lanes
+themselves are covered by real containers rather than by fake adapters alone. None of the three
+skips by platform: each branches on a capability it probes (the reflink probe's answer; whether this
+host can dial a container IP on the branch network), so a Linux runner takes the production side of
+every branch. What remains uncovered there is the WebSocket passthrough of 02's list, which
+`test/router.test.ts` covers against a fake upstream. Steps 11 and 12 need a Linux host and a
+throwaway VM.
 
-Three real defects the pass found, each fixed on this branch:
+One real defect that pass found, fixed on this branch: with `INSTA_OSS_FORK=reflink` the postgres
+adapter fell through to `pg_basebackup` whenever a clone raised `NoReflinkError`, so the one setting
+that exists to forbid a silent stream permitted one. `main.ts` already refuses at boot when the
+probe says the data dir cannot clone; the adapter now refuses too, for a clone that turns out
+impossible anyway. `auto` and `basebackup` are untouched.
+
+Three real defects the first pass found, each fixed on this branch:
 
 - Local mode published the container's own port with no free-port check, so a second instance of any
   image (a second template deploy, or two apps on 3000) died at `docker start` with `port is already
