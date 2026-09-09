@@ -53,13 +53,52 @@ IS the template code. Copying the closest existing template is the fastest way t
    a number here could only drift from it: every template once carried `size: 1` because that was
    the free cap the day it was written. `npm run lint` refuses both, and so does publish.
 8. Never commit `index.json`. CI generates it.
-9. A `${...}` inside an `env.fixed` value may only be `${services.<name>.url}` or
+9. `meta.architectures` is mandatory, drafts included: a non-empty list of `amd64`, `arm64`, or
+   both. See [Architectures](#architectures).
+10. A `${...}` inside an `env.fixed` value may only be `${services.<name>.url}` or
    `${services.<name>.host}`, naming a service the manifest declares that is not a managed
    database. A managed database has no address: its credentials belong under `env.platform` as
    `${{services.<name>.<KEY>}}`, with doubled braces, and putting that form in `fixed` is rejected.
    So is a generator ref, even a declared one: composed into a fixed string it is stored only as
    the final value, so a retry could not recover it and would silently rotate the secret. Declare
    the variable under `env.generated` instead. `npm run lint` mirrors the platform's check.
+
+## Architectures
+
+`meta.architectures` names the CPU architectures your template's deployable image is published
+for, in OCI naming: `[amd64, arm64]`, or one of the two. It is not decoration. Three things read
+it, so a wrong answer is worse than no template at all:
+
+- `templates-build-images.yml` derives its buildx `platforms` from it and, after pushing, checks
+  the pushed index against it. Declaring `arm64` for an image that cannot cross-build turns the
+  build red.
+- The catalog serves it, and the dashboard greys out a template this box cannot run.
+- `insta template deploy` refuses the pair before it creates a single service. Without the field
+  the deploy runs, creates the services and the variables, and only then fails on the pull with
+  docker's `no matching manifest for linux/arm64/v8`, leaving half a template behind.
+
+**Prove it before you declare it.** From the repository root:
+
+```bash
+docker buildx build --platform linux/arm64 templates/<code>          # it builds
+docker buildx build --platform linux/arm64 --load -t probe templates/<code>
+docker run --rm probe <your app's version command>                   # and it runs
+```
+
+Two traps, both real, both found in this registry:
+
+- **Pin the index digest, not a child's.** `FROM upstream:1.2@sha256:...` is only multi-arch if
+  that digest is the OCI index. Take it from the top-level `Digest:` line of
+  `docker buildx imagetools inspect upstream:1.2`, never from one of the `Manifests:` rows. A
+  child digest resolves to that one platform whatever `--platform` says, which is exactly how
+  `9router` shipped an amd64-only image while every other pin was fine.
+- **A per-architecture download needs a per-architecture checksum.** The ttyd templates switch on
+  `dpkg --print-architecture` and verify a different SHA-256 for each. A single pinned checksum
+  cannot be right for both.
+
+If an upstream genuinely publishes only one architecture, declare only that one. That is an
+honest template: the catalog says so, the workflow builds only what exists, and a user on the
+other architecture is told before they deploy rather than after. Do not declare both and hope.
 
 ## Logos
 

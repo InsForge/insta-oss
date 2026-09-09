@@ -744,7 +744,11 @@ export class Engine {
         id: id(s.id), type: 'storage', name: s.name, status: 'ready',
         public: (branch ? this.bucketHandle(project, branch, s.id)?.public : s.public) ?? s.public ?? false,
         ...this.rowNetwork(project, branch, { id: s.id, type: 'storage', name: s.name }),
-        runtime: branch ? this.runtimeOf(this.s3Host(project, branch, s.id)?.split(':')[0] ?? '') : undefined,
+        // The object store is ONE shared container for the whole box, so every bucket reports its
+        // state. Not the S3 host: that is `io-garage` only in local mode, and in server mode it is
+        // `s3.<domain>`, which matches no container, so every bucket on a real install read
+        // 'stopped' while Garage was up and serving it.
+        runtime: branch ? this.runtimeOf(GARAGE_CONTAINER) : undefined,
         updated_at: iso(s.createdAt),
       })),
       // Managed databases (redis/mysql/mongodb): one private container per branch. `port` +

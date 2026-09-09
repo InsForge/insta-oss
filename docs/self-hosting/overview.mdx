@@ -20,7 +20,8 @@ daemon that drives your Docker and answers the same API the hosted platform answ
 - Branches that fork the disk: `insta branch create` returns in about a second at any database
   size. See [branching](/self-hosting/branching).
 - The bundled template catalog served through the cloud's `/templates` routes, so
-  `insta template list` works with no internet access.
+  `insta template list` works with no internet access. Each template declares the CPU
+  architectures its image is published for, and a deploy this box cannot run is refused up front.
 - The dashboard, served by the daemon itself, with setup, login, API tokens, a Deploy dialog and
   the Templates gallery.
 

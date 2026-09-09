@@ -7,7 +7,10 @@ description: "One command on a VPS, or a clone and npm run dev on your laptop."
 
 Server mode wants a machine you can point DNS at:
 
-- Ubuntu 22.04+ or Debian 12+, `x86_64` or `aarch64`
+- Ubuntu 22.04+ or Debian 12+, `x86_64` or `aarch64`. The daemon image and every bundled template
+  publish both, and `insta template list` reports each template's `architectures` next to this
+  box's own `hostArchitecture`, so a template that will not run here is refused before it creates
+  anything rather than failing on the image pull
 - root (the script uses `sudo` nothing: run it as root)
 - 2 vCPU, 2 GiB RAM, 15 GiB free disk
 - ports 80, 443, 8080, 8081, 5432, 6379 and 27017 free (the script refuses to start if any is

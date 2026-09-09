@@ -6,3 +6,4 @@ dist/
 postcss.config.mjs
 ui/node_modules/
 ui/dist/
+.gstack/
