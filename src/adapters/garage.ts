@@ -15,8 +15,9 @@ import type { StorageAdapter, ObjectListing } from '../types'
 // (rclone sync). Public access = Garage's web endpoint (:3902, vhost per bucket). Handles are the
 // bucket names the engine passes in (`io-<ref>-<name>`; legacy rows still carry `io-<ref>`); the
 // access key is named after its bucket so destroy(bucket) finds it.
-// Scaffold interim (WP5 rewrites the file): `mode`/`domain` are accepted and unused; the local toml
-// written below stays as today.
+// Run modes differ in exactly two places (decision 20): the toml's root_domain (`.s3.<domain>` on
+// a server, `.s3.garage.localhost` / `.web.garage.localhost` locally) and the AWS_ENDPOINT_URL_S3 a
+// service is handed (`https://s3.<domain>` on a server, the branch-network name locally).
 const GARAGE = 'io-garage'
 const IMAGE = 'dxflrs/garage:v2.3.0'
 const RCLONE = 'rclone/rclone'
@@ -41,10 +42,21 @@ export class LocalGarage implements StorageAdapter {
     return docker(['exec', GARAGE, '/garage', ...args])
   }
 
-  /** Write the single-node config once (rpc secret persisted inside it). */
+  /** Write the single-node config once (rpc secret persisted inside it).
+   *
+   *  The two root_domains are the whole run-mode difference (decision 20). Local mode keeps
+   *  today's `.s3.garage.localhost` / `.web.garage.localhost`, so public reads stay at
+   *  `http://<bucket>.web.garage.localhost:3902` and the router serves no bucket vhost. Server mode
+   *  writes install.sh's toml: BOTH endpoints answer on `.s3.<domain>`, because
+   *  `<bucket>.s3.<domain>` is one hostname whose upstream the router picks per request (a signed
+   *  or non-GET request goes to the S3 API, an anonymous GET/HEAD to the web endpoint). Normally
+   *  install.sh has already written this file and mounted it into the compose container; writing it
+   *  here keeps a hand-assembled server install self-consistent instead of silently serving
+   *  localhost vhosts. */
   private ensureConfig(): string {
     const p = this.opts.configPath
     if (!existsSync(p)) {
+      const server = this.opts.mode === 'server'
       mkdirSync(dirname(p), { recursive: true })
       writeFileSync(p, [
         'metadata_dir = "/var/lib/garage/meta"',
@@ -56,10 +68,10 @@ export class LocalGarage implements StorageAdapter {
         '[s3_api]',
         's3_region = "garage"',
         `api_bind_addr = "[::]:${S3_PORT}"`,
-        'root_domain = ".s3.garage.localhost"',
+        `root_domain = "${server ? `.s3.${this.opts.domain}` : '.s3.garage.localhost'}"`,
         '[s3_web]',
         `bind_addr = "[::]:${WEB_PORT}"`,
-        'root_domain = ".web.garage.localhost"',
+        `root_domain = "${server ? `.s3.${this.opts.domain}` : '.web.garage.localhost'}"`,
         'index = "index.html"',
         '',
       ].join('\n'))
@@ -176,7 +188,11 @@ export class LocalGarage implements StorageAdapter {
       env: {
         AWS_ACCESS_KEY_ID: creds.id,
         AWS_SECRET_ACCESS_KEY: creds.secret,
-        AWS_ENDPOINT_URL_S3: `http://${GARAGE}:${S3_PORT}`,
+        // Server mode: ONE string that works on the host and inside a container (decision 20) —
+        // `s3.<domain>` routes to Garage, and the deploy aliases pin it to the box, so an SDK's
+        // default virtual-hosted addressing (`<bucket>.s3.<domain>`) works too. Local mode keeps
+        // the branch-network name; `containerize()` owns the host-facing rewrite there.
+        AWS_ENDPOINT_URL_S3: this.opts.mode === 'server' ? this.opts.hostEndpoint : `http://${GARAGE}:${S3_PORT}`,
         AWS_REGION: 'garage',
         BUCKET_NAME: bucket,
       },
