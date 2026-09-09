@@ -1587,7 +1587,7 @@ export class Engine {
    *  unused indexes — same sections the cloud serves, read straight off the branch container. */
   async dbInsight(projectId: string, branchName?: string, group?: string): Promise<observe.DbInsight> {
     const t = this.dbTarget(projectId, branchName, group)
-    this.assertPgAwake(t.branch, t.serviceId)                                   // WP3: never wakes
+    await this.assertPgAwake(t.branch, t.serviceId)                             // WP3: never wakes
     return observe.toDbInsight(await this.db.query(t.container, observe.DB_INSIGHT_SQL))
   }
 
@@ -1720,14 +1720,14 @@ export class Engine {
   /** Point-in-time DB metrics — runs SQL against the branch database (same query as the cloud). */
   async dbMetricsSnapshot(projectId: string, branchName?: string, group?: string): Promise<observe.DbMetricsSnapshot> {
     const t = this.dbTarget(projectId, branchName, group)
-    this.assertPgAwake(t.branch, t.serviceId)                                   // WP3: never wakes
+    await this.assertPgAwake(t.branch, t.serviceId)                             // WP3: never wakes
     return observe.toDbMetrics(await this.db.query(t.container, observe.DB_METRICS_SQL))
   }
 
   /** Currently running queries (pg_stat_activity, ≤100). */
   async dbActivity(projectId: string, branchName?: string, group?: string): Promise<{ queries: observe.DbActivityRow[] }> {
     const t = this.dbTarget(projectId, branchName, group)
-    this.assertPgAwake(t.branch, t.serviceId)                                   // WP3: never wakes
+    await this.assertPgAwake(t.branch, t.serviceId)                             // WP3: never wakes
     return { queries: observe.toDbActivity(await this.db.query(t.container, observe.DB_ACTIVITY_SQL)) }
   }
 
@@ -1736,7 +1736,7 @@ export class Engine {
    *  "enabled on demand" path when the extension can't load). */
   async dbQueryStats(projectId: string, branchName: string | undefined, opts: { limit?: number; sort?: observe.QueryStatSort; group?: string } = {}): Promise<observe.DbQueryStats> {
     const t = this.dbTarget(projectId, branchName, opts.group)
-    this.assertPgAwake(t.branch, t.serviceId)                                   // WP3: never wakes
+    await this.assertPgAwake(t.branch, t.serviceId)                             // WP3: never wakes
     const container = t.container
     try {
       await this.db.query(container, 'create extension if not exists pg_stat_statements')
@@ -2468,9 +2468,13 @@ export class Engine {
   }
 
   /** Before an OBSERVABILITY query: a sleeping database reports that it is sleeping instead of
-   *  being woken by a dashboard poll. `server.ts` maps this message to 503. */
-  private assertPgAwake(branch: Branch, serviceId: string): void {
-    if (this.stateOf(this.serviceKey(branch, serviceId)) !== 'running') {
+   *  being woken by a dashboard poll. `server.ts` maps this message to 503. The snapshot is taken
+   *  fresh, because a stale one would refuse a database that is up. Only `asleep` and `starting`
+   *  refuse: a container that crashed is not sleeping, and letting the query fail says so honestly. */
+  private async assertPgAwake(branch: Branch, serviceId: string): Promise<void> {
+    await this.scheduler.refreshStates()
+    const live = this.stateOf(this.serviceKey(branch, serviceId))
+    if (live === 'asleep' || live === 'starting') {
       throw new Error('database is sleeping: it wakes on the next connection')
     }
   }

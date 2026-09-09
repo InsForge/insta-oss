@@ -172,10 +172,9 @@ const NOT_CLOUD_WP1: Array<[string, string]> = [
 // WP2: the four compute/domain routes are real now (contract 00 section 9), so this sub-array is
 // empty; the sweep still concatenates it so the shape of the test does not move.
 const NOT_CLOUD_WP2: Array<[string, string]> = []
-const NOT_CLOUD_WP3: Array<[string, string]> = [
-  ['GET', '/projects/x/services/cp-x/limits'], ['PUT', '/projects/x/services/cp-x/limits'],
-  ['PUT', '/projects/x/services/cp-x/always-on'],
-]
+// WP3: GET/PUT limits and PUT always-on are real routes now (contract 00 section 9), so this
+// sub-array is empty; the sweep still concatenates it so the shape of the test does not move.
+const NOT_CLOUD_WP3: Array<[string, string]> = []
 const NOT_CLOUD_REST: Array<[string, string]> = [
   ['GET', '/projects/x/usage/daily'], ['GET', '/projects/x/utilisation'],
   ['GET', '/orgs/local/members'], ['PUT', '/orgs/local/members/u1'], ['DELETE', '/orgs/local/members/u1'],
@@ -327,7 +326,7 @@ test('services carry dashboard fields (runtime/endpoint/updated_at) and are bran
   const db = main.find((s: { id: string }) => s.id === 'pg-db')
   expect(db.domain).toBe('pg-db-demo-main.localhost')
   expect(db.endpoint).toMatch(/^127\.0\.0\.1:2\d{4}$/)
-  expect(db.runtime).toBe('stopped') // fake docker ps lists nothing
+  expect(db.runtime).toBe('online') // WP3: the fake adapter's container is running, and `runtime` reads that one store
   const cp = main.find((s: { id: string }) => s.id === 'cp-default')
   expect(cp.domain).toBe('default-demo-main.localhost')
   expect(cp.endpoint).toBe('default-demo-main.localhost:8080')
@@ -459,10 +458,12 @@ test('compute lifecycle: stop sets desired intent; state reports desired vs live
   const r = await post(`/projects/${id}/services/cp-default/stop`)
   expect(r.statusCode).toBe(200)
   expect(r.json().service.desired_state).toBe('stopped')
-  expect(r.json().state).toBe('running') // fake adapter always reports running
+  // WP3 (decision 53): liveState reads the ONE container store the fake adapter just moved, so a
+  // stopped service reports `stopped` where the fake used to answer `running` unconditionally.
+  expect(r.json().state).toBe('stopped')
   expect(calls).toContain('compute.stop:demo-main:default')
   const st = (await get(`/projects/${id}/services/cp-default/state`)).json()
-  expect(st).toEqual({ desiredState: 'stopped', state: 'running' })
+  expect(st).toEqual({ desiredState: 'stopped', state: 'stopped' })
   await post(`/projects/${id}/services/cp-default/start`)
   expect((await get(`/projects/${id}/services/cp-default/state`)).json().desiredState).toBe('running')
   // lifecycle is compute-only; unknown services 404
@@ -1324,7 +1325,12 @@ test('a pre-scaffold branch row (no databases) keeps resolving its legacy io-<re
     }
   })
 
-  expect((await get(`/projects/${id}/database/instance`)).json().host).toBe('io-demo-main-pg')
+  // WP3: `host`/`port` are the row's LANE address (contract 00 section 10), not the container name.
+  // The legacy container is still what the daemon dials underneath, which the DSN and the teardown
+  // assertions below are what pin.
+  const legacyInstance = (await get(`/projects/${id}/database/instance`)).json()
+  expect(legacyInstance.host).toBe('127.0.0.1')
+  expect(String(legacyInstance.port)).toMatch(/^2\d{4}$/)
   const featBranchId = (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === 'feat').id
   const services = (await get(`/projects/${id}/services?branch=feat`)).json().services
   expect(services.find((s: { id: string }) => s.id === `${featBranchId}:pg-db`).endpoint).toMatch(/^127\.0\.0\.1:2\d{4}$/)
@@ -1433,7 +1439,9 @@ test('database routes over several postgres services: ?group=, the 400 and the 4
   const ambiguous = await get(`/projects/${id}/database/instance`)
   expect(ambiguous.statusCode).toBe(400)
   expect(ambiguous.json().error).toBe('multiple postgres services - specify one: analytics, db')
-  expect((await get(`/projects/${id}/database/instance?group=analytics`)).json()).toMatchObject({ id: 'pg-analytics', name: 'analytics', host: 'io-demo-main-pg-analytics' })
+  // WP3: which service the row describes is `id`/`name`/`routeKey`; `host`/`port` are its lane.
+  expect((await get(`/projects/${id}/database/instance?group=analytics`)).json())
+    .toMatchObject({ id: 'pg-analytics', name: 'analytics', routeKey: 'pg-analytics-demo-main', host: '127.0.0.1' })
   expect((await get(`/projects/${id}/database/instance?group=nope`)).statusCode).toBe(404)
   // runtime-health has one row per postgres service.
   const health = (await get(`/projects/${id}/runtime-health`)).json().services

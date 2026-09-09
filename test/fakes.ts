@@ -11,80 +11,9 @@ import { loadConfig } from '../src/config'
 import { Engine, type EngineOptions } from '../src/engine'
 import { initStatePath } from '../src/state'
 // ---- region WP3 (scheduler) ----
-// FakeRuntime is THE fake container store (decision 53): the four adapters above move it, the
-// engine's `liveState`, `runtime` column and runtime-health read it through `scheduler.stateOf`,
-// and the scheduler's own sweep, wake and sleep act on it. Two module-level singletons, cleared by
-// `resetFakes`, because the adapters that move them are module-level too. The store field is
-// `store`, not `containers`: the `Runtime` interface needs that name for its one docker read.
-export class FakeRuntime implements Runtime {
-  store = new Map<string, { state: ContainerState; id: string }>()
-  /** RSS bytes per container: the eviction tie-break and a wake's room estimate. */
-  rss = new Map<string, number>()
-  /** null = this box cannot report memory, which disables eviction entirely. */
-  mem: { availableBytes: number; totalBytes: number } | null = null
-  /** Readiness. The default answers for a running container; a test can refuse or delay. */
-  probeFn: (t: ServiceTarget) => boolean | Promise<boolean> = (t) => this.store.get(t.container)?.state === 'running'
-  private seq = 0
-
-  put(name: string, state: ContainerState): void {
-    this.store.set(name, { state, id: this.store.get(name)?.id ?? `cid${++this.seq}` })
-  }
-  /** A restart under our feet: same name, a new id (what `forgetIfChanged` is for). */
-  replace(name: string, state: ContainerState): void { this.store.set(name, { state, id: `cid${++this.seq}` }) }
-  drop(name: string): void { this.store.delete(name) }
-  dropPrefix(prefix: string): void { for (const k of [...this.store.keys()]) if (k.startsWith(prefix)) this.store.delete(k) }
-  move(from: string, to: string): void {
-    const c = this.store.get(from)
-    if (c) { this.store.set(to, c); this.store.delete(from) }
-  }
-  stateOfContainer(name: string): ContainerState | undefined { return this.store.get(name)?.state }
-  reset(): void {
-    this.store.clear(); this.rss.clear(); this.mem = null
-    this.probeFn = (t) => this.store.get(t.container)?.state === 'running'
-  }
-
-  async containers(): Promise<Map<string, { state: ContainerState; id: string }>> { return new Map(this.store) }
-  async stats(): Promise<Map<string, number>> { return new Map(this.rss) }
-  memory(): { availableBytes: number; totalBytes: number } | null { return this.mem }
-  async start(container: string): Promise<void> { calls.push(`runtime.start:${container}`); this.put(container, 'running') }
-  async stop(container: string, graceSec: number): Promise<void> { calls.push(`runtime.stop:${container}:${graceSec}`); this.put(container, 'exited') }
-  async unpause(container: string): Promise<void> { calls.push(`runtime.unpause:${container}`); this.put(container, 'running') }
-  async update(container: string, limits: ServiceLimits): Promise<void> {
-    calls.push(`runtime.update:${container}:${limits.cpu}/${limits.memoryMb}`)
-    if (!this.store.has(container)) throw new Error(`No such container: ${container}`)
-  }
-  async probe(t: ServiceTarget): Promise<boolean> { return this.probeFn(t) }
-}
-
-/** The upstream twin: an address exists exactly while the container runs. */
-export class FakeUpstream implements UpstreamLike {
-  addrs = new Map<string, { host: string; port: number }>()
-  constructor(private rt: FakeRuntime) {}
-  async resolve(container: string, _network: string, port: number): Promise<UpstreamAddr | null> {
-    const live = this.rt.store.get(container)
-    if (live?.state !== 'running') return null
-    const a = this.addrs.get(container) ?? { host: '127.0.0.1', port }
-    return { host: a.host, port: a.port, containerId: live.id, startedAt: '' }
-  }
-  forget(container: string): void { calls.push(`upstream.forget:${container}`) }
-  forgetIfChanged(container: string, containerId: string): void { calls.push(`upstream.checked:${container}:${containerId}`) }
-  async dial(container: string, network: string, port: number): Promise<boolean> { return (await this.resolve(container, network, port)) !== null }
-  reset(): void { this.addrs.clear() }
-}
-
-export const runtime = new FakeRuntime()
-export const upstream = new FakeUpstream(runtime)
-
-/** One ServiceTarget for test/scheduler.test.ts, which drives the Scheduler directly. */
-export function fakeTarget(over: Partial<ServiceTarget> & { key: ServiceKey }): ServiceTarget {
-  const serviceId = over.serviceId ?? over.key.slice(over.key.indexOf(':') + 1)
-  return {
-    kind: 'compute', container: `io-demo-main-app-${serviceId.replace(/^cp-/, '')}`, network: 'io-demo-main', port: 8080,
-    projectId: 'p1', branchId: over.key.slice(0, over.key.indexOf(':')), serviceId,
-    alwaysOn: false, desiredState: 'running', idleSec: 300, sleptAt: null, createdAt: 0,
-    ...over,
-  }
-}
+import { appContainerName } from '../src/manageddb'
+import type { ContainerState, Runtime, ServiceTarget } from '../src/scheduler'
+import type { UpstreamAddr, UpstreamLike } from '../src/upstream'
 // ---- end region WP3 ----
 
 export const calls: string[] = []
@@ -220,40 +149,37 @@ export function resetFakes(): void {
 // ---- region WP3 (scheduler) ----
 // FakeRuntime is THE fake container store (decision 53): the four adapters above move it, the
 // engine's `liveState`, `runtime` column and runtime-health read it through `scheduler.stateOf`,
-// and the scheduler's own sweep/wake/sleep act on it. Two module-level singletons, cleared by
-// `resetFakes`, because the adapters are module-level too.
+// and the scheduler's own sweep, wake and sleep act on it. Two module-level singletons, cleared by
+// `resetFakes`, because the adapters that move them are module-level too. The store field is
+// `store`, not `containers`: the `Runtime` interface needs that name for its one docker read.
 export class FakeRuntime implements Runtime {
-  containers = new Map<string, { state: ContainerState; id: string }>()
-  /** RSS bytes per container, for the eviction pool's tie-break and a wake's room estimate. */
+  store = new Map<string, { state: ContainerState; id: string }>()
+  /** RSS bytes per container: the eviction tie-break and a wake's room estimate. */
   rss = new Map<string, number>()
   /** null = this box cannot report memory, which disables eviction entirely. */
   mem: { availableBytes: number; totalBytes: number } | null = null
   /** Readiness. The default answers for a running container; a test can refuse or delay. */
-  probeFn: (t: ServiceTarget) => boolean | Promise<boolean> = (t) => this.containers.get(t.container)?.state === 'running'
-  /** Set to fail the next docker read, the way a busy daemon times out. */
-  failContainers = false
+  probeFn: (t: ServiceTarget) => boolean | Promise<boolean> = (t) => this.store.get(t.container)?.state === 'running'
   private seq = 0
 
   put(name: string, state: ContainerState): void {
-    this.containers.set(name, { state, id: this.containers.get(name)?.id ?? `cid${++this.seq}` })
+    this.store.set(name, { state, id: this.store.get(name)?.id ?? `cid${++this.seq}` })
   }
-  /** A restart under our feet: same name, new id (what `forgetIfChanged` is for). */
-  replace(name: string, state: ContainerState): void { this.containers.set(name, { state, id: `cid${++this.seq}` }) }
-  drop(name: string): void { this.containers.delete(name) }
-  dropPrefix(prefix: string): void { for (const k of [...this.containers.keys()]) if (k.startsWith(prefix)) this.containers.delete(k) }
+  /** A restart under our feet: same name, a new id (what `forgetIfChanged` is for). */
+  replace(name: string, state: ContainerState): void { this.store.set(name, { state, id: `cid${++this.seq}` }) }
+  drop(name: string): void { this.store.delete(name) }
+  dropPrefix(prefix: string): void { for (const k of [...this.store.keys()]) if (k.startsWith(prefix)) this.store.delete(k) }
   move(from: string, to: string): void {
-    const c = this.containers.get(from)
-    if (c) { this.containers.set(to, c); this.containers.delete(from) }
+    const c = this.store.get(from)
+    if (c) { this.store.set(to, c); this.store.delete(from) }
   }
-  stateOfContainer(name: string): ContainerState | undefined { return this.containers.get(name)?.state }
+  stateOfContainer(name: string): ContainerState | undefined { return this.store.get(name)?.state }
   reset(): void {
-    this.containers.clear(); this.rss.clear(); this.mem = null; this.failContainers = false
-    this.probeFn = (t) => this.containers.get(t.container)?.state === 'running'
+    this.store.clear(); this.rss.clear(); this.mem = null
+    this.probeFn = (t) => this.store.get(t.container)?.state === 'running'
   }
 
-  async containers_(): Promise<Map<string, { state: ContainerState; id: string }>> { return new Map(this.containers) }
-  async containersRead(): Promise<Map<string, { state: ContainerState; id: string }>> { return this.containers_() }
-
+  async containers(): Promise<Map<string, { state: ContainerState; id: string }>> { return new Map(this.store) }
   async stats(): Promise<Map<string, number>> { return new Map(this.rss) }
   memory(): { availableBytes: number; totalBytes: number } | null { return this.mem }
   async start(container: string): Promise<void> { calls.push(`runtime.start:${container}`); this.put(container, 'running') }
@@ -261,20 +187,17 @@ export class FakeRuntime implements Runtime {
   async unpause(container: string): Promise<void> { calls.push(`runtime.unpause:${container}`); this.put(container, 'running') }
   async update(container: string, limits: ServiceLimits): Promise<void> {
     calls.push(`runtime.update:${container}:${limits.cpu}/${limits.memoryMb}`)
-    if (!this.containers.has(container)) throw new Error(`No such container: ${container}`)
+    if (!this.store.has(container)) throw new Error(`No such container: ${container}`)
   }
   async probe(t: ServiceTarget): Promise<boolean> { return this.probeFn(t) }
 }
-// `containers()` is declared last so the overridable async read stays one method (the interface
-// name), while the plain Map above is what tests poke.
-Object.defineProperty(FakeRuntime.prototype, 'containers_', { value: FakeRuntime.prototype.containers_, enumerable: false })
 
-/** The upstream twin: an address exists while the container runs. */
+/** The upstream twin: an address exists exactly while the container runs. */
 export class FakeUpstream implements UpstreamLike {
   addrs = new Map<string, { host: string; port: number }>()
   constructor(private rt: FakeRuntime) {}
   async resolve(container: string, _network: string, port: number): Promise<UpstreamAddr | null> {
-    const live = this.rt.containers.get(container)
+    const live = this.rt.store.get(container)
     if (live?.state !== 'running') return null
     const a = this.addrs.get(container) ?? { host: '127.0.0.1', port }
     return { host: a.host, port: a.port, containerId: live.id, startedAt: '' }
@@ -288,7 +211,7 @@ export class FakeUpstream implements UpstreamLike {
 export const runtime = new FakeRuntime()
 export const upstream = new FakeUpstream(runtime)
 
-/** One ServiceTarget for the scheduler suite, which drives the Scheduler directly. */
+/** One ServiceTarget for test/scheduler.test.ts, which drives the Scheduler directly. */
 export function fakeTarget(over: Partial<ServiceTarget> & { key: ServiceKey }): ServiceTarget {
   const serviceId = over.serviceId ?? over.key.slice(over.key.indexOf(':') + 1)
   return {
