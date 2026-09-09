@@ -270,6 +270,8 @@ test('services remove: compute, postgres and storage all tear down and report th
   expect(calls).toContain('st.destroy:io-demo-main-store')
   expect((await get(`/projects/${id}/services`)).json().services).toEqual([])
   expect((await app.inject({ method: 'DELETE', url: `/projects/${id}/services/pg-ghost` })).statusCode).toBe(404)
+  // ...and a compute name nothing claims is a 404 too, not an empty teardown reported as success.
+  expect((await app.inject({ method: 'DELETE', url: `/projects/${id}/services/cp-ghost` })).statusCode).toBe(404)
 })
 
 test('removing ONE of two storage services leaves the shared object store on the branch network', async () => {

@@ -1176,6 +1176,9 @@ export class Engine {
   async removeComputeService(projectId: string, name: string): Promise<Teardown> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
+    // A name no branch and no registration claims is a 404, not an empty teardown reporting the
+    // successful removal of something that never existed (contract section 9).
+    if (!this.computeGroupNames(projectId).includes(name)) throw new Error('service not found')
     const vol = project.computeVolumes?.[name]
     const t = newTeardown()
     for (const b of this.listBranches(projectId)) {
