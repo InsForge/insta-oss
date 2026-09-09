@@ -1,8 +1,11 @@
 import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 import { api } from './api'
 import { usePoll } from './hooks'
+import { AuthGate } from './components/AuthGate'
 import { Layout } from './components/Layout'
 import { Services } from './pages/Services'
+import { ServiceDetail } from './pages/ServiceDetail'
+import { Templates } from './pages/Templates'
 import { Environments } from './pages/Environments'
 import { Logs } from './pages/Logs'
 import { Secrets } from './pages/Secrets'
@@ -11,6 +14,9 @@ import { Operations } from './pages/Operations'
 import { Usage } from './pages/Usage'
 import { Approvals } from './pages/Approvals'
 import { Settings } from './pages/Settings'
+import { Setup } from './pages/Setup'
+import { Login } from './pages/Login'
+import { Tokens } from './pages/Tokens'
 
 /** Lands on the first project's default branch (or an empty state if none exist yet). */
 function Home() {
@@ -49,23 +55,32 @@ function ProjectShell() {
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/" element={<Home />} />
-      <Route path="/p/:projectId/:branch" element={<ProjectShell />}>
-        <Route index element={<Navigate to="services" replace />} />
-        <Route path="services" element={<Services />} />
-        <Route path="env" element={<Environments />} />
-        {/* pre-rename bookmarks */}
-        <Route path="branches" element={<Navigate to="../env" replace />} />
-        <Route path="logs" element={<Logs />} />
-        <Route path="secrets" element={<Secrets />} />
-        <Route path="database" element={<DatabaseInsight />} />
-        <Route path="operations" element={<Operations />} />
-        <Route path="usage" element={<Usage />} />
-        <Route path="approvals" element={<Approvals />} />
-        <Route path="settings" element={<Settings />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <AuthGate>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        {/* Server-mode identity pages; each redirects home in local mode. */}
+        <Route path="/setup" element={<Setup />} />
+        <Route path="/login" element={<Login />} />
+        <Route path="/account/tokens" element={<Tokens />} />
+        <Route path="/p/:projectId/:branch" element={<ProjectShell />}>
+          <Route index element={<Navigate to="services" replace />} />
+          <Route path="services" element={<Services />} />
+          {/* Branch-scoped, opaque service id (decision 49); the `:` in it is path-safe. */}
+          <Route path="services/:sid" element={<ServiceDetail />} />
+          <Route path="templates" element={<Templates />} />
+          <Route path="env" element={<Environments />} />
+          {/* pre-rename bookmarks */}
+          <Route path="branches" element={<Navigate to="../env" replace />} />
+          <Route path="logs" element={<Logs />} />
+          <Route path="secrets" element={<Secrets />} />
+          <Route path="database" element={<DatabaseInsight />} />
+          <Route path="operations" element={<Operations />} />
+          <Route path="usage" element={<Usage />} />
+          <Route path="approvals" element={<Approvals />} />
+          <Route path="settings" element={<Settings />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </AuthGate>
   )
 }
