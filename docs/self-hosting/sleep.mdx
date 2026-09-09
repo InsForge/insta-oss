@@ -65,7 +65,7 @@ have work to flush.
 ## What wakes it
 
 - **A request on any lane.** HTTP, Postgres, Redis, MongoDB or MySQL. The connection is held while
-  the container starts, for up to 60 seconds, plus up to 38 seconds of readiness retries after
+  the container starts, for up to 60 seconds, plus up to 30 seconds of readiness retries after
   that. You see a slow first request, not an error.
 - **`insta compute start`**, and any management call that needs the service up.
 - **A deploy**, which starts the replacement container.
@@ -112,6 +112,7 @@ Set these in `/etc/instacloud/instad.env`, then `cd /etc/instacloud && docker co
 | `INSTA_OSS_STOP_GRACE_SEC` | 10 | seconds before SIGKILL for compute |
 | `INSTA_OSS_STOP_GRACE_DB_SEC` | 30 | seconds before SIGKILL for a database |
 | `INSTA_OSS_WAKE_TIMEOUT_SEC` | 60 | how long a request is held for a wake |
+| `INSTA_OSS_READY_WINDOW_MS` | 30000 | retry window for a just woken upstream |
 | `INSTA_OSS_RAM_FLOOR_PCT` | 15 | free-memory floor for pressure eviction, 0 disables it |
 | `INSTA_OSS_MEM_BUDGET_MB` | unset | assumed total memory, needed for eviction on macOS |
 | `INSTA_OSS_ALWAYS_ON_DEFAULT` | false | make every new service always-on |
