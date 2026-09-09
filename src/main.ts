@@ -17,6 +17,9 @@ import { acquireLock, initStatePath, loadState, releaseLock } from './state'
 // ---- region WP4 (data dir) ----
 import { capabilitiesLine, sharedDataDir } from './datadir'
 // ---- end region WP4 ----
+// ---- region WP5 (templates/parity) ----
+import { TemplateCatalog } from './templates/catalog'
+// ---- end region WP5 ----
 // ---- region WP2 (router) ----
 import { laneReallocator, Router } from './router'
 import { engineRouterDeps, routerUpstream } from './router/deps'
@@ -75,11 +78,13 @@ async function main(): Promise<void> {
   // Upstream + DockerRuntime; passed as EngineOptions.upstream
   // ---- end region WP3 (upstream) ----
   // ---- region WP5 (catalog) ----
-  // TemplateCatalog; passed as EngineOptions.templates
+  // The bundled template registry. Reads no file until a route asks, so a missing or unreadable
+  // templates directory costs an empty catalog rather than a failed boot.
+  const templates = new TemplateCatalog(cfg.templatesDir)
   // ---- end region WP5 (catalog) ----
 
   const storage = new LocalGarage({ configPath: cfg.garageConfigPath, hostEndpoint: cfg.s3HostEndpoint, mode: cfg.mode, domain: cfg.domain })
-  const engine = new Engine(new LocalPostgres(), new DockerCompute(), storage, new LocalManagedDb(), { cfg })
+  const engine = new Engine(new LocalPostgres(), new DockerCompute(), storage, new LocalManagedDb(), { cfg, templates })
 
   // ---- region WP4 (migrate) ----
   // One boot migration of installs that stored data in docker volumes, BEFORE the router and the
@@ -92,7 +97,15 @@ async function main(): Promise<void> {
   finally { engine.booting = false }
   // ---- end region WP4 (migrate) ----
   // ---- region WP5 (executor) ----
-  // executor; abandonStale; migrateLegacyContainers
+  // A `running` deployment record cannot have a live executor behind it after a restart: mark those
+  // failed with the message that tells the operator a retry with the same deploymentId resumes.
+  const abandoned = engine.executor.abandonStale()
+  if (abandoned.length) console.warn(`warning: ${abandoned.length} template deployment(s) were interrupted by a restart; retry them with the same deploymentId`)
+  // Best-effort repair of a legacy `io-<ref>-pg` container name for an install that skipped the
+  // data migration above (which renames while it moves the bytes). A no-op otherwise.
+  await engine.migrateLegacyContainers().catch((e) => {
+    console.warn(`warning: could not rename a legacy postgres container: ${e instanceof Error ? e.message : String(e)}`)
+  })
   // ---- end region WP5 (executor) ----
   // ---- region WP2 (router) ----
   // The router owns the node:http server; Fastify receives it through `serverFactory` and hands its
