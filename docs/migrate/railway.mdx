@@ -7,7 +7,7 @@ Railway and InstaCloud think about deployments the same way, so the concepts map
 
 InstaCloud offers:
 
-- **Postgres with real branching.** Give a feature, or an agent task, its own database and its own compute, then merge the structure back.
+- **Postgres with real branching.** A branch opens as a copy-on-write clone holding all of the parent's data, at its own connection string, so a feature or an agent task can run migrations nowhere near production.
 - **Built for coding agents.** A CLI and an MCP server your agent drives directly, with an approval gate on the actions that matter.
 - **Flexible deployments.** A GitHub repo with no Dockerfile needed, your own Dockerfile, or an image from any registry.
 - **Managed services alongside.** Postgres, Redis, MySQL, MongoDB, and object storage in one project.
@@ -76,20 +76,12 @@ Attach <your-domain> to the compute service and give me the DNS records to publi
 
 Publish the records at your DNS provider, then ask your agent to check the domain. Keep the Railway project frozen, and do not delete it, until the old records have aged out of resolver caches.
 
-### 5. Branch the database
-
-A branch gets its own Postgres and its own compute, created by one command. A schema change, a destructive test, or a second agent working in parallel therefore cannot reach your production data, which is what makes it safe to hand an agent a migration in the first place. It is the closest thing here to a Railway environment, except that an agent makes one per task rather than you duplicating one in the dashboard.
-
-```text title="Prompt" wrap
-Create a branch called <name> and deploy the current code to it.
-```
-
-Schema moves forward through migration files, not by merging databases. `insta branch merge` creates the services a branch added and nothing else crosses over, so keep every schema change in a migration file and it replays on the branch, then on main.
-
 ## Workers and cron services
 
 A Railway worker becomes a second compute service. Give it a port to listen on and leave always-on enabled, because a suspended worker has no traffic to wake it.
 
 Railway cron services have no direct equivalent. Use `pg_cron`, which InstaCloud's Postgres ships, or run a scheduler inside an always-on service.
 
-And that is it. Everything your agent ran is a command you can run yourself, and the [CLI reference](/reference/cli/overview) has all of them. Stuck anywhere? Come to [Discord](https://discord.com/invite/MPxwj5xVvW).
+And that is it. Everything your agent ran is a command you can run yourself, and the [CLI reference](/reference/cli/overview) has all of them.
+
+Once you are settled in, [database branching](/postgres/branching) is the part most people came for: one command clones your database, storage and apps, data included, so a migration or an agent task never runs near production. Stuck anywhere? Come to [Discord](https://discord.com/invite/MPxwj5xVvW).
