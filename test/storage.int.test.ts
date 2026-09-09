@@ -26,6 +26,10 @@ afterAll(teardown)
 test('branch create copies the bucket; clone writes never touch the source bucket', async () => {
   const { project } = await engine.createProject('sttest')
   projectId = project.id
+  // Project create provisions nothing (WP5): the bucket arrives with the storage service, whose
+  // handle is `io-<ref>-<name>` on every branch.
+  const row = await engine.addStorageService(projectId, 'store')
+  expect(row).toMatchObject({ id: 'st-store', type: 'storage', name: 'store' })
   const mainNet = 'io-sttest-main'
   const featNet = 'io-sttest-feat'
 
@@ -47,18 +51,23 @@ test('branch credentials are scoped: a branch key cannot touch another branch bu
   // main's own creds work on main's bucket…
   const branches = engine.listBranches(projectId)
   const main = branches.find((b) => b.name === 'main')!
-  const feat = branches.find((b) => b.name === 'feat')!
+  expect(branches.map((b) => b.name).sort()).toEqual(['feat', 'main'])
+  // The minted bundle of ONE storage service on ONE branch (the credentials route's own answer).
+  const mainCreds = engine.credentials(projectId, 'st-store', 'main')
+  const featCreds = engine.credentials(projectId, 'st-store', 'feat')
+  expect(mainCreds.BUCKET_NAME).toBe(MAIN_BUCKET)
+  expect(featCreds.BUCKET_NAME).toBe(FEAT_BUCKET)
   const rcloneAs = (creds: Record<string, string>, args: string[]) =>
     // same path the app takes: plain S3 with the branch's minted key
     import('../src/docker').then(({ docker }) => docker(['run', '--rm', '--network', main.network,
       '-e', 'RCLONE_CONFIG_G_TYPE=s3', '-e', 'RCLONE_CONFIG_G_PROVIDER=Other',
-      '-e', `RCLONE_CONFIG_G_ENDPOINT=${main.s3!.AWS_ENDPOINT_URL_S3}`, '-e', 'RCLONE_CONFIG_G_REGION=garage',
+      '-e', `RCLONE_CONFIG_G_ENDPOINT=${mainCreds.AWS_ENDPOINT_URL_S3}`, '-e', 'RCLONE_CONFIG_G_REGION=garage',
       '-e', `RCLONE_CONFIG_G_ACCESS_KEY_ID=${creds.AWS_ACCESS_KEY_ID}`, '-e', `RCLONE_CONFIG_G_SECRET_ACCESS_KEY=${creds.AWS_SECRET_ACCESS_KEY}`,
       'rclone/rclone', ...args]))
   // own bucket readable
-  expect((await rcloneAs(main.s3!, ['ls', `g:${main.bucket}`])).toString()).toContain('hello.txt')
+  expect((await rcloneAs(mainCreds, ['ls', `g:${mainCreds.BUCKET_NAME}`])).toString()).toContain('hello.txt')
   // foreign bucket: denied
-  await expect(rcloneAs(main.s3!, ['ls', `g:${feat.bucket}`])).rejects.toThrow(/AccessDenied|Forbidden|exit/)
+  await expect(rcloneAs(mainCreds, ['ls', `g:${featCreds.BUCKET_NAME}`])).rejects.toThrow(/AccessDenied|Forbidden|exit/)
 })
 
 test('object ops round-trip on the host port: list → presigned GET → upload POST → delete', async () => {
