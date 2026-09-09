@@ -295,7 +295,10 @@ test('removing ONE of two storage services leaves the shared object store on the
   // The survivor is still a real bucket with its endpoint minted.
   const secrets = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets as Record<string, string>
   expect(secrets.BUCKET_NAME).toBe('io-demo-main-blobs')
-  expect(secrets.AWS_ENDPOINT_URL_S3).toBeTruthy()
+  // Host-facing, like every DSN in the bundle: the stored value names the object store on the
+  // branch network, and `insta secrets -o .env` feeds a process on the HOST (contract section 10).
+  expect(secrets.AWS_ENDPOINT_URL_S3).toBe('http://127.0.0.1:3900')
+  expect(secrets.AWS_ENDPOINT_URL_S3_BLOBS).toBe('http://127.0.0.1:3900')
   // ...and the LAST bucket takes the attachment with it.
   const last = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/st-blobs` })
   expect(last.statusCode).toBe(200)
@@ -1050,12 +1053,16 @@ test('compute deploys receive the managed-db bundle in env', async () => {
   const r = await local.inject({ method: 'POST', url: '/orgs/local/projects', payload: { name: 'demo' } })
   const pid = r.json().project.id
   await local.inject({ method: 'POST', url: `/projects/${pid}/services`, payload: { type: 'mongodb', name: 'mongo-db' } })
+  await local.inject({ method: 'POST', url: `/projects/${pid}/services`, payload: { type: 'storage', name: 'store' } })
   await local.inject({ method: 'POST', url: `/projects/${pid}/deploy`, payload: { image: 'app:1', branch: 'main', port: 3000 } })
   // The deploy env is the same host-facing bundle, containerized: 127.0.0.1 becomes the gateway
   // name a container can dial (contract §10, `containerize`).
   expect(seen[0].MONGODB_URL).toMatch(/^mongodb:\/\/root:.+@host\.docker\.internal:2\d{4}\/admin\?authSource=admin$/)
   expect(seen[0].MONGODB_HOST).toBe('host.docker.internal')
   expect(seen[0].MONGODB_URL_MONGO_DB).toBe(seen[0].MONGODB_URL)
+  // The object store is the exception the contract names: a container resolves it on the branch
+  // network, so the deploy keeps the stored name where the host-facing bundle says 127.0.0.1:3900.
+  expect(seen[0].AWS_ENDPOINT_URL_S3).toBe('http://io-garage:3900')
 })
 
 test('managed db remove: destroys on every branch, drops rows + secrets; rename re-keys everything', async () => {

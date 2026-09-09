@@ -135,8 +135,10 @@ test('--print-compose: host networking, the socket and the data dir bound at the
   expect(garage).toContain('- 127.0.0.1:3900:3900')
   expect(garage).toContain('- 127.0.0.1:3902:3902')
   expect(garage).toContain('${INSTA_OSS_DATA_DIR}/garage/garage.toml:/etc/garage.toml:ro')
-  // decision 46: the compose name must equal the handle the storage adapter execs into
-  expect(readFileSync(join(ROOT, 'src', 'adapters', 'garage.ts'), 'utf8')).toContain("const GARAGE = 'io-garage'")
+  // decision 46: the compose name must equal the handle the storage adapter execs into, which is
+  // the one constant the adapter and the engine share.
+  expect(readFileSync(join(ROOT, 'src', 'manageddb.ts'), 'utf8')).toContain("export const GARAGE_CONTAINER = 'io-garage'")
+  expect(readFileSync(join(ROOT, 'src', 'adapters', 'garage.ts'), 'utf8')).toContain('const GARAGE = GARAGE_CONTAINER')
   // the render is verbatim: no value from the environment is baked in
   expect(run(['--print-compose'], { INSTA_OSS_DATA_DIR: '/srv/x', INSTA_OSS_VERSION: '9.9.9' })).toBe(out)
 })

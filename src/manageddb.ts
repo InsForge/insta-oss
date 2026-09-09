@@ -148,6 +148,8 @@ export const dataPaths = (type: ManagedDbType): ReadonlyArray<{ containerPath: s
 // row carries them (databases[id].container, buckets[id].bucket) and derived here only at provision.
 /** Postgres container for one database service on a branch: `io-<ref>-pg-<name>`. */
 export const pgContainerName = (ref: string, name: string): string => `io-${ref}-pg-${name}`
+/** The ONE object-store container of the box, on every branch network that has a bucket. */
+export const GARAGE_CONTAINER = 'io-garage'
 /** Bucket for one storage service on a branch: `io-<ref>-<name>` (legacy single bucket: `io-<ref>`). */
 export const bucketName = (ref: string, name: string): string => `io-${ref}-${name}`
 /** App container for one compute group on a branch: `io-<ref>-app-<group>`. */

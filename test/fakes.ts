@@ -78,7 +78,7 @@ export const compute: ComputeAdapter = {
 export const storage: StorageAdapter = {
   // The bucket HANDLE is `io-<ref>-<name>` (what cloneInto/destroy/setAccess receive) and, as in the
   // real adapter, the env's BUCKET_NAME is that same bucket (contract §6).
-  provision: async (ref, _network, name) => { const bucket = `io-${ref}-${name}`; calls.push(`st.provision:${ref}:${name}`); return { bucket, env: { BUCKET_NAME: bucket, AWS_ACCESS_KEY_ID: 'k', AWS_SECRET_ACCESS_KEY: 's', AWS_ENDPOINT_URL_S3: 'http://io-minio:9000', AWS_REGION: 'local' } } },
+  provision: async (ref, _network, name) => { const bucket = `io-${ref}-${name}`; calls.push(`st.provision:${ref}:${name}`); return { bucket, env: { BUCKET_NAME: bucket, AWS_ACCESS_KEY_ID: 'k', AWS_SECRET_ACCESS_KEY: 's', AWS_ENDPOINT_URL_S3: 'http://io-garage:3900', AWS_REGION: 'local' } } },
   cloneInto: async (srcBucket, dstBucket) => { calls.push(`st.clone:${srcBucket}->${dstBucket}`) },
   destroy: async (bucket) => { calls.push(`st.destroy:${bucket}`) },
   detachFrom: async (network) => { calls.push(`st.detach:${network}`) },

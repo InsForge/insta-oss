@@ -57,11 +57,16 @@ test('branch credentials are scoped: a branch key cannot touch another branch bu
   const featCreds = engine.credentials(projectId, 'st-store', 'feat')
   expect(mainCreds.BUCKET_NAME).toBe(MAIN_BUCKET)
   expect(featCreds.BUCKET_NAME).toBe(FEAT_BUCKET)
+  // The credential bundle is HOST-facing (contract section 10: `http://127.0.0.1:3900` in local
+  // mode), and this probe runs INSIDE a container on the branch network, where the object store
+  // answers to its own name. That is the same swap `envFor` makes for a deploy.
+  expect(mainCreds.AWS_ENDPOINT_URL_S3).toBe('http://127.0.0.1:3900')
+  const inContainerEndpoint = 'http://io-garage:3900'
   const rcloneAs = (creds: Record<string, string>, args: string[]) =>
     // same path the app takes: plain S3 with the branch's minted key
     import('../src/docker').then(({ docker }) => docker(['run', '--rm', '--network', main.network,
       '-e', 'RCLONE_CONFIG_G_TYPE=s3', '-e', 'RCLONE_CONFIG_G_PROVIDER=Other',
-      '-e', `RCLONE_CONFIG_G_ENDPOINT=${mainCreds.AWS_ENDPOINT_URL_S3}`, '-e', 'RCLONE_CONFIG_G_REGION=garage',
+      '-e', `RCLONE_CONFIG_G_ENDPOINT=${inContainerEndpoint}`, '-e', 'RCLONE_CONFIG_G_REGION=garage',
       '-e', `RCLONE_CONFIG_G_ACCESS_KEY_ID=${creds.AWS_ACCESS_KEY_ID}`, '-e', `RCLONE_CONFIG_G_SECRET_ACCESS_KEY=${creds.AWS_SECRET_ACCESS_KEY}`,
       'rclone/rclone', ...args]))
   // own bucket readable

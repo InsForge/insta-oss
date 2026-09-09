@@ -9,7 +9,7 @@ import { loadConfig, type Config } from './config'
 import { dataLayout, ensureDirSync, lazyDataDirOps, probedCapabilities } from './datadir'
 import { migrateLegacyData } from './datadir-migrate'
 import { docker } from './docker'
-import { MANAGED_DB, CANONICAL_MANAGED_KEYS, CANONICAL_KEYS, suffixBundle, envSuffix, laneBundle, managedServiceId, managedContainerName, isManagedDbType, parseServiceId, pgContainerName, pgServiceId, storageServiceId, bucketName, appContainerName, dataPaths } from './manageddb'
+import { MANAGED_DB, CANONICAL_MANAGED_KEYS, CANONICAL_KEYS, GARAGE_CONTAINER, suffixBundle, envSuffix, laneBundle, managedServiceId, managedContainerName, isManagedDbType, parseServiceId, pgContainerName, pgServiceId, storageServiceId, bucketName, appContainerName, dataPaths } from './manageddb'
 import * as observe from './observe'
 import { loadState, mutate } from './state'
 import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret, DataDirOps, PgTarget, ServiceKey, ServiceLimits, ServiceSettings } from './types'
@@ -2691,15 +2691,31 @@ export class Engine {
     return out
   }
 
-  /** Minted storage credentials on the same suffix + alias rule as postgres and managed. */
-  private storageSecretsFor(project: Project, branch: Branch): Record<string, string> {
+  /** Minted storage credentials on the same suffix + alias rule as postgres and managed.
+   *  `hostFacing` (the default, for `secrets` and `credentials`) swaps the stored branch-network
+   *  endpoint for the one that answers on the HOST, which is what `insta secrets -o .env` and the
+   *  aws CLI need; a deploy asks for the stored form, because a container resolves `io-garage`
+   *  through the branch network and needs no gateway at all (contract section 10). */
+  private storageSecretsFor(project: Project, branch: Branch, hostFacing = true): Record<string, string> {
     const out: Record<string, string> = {}
     let aliased = false
     for (const s of this.stList(project.id)) {
       const row = this.bucketHandle(project, branch, s.id)
       if (!row) continue
-      Object.assign(out, suffixBundle(row.env, s.name))
-      if (!aliased) { aliased = true; Object.assign(out, row.env) }
+      const env = hostFacing ? this.hostFacingS3(row.env) : row.env
+      Object.assign(out, suffixBundle(env, s.name))
+      if (!aliased) { aliased = true; Object.assign(out, env) }
+    }
+    return out
+  }
+
+  /** The stored S3 endpoint rewritten onto the host: in server mode the two are the same string
+   *  already, so this only bites in local mode, where the row holds `http://io-garage:3900`. */
+  private hostFacingS3(env: Record<string, string>): Record<string, string> {
+    const out: Record<string, string> = { ...env }
+    for (const [k, v] of Object.entries(out)) {
+      if (!/^AWS_ENDPOINT_URL_S3(_|$)/.test(k)) continue
+      try { if (new URL(v).hostname === GARAGE_CONTAINER) out[k] = this.cfg.s3HostEndpoint } catch { /* not a URL: leave it */ }
     }
     return out
   }
@@ -2749,7 +2765,7 @@ export class Engine {
   envFor(project: Project, branch: Branch, group: string): Record<string, string> {
     return {
       ...this.dbSecretsFor(project, branch),
-      ...this.storageSecretsFor(project, branch),
+      ...this.storageSecretsFor(project, branch, false),
       ...this.managedSecretsFor(project.id, branch),
       ...this.deploySecretsFor(project.id, branch.name, group),
       ...this.bindingsFor(project, branch, group),
@@ -2769,7 +2785,7 @@ export class Engine {
     }
     if (parsed.type === 'storage') {
       const row = this.bucketHandle(project, branch, serviceId)
-      return row ? { ...row.env } : {}
+      return row ? this.hostFacingS3(row.env) : {}
     }
     if (isManagedDbType(parsed.type)) {
       const cred = branch.managed?.[serviceId]

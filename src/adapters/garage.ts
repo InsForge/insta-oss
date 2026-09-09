@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { RunMode } from '../config'
 import { docker } from '../docker'
-import { bucketName } from '../manageddb'
+import { bucketName, GARAGE_CONTAINER } from '../manageddb'
 import { signRequest, presignGet, presignPost, parseListObjects, parseDeleteResult, escapeXml, type S3Creds } from '../s3'
 import type { StorageAdapter, ObjectListing } from '../types'
 
@@ -18,7 +18,7 @@ import type { StorageAdapter, ObjectListing } from '../types'
 // Run modes differ in exactly two places (decision 20): the toml's root_domain (`.s3.<domain>` on
 // a server, `.s3.garage.localhost` / `.web.garage.localhost` locally) and the AWS_ENDPOINT_URL_S3 a
 // service is handed (`https://s3.<domain>` on a server, the branch-network name locally).
-const GARAGE = 'io-garage'
+const GARAGE = GARAGE_CONTAINER
 const IMAGE = 'dxflrs/garage:v2.3.0'
 const RCLONE = 'rclone/rclone'
 const S3_PORT = 3900
