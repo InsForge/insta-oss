@@ -271,7 +271,10 @@ insta compute limits web --memory 512mb >/dev/null || FAIL "compute limits faile
 wait_for 60 curl -sf "$URL/" || FAIL "the app did not come back after a limits change"
 MEM=$(docker inspect -f '{{.HostConfig.Memory}}' "$WEBC")
 [ "$MEM" = "536870912" ] || FAIL "expected 536870912 bytes of memory, docker reports $MEM"
-insta compute limits web | grep -q '512' || FAIL "limits read-back does not show 512"
+# Captured, never piped into `grep -q`: grep exits at the first match and the CLI dies on the
+# closed pipe, printing a stack trace over an assertion that passed.
+LIMITS=$(insta compute limits web)
+printf '%s\n' "$LIMITS" | grep -q '512' || FAIL "limits read-back does not show 512"
 OK "memory limit applied and read back"
 
 STEP "9. templates"
@@ -287,11 +290,16 @@ HELLO_URL=$(printf '%s\n' "$DEPLOY_JSON" | jsel 'd.services[0].url')
 [ -n "$HELLO_URL" ] || FAIL "template deploy returned no service url"
 [ "$HAVE_LOCALHOST_DNS" = "1" ] || ensure_host "$(url_host "$HELLO_URL")"
 wait_for 90 curl -sf "$HELLO_URL/" || FAIL "$HELLO_URL never answered"
-insta services list | grep -q 'compute/hello' || FAIL "the template service is missing"
+SVCS=$(insta services list)
+printf '%s\n' "$SVCS" | grep -q 'compute/hello' || FAIL "the template service is missing"
 OK "template deployed from a directory and answers"
 if insta template deploy ./e2e/fixtures/tpl-hello --branch main --yes --json >/dev/null 2>&1; then
-  insta services list | grep -q 'hello-2' && OK "a second deploy names itself hello-2" \
-    || SKIP "second deploy did not use the hello-2 name"
+  SVCS=$(insta services list)
+  if printf '%s\n' "$SVCS" | grep -q 'hello-2'; then
+    OK "a second deploy names itself hello-2"
+  else
+    SKIP "second deploy did not use the hello-2 name"
+  fi
 else
   SKIP "a second deploy of the same template was refused"
 fi
