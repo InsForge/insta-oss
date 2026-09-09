@@ -455,7 +455,7 @@
     },
     {
       "source": "/platform/migrate/railway",
-      "destination": "/introduction"
+      "destination": "/migrate/railway"
     },
     {
       "source": "/postgres/backups",

@@ -15,7 +15,7 @@ InstaCloud offers:
 
 ## Migration steps
 
-We will migrate [Railway's own Django template](https://github.com/railwayapp-templates/django), a Python service with a Postgres database. Its `railway.json` says how it was built:
+We will migrate [Railway's own Django template](https://github.com/railwayapp-templates/django), a Python service with a Postgres database. Its `railway.json` says how it was built. Abridged here: the real `startCommand` also runs `collectstatic`:
 
 ```json
 {
@@ -60,7 +60,7 @@ Create a Railway project token first, under **Project Settings → Tokens**. Rai
 Migrate my Railway service mysite and its Postgres data to InstaCloud. The repo is railwayapp-templates/django, and my Railway project token is in RAILWAY_TOKEN. Follow the insta skill's migration runbook, and stop before moving DNS.
 ```
 
-It will ask you to approve anything that touches production, and it will hand two jobs back to you, because Railway has no command for either: scaling every service to zero, and downloading a volume if you have one.
+It will ask you to approve anything that touches production, and it will hand two jobs back to you, because Railway has no command for either. **Order matters.** If you have a volume, download it *first*, while its service is still running, because Railway refuses to read a volume whose service is stopped. Only then scale every service to zero, workers and cron services included, so nothing is still writing when the database is copied.
 
 {/* screenshot: console, project with a compute service and a postgres service deployed */}
 
@@ -78,6 +78,6 @@ A Railway worker becomes a second compute service. Give it a port to listen on a
 
 Railway cron services have no direct equivalent. Use `pg_cron`, which InstaCloud's Postgres ships, or run a scheduler inside an always-on service.
 
-And that is it. Everything your agent ran is a command you can run yourself, and the [CLI reference](/reference/cli/overview) has all of them.
+And that is it. Every InstaCloud action your agent took is a command you can run yourself, in the [CLI reference](/reference/cli/overview); the inspection on the other side used that provider's own CLI and API.
 
-Once you are settled in, [database branching](/postgres/branching) is the part most people came for: one command clones your database, storage and apps, data included, so a migration or an agent task never runs near production. Stuck anywhere? Come to [Discord](https://discord.com/invite/MPxwj5xVvW).
+Once you are settled in, [database branching](/postgres/branching) is the part most people came for: one command clones your database, storage and apps, data included, so work an agent does *on its branch* stays there. The branch boundary is separation, not authorization: any command taking `--branch` still reaches `main`, so set [policy](/governance/overview) for the actions that matter. Stuck anywhere? Come to [Discord](https://discord.com/invite/MPxwj5xVvW).

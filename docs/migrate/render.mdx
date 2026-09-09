@@ -15,7 +15,7 @@ InstaCloud offers:
 
 ## Migration steps
 
-We will migrate [Render's own Django example](https://github.com/render-examples/django), a Python web service with a Postgres database. Here is its `render.yaml`:
+We will migrate [Render's own Django example](https://github.com/render-examples/django), a Python web service with a Postgres database. The interesting part of its `render.yaml`. This is abridged; the full file also carries `plan`, `databaseName`, `user` and a `startCommand`:
 
 ```yaml
 databases:
@@ -88,6 +88,6 @@ A Render background worker becomes a second compute service. Give it a port to l
 
 Render cron jobs have no direct equivalent. Use `pg_cron`, which InstaCloud's Postgres ships, or run a scheduler inside an always-on service.
 
-And that is it. Everything your agent ran is a command you can run yourself, and the [CLI reference](/reference/cli/overview) has all of them.
+And that is it. Every InstaCloud action your agent took is a command you can run yourself, in the [CLI reference](/reference/cli/overview); the inspection on the other side used that provider's own CLI and API.
 
-Once you are settled in, [database branching](/postgres/branching) is the part most people came for: one command clones your database, storage and apps, data included, so a migration or an agent task never runs near production. Stuck anywhere? Come to [Discord](https://discord.com/invite/MPxwj5xVvW).
+Once you are settled in, [database branching](/postgres/branching) is the part most people came for: one command clones your database, storage and apps, data included, so work an agent does *on its branch* stays there. The branch boundary is separation, not authorization: any command taking `--branch` still reaches `main`, so set [policy](/governance/overview) for the actions that matter. Stuck anywhere? Come to [Discord](https://discord.com/invite/MPxwj5xVvW).
