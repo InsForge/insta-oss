@@ -43,6 +43,10 @@ log() { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+# systemd is often INSTALLED without running the box (containers, sysvinit, OpenRC): systemctl is
+# then on PATH but every call fails with "System has not been booted with systemd as init system".
+# /run/systemd/system exists only while systemd is PID 1.
+systemd_running() { have systemctl && [ -d /run/systemd/system ]; }
 randhex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 valid_ip() { printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
 private_ip() {
@@ -462,15 +466,24 @@ if ! have docker; then
   curl -fsSL https://get.docker.com | sh
   DOCKER_FRESH=1
 fi
-if have systemctl; then systemctl enable --now docker >/dev/null 2>&1 || true; fi
+if systemd_running; then systemctl enable --now docker >/dev/null 2>&1 || true; fi
 docker compose version >/dev/null 2>&1 || die "docker compose (the v2 plugin) is required: install docker-compose-plugin, then re-run"
 
 restart_docker() {
-  if have systemctl; then systemctl restart docker; else service docker restart; fi
+  if systemd_running; then systemctl restart docker || true
+  elif have service && [ -x /etc/init.d/docker ]; then service docker restart || true
+  else warn "no service manager found to restart Docker; restart it yourself if the next step fails"
+  fi
   _i=0
   until docker info >/dev/null 2>&1 || [ "$_i" -ge 30 ]; do _i=$((_i + 1)); sleep 1; done
-  docker info >/dev/null 2>&1 || die "Docker did not come back after the restart (journalctl -u docker)"
+  docker info >/dev/null 2>&1 || die "Docker is not answering after a restart (systemctl status docker, journalctl -u docker); start it, then re-run"
 }
+# get.docker.com enables the unit through systemd; a box that boots something else is left with an
+# installed but stopped daemon, and every later step would fail on a raw "cannot connect" error.
+if ! docker info >/dev/null 2>&1; then
+  log "Docker is installed but not answering: starting it"
+  restart_docker
+fi
 # Every branch is one user-defined network and stock dockerd yields only 31 of them; the 32nd
 # `branch create` fails with "could not find an available, non-overlapping IPv4 address pool".
 ensure_pools() {
@@ -532,7 +545,7 @@ make_loop_image() {
     # otherwise bring every Postgres up on an empty directory before instad's guard runs.
     printf '%s\n' "$IMG $DATA xfs loop,nofail,x-systemd.required-by=docker.service,x-systemd.before=docker.service 0 0" >> /etc/fstab
   fi
-  if have systemctl; then systemctl daemon-reload || true; fi
+  if systemd_running; then systemctl daemon-reload || true; fi
   mount "$DATA" || mount -o loop "$IMG" "$DATA"
   probe_reflink || die "$IMG is mounted at $DATA but reflinks still fail; check dmesg and mkfs.xfs -m reflink=1 support"
   REFLINK="loop image ($_size GiB)"
