@@ -59,17 +59,9 @@ railway volume files download /path/to/file ./local-copy
 Migrate my Railway project to InstaCloud, including the Postgres data. The repo is <owner/repo>. Follow the insta skill's migration runbook, and stop before moving DNS.
 ```
 
-Your agent works through the runbook in the `insta` skill, which has a condition that has to hold before each step runs:
+Your agent follows the migration runbook in the `insta` skill: it adds one compute service per Railway service, wires the database credential, deploys your repo, moves the data, and checks that it landed. It will ask you to approve the actions that touch production.
 
-1. Add one **compute** service per Railway service, plus a **postgres** service.
-2. Bind `DATABASE_URL` from the postgres service. This replaces Railway's reference variables, and it matters more than it looks: `railway variable list` prints references already resolved, so a copied `DATABASE_URL` is a literal still pointing at Railway.
-3. Connect your repo and deploy it. Railpack built your app without a Dockerfile, and InstaCloud detects the runtime with nixpacks on the server the same way.
-4. Copy the remaining variables, skipping `RAILWAY_*` and `PORT`, which the platform supplies.
-5. Stop the writers on both sides, then move the database.
-6. Check row counts, sequences, constraints and indexes against Railway, rather than trusting the exit code.
-7. Restart the app so it resolves the new database, and confirm at the machine rather than at the binding.
-
-The ordering is the part that matters. Once InstaCloud is taking writes, going back to Railway quietly discards them, so the source stops first. Railway has no maintenance mode, so scaling the service to zero in the dashboard is how you stop it, and every worker and cron service needs the same treatment.
+One thing is worth knowing, because it is the reason the runbook exists. Nothing on Railway can still be writing when the data moves, and Railway has no maintenance mode, so scale the service to zero in the dashboard yourself, along with every worker and cron service. Once the new database has writes of its own, going back to Railway quietly loses them.
 
 {/* screenshot: console, project canvas with a compute service and a postgres service deployed */}
 

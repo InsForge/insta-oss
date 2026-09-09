@@ -51,17 +51,9 @@ Two things do not exist anywhere your agent can read:
 Migrate my Render service <service-name> and its Postgres database to InstaCloud. The repo is <owner/repo>. Follow the insta skill's migration runbook, and stop before moving DNS.
 ```
 
-Your agent works through the runbook in the `insta` skill, which has a condition that has to hold before each step runs:
+Your agent follows the migration runbook in the `insta` skill: it adds the services, wires the database credential, deploys your repo, moves the data, and checks that it landed. It will ask you to approve the actions that touch production.
 
-1. Add a **compute** service and a **postgres** service.
-2. Bind `DATABASE_URL` from the postgres service, rather than copying the string across, so a rotated credential reaches the app on its own.
-3. Connect your repo and deploy it. Render built with a buildpack, so there is probably no Dockerfile, and InstaCloud detects the runtime with nixpacks on the server.
-4. Copy the remaining environment variables, skipping `RENDER_*` and `PORT`, which the platform supplies.
-5. Stop the writers on both sides, then move the database.
-6. Check row counts, sequences, constraints and indexes against Render, rather than trusting the exit code.
-7. Restart the app so it resolves the new database, and confirm at the machine rather than at the binding.
-
-The ordering is the part that matters. Once InstaCloud is taking writes, going back to Render quietly discards them, so the source stops first.
+One thing is worth knowing, because it is the reason the runbook exists. Your agent stops Render from taking writes before InstaCloud starts taking them. Once the new database has writes of its own, going back to Render quietly loses them.
 
 {/* screenshot: console, project canvas with a compute service and a postgres service deployed */}
 
