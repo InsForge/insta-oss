@@ -4,6 +4,7 @@
 // --email`, /me as PublicUser + via, and /tokens minting `insta_` keys. Local mode registers exactly
 // today's /me and the three /tokens 501s and no hook, so the local surface stays byte-identical.
 // No endpoint here is missing on the cloud (contract 00 section 9, WP1 rows).
+import { randomUUID } from 'node:crypto'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { Config } from './config'
 import { isApiPath } from './server'
@@ -94,8 +95,39 @@ type SignIn =
   | { ok: true; token: string; session: SessionRow; admin: AdminRow }
   | { ok: false; reason: 'invalid_email' | 'invalid_credentials' | 'too_many' }
 
+/** Twelve hours: long enough for a working session, short enough that a leaked receipt ages out. */
+const AGENT_SESSION_TTL_SEC = 12 * 60 * 60
+
+/**
+ * POST /agent/sessions, in BOTH run modes. The CLI enrols itself as an agent whenever it detects
+ * one around it (CLAUDECODE, CODEX_THREAD_ID, CURSOR_AGENT) and then mints a session before its
+ * FIRST authenticated call, so a daemon without this route answers 404 and every command from an
+ * agent shell dies there, `insta login` included.
+ *
+ * The receipt is not a credential here. One box has one admin, the bearer already carries its full
+ * access, and this daemon does not verify the Ed25519 assertion the CLI signs with the returned id:
+ * the session identifies the client, it never widens or narrows what the caller can already do. In
+ * server mode the route sits behind the same guard as the rest of the API, so an agent still needs
+ * a valid `insta_` token or session to obtain one.
+ */
+function registerAgentSessions(app: FastifyInstance): void {
+  app.post('/agent/sessions', async (req, reply) => {
+    const b = body(req)
+    const projectId = typeof b.projectId === 'string' && b.projectId ? b.projectId : null
+    const client = typeof b.client === 'string' && b.client ? b.client : 'unknown'
+    return reply.code(201).send({
+      agentSessionId: randomUUID(),
+      token: `agsess_${randomUUID().replace(/-/g, '')}`,
+      projectId,
+      client,
+      expiresAt: new Date(clock.now() + AGENT_SESSION_TTL_SEC * 1000).toISOString(),
+    })
+  })
+}
+
 /** Registers the identity surface for `cfg.mode`; call right after the content-type parser. */
 export function registerAuth(app: FastifyInstance, cfg: Config): void {
+  registerAgentSessions(app)
   if (!cfg.auth.enabled) {
     // Local mode: byte-identical to the pre-identity daemon (contract 00 section 11).
     const notCloud = (reply: FastifyReply, what: string) =>

@@ -55,6 +55,14 @@ create one in the dashboard, on the Account page, or with `POST /tokens` and a s
 `GET /tokens` lists them and `DELETE /tokens/:id` revokes one. In local mode those routes stay
 `501`, because there is nothing to authenticate.
 
+## Agent sessions
+
+The CLI enrols itself as an agent whenever it detects one around it (Claude Code, Codex, Cursor)
+and mints a session at `POST /agent/sessions` before its first authenticated call, `insta login`
+included. insta-oss answers that route in both run modes, so the CLI works from an agent shell.
+The receipt is not a second credential: one box has one admin, the bearer already carries its full
+access, and the daemon does not verify the signed assertion the CLI attaches to later requests.
+
 ## Backups
 
 The backups API routes answer `501` with a hint that names the documented path, and there is

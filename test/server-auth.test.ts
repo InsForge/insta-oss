@@ -346,3 +346,24 @@ test('a foreign session token and a stale admin id never authenticate', async ()
   mutate((s) => { s.identity!.admin!.id = 'someone-else' })
   expect((await send('GET', '/me', { headers: { authorization: `Bearer ${token}` } })).statusCode).toBe(401)
 })
+
+test('an agent enrols itself: POST /agent/sessions needs the bearer and returns a usable receipt', async () => {
+  const cookie = cookieOf(await signUp())
+  const key = (await send('POST', '/tokens', { headers: { cookie }, payload: { name: 'cli' } })).json().token
+  const res = await send('POST', '/agent/sessions', {
+    headers: { authorization: `Bearer ${key}` },
+    payload: { projectId: 'p1', client: 'claude-code', publicKey: '-----BEGIN PUBLIC KEY-----\nx\n-----END PUBLIC KEY-----\n' },
+  })
+  expect(res.statusCode).toBe(201)
+  const out = res.json()
+  expect(out.agentSessionId).toEqual(expect.any(String))
+  expect(out.token).toMatch(/^agsess_/)
+  expect(out.projectId).toBe('p1')
+  expect(out.client).toBe('claude-code')
+  expect(Date.parse(out.expiresAt)).toBeGreaterThan(Date.now())
+  // The bootstrap call the CLI makes before it knows a project carries no projectId.
+  const boot = await send('POST', '/agent/sessions', { headers: { authorization: `Bearer ${key}` }, payload: { client: 'codex' } })
+  expect(boot.statusCode).toBe(201)
+  expect(boot.json().projectId).toBeNull()
+  expect(boot.json().agentSessionId).not.toBe(out.agentSessionId)
+})
