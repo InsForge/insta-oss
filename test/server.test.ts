@@ -1637,11 +1637,21 @@ test('database management wakes a sleeping instance; observability answers 503 a
   expect(calls.filter((c) => c.startsWith('db.query'))).toEqual([])
   expect(calls.filter((c) => c.startsWith('runtime.start:'))).toEqual([])
 
-  // Management is an explicit operation: it starts the container first, then runs its SQL.
-  calls.length = 0
-  expect((await get(`/projects/${id}/database/databases`)).statusCode).toBe(200)
-  expect(calls.indexOf('runtime.start:io-demo-main-pg-db')).toBeGreaterThanOrEqual(0)
-  expect(calls.findIndex((c) => c.startsWith('db.query'))).toBeGreaterThan(calls.indexOf('runtime.start:io-demo-main-pg-db'))
+  // Management is an explicit operation: it starts the container first, then runs its SQL. Every
+  // route decision 48 calls management does it, not just the first one.
+  const management: Array<[string, string, unknown]> = [
+    ['GET', 'databases', undefined],
+    ['GET', 'extensions', undefined],
+    ['POST', 'password', { password: 'pw-rotate' }],
+  ]
+  for (const [method, path, payload] of management) {
+    await engine.sleep(pgKey, 'idle')
+    calls.length = 0
+    const r = await app.inject({ method: method as 'GET', url: `/projects/${id}/database/${path}`, payload })
+    expect(r.statusCode, path).toBe(200)
+    expect(calls.indexOf('runtime.start:io-demo-main-pg-db'), path).toBeGreaterThanOrEqual(0)
+    expect(calls.findIndex((c) => c.startsWith('db.query')), path).toBeGreaterThan(calls.indexOf('runtime.start:io-demo-main-pg-db'))
+  }
   // ...and now that it is awake, the observability pages answer again.
   expect((await get(`/projects/${id}/database/metrics`)).statusCode).toBe(200)
 })
@@ -1673,6 +1683,32 @@ test('PATCH database/settings: scaleToZero, idleTimeout and the cpu/memory grid,
   // 0 disables sleep for this instance without touching the always-on flag.
   expect((await patch(`/projects/${id}/database/settings`, { idleTimeout: 0 })).json().idleTimeoutSecs).toBe(0)
 })
+
+test('the sweep sleeps an idle service read out of state.json, and always-on takes it out again', async () => {
+  // A real projection: the idle window comes from the config, the create grace from the ROW, and
+  // always-on from the service setting. One second of real time is cheaper than faking the clock
+  // around Fastify's own timers.
+  const engine = makeEngine(testConfig({ INSTA_OSS_IDLE_COMPUTE_SEC: '1', INSTA_OSS_IDLE_DB_SEC: '1', INSTA_OSS_CREATE_GRACE_SEC: '0' }))
+  app = buildServer(engine)
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await new Promise((r) => { setTimeout(r, 1_100) })
+
+  calls.length = 0
+  await engine.scheduler.sweep()
+  expect(calls).toContain('runtime.stop:io-demo-main-app-default:10')
+  expect(calls).toContain('runtime.stop:io-demo-main-pg-db:30')
+  expect((await get(`/projects/${id}/services`)).json().services.find((x: { id: string }) => x.id === 'cp-default').runtime).toBe('asleep')
+
+  // Always-on, and the very same sweep leaves it alone.
+  await post(`/projects/${id}/services/cp-default/start`)
+  await put(`/projects/${id}/services/cp-default/always-on`, { enabled: true })
+  await patch(`/projects/${id}/database/settings`, { scaleToZero: false })
+  await new Promise((r) => { setTimeout(r, 1_100) })
+  calls.length = 0
+  await engine.scheduler.sweep()
+  expect(calls.filter((c) => c.startsWith('runtime.stop:'))).toEqual([])
+}, 20_000)
 
 test('GET /policy lists service.upgrade, the action PUT limits gates on', async () => {
   const { id } = await wp3Project()
