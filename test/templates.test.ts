@@ -443,7 +443,10 @@ test('an inline manifest with a postgres service binds its DATABASE_URL into the
   const bindings = loadState().branches[Object.keys(loadState().branches)[0]].bindings ?? []
   expect(bindings).toEqual([{ envName: 'DATABASE_URL_APP', target: 'compute/app', source: 'postgres/store', sourceName: 'DATABASE_URL' }])
   const secrets = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
-  expect(secrets.DATABASE_URL).toContain('io-demo-main-pg-db')   // the older service keeps the alias
+  // The alias still belongs to the older `db` service, and every DSN is the host-facing lane form.
+  expect(secrets.DATABASE_URL).toBe(secrets.DATABASE_URL_DB)
+  expect(secrets.DATABASE_URL).not.toBe(secrets.DATABASE_URL_STORE)
+  expect(secrets.DATABASE_URL).toMatch(/^postgres:\/\/postgres:pw@127\.0\.0\.1:2\d{4}\/app$/)
 })
 
 test('the per-type cap is enforced synchronously, before any service is created', async () => {

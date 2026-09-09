@@ -91,7 +91,12 @@ test('secrets returns the branch bundle (seam) and is gateable', async () => {
   const id = await createProject()
   const r = await get(`/projects/${id}/secrets?branch=main`)
   expect(r.statusCode).toBe(200)
-  expect(r.json().secrets.DATABASE_URL).toBe('postgres://postgres:pw@io-demo-main-pg-db:5432/app')
+  // ONE host-facing string (contract section 10): the bundle carries the same lane DSN the
+  // credentials route answers, because this is what `insta run` and `insta secrets -o .env` inject
+  // into a HOST process.
+  const laneDsn = (await get(`/projects/${id}/services/pg-db/credentials`)).json().credentials.DATABASE_URL as string
+  expect(laneDsn).toMatch(/^postgres:\/\/postgres:pw@127\.0\.0\.1:2\d{4}\/app$/)
+  expect(r.json().secrets.DATABASE_URL).toBe(laneDsn)
   expect(r.json().secrets.BUCKET_NAME).toBe('io-demo-main-store') // S3 bundle rides the same seam
 
   await app.inject({ method: 'PUT', url: `/projects/${id}/policy/secrets.read`, payload: { decision: 'approve' } })
@@ -989,9 +994,16 @@ test('managed db secrets: suffixed bundle + canonical aliases for the oldest per
   await post(`/projects/${id}/services`, { type: 'mysql', name: 'mysql-db' })
   const s = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
   // suffixed names for every service (envSuffix: kebab -> SNAKE)
-  expect(s.REDIS_URL_CACHE).toMatch(/^redis:\/\/default:.+@io-demo-main-rd-cache:6379\/0$/)
-  expect(s.REDIS_URL_CACHE_TWO).toContain('io-demo-main-rd-cache-two:6379')
-  expect(s.MYSQL_URL_MYSQL_DB).toContain('io-demo-main-my-mysql-db:3306/app')
+  // Host-facing lane form, one string per service across secrets and credentials (contract §10);
+  // the service identity is the lane it owns, so no two bundles share an address.
+  const credOf = async (sid: string): Promise<Record<string, string>> =>
+    (await get(`/projects/${id}/services/${sid}/credentials`)).json().credentials as Record<string, string>
+  expect(s.REDIS_URL_CACHE).toMatch(/^redis:\/\/default:.+@127\.0\.0\.1:2\d{4}\/0$/)
+  expect(s.REDIS_URL_CACHE).toBe((await credOf('rd-cache')).REDIS_URL)
+  expect(s.REDIS_URL_CACHE_TWO).toBe((await credOf('rd-cache-two')).REDIS_URL)
+  expect(s.REDIS_URL_CACHE_TWO).not.toBe(s.REDIS_URL_CACHE)
+  expect(s.MYSQL_URL_MYSQL_DB).toMatch(/^mysql:\/\/insta:.+@127\.0\.0\.1:2\d{4}\/app$/)
+  expect(s.MYSQL_URL_MYSQL_DB).toBe((await credOf('my-mysql-db')).MYSQL_URL)
   // canonical aliases follow the OLDEST service of each type
   expect(s.REDIS_URL).toBe(s.REDIS_URL_CACHE)
   expect(s.REDIS_PASSWORD).toBe(s.REDIS_PASSWORD_CACHE)
@@ -1011,7 +1023,10 @@ test('branch create gives managed dbs a FRESH empty instance + fresh password (n
   expect(calls).toContain('md.provision:io-demo-feat-rd-cache')
   const main = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
   const feat = (await get(`/projects/${id}/secrets?branch=feat`)).json().secrets
-  expect(feat.REDIS_URL).toContain('io-demo-feat-rd-cache:6379')
+  // Its own instance means its own lane: the branch bundles never share an address.
+  expect(feat.REDIS_URL).toMatch(/^redis:\/\/default:.+@127\.0\.0\.1:2\d{4}\/0$/)
+  expect(feat.REDIS_URL).toBe((await get(`/projects/${id}/services/rd-cache/credentials?branch=feat`)).json().credentials.REDIS_URL)
+  expect(feat.REDIS_URL).not.toBe(main.REDIS_URL)
   expect(feat.REDIS_PASSWORD).not.toBe(main.REDIS_PASSWORD)
 })
 
@@ -1026,7 +1041,10 @@ test('compute deploys receive the managed-db bundle in env', async () => {
   const pid = r.json().project.id
   await local.inject({ method: 'POST', url: `/projects/${pid}/services`, payload: { type: 'mongodb', name: 'mongo-db' } })
   await local.inject({ method: 'POST', url: `/projects/${pid}/deploy`, payload: { image: 'app:1', branch: 'main', port: 3000 } })
-  expect(seen[0].MONGODB_URL).toContain('io-demo-main-mo-mongo-db:27017')
+  // The deploy env is the same host-facing bundle, containerized: 127.0.0.1 becomes the gateway
+  // name a container can dial (contract §10, `containerize`).
+  expect(seen[0].MONGODB_URL).toMatch(/^mongodb:\/\/root:.+@host\.docker\.internal:2\d{4}\/admin\?authSource=admin$/)
+  expect(seen[0].MONGODB_HOST).toBe('host.docker.internal')
   expect(seen[0].MONGODB_URL_MONGO_DB).toBe(seen[0].MONGODB_URL)
 })
 
@@ -1042,7 +1060,8 @@ test('managed db remove: destroys on every branch, drops rows + secrets; rename 
   expect(calls).toContain('md.rename:io-demo-main-rd-cache->io-demo-main-rd-kv')
   expect(calls).toContain('md.rename:io-demo-feat-rd-cache->io-demo-feat-rd-kv')
   const s = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
-  expect(s.REDIS_URL_KV).toContain('io-demo-main-rd-kv:6379')
+  expect(s.REDIS_URL_KV).toBe((await get(`/projects/${id}/services/rd-kv/credentials`)).json().credentials.REDIS_URL)
+  expect(s.REDIS_URL_KV).toMatch(/^redis:\/\/default:.+@127\.0\.0\.1:2\d{4}\/0$/)
   expect(s.REDIS_URL_CACHE).toBeUndefined()
   expect(s.REDIS_URL).toBe(s.REDIS_URL_KV)
 
@@ -1246,7 +1265,10 @@ test('branch rename: metadata-only — resources keep their frozen ref; guards d
 
   // the seam still mints the FROZEN ref's resources, and branch-scoped secrets followed the name
   const secrets = (await get(`/projects/${id}/secrets?branch=exp`)).json().secrets
-  expect(secrets.DATABASE_URL).toBe('postgres://postgres:pw@io-demo-feat-pg-db:5432/app')
+  // The bundle is the lane form now (contract §10); the FROZEN ref is what the route key still names.
+  expect(secrets.DATABASE_URL).toMatch(/^postgres:\/\/postgres:pw@127\.0\.0\.1:2\d{4}\/app$/)
+  expect(secrets.DATABASE_URL).toBe((await get(`/projects/${id}/services/pg-db/credentials?branch=exp`)).json().credentials.DATABASE_URL)
+  expect((await get(`/projects/${id}/database/instance?branch=exp`)).json().routeKey).toBe('pg-db-demo-feat')
   expect(secrets.FEAT_ONLY).toBe('v')
   expect((await get(`/projects/${id}/secrets?branch=feat`)).statusCode).toBe(404) // old name gone
 
@@ -1274,8 +1296,10 @@ test('project rename: display name only; resources AND future branches keep the 
   expect(r.json().project).toMatchObject({ id, name: 'Shop Backend' })
   expect((await get('/orgs/local/projects')).json().projects[0].name).toBe('Shop Backend')
 
-  // existing resources keep serving under the frozen slug
-  expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.DATABASE_URL).toBe('postgres://postgres:pw@io-demo-main-pg-db:5432/app')
+  // existing resources keep serving under the frozen slug (the DSN is lane-form, so the frozen ref
+  // shows in the route key the lane dispatches on)
+  expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.DATABASE_URL).toMatch(/^postgres:\/\/postgres:pw@127\.0\.0\.1:2\d{4}\/app$/)
+  expect((await get(`/projects/${id}/database/instance`)).json().routeKey).toBe('pg-db-demo-main')
   // a branch created AFTER the rename still keys on the frozen slug, not the new name
   await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
   expect(calls).toContain('db.fork:io-demo-main-pg-db->io-demo-feat-pg-db')
@@ -1354,8 +1378,9 @@ test('a pre-scaffold branch row (no databases) keeps resolving its legacy io-<re
   const featBranchId = (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === 'feat').id
   const services = (await get(`/projects/${id}/services?branch=feat`)).json().services
   expect(services.find((s: { id: string }) => s.id === `${featBranchId}:pg-db`).endpoint).toMatch(/^127\.0\.0\.1:2\d{4}$/)
-  // the legacy DSN still comes off `dbUrl`
-  expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.DATABASE_URL).toBe('postgres://postgres:pw@io-demo-main-pg-db:5432/app')
+  // the legacy DSN still comes off `dbUrl`, rewritten onto the lane like every other one
+  expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.DATABASE_URL)
+    .toBe(`postgres://postgres:pw@${String(legacyInstance.host)}:${String(legacyInstance.port)}/app`)
 
   const feat = (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === 'feat')
   await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${feat.id}` })
@@ -1762,8 +1787,11 @@ test('two postgres services: DATABASE_URL aliases the oldest, both carry a suffi
   const id = await createProject()
   await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics' })
   const secrets = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
-  expect(secrets.DATABASE_URL_DB).toBe('postgres://postgres:pw@io-demo-main-pg-db:5432/app')
-  expect(secrets.DATABASE_URL_ANALYTICS).toBe('postgres://postgres:pw@io-demo-main-pg-analytics:5432/app')
+  // Lane form (contract §10), one lane per service, and the alias follows the oldest.
+  expect(secrets.DATABASE_URL_DB).toBe((await get(`/projects/${id}/services/pg-db/credentials`)).json().credentials.DATABASE_URL)
+  expect(secrets.DATABASE_URL_ANALYTICS).toBe((await get(`/projects/${id}/services/pg-analytics/credentials`)).json().credentials.DATABASE_URL)
+  expect(secrets.DATABASE_URL_DB).toMatch(/^postgres:\/\/postgres:pw@127\.0\.0\.1:2\d{4}\/app$/)
+  expect(secrets.DATABASE_URL_ANALYTICS).not.toBe(secrets.DATABASE_URL_DB)
   expect(secrets.DATABASE_URL).toBe(secrets.DATABASE_URL_DB)
   // A deploy carries the identical set.
   calls.length = 0

@@ -576,8 +576,10 @@ export class Engine {
     for (const m of project?.managedServices ?? []) {
       const cred = branch.managed?.[m.id]
       if (!cred) continue
-      const host = managedContainerName(this.ref(project!, branch), m.type, m.name)
-      const bundle = MANAGED_DB[m.type].bundle(host, cred.password)
+      // Host-facing, like the postgres DSN and `credentials()`: the lane is the address a client
+      // outside the branch network dials, and `containerize()` maps it back for a container.
+      const lane = this.laneAddress(project!, branch, m.id)
+      const bundle = laneBundle(m.type, lane.host, lane.port, cred.password, lane.tls)
       Object.assign(out, suffixBundle(bundle, m.name))
       if (!aliasedTypes.has(m.type)) { aliasedTypes.add(m.type); Object.assign(out, bundle) }
     }
@@ -1501,10 +1503,13 @@ export class Engine {
   private static DB_NAME_RE = /^[A-Za-z0-9._-]+$/
   private quoteIdent(name: string): string { return `"${name.replace(/"/g, '""')}"` }
 
-  /** The branch's connection URL with the database name swapped. */
-  private connStringFor(url: string, database: string): string {
-    const u = new URL(url)
-    return `${u.protocol}//${u.username}:${u.password}@${u.host}/${database}`
+  /** The branch's HOST-FACING connection URL (the service's lane, contract section 10) with the
+   *  database name swapped: these strings are printed for a developer to paste, exactly like the
+   *  DSN in `credentials` and `secrets`. */
+  private connStringFor(t: { project: Project; branch: Branch; serviceId: string; url: string }, database: string): string {
+    const u = new URL(this.laneUrl(t.project, t.branch, t.serviceId, t.url))
+    u.pathname = `/${database}`
+    return u.toString()
   }
 
   /** Set or regenerate the postgres user password; re-mints the branch's DATABASE_URL. Deployed
@@ -1515,12 +1520,15 @@ export class Engine {
     // WP3 (decision 48): management is an explicit operation, so it WAKES a sleeping instance.
     await this.pgManage(t.branch, t.serviceId, () => this.db.query(t.container, `alter user postgres with password '${pw.replace(/'/g, "''")}'`))
     const u = new URL(t.url)
-    const connString = `${u.protocol}//${u.username}:${encodeURIComponent(pw)}@${u.host}${u.pathname}`
+    // The STORED url stays the container-host form every read seam rewrites onto a lane; what the
+    // caller gets back is that host-facing lane form (contract section 10).
+    const stored = `${u.protocol}//${u.username}:${encodeURIComponent(pw)}@${u.host}${u.pathname}`
+    const connString = this.laneUrl(t.project, t.branch, t.serviceId, stored)
     mutate((st) => {
       const row = st.branches[t.branch.id].databases?.[t.serviceId]
-      if (row) row.url = connString
+      if (row) row.url = stored
       // A legacy branch keeps its deprecated mirror in step until the migration drops it.
-      if (t.serviceId === 'pg-db' && st.branches[t.branch.id].dbUrl !== undefined) st.branches[t.branch.id].dbUrl = connString
+      if (t.serviceId === 'pg-db' && st.branches[t.branch.id].dbUrl !== undefined) st.branches[t.branch.id].dbUrl = stored
     })
     this.emit(projectId, t.branch.name, 'resource', 'db.password.set', { generated: !password })
     return { connString, password: pw }
@@ -1529,7 +1537,7 @@ export class Engine {
   async dbListDatabases(projectId: string, branchName?: string, group?: string): Promise<{ databases: Array<{ name: string; connString: string }> }> {
     const t = this.dbTarget(projectId, branchName, group)
     const rows = JSON.parse(await this.pgManage(t.branch, t.serviceId, () => this.db.query(t.container, observe.DB_DATABASES_SQL))) as Array<{ name: string }>
-    return { databases: rows.map((r) => ({ name: r.name, connString: this.connStringFor(t.url, r.name) })) }
+    return { databases: rows.map((r) => ({ name: r.name, connString: this.connStringFor(t, r.name) })) }
   }
 
   async dbCreateDatabase(projectId: string, name: string, branchName?: string, group?: string): Promise<{ name: string; connString: string }> {
@@ -1537,7 +1545,7 @@ export class Engine {
     if (!Engine.DB_NAME_RE.test(name)) throw new Error('database name must match ^[A-Za-z0-9._-]+$')
     await this.pgManage(t.branch, t.serviceId, () => this.db.query(t.container, `create database ${this.quoteIdent(name)}`))
     this.emit(projectId, t.branch.name, 'resource', 'db.database.create', { name })
-    return { name, connString: this.connStringFor(t.url, name) }
+    return { name, connString: this.connStringFor(t, name) }
   }
 
   async dbDeleteDatabase(projectId: string, name: string, branchName?: string, group?: string): Promise<void> {
@@ -2655,17 +2663,19 @@ export class Engine {
   // ---- env assembly (contract 00 section 10, plan 05 section 5) ----------------------------------
 
   /** Minted postgres credentials: every service SUFFIXED (`DATABASE_URL_<NAME>`), the oldest also
-   *  unsuffixed. The stored container-host DSN is what a container dials (docker DNS on the branch
-   *  network resolves it in both run modes); the host-facing lane form is what `credentials()`
-   *  returns. */
+   *  unsuffixed. ONE host-facing string everywhere (contract section 10): the stored DSN is rewritten
+   *  onto the service's lane, exactly as `credentials()` does it, because this is what `insta run`
+   *  and `insta secrets -o .env` inject into a HOST process. A container gets the same string with
+   *  127.0.0.1 swapped for host.docker.internal by `containerize()` on the deploy path. */
   private dbSecretsFor(project: Project, branch: Branch): Record<string, string> {
     const out: Record<string, string> = {}
     let aliased = false
     for (const d of this.dbList(project.id)) {
       const row = this.dbHandle(project, branch, d.id)
       if (!row) continue
-      out[`DATABASE_URL_${envSuffix(d.name)}`] = row.url
-      if (!aliased) { aliased = true; out.DATABASE_URL = row.url }
+      const url = this.laneUrl(project, branch, d.id, row.url)
+      out[`DATABASE_URL_${envSuffix(d.name)}`] = url
+      if (!aliased) { aliased = true; out.DATABASE_URL = url }
     }
     return out
   }
