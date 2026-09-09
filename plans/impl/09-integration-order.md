@@ -99,6 +99,39 @@ Run alone, in this order, each with `RUN_DOCKER_TESTS=1 npx vitest run <file>` a
 
 Every Docker file uses its own project name and sets `INSTA_OSS_SCHEDULER=0` unless it tests sleep (`test/sleep-wake.int.test.ts` runs the ticker with `INSTA_OSS_RAM_FLOOR_PCT=0` outside its eviction case; the e2e scripts keep the ticker and set `INSTA_OSS_RAM_FLOOR_PCT=0`); `INSTA_OSS_DATA_DIR` is a realpath'd tmp dir per file.
 
+### Result of the pass (integrator, on the assembled branch)
+
+Seven of the ten Docker files exist and all seven are green, each run alone in the order above.
+Steps 4 (`test/fork.int.test.ts`), 5 (`test/datadir-migrate.int.test.ts`) and 7
+(`test/router.int.test.ts`) have no file in the tree: WP4 shipped no Docker coverage for the reflink
+fork path or the data-dir migration, and WP2 none for the router lanes, so the reflink and
+`basebackup` fork variants, the migration of a pre-scaffold data directory and the lanes themselves
+are still only covered by fake-adapter suites. Steps 11 and 12 need a Linux host and a throwaway VM.
+
+Three real defects the pass found, each fixed on this branch:
+
+- Local mode published the container's own port with no free-port check, so a second instance of any
+  image (a second template deploy, or two apps on 3000) died at `docker start` with `port is already
+  allocated`. `localHostPort` now falls back to a free port, and `takenLanePorts` counts published
+  app host ports, making it one loopback port space with the database lanes.
+- `ui/tsconfig.json` typechecked WP7's `ui/src/lib/*.test.ts`, which import a vitest that by design
+  is not installed under `ui/`, so the image's ui build stage failed. They are excluded from the
+  dashboard's own typecheck; the root vitest and eslint still cover them.
+- `bridgeGateway` returned the host's bridge gateway to a daemon running inside a bridge-networked
+  container, where that address cannot be bound, and the extra listener's reject killed the boot.
+  It is taken only when it is one of the process's own interface addresses.
+
+And one packaging trap: `docker compose` gives the calling shell precedence over `--env-file`, so the
+`${INSTA_OSS_DATA_DIR}` binds in the rendered `compose.yml` resolved from the operator's environment
+rather than from `instad.env`. The data directory is now written in concretely (the installer already
+refuses to move it after install); the image and the version stay late-bound.
+
+Four assertion sets moved with those fixes, all recorded in the commits: `test/install.test.ts` no
+longer pins the placeholder text or "no value from the environment is baked in"; the compose suite's
+text-level bind check reads the long form `compose config` normalises binds to; the clone suite wakes
+the fork through the `api` door, since contract section 13 slept it from birth; and the sleep suite's
+eviction case registers its keys on the second scheduler it builds.
+
 ## Conflict rules at merge
 
 - A conflict inside a region: take the region owner's side, re-apply the other side's lines inside their own region.
