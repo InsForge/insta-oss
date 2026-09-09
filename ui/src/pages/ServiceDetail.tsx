@@ -278,7 +278,7 @@ function ComputeResources({ projectId, branch, service, onApproval }: {
             onChange={(e) => setMemory(e.target.value)} />
         </Field>
       </div>
-      {cap && <p className="mt-2 text-xs text-muted-foreground">This machine: {cap.cpu} vCPU, {cap.memoryMb} MB</p>}
+      {cap && <p className="mt-2 text-xs text-muted-foreground">Ceiling: {cap.cpu} vCPU, {cap.memoryMb} MB. It is the grid the API accepts, not this box: a limit above what the box has is a limit the container never reaches.</p>}
       <ErrorNote error={actionError ?? error} />
       <div className="mt-3 flex justify-end">
         <Button variant="secondary" onClick={save} disabled={busy || !valid || !dirty}>Save</Button>
@@ -377,7 +377,7 @@ function VolumeSection({ projectId, branch, service, onApproval }: {
       {data?.volume?.mountPath && (
         <p className="mt-2 text-xs text-muted-foreground">Mounted at <span className="font-mono">{data.volume.mountPath}</span>.</p>
       )}
-      {cap && <p className="mt-1 text-xs text-muted-foreground">This machine allows up to {cap} Gi.</p>}
+      {cap && <p className="mt-1 text-xs text-muted-foreground">Ceiling: {cap} Gi. Free space on the data volume is the real limit.</p>}
       <ErrorNote error={actionError ?? error} />
     </Section>
   )
