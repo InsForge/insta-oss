@@ -270,13 +270,18 @@ $(env | sed -n 's/^\(INSTA_OSS_[A-Z0-9_]*\)=.*/\1/p')"
 
 # Compose stack, written verbatim on every run (put your own changes in compose.override.yml).
 render_compose() {
-  cat <<'EOF'
+  cat <<EOF
 # compose.yml: written by install.sh on every run; overrides go in compose.override.yml.
-# Values come from instad.env (docker compose --env-file instad.env ...).
+# The image and the CA file come from instad.env (docker compose --env-file instad.env ...). The
+# data directory does NOT: it is written in here as the concrete path this run resolved, because
+# compose interpolation lets the CALLING SHELL outrank --env-file, so an INSTA_OSS_DATA_DIR left
+# over in an operator's environment would silently point every bind below (the daemon's own data,
+# the certificate store, garage's meta and data) at another directory. This installer already
+# refuses to move the data directory of an existing install, so the path is fixed at install time.
 name: instacloud
 services:
   instad:
-    image: ${INSTA_OSS_IMAGE}:${INSTA_OSS_VERSION}
+    image: \${INSTA_OSS_IMAGE}:\${INSTA_OSS_VERSION}
     container_name: io-instad
     restart: unless-stopped
     # host network: 127.0.0.1:8080 (API, console, HTTP lane behind the edge), 127.0.0.1:8081 (edge
@@ -287,11 +292,11 @@ services:
     env_file: instad.env
     environment:
       # set by install.sh with INSTA_OSS_TLS=internal so the daemon trusts the edge's own CA
-      NODE_EXTRA_CA_CERTS: ${INSTA_OSS_CA_FILE:-}
+      NODE_EXTRA_CA_CERTS: \${INSTA_OSS_CA_FILE:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # identical path on both sides: every bind mount the daemon emits is valid on the host
-      - ${INSTA_OSS_DATA_DIR}:${INSTA_OSS_DATA_DIR}
+      - $DATA:$DATA
   edge:
     image: caddy:2.11.4
     container_name: io-edge
@@ -301,8 +306,8 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # certificate store; the daemon reads it (INSTA_OSS_TLS_CERT_DIR) for the database lanes
-      - ${INSTA_OSS_DATA_DIR}/caddy/data:/data
-      - ${INSTA_OSS_DATA_DIR}/caddy/config:/config
+      - $DATA/caddy/data:/data
+      - $DATA/caddy/config:/config
   garage:
     image: dxflrs/garage:v2.3.0
     container_name: io-garage
@@ -312,9 +317,9 @@ services:
       - 127.0.0.1:3900:3900
       - 127.0.0.1:3902:3902
     volumes:
-      - ${INSTA_OSS_DATA_DIR}/garage/garage.toml:/etc/garage.toml:ro
-      - ${INSTA_OSS_DATA_DIR}/garage/meta:/var/lib/garage/meta
-      - ${INSTA_OSS_DATA_DIR}/garage/data:/var/lib/garage/data
+      - $DATA/garage/garage.toml:/etc/garage.toml:ro
+      - $DATA/garage/meta:/var/lib/garage/meta
+      - $DATA/garage/data:/var/lib/garage/data
 EOF
 }
 

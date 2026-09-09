@@ -60,7 +60,10 @@ test('docker compose config resolves the rendered stack: host networking, the so
   expect(String(r.stderr)).not.toMatch(/variable is not set|error/i)   // an unset INSTA_OSS_* would blank a bind
   expect(r.status).toBe(0)
   expect(String(r.stdout)).toContain('network_mode: host')
-  expect(String(r.stdout)).toContain(`${DATA}:${DATA}`)
+  // `compose config` normalises every bind to the long form, so the pair is two lines here; the
+  // json pass below pins source and target together on instad's own volume list.
+  expect(String(r.stdout)).toContain(`source: ${DATA}`)
+  expect(String(r.stdout)).toContain(`target: ${DATA}`)
 
   const json = compose('config', '--format', 'json')
   expect(json.status).toBe(0)

@@ -117,7 +117,7 @@ test('--print-compose: host networking, the socket and the data dir bound at the
   expect(out).toContain('name: instacloud')
   expect(out).toContain('image: ${INSTA_OSS_IMAGE}:${INSTA_OSS_VERSION}')
   expect(out).toContain('- /var/run/docker.sock:/var/run/docker.sock')
-  expect(out).toContain('- ${INSTA_OSS_DATA_DIR}:${INSTA_OSS_DATA_DIR}')
+  expect(out).toContain('- /var/lib/instacloud:/var/lib/instacloud')
   expect(out).toContain('env_file: instad.env')
   for (const c of ['io-instad', 'io-edge', 'io-garage']) expect(out).toContain(`container_name: ${c}`)
   const instad = out.slice(out.indexOf('  instad:'), out.indexOf('  edge:'))
@@ -129,18 +129,26 @@ test('--print-compose: host networking, the socket and the data dir bound at the
   const edge = out.slice(out.indexOf('  edge:'), out.indexOf('  garage:'))
   expect(edge).toContain('network_mode: host')
   expect(edge).toContain('- ./Caddyfile:/etc/caddy/Caddyfile:ro')
-  expect(edge).toContain('${INSTA_OSS_DATA_DIR}/caddy/data:/data')   // the cert store the daemon reads (INSTA_OSS_TLS_CERT_DIR)
+  expect(edge).toContain('/var/lib/instacloud/caddy/data:/data')     // the cert store the daemon reads (INSTA_OSS_TLS_CERT_DIR)
   const garage = out.slice(out.indexOf('  garage:'))
   expect(garage).not.toContain('network_mode: host')                 // stays on the bridge: the daemon attaches it to branch networks
   expect(garage).toContain('- 127.0.0.1:3900:3900')
   expect(garage).toContain('- 127.0.0.1:3902:3902')
-  expect(garage).toContain('${INSTA_OSS_DATA_DIR}/garage/garage.toml:/etc/garage.toml:ro')
+  expect(garage).toContain('/var/lib/instacloud/garage/garage.toml:/etc/garage.toml:ro')
   // decision 46: the compose name must equal the handle the storage adapter execs into, which is
   // the one constant the adapter and the engine share.
   expect(readFileSync(join(ROOT, 'src', 'manageddb.ts'), 'utf8')).toContain("export const GARAGE_CONTAINER = 'io-garage'")
   expect(readFileSync(join(ROOT, 'src', 'adapters', 'garage.ts'), 'utf8')).toContain('const GARAGE = GARAGE_CONTAINER')
-  // the render is verbatim: no value from the environment is baked in
-  expect(run(['--print-compose'], { INSTA_OSS_DATA_DIR: '/srv/x', INSTA_OSS_VERSION: '9.9.9' })).toBe(out)
+  // The data directory is the one value baked in, and on purpose: compose interpolation lets the
+  // calling shell outrank --env-file, so a stray INSTA_OSS_DATA_DIR in an operator's environment
+  // would move every bind above. The image and the version stay late-bound, so editing instad.env
+  // is still how the running tag changes.
+  const elsewhere = run(['--print-compose'], { INSTA_OSS_DATA_DIR: '/srv/x', INSTA_OSS_VERSION: '9.9.9' })
+  expect(elsewhere).toContain('- /srv/x:/srv/x')
+  expect(elsewhere).toContain('- /srv/x/garage/meta:/var/lib/garage/meta')
+  expect(elsewhere).toContain('image: ${INSTA_OSS_IMAGE}:${INSTA_OSS_VERSION}')
+  expect(elsewhere).not.toContain('9.9.9')
+  expect(elsewhere).not.toContain('/var/lib/instacloud')
 })
 
 test('--print-caddyfile: ask on the internal port, on_demand, acme then internal; --tls internal drops issuer acme', () => {
