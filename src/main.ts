@@ -177,8 +177,12 @@ async function main(): Promise<void> {
     // ---- end region WP2 (stop) ----
     // ---- region WP3 (stop) ----
     // After the lanes, before app.close(): the ticker stops and an in-flight sweep is awaited, so
-    // no `docker stop` is left running into the compose grace.
-    await engine.scheduler.stop()
+    // no `docker stop` is left running into the compose grace. BOUNDED, like app.close() below: a
+    // sweep can be holding four docker stops with a 30 s database grace each, which would blow the
+    // compose stop_grace_period, and a SIGKILL there skips releaseLock() and leaves the replacement
+    // container refusing the lock. stop() clears the ticker synchronously, and docker finishes the
+    // stops it already started on its own.
+    await Promise.race([engine.scheduler.stop(), sleep(5_000)])
     // ---- end region WP3 (stop) ----
     await Promise.race([app.close(), sleep(10_000)])
     releaseLock()

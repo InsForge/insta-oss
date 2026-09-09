@@ -2489,16 +2489,24 @@ export class Engine {
   }
 
   /** Before an OBSERVABILITY query: a sleeping database reports that it is sleeping instead of
-   *  being woken by a dashboard poll. `server.ts` maps this message to 503. The snapshot is taken
-   *  fresh, because a stale one would refuse a database that is up. Only `asleep` and `starting`
-   *  refuse: a container that crashed is not sleeping, and letting the query fail says so honestly. */
+   *  being woken by a dashboard poll. `server.ts` maps this message to 503. A refusal is only ever
+   *  taken on a FRESH snapshot, because a stale one would refuse a database that is up. */
   private async assertPgAwake(branch: Branch, serviceId: string): Promise<void> {
+    const key = this.serviceKey(branch, serviceId)
+    // The cheap answer first: the dashboard polls the four routes this guards, and a `docker ps -a`
+    // per panel per poll is a process spawn for a question the snapshot almost always answers with
+    // `running`. A REFUSAL is still never taken on a stale read: only that path pays for the fresh
+    // snapshot, and re-tests against it.
+    if (!this.refusesPgRead(this.stateOf(key))) return
     await this.scheduler.refreshStates()
-    const live = this.stateOf(this.serviceKey(branch, serviceId))
-    if (live === 'asleep' || live === 'starting') {
+    if (this.refusesPgRead(this.stateOf(key))) {
       throw new Error('database is sleeping: it wakes on the next connection')
     }
   }
+
+  /** Only `asleep` and `starting` refuse: a container that crashed is not sleeping, and letting the
+   *  query fail says so honestly. */
+  private refusesPgRead(live: string): boolean { return live === 'asleep' || live === 'starting' }
 
   /** Run one management query with the instance awake and the key held for its duration. */
   private async pgManage<T>(branch: Branch, serviceId: string, fn: () => Promise<T>): Promise<T> {
