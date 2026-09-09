@@ -42,18 +42,39 @@ export INSTA_OSS_CREATE_GRACE_SEC INSTA_OSS_RAM_FLOOR_PCT
 DAEMON_PID=
 CLEANED=0
 
+# Stop the daemon this script started, and MAKE SURE it is stopped: npx forks the process that
+# holds the port, so killing the wrapper can leave the daemon listening. A leaked daemon is worse
+# than a noisy failure, because the next run's healthz answers from the OLD process with the old
+# state and knobs, and only fails later somewhere confusing. The data directory's lock names the
+# holder's pid, so that is who gets stopped.
+stop_daemon() {
+  [ -n "$DAEMON_PID" ] || return 0
+  kill "$DAEMON_PID" 2>/dev/null || true
+  wait "$DAEMON_PID" 2>/dev/null || true
+  _n=0
+  while curl -sf "$API/healthz" >/dev/null 2>&1 && [ "$_n" -lt 15 ]; do
+    _holder=$(jsel 'd.pid' < "$DATA/instad.lock" 2>/dev/null) || _holder=
+    case $_holder in
+      [1-9]*) kill "$_holder" 2>/dev/null || true ;;
+      *) : ;;
+    esac
+    _n=$((_n + 1))
+    sleep 1
+  done
+  if curl -sf "$API/healthz" >/dev/null 2>&1; then
+    printf 'warn the daemon on %s is still listening\n' "$API" 1>&2
+  fi
+}
+
 cleanup() {
   [ "$CLEANED" = "0" ] || return 0
   CLEANED=1
   STEP "11. teardown"
   if command -v insta >/dev/null 2>&1; then
     allow_delete >/dev/null 2>&1 || true
-    insta project delete --yes >/dev/null 2>&1 || insta project delete >/dev/null 2>&1 || true
+    insta project delete >/dev/null 2>&1 || true
   fi
-  if [ -n "$DAEMON_PID" ]; then
-    kill "$DAEMON_PID" 2>/dev/null || true
-    wait "$DAEMON_PID" 2>/dev/null || true
-  fi
+  stop_daemon
 }
 trap cleanup EXIT INT TERM
 
@@ -68,10 +89,11 @@ resolves e2e-probe.localhost || HAVE_LOCALHOST_DNS=0
 OK "preflight (localhost wildcard dns: $HAVE_LOCALHOST_DNS)"
 
 STEP "1. daemon"
+cd "$ROOT"   # step 9 deploys a template by relative path, and the daemon runs from here
 if [ "$START_DAEMON" = "1" ]; then
   mkdir -p "$DATA"
-  ( cd "$ROOT" && INSTA_OSS_MODE=local INSTA_OSS_DATA_DIR=$DATA INSTA_OSS_PORT=$PORT \
-      npx tsx src/main.ts ) >"$LOG" 2>&1 &
+  INSTA_OSS_MODE=local INSTA_OSS_DATA_DIR=$DATA INSTA_OSS_PORT=$PORT \
+    npx tsx src/main.ts >"$LOG" 2>&1 &
   DAEMON_PID=$!
 fi
 wait_for 90 curl -sf "$API/healthz" || FAIL "daemon never became healthy, see $LOG"
@@ -289,9 +311,6 @@ NETS=$(docker network ls -q --filter "name=io-$SLUG-")
 [ ! -d "$DATA/pg/$SLUG-main" ] || FAIL "$DATA/pg/$SLUG-main survived the delete"
 OK "teardown removed containers, networks and data directories"
 
-if [ -n "$DAEMON_PID" ]; then
-  kill "$DAEMON_PID" 2>/dev/null || true
-  wait "$DAEMON_PID" 2>/dev/null || true
-fi
+stop_daemon
 
 printf '\nLOCAL SMOKE PASSED\n'
