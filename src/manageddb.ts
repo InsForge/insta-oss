@@ -152,7 +152,51 @@ export const pgContainerName = (ref: string, name: string): string => `io-${ref}
 export const bucketName = (ref: string, name: string): string => `io-${ref}-${name}`
 /** App container for one compute group on a branch: `io-<ref>-app-<group>`. */
 export const appContainerName = (ref: string, group: string): string => `io-${ref}-app-${group}`
-// WP5 adds: parseServiceId (strips the branch qualifier), pgServiceId, storageServiceId, CANONICAL_KEYS
+
+/** Service id of one postgres service: `pg-<name>` (the legacy single database is `pg-db`). */
+export const pgServiceId = (name: string): string => `pg-${name}`
+/** Service id of one storage service: `st-<name>` (the legacy single bucket is `st-store`). */
+export const storageServiceId = (name: string): string => `st-${name}`
+/** Service id of one compute group: `cp-<group>`. */
+export const computeServiceId = (group: string): string => `cp-${group}`
+
+/** Every service type's canonical (unsuffixed) credential keys, in the platform's own order
+ *  (insta-platform src/provisioning/secretNames.ts CANONICAL_KEYS). A template's env.platform ref
+ *  `${{services.<name>.<KEY>}}` may only name a key of the target's type, and `credentials()`
+ *  returns exactly this set for one service. Managed types read their keys off the catalog above,
+ *  so the two can never drift. */
+export const CANONICAL_KEYS: Record<string, readonly string[]> = {
+  postgres: ['DATABASE_URL'],
+  storage: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_ENDPOINT_URL_S3', 'BUCKET_NAME', 'AWS_REGION'],
+  redis: Object.keys(MANAGED_DB.redis.bundle('h', 'p')),
+  mysql: Object.keys(MANAGED_DB.mysql.bundle('h', 'p')),
+  mongodb: Object.keys(MANAGED_DB.mongodb.bundle('h', 'p')),
+}
+
+/** Every oss service type a service id can name. */
+export type ServiceType = 'postgres' | 'storage' | 'compute' | ManagedDbType
+
+/** A parsed service id: the optional branch qualifier of decision 49, the BARE service id, and the
+ *  type + name its prefix encodes. `null` for an id no prefix claims.
+ *
+ *  The qualifier is what `GET /projects/:id/services?branch=<b>` puts in front of a row id on a
+ *  non-default branch (`<branchId>:pg-db`), because the CLI takes an id from that list and calls
+ *  credentials/state/start/stop with NO branch. Stripping it here keeps every project-level key
+ *  (`serviceSettings`, limits, always-on) branch-free. */
+export function parseServiceId(sid: string): { branchId?: string; serviceId: string; type: ServiceType; name: string } | null {
+  const i = sid.indexOf(':')
+  const branchId = i === -1 ? undefined : sid.slice(0, i)
+  const serviceId = i === -1 ? sid : sid.slice(i + 1)
+  if (branchId === '' || serviceId === '' || serviceId.includes(':')) return null
+  const managed = parseManagedServiceId(serviceId)
+  if (managed) return { ...(branchId !== undefined ? { branchId } : {}), serviceId, type: managed.type, name: managed.name }
+  for (const [prefix, type] of [['pg-', 'postgres'], ['st-', 'storage'], ['cp-', 'compute']] as const) {
+    if (serviceId.startsWith(prefix) && serviceId.length > prefix.length) {
+      return { ...(branchId !== undefined ? { branchId } : {}), serviceId, type, name: serviceId.slice(prefix.length) }
+    }
+  }
+  return null
+}
 // ---- end region WP5 ----
 
 /** Resolve a managed service id (rd-* | my-* | mo-*) to its type + name, or null. */
