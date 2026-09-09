@@ -248,11 +248,17 @@ export function migrateState(s: State): State {
   for (const project of Object.values(s.projects)) {
     const branches = branchesOf(project.id)
     if (!branches.length) continue
+    // Only a LEGACY project is migrated. A project created after WP5 starts empty and stays empty
+    // until `services add` registers something: deriving the fixed pair for it would resurrect a
+    // postgres and a bucket nobody asked for on the next parse.
+    const hadDb = branches.some((b) => b.dbUrl !== undefined)
+    const hadBucket = branches.some((b) => b.bucket !== undefined)
+    if (!hadDb && !hadBucket) continue
     const def = branches.find((b) => b.isDefault) ?? branches[0]
-    if (!project.dbServices) {
+    if (hadDb && !project.dbServices) {
       project.dbServices = [{ id: 'pg-db', name: 'db', dataId: 'db', createdAt: project.createdAt }]
     }
-    if (!project.storageServices) {
+    if (hadBucket && !project.storageServices) {
       project.storageServices = [{ id: 'st-store', name: 'store', createdAt: project.createdAt, public: def.storagePublic ?? false }]
     }
     for (const b of branches) {
