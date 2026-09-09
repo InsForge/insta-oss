@@ -83,7 +83,9 @@ test('deploying n8n on main reaches succeeded, answers its healthcheck and carri
 test('a second deploy into the same branch mints n8n-2 beside the first, and both remove cleanly', async () => {
   const out = await engine.executor.create(projectId, { templateCode: 'n8n', branch: 'main' })
   await engine.executor.idle()
-  expect(engine.executor.get(out.deployment.id).status).toBe('succeeded')
+  const second = engine.executor.get(out.deployment.id)
+  expect(second.error ?? '').toBe('')
+  expect(second.status).toBe('succeeded')
 
   const names = (await engine.services(projectId, 'main')).filter((s) => s.type === 'compute').map((s) => s.name).sort()
   expect(names).toEqual(['n8n', 'n8n-2'])

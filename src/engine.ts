@@ -1837,10 +1837,19 @@ export class Engine {
     throw new Error(`no free lane port left in ${lo}-${hi} (INSTA_OSS_LANE_PORT_RANGE)`)
   }
 
-  private takenLanePorts(s: State): Set<number> {
+  /** Every loopback port this daemon has already published or reserved: database lanes, lane
+   *  reservations, and the host ports local mode published for compute services. It is ONE port
+   *  space, so a lane can never be handed the port an app already publishes and vice versa. */
+  private takenLanePorts(s: State, skip?: { branchId: string; group: string }): Set<number> {
     const taken = new Set<number>()
     for (const b of Object.values(s.branches)) for (const p of Object.values(b.lanes ?? {})) taken.add(p)
     for (const p of Object.keys(s.laneReservations ?? {})) taken.add(Number(p))
+    for (const [bid, b] of Object.entries(s.branches)) {
+      for (const [group, app] of Object.entries(b.apps ?? {})) {
+        if (skip && bid === skip.branchId && group === skip.group) continue
+        if (app.hostPort) taken.add(app.hostPort)
+      }
+    }
     return taken
   }
 
@@ -1990,7 +1999,15 @@ export class Engine {
     if (this.cfg.mode === 'server') return undefined
     const prior = branch.apps[group]
     const fromLegacyUrl = prior && !prior.host && prior.url ? Number(new URL(prior.url).port) || undefined : undefined
-    return opts.hostPort ?? prior?.hostPort ?? fromLegacyUrl ?? opts.port
+    // A port the caller named and the port the row already holds are honoured as they are: a
+    // redeploy has to keep the port it published, and a caller who asked for one gets docker's own
+    // error if it is busy. Only the DEFAULT can collide by accident, and it does: the container's
+    // own port is the same number for every instance, so a second deploy of one template, or two
+    // apps that both listen on 3000, would fail at `docker start` with "port is already allocated".
+    const pinned = opts.hostPort ?? prior?.hostPort ?? fromLegacyUrl
+    if (pinned !== undefined) return pinned
+    const taken = this.takenLanePorts(loadState(), { branchId: branch.id, group })
+    return taken.has(opts.port) ? this.nextLanePort(taken) : opts.port
   }
 
   /** The services() row's network columns: `domain` is the bare hostname, `endpoint` is `host[:port]`
