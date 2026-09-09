@@ -92,7 +92,6 @@ export interface EngineOptions {
   // ---- end region WP3 ----
   // ---- region WP5 (templates/parity) ----
   templates?: TemplateCatalog        // default new TemplateCatalog(cfg.templatesDir)
-  executor?: TemplateExecutor        // default a TemplateExecutor over this engine (tests inject a probe)
   // ---- end region WP5 ----
 }
 
@@ -110,7 +109,6 @@ export class Engine {
     this.data = opts.data ?? Engine.NOOP_DATA
     this.router = opts.router ?? { invalidate() { /* no router until WP2 */ } }
     this.templates = opts.templates ?? new TemplateCatalog(this.cfg.templatesDir)   // WP5 (lazy: reads no file until asked)
-    this.executorInstance = opts.executor
   }
 
   /** Serialize container work per app. `deploy` re-asserts the standing lifecycle intent after
@@ -2171,11 +2169,13 @@ export class Engine {
   /** The bundled template registry (`cfg.templatesDir`). Reads no file until a route asks. */
   readonly templates: TemplateCatalog
   private executorInstance: TemplateExecutor | undefined
-  /** The template executor, created on first use so nothing has to wire it up (main.ts calls
-   *  `abandonStale()` at boot; tests inject one with a fake health probe). */
+  /** The template executor, created on first use so nothing has to wire it up: main.ts just calls
+   *  `abandonStale()` at boot. Assignable like `router`, because an executor needs the engine that
+   *  owns it — a test builds the engine, then hands it one with a fake health probe. */
   get executor(): TemplateExecutor {
     return (this.executorInstance ??= new TemplateExecutor(this))
   }
+  set executor(ex: TemplateExecutor) { this.executorInstance = ex }
 
   /** User secrets bound to ONE service on ONE branch, by name. The template executor reads back
    *  what a previous attempt wrote (the deployment record stores refs, never values). */
