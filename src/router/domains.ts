@@ -56,9 +56,18 @@ export interface Resolver {
   resolveCname(host: string): Promise<string[]>
 }
 
+/** Per-query budget for the four domain routes. The stock resolver retries a silent server four
+ *  times at five seconds each, so one `insta compute check-domain` against a name whose nameserver
+ *  drops packets held an API request for the better part of a minute; `insta compute domains` does
+ *  that for every attached name at once. Two tries of two seconds is an upper bound of about eight
+ *  seconds for the pair of lookups, and a query that runs out reads as `unchecked`, which is one of
+ *  the cloud's four DnsRecordCheck values and exactly what it means. */
+export const DNS_TIMEOUT_MS = 2000
+export const DNS_TRIES = 2
+
 export const systemResolver: Resolver = {
-  resolve4: (host) => dnsPromises.resolve4(host),
-  resolveCname: (host) => dnsPromises.resolveCname(host),
+  resolve4: (host) => new dnsPromises.Resolver({ timeout: DNS_TIMEOUT_MS, tries: DNS_TRIES }).resolve4(host),
+  resolveCname: (host) => new dnsPromises.Resolver({ timeout: DNS_TIMEOUT_MS, tries: DNS_TRIES }).resolveCname(host),
 }
 
 const NOT_FOUND = new Set(['ENOTFOUND', 'NXDOMAIN', 'ENODATA'])

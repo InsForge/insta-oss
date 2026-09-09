@@ -15,7 +15,7 @@ import { loadState, mutate } from './state'
 import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret, DataDirOps, PgTarget, ServiceKey, ServiceLimits, ServiceSettings } from './types'
 // ---- region WP2 (router): the router's pure modules feed the seams at the end of this class ----
 import { findCertFiles } from './router/certs'
-import { checkDns, domainResult, DomainError, normalizeHostname, notAdded, type ComputeDomainResult } from './router/domains'
+import { checkDns, domainResult, DomainError, normalizeHostname, notAdded, systemResolver, type ComputeDomainResult, type Resolver } from './router/domains'
 import { assertHostLabel, bucketsOf, buildTable, databasesOf, hostFor as fqdnFor, hostOnly, labelFor, RESERVED_LABELS, type HostKind } from './router/table'
 import type { State } from './state'
 // ---- end region WP2 ----
@@ -93,6 +93,9 @@ export interface EngineOptions {
   cfg?: Config                       // default loadConfig()
   data?: DataDirOps                  // scaffold default: the no-op Engine.NOOP_DATA; WP4 default: new DataDir(cfg)
   router?: { invalidate(): void }    // default no-op; main.ts sets engine.router after constructing the Router (WP2)
+  // ---- region WP2 (router) ----
+  resolver?: Resolver                // default systemResolver; the fake-adapter suite injects a hermetic one
+  // ---- end region WP2 ----
   // ---- region WP3 (scheduler) ----
   upstream?: UpstreamLike            // default new Upstream(cfg); ONE instance for runtime, scheduler and router (decision 57)
   runtime?: Runtime                  // default new DockerRuntime(cfg, upstream); tests pass FakeRuntime
@@ -105,6 +108,9 @@ export interface EngineOptions {
 
 export class Engine {
   readonly cfg: Config
+  /** How the four custom-domain routes look a hostname up (WP2). Injected by the fake-adapter
+   *  suite so no test ever reaches a real nameserver. */
+  private readonly resolver: Resolver
   /** Invalidated after every mutate that changes hosts or lanes (decision 54). A public assignable
    *  field: main.ts constructs the Router AFTER the engine and sets it (WP2). */
   router: { invalidate(): void }
@@ -116,6 +122,7 @@ export class Engine {
     this.cfg = opts.cfg ?? loadConfig()
     this.data = opts.data ?? Engine.NOOP_DATA
     this.router = opts.router ?? { invalidate() { /* no router until WP2 */ } }
+    this.resolver = opts.resolver ?? systemResolver
     this.templates = opts.templates ?? new TemplateCatalog(this.cfg.templatesDir)   // WP5 (lazy: reads no file until asked)
     // ---- region WP3 (scheduler) ----
     // ONE Upstream for the runtime, the scheduler and (through `engine.upstream`) the router, so a
@@ -2085,7 +2092,7 @@ export class Engine {
   }
 
   private async domainEnvelope(project: Project, branch: Branch, group: string, hostname: string): Promise<ComputeDomainResult> {
-    const dns = await checkDns(hostname, this.cfg)
+    const dns = await checkDns(hostname, this.cfg, this.resolver)
     return domainResult({
       hostname, flyApp: appContainerName(this.ref(project, branch), group), service: group,
       dns, certOk: this.domainCertOk(hostname),

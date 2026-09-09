@@ -10,6 +10,9 @@ import type { Config } from '../src/config'
 import { loadConfig } from '../src/config'
 import { Engine, type EngineOptions } from '../src/engine'
 import { initStatePath } from '../src/state'
+// ---- region WP2 (router) ----
+import type { Resolver } from '../src/router/domains'
+// ---- end region WP2 ----
 // ---- region WP3 (scheduler) ----
 import { appContainerName } from '../src/manageddb'
 import type { ContainerState, Runtime, ServiceTarget } from '../src/scheduler'
@@ -132,7 +135,7 @@ export function serverConfig(over: Record<string, string> = {}): Config {
  *  scheduler read ONE container store (decisions 53 and 57). */
 export function makeEngine(cfg: Config = testConfig(), extra: Partial<EngineOptions> = {}): Engine {
   initStatePath(cfg.statePath)
-  return new Engine(db, compute, storage, managed, { cfg, data, upstream, runtime, ...extra })
+  return new Engine(db, compute, storage, managed, { cfg, data, upstream, runtime, resolver, ...extra })
 }
 
 /** Clear the recorder and start from an empty state file. */
@@ -140,12 +143,26 @@ export function resetFakes(): void {
   calls.length = 0
   runtime.reset()
   upstream.reset()
+  dnsRecords.clear()
   initStatePath(join(mkdtempSync(join(tmpdir(), 'io-')), 'state.json'))
 }
 
 // ---- region WP1 (identity/config) ----
 // ---- end region WP1 ----
 // ---- region WP2 (router) ----
+// DNS for the four custom-domain routes. No fake-adapter test may reach a real nameserver: it
+// makes the suite depend on the box's egress and on how fast a public resolver says NXDOMAIN, and
+// `insta compute domains` fans one lookup out per attached name. An empty map answers ENOTFOUND
+// (which `checkDns` reads as `missing`); a test that wants a name to resolve sets it here.
+export const dnsRecords = new Map<string, { a?: string[]; cname?: string[] }>()
+
+const notFound = (host: string): never => {
+  throw Object.assign(new Error(`queryA ENOTFOUND ${host}`), { code: 'ENOTFOUND' })
+}
+export const resolver: Resolver = {
+  resolve4: async (host) => dnsRecords.get(host)?.a ?? notFound(host),
+  resolveCname: async (host) => dnsRecords.get(host)?.cname ?? notFound(host),
+}
 // ---- end region WP2 ----
 // ---- region WP3 (scheduler) ----
 // FakeRuntime is THE fake container store (decision 53): the four adapters above move it, the
