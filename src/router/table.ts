@@ -92,6 +92,16 @@ export function hostOnly(hostHeader: string | undefined): string {
 
 const LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 
+/** True when every label of `hostname` is `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` and the whole name
+ *  is at most 253 chars. The one shape test: `assertHostLabel` turns a false into the 400 the domain
+ *  routes send, and the certificate store uses it to refuse a name before building a path out of it
+ *  (a TLS servername arrives from anyone who can reach a public lane, and `<certDir>/<issuer>/<host>
+ *  /<host>.crt` would otherwise put `..` in a filesystem read). */
+export function isHostname(hostname: string): boolean {
+  if (!hostname || hostname.length > 253) return false
+  return hostname.split('.').every((label) => LABEL_RE.test(label))
+}
+
 /** Operator-supplied hostnames only (custom domains): every label `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`,
  *  the whole name at most 253 chars. Minted labels are bounded, never rejected. Throws a 400-class Error. */
 export function assertHostLabel(hostname: string): void {

@@ -10,7 +10,7 @@ import { createServer as createHttpServer, request as httpRequest, type Incoming
 import { connect as netConnect, createServer as createNetServer, type Server as NetServer } from 'node:net'
 import { connect as tlsConnect } from 'node:tls'
 import { Router } from '../src/router'
-import { Certs } from '../src/router/certs'
+import { Certs, findCertFiles } from '../src/router/certs'
 import { createPgLane, errorResponse, PG_ERRORS } from '../src/router/pg'
 import { createSniLane } from '../src/router/tls'
 import { buildTable, type Route } from '../src/router/table'
@@ -739,3 +739,55 @@ test('the redis SNI lane treats -LOADING as not ready and +PONG as ready', async
 })
 
 afterEach(() => { vi.restoreAllMocks() })
+
+// ---- certificate store (02 section 8) ----------------------------------------------------------
+
+test('the cert store refuses a servername that is not a hostname before it becomes a path', async () => {
+  const certDir = mkdtempSync(join(tmpdir(), 'io-certs-'))
+  const host = 'api.router.test'
+  mkdirSync(join(certDir, 'local', host), { recursive: true })
+  cpSync(join('test', 'fixtures', 'local', 'router.test', 'router.test.crt'), join(certDir, 'local', host, `${host}.crt`))
+  cpSync(join('test', 'fixtures', 'local', 'router.test', 'router.test.key'), join(certDir, 'local', host, `${host}.key`))
+  // A real pair OUTSIDE the `<issuer>/<host>/` layout: `join(certDir, 'local', '../x', '../x.crt')`
+  // normalises to `<certDir>/x.crt`, so a servername of `../x` served it before the shape check.
+  cpSync(join('test', 'fixtures', 'local', 'router.test', 'router.test.crt'), join(certDir, 'x.crt'))
+  cpSync(join('test', 'fixtures', 'local', 'router.test', 'router.test.key'), join(certDir, 'x.key'))
+
+  let issued: string[] = []
+  const certs = new Certs({ certDir, issue: async (h) => { issued.push(h) } })
+  expect(await certs.certFor(host)).not.toBeNull()
+  expect(findCertFiles(certDir, host)).not.toBeNull()
+
+  issued = []
+  for (const bad of ['../x', '../../escaped', 'a/b', 'has space', '', 'under_score.router.test', 'x'.repeat(254)]) {
+    expect(findCertFiles(certDir, bad), bad).toBeNull()
+    expect(await certs.certFor(bad), bad).toBeNull()
+  }
+  // A malformed name never even asks the edge to issue for it.
+  expect(issued).toEqual([])
+})
+
+test('sniCallback hands the default context to a servername the route table does not serve, and reads no store', async () => {
+  const certDir = mkdtempSync(join(tmpdir(), 'io-certs-'))
+  const host = 'api.router.test'
+  mkdirSync(join(certDir, 'local', host), { recursive: true })
+  cpSync(join('test', 'fixtures', 'local', 'router.test', 'router.test.crt'), join(certDir, 'local', host, `${host}.crt`))
+  cpSync(join('test', 'fixtures', 'local', 'router.test', 'router.test.key'), join(certDir, 'local', host, `${host}.key`))
+  const issued: string[] = []
+  const certs = new Certs({ certDir, issue: async (h) => { issued.push(h) } })
+  const fallback = await certs.certFor(host)
+  expect(fallback).not.toBeNull()
+
+  const owned = new Set([host])
+  const cb = certs.sniCallback(fallback, (h) => owned.has(h))
+  const ask = (servername: string): Promise<unknown> =>
+    new Promise((resolve, reject) => cb(servername, (e, ctx) => (e ? reject(e) : resolve(ctx))))
+
+  // Case and a trailing dot still reach the store: Caddy may send either.
+  expect(await ask('API.router.test.')).toBe(fallback)
+  expect(issued).toEqual([])
+  // A name nobody serves gets the default context and buys no issuance handshake and no walk.
+  expect(await ask('scan-1.example.com')).toBe(fallback)
+  expect(await ask('scan-2.example.com')).toBe(fallback)
+  expect(issued).toEqual([])
+})

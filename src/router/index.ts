@@ -278,7 +278,7 @@ export class Router {
     const s = createPgLane({
       cfg: this.cfg, upstream: this.deps.upstream, stateOf: this.deps.stateOf, wake: this.deps.wake,
       table: () => this.table(), touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
-      signal: this.abort.signal, secureContext: this.defaultContext, sniCallback: this.certs.sniCallback(this.defaultContext), log: this.log,
+      signal: this.abort.signal, secureContext: this.defaultContext, sniCallback: this.certs.sniCallback(this.defaultContext, (h) => this.table().byHost(h) !== undefined), log: this.log,
     }, this.cfg.lanes.bind, port)
     s.on('connection', (c: Socket) => this.track(c))
     return s
@@ -288,7 +288,7 @@ export class Router {
     const s = createSniLane({
       cfg: this.cfg, upstream: this.deps.upstream, stateOf: this.deps.stateOf, wake: this.deps.wake,
       table: () => this.table(), touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
-      signal: this.abort.signal, secureContext: this.defaultContext, sniCallback: this.certs.sniCallback(this.defaultContext), log: this.log,
+      signal: this.abort.signal, secureContext: this.defaultContext, sniCallback: this.certs.sniCallback(this.defaultContext, (h) => this.table().byHost(h) !== undefined), log: this.log,
     }, kind, bind, port)
     s.on('connection', (c: Socket) => this.track(c))
     return s

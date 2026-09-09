@@ -6,11 +6,15 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { connect as tlsConnect, createSecureContext, type SecureContext } from 'node:tls'
 import type { Config } from '../config'
+import { isHostname } from './table'
 
 export interface CertFiles { crt: string; key: string; mtimeMs: number }
 
-/** Walk the store for an exact host match. */
+/** Walk the store for an exact host match. `host` reaches here from a TLS servername, which on the
+ *  three server-mode lanes arrives from anyone who can open a TCP connection to the box, so it is
+ *  shape-checked before it becomes a path: without that, `..` in a servername is `..` in a read. */
 export function findCertFiles(certDir: string, host: string): CertFiles | null {
+  if (!isHostname(host)) return null
   let issuers: string[]
   try { issuers = readdirSync(certDir) } catch { return null }
   for (const issuer of issuers) {
@@ -35,6 +39,10 @@ export function triggerIssuance(cfg: Config): (host: string) => Promise<void> {
   })
 }
 
+/** Loaded contexts held at once. One entry per hostname this box actually serves is a handful;
+ *  the cap only ever bites on a scan, and evicting the oldest costs one re-read. */
+const CACHE_MAX = 256
+
 export class Certs {
   private cache = new Map<string, { ctx: SecureContext; mtimeMs: number; crt: string }>()
   private readonly certDir: string | null
@@ -56,7 +64,7 @@ export class Certs {
    *  still missing -> null (the lane then falls back to the default context so the client completes
    *  the handshake and receives a readable error instead of an alert). */
   async certFor(host: string): Promise<SecureContext | null> {
-    if (!this.certDir) return null
+    if (!this.certDir || !isHostname(host)) return null
     let files = findCertFiles(this.certDir, host)
     if (!files) {
       try { await this.issue(host) } catch (e) { this.log(`router: certificate issuance for ${host} failed: ${e instanceof Error ? e.message : String(e)}`) }
@@ -68,6 +76,11 @@ export class Certs {
     try {
       const ctx = createSecureContext({ cert: readFileSync(files.crt), key: readFileSync(files.key) })
       this.cache.set(host, { ctx, mtimeMs: files.mtimeMs, crt: files.crt })
+      while (this.cache.size > CACHE_MAX) {
+        const oldest = this.cache.keys().next().value
+        if (oldest === undefined) break
+        this.cache.delete(oldest)
+      }
       return ctx
     } catch (e) {
       this.log(`router: unreadable certificate for ${host}: ${e instanceof Error ? e.message : String(e)}`)
@@ -75,10 +88,16 @@ export class Certs {
     }
   }
 
-  /** Node's SNICallback: the host's context, else `fallback` (never an alert on a missing cert). */
-  sniCallback(fallback: SecureContext | null): (servername: string, cb: (err: Error | null, ctx?: SecureContext) => void) => void {
+  /** Node's SNICallback: the host's context, else `fallback` (never an alert on a missing cert).
+   *  `owns` is the route table's verdict, and a servername it does not know never reaches the store:
+   *  the lanes listen on 0.0.0.0, and a miss costs a directory walk plus a 15 s issuance handshake,
+   *  so a scanner sending fresh servernames would otherwise buy that work for the price of a packet.
+   *  It stays optional because the pg lane's own tests build a Certs with no table behind it. */
+  sniCallback(fallback: SecureContext | null, owns?: (host: string) => boolean): (servername: string, cb: (err: Error | null, ctx?: SecureContext) => void) => void {
     return (servername, cb) => {
-      this.certFor(servername.toLowerCase().replace(/\.$/, '')).then(
+      const host = String(servername ?? '').toLowerCase().replace(/\.$/, '')
+      if (owns && !owns(host)) { cb(null, fallback ?? undefined); return }
+      this.certFor(host).then(
         (ctx) => cb(null, ctx ?? fallback ?? undefined),
         (e) => cb(e instanceof Error ? e : new Error(String(e))),
       )
