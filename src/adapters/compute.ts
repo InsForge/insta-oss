@@ -6,7 +6,8 @@ const appName = (ref: string, group: string): string => `io-${ref}-app-${group}`
 // Custom compute: runs the USER's image as a container on the branch network.
 // Branch model = redeploy (replace-on-deploy; state lives in the branch's db/storage).
 export class DockerCompute implements ComputeAdapter {
-  // Persistent /data volumes map 1:1 onto docker named volumes (mounted below, swept in destroy).
+  // Persistent /data volumes are directories under the data dir, bind-mounted below; the engine
+  // creates and removes them (04 section E), so a branch fork can reflink one.
   readonly supportsVolumes = true
 
   async deploy(
@@ -21,10 +22,13 @@ export class DockerCompute implements ComputeAdapter {
     const hostPort = opts.hostPort ?? opts.port
     try { await docker(['rm', '-f', name]) } catch { /* not running yet */ }
     const envArgs = Object.entries(opts.envVars).flatMap(([k, v]) => ['-e', `${k}=${v}`])
-    // Scaffold interim: `hostPath` is a docker NAMED-VOLUME name mounted at /data (platform parity);
-    // docker creates it on first use and it survives redeploys because only the container is
-    // replaced. WP4 replaces this with `--mount type=bind,src=<hostPath>,dst=/data` (decision 56).
-    const volArgs = opts.volume ? ['-v', `${opts.volume.hostPath}:/data`] : []
+    // `hostPath` is `vol/<ref>/<volId>` under the data dir, created by the engine before the deploy
+    // (`volumeMount`, mode 0777 because a user image may run as any uid). `--mount type=bind`,
+    // never `-v` (decision 56): with `-v` dockerd CREATES a missing host directory, so a reboot
+    // where the data volume failed to mount would hand the app an empty /data on the root
+    // filesystem instead of failing the start. The data survives redeploys because only the
+    // container is replaced.
+    const volArgs = opts.volume ? ['--mount', `type=bind,src=${opts.volume.hostPath},dst=/data`] : []
     // create + conditional start, not `run -d`: a redeploy of a service the user stopped must not
     // run its entrypoint for the length of the redeploy. `--restart unless-stopped` is unaffected:
     // it only ever restarts containers that were RUNNING when the daemon went down, so one created
@@ -35,7 +39,7 @@ export class DockerCompute implements ComputeAdapter {
       // host-side mapping may differ (branch clones); the app's listen port never changes
       '-p', `${hostPort}:${opts.port}`,
       // ---- args WP3 ---- (`--init`; `--cpus` / `--memory` / `--memory-swap` when limits)
-      // ---- args WP4 ---- (`--mount type=bind,src=<hostPath>,dst=/data` replaces volArgs)
+      // ---- args WP4 ---- (`--mount type=bind,src=<hostPath>,dst=/data`)
       ...volArgs,
       opts.image])
     if (opts.start !== false) await docker(['start', name])
@@ -46,10 +50,10 @@ export class DockerCompute implements ComputeAdapter {
     // Remove every compute group container for this branch ref.
     const out = await docker(['ps', '-aq', '--filter', `name=io-${ref}-app-`])
     const ids = out.toString().trim().split('\n').filter(Boolean)
-    if (ids.length) await docker(['rm', '-f', ...ids])
-    // ...then this branch's /data volumes (never orphan resources; containers must go first).
-    const vols = (await docker(['volume', 'ls', '-q', '--filter', `name=io-${ref}-data-`])).toString().trim().split('\n').filter(Boolean)
-    if (vols.length) await docker(['volume', 'rm', '-f', ...vols])
+    // `-v` drops each container's anonymous volumes with it. The branch's /data trees are
+    // directories under the data dir now, and the ENGINE removes them after this call
+    // (`data.remove(layout().vol(ref, id))`), so nothing here sweeps named volumes.
+    if (ids.length) await docker(['rm', '-f', '-v', ...ids])
   }
 
   // ---- lifecycle (persistent developer intent; suspend = docker pause) ----

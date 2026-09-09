@@ -104,7 +104,17 @@ export const managedContainerName = (ref: string, type: ManagedDbType, name: str
 // bundle(host, port, password, tls); MANAGED_DB[t].sni
 // ---- end region WP2 ----
 // ---- region WP4 (data dir) ----
-// dataPaths
+/** Where each managed image keeps its state, and the sub-directory of `md/<ref>/<prefix>-<dataId>/`
+ *  that bind-mounts onto it (contract 00 section 12). One entry per path the image writes: mongo
+ *  keeps its config server separate. A missing bind source makes `--mount type=bind` fail, so the
+ *  engine creates every sub-directory before the container starts. */
+export const MANAGED_DB_DATA_PATHS: Record<ManagedDbType, ReadonlyArray<{ containerPath: string; sub: string }>> = {
+  redis: [{ containerPath: '/data', sub: 'data' }],
+  mysql: [{ containerPath: '/var/lib/mysql', sub: 'mysql' }],
+  mongodb: [{ containerPath: '/data/db', sub: 'db' }, { containerPath: '/data/configdb', sub: 'configdb' }],
+}
+export const dataPaths = (type: ManagedDbType): ReadonlyArray<{ containerPath: string; sub: string }> =>
+  MANAGED_DB_DATA_PATHS[type]
 // ---- end region WP4 ----
 // ---- region WP5 (templates/parity) ----
 // Naming helpers shared by every package (contract 00 section 7). Handles are READ from state when a
