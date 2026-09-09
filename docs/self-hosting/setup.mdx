@@ -101,10 +101,14 @@ There is no password-reset email. Reset the admin from the box:
 ```bash
 cd /etc/instacloud
 docker compose stop instad
-docker compose run --rm instad --reset-admin
+docker compose run --rm instad node node_modules/tsx/dist/cli.mjs src/main.ts --reset-admin
 docker compose start instad
 ```
 
-The flag refuses to run while the daemon is up, because both processes would write the same state
-file. It clears the admin record so `/setup` accepts a new one. Existing `insta_` tokens keep
-working.
+The image has no entrypoint, so the whole command is spelled out: `docker compose run` replaces it
+rather than appending to it.
+
+The flag refuses to run while the daemon is up, because it takes the same data-directory lock a
+boot takes and both processes would write the same state file. It removes the admin record and
+every session, so `/setup` accepts a new one. Existing `insta_` tokens are kept, and they work
+again as soon as the new admin exists.

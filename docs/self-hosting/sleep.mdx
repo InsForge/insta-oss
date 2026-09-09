@@ -46,8 +46,8 @@ Sleeping on idle is not always fast enough, so the sweeper also watches free mem
 available memory is below 15 percent of the total, it sleeps the least recently active running
 service, one at a time, until it is back above the floor.
 
-Never evicted: an always-on service, a service that woke in the last minute, and a service
-answering a request right now.
+Never evicted: an always-on service, a service that woke inside the wake-protection window (60
+seconds by default), and a service answering a request right now.
 
 On Linux the total is the machine's, read from `/proc/meminfo`, or the daemon's own cgroup ceiling
 when it runs in a container that has one, whichever is smaller. A ceiling matters because
@@ -120,7 +120,8 @@ Set these in `/etc/instacloud/instad.env`, then `cd /etc/instacloud && docker co
 | `INSTA_OSS_READY_WINDOW_MS` | 30000 | retry window for a just woken upstream |
 | `INSTA_OSS_RAM_FLOOR_PCT` | 15 | free-memory floor for pressure eviction, 0 disables it |
 | `INSTA_OSS_MEM_BUDGET_MB` | unset | assumed total memory, needed for eviction on macOS |
-| `INSTA_OSS_ALWAYS_ON_DEFAULT` | false | make every new service always-on |
+| `INSTA_OSS_WAKE_PROTECT_SEC` | 60 | how long after a wake a service cannot be evicted |
+| `INSTA_OSS_ALWAYS_ON_DEFAULT` | 0 | set to 1 to make every new service always-on |
 | `INSTA_OSS_SCHEDULER` | 1 | set to 0 to turn the sweeper off, so nothing sleeps on a timer |
 
 An idle window of 0 turns sleeping off for that kind of service without turning off the sweeper.

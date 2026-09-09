@@ -16,7 +16,7 @@ Under the data directory, `/var/lib/instacloud` on a server and `~/.insta-oss` o
 ```
 pg/<ref>/<id>/      Postgres data directory, bind-mounted into the container
 vol/<ref>/<id>/     a compute volume, mounted at /data
-md/<ref>/<id>/      managed database data (redis, mysql, mongodb)
+md/<ref>/<rd|my|mo>-<id>/   managed database data (redis, mysql, mongodb)
 garage/             the object store metadata and data
 ```
 
@@ -48,6 +48,11 @@ insta events --json
 
 `db.method` is `reflink` or `basebackup`, and it is the fastest way to confirm that reflinks are
 actually working on your box.
+
+`INSTA_OSS_FORK` decides which of the two is allowed: `auto` (the default) reflinks when it can and
+streams when it cannot, `reflink` refuses the fork rather than falling back, and `basebackup`
+always streams. Set it to `reflink` on a box where a silent fall back to a copy proportional to the
+database would be worse than an error.
 
 ## Volumes fork too
 

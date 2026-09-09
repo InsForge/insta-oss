@@ -12,7 +12,9 @@ Server mode wants a machine you can point DNS at:
   box's own `hostArchitecture`, so a template that will not run here is refused before it creates
   anything rather than failing on the image pull
 - root (the script uses `sudo` nothing: run it as root)
-- 2 vCPU, 2 GiB RAM, 15 GiB free disk
+- 2 vCPU, 2 GiB RAM, 15 GiB free disk. A first install refuses a box under the memory or disk
+  minimum and says which one; an upgrade of a box that is already installed warns and continues.
+  One vCPU is a warning either way: it runs, and every deploy and fork is slow
 - ports 80, 443, 8080, 8081, 5432, 6379 and 27017 free (the script refuses to start if any is
   bound, and prints the holder)
 - Docker, installed by the script when it is missing
@@ -41,25 +43,33 @@ curl -fsSL https://raw.githubusercontent.com/InsForge/insta-oss/main/install.sh 
    binds all three lanes at startup and exits if one is busy, so a busy lane port is a refusal, not
    a warning; the message names the `INSTA_OSS_LANE_*` key that moves that lane elsewhere. While
    the stack is already up this check is skipped.
-4. Opens the firewall, but only when one is active. Under `ufw`: inbound 80, 443 and 5432, plus
-   `docker0` to the host on 443, 5432, 6379, 27017 and 20000 to 20999. Under `firewalld`: the same
-   ports in the `docker` zone. Both are idempotent and every rule is printed. `--print-firewall`
-   shows the list without touching anything.
-5. Installs Docker when missing, enables it, requires `docker compose version`, and starts the
+4. Checks the sizing: the vCPU count, `MemTotal`, and the free space on the filesystem that will
+   hold the data directory. See [Requirements](#requirements) for what is fatal and what is a
+   warning.
+5. Opens the firewall, but only when one is active. Under `ufw`: inbound 80, 443 and 5432, plus
+   443, 5432, 6379, 27017 and 20000 to 20999 from `docker0` and from every Docker address pool.
+   Under `firewalld`: the same container ports in the `docker` zone and 80, 443 and 5432 in the
+   `public` one. Both are idempotent and every rule is printed. `--print-firewall` shows the list
+   without touching anything.
+6. Installs Docker when missing, enables it, requires `docker compose version`, and starts the
    daemon when it is installed but not answering.
-6. Writes `/etc/docker/daemon.json` with `default-address-pools` and restarts Docker, on a fresh
+7. Writes `/etc/docker/daemon.json` with `default-address-pools` and restarts Docker, on a fresh
    Docker install or when the file has no such key. See [Docker address
    pools](#docker-address-pools) for why.
-7. Creates `/var/lib/instacloud` and probes for reflinks, falling back to an XFS loop image. See
+8. Creates `/var/lib/instacloud` and probes for reflinks, falling back to an XFS loop image. See
    [Reflinks](#reflinks).
-8. Resolves the domain: `--domain`, then `INSTA_OSS_DOMAIN`, then the value already in
+9. Resolves the domain: `--domain`, then `INSTA_OSS_DOMAIN`, then the value already in
    `instad.env`, then automatically from the public IPv4 address as `<a-b-c-d>.sslip.io`.
-9. Writes the secrets and files: `INSTA_OSS_SECRET` (kept if present, else 64 hex characters), the
-   Garage `rpc_secret` and toml, `instad.env` (`chmod 600`), `compose.yml` and the `Caddyfile`.
-10. Pulls and starts the stack: `docker compose --env-file instad.env up -d --remove-orphans`.
-11. Waits on `http://127.0.0.1:8080/healthz` for up to 60 seconds. On timeout it prints the tail of
-    `docker compose logs instad` and exits 1. With `INSTA_OSS_TLS=internal` it also copies the root
-    CA to `/var/lib/instacloud/edge/ca.pem`.
+10. Writes the secrets and files: `INSTA_OSS_SECRET` (kept if present, else 64 hex characters), the
+    Garage `rpc_secret` and toml, `instad.env` (`chmod 600`), `compose.yml` and the `Caddyfile`.
+11. Pulls and starts the stack: `docker compose --env-file instad.env up -d --remove-orphans`.
+12. Waits on `http://127.0.0.1:8080/healthz` for up to 60 seconds. On timeout it prints the tail of
+    `docker compose logs instad` and exits 1.
+13. Asks the edge for the certificate for `api.<domain>` over loopback and waits until the file
+    appears in the store, up to 4 minutes with a public CA and 60 seconds with the internal issuer.
+    A certificate that has not landed by then is a warning, not a failure: the edge keeps retrying
+    on its own, and the database lanes start presenting it the moment it lands. With
+    `INSTA_OSS_TLS=internal` the root CA is then copied to `/var/lib/instacloud/edge/ca.pem`.
 
 Then it prints two lines you need:
 
