@@ -1,0 +1,189 @@
+---
+title: "Install"
+description: "One command on a VPS, or a clone and npm run dev on your laptop."
+---
+
+## Requirements
+
+Server mode wants a machine you can point DNS at:
+
+- Ubuntu 22.04+ or Debian 12+, `x86_64` or `aarch64`
+- root (the script uses `sudo` nothing: run it as root)
+- 2 vCPU, 2 GiB RAM, 15 GiB free disk
+- ports 80, 443 and 5432 free (the script refuses to start if they are bound and prints the holder)
+- Docker, installed by the script when it is missing
+
+## The one-liner
+
+```bash
+curl -fsSL https://get.instacloud.com | sh
+```
+
+The raw URL is the documented fallback:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/InsForge/insta-oss/main/install.sh | sh
+```
+
+## What the script does
+
+1. Renders and exits for any `--print-*` flag, with no root and no side effects.
+2. Checks preconditions: root, Linux, a supported architecture, `curl`, `ss`. An existing
+   `/etc/instacloud/instad.env` puts it in upgrade mode.
+3. Checks ports. It refuses when 80, 443 or 5432 are taken and warns about 6379, 3306 and 27017.
+   While the stack is already up this check is skipped.
+4. Opens the firewall, but only when one is active. Under `ufw`: inbound 80, 443 and 5432, plus
+   `docker0` to the host on 443, 5432, 6379, 27017 and 20000 to 20999. Under `firewalld`: the same
+   ports in the `docker` zone. Both are idempotent and every rule is printed. `--print-firewall`
+   shows the list without touching anything.
+5. Installs Docker when missing, enables it, and requires `docker compose version`.
+6. Writes `/etc/docker/daemon.json` with `default-address-pools` and restarts Docker, on a fresh
+   Docker install or when the file has no such key. See [Docker address
+   pools](#docker-address-pools) for why.
+7. Creates `/var/lib/instacloud` and probes for reflinks, falling back to an XFS loop image. See
+   [Reflinks](#reflinks).
+8. Resolves the domain: `--domain`, then `INSTA_OSS_DOMAIN`, then the value already in
+   `instad.env`, then automatically from the public IPv4 address as `<a-b-c-d>.sslip.io`.
+9. Writes the secrets and files: `INSTA_OSS_SECRET` (kept if present, else 64 hex characters), the
+   Garage `rpc_secret` and toml, `instad.env` (`chmod 600`), `compose.yml` and the `Caddyfile`.
+10. Pulls and starts the stack: `docker compose --env-file instad.env up -d --remove-orphans`.
+11. Waits on `http://127.0.0.1:8080/healthz` for up to 60 seconds. On timeout it prints the tail of
+    `docker compose logs instad` and exits 1. With `INSTA_OSS_TLS=internal` it also copies the root
+    CA to `/var/lib/instacloud/edge/ca.pem`.
+
+Then it prints two lines you need:
+
+```
+  Setup:    https://console.<domain>/setup
+  CLI:      insta login --api-key <token from the setup page> --api-url https://api.<domain>
+```
+
+Open the setup URL to create the admin account. See [set up access](/self-hosting/setup).
+
+## What it writes
+
+| Path | What |
+| --- | --- |
+| `/etc/instacloud/instad.env` | every `INSTA_OSS_*` setting, mode 600 |
+| `/etc/instacloud/compose.yml` | the three services `io-instad`, `io-edge`, `io-garage` |
+| `/etc/instacloud/Caddyfile` | the edge configuration, including on-demand TLS |
+| `/var/lib/instacloud` | all data: `state.json`, `pg/`, `vol/`, `md/`, `garage/`, `caddy/`, `edge/ca.pem` |
+| `/var/lib/instacloud.img` | the XFS loop image, only when one was needed |
+| `/etc/fstab` | `/var/lib/instacloud.img /var/lib/instacloud xfs loop,nofail,x-systemd.required-by=docker.service,x-systemd.before=docker.service 0 0` |
+| `/etc/docker/daemon.json` | `default-address-pools`, on a fresh install or when the key is absent |
+
+The `x-systemd.required-by=docker.service` part matters: Docker must not start before the data
+mount is there. Without it a reboot where the image failed to mount would let dockerd restart the
+Postgres containers against empty directories.
+
+## Options
+
+| Flag | Env | What |
+| --- | --- | --- |
+| `--domain <host>` | `INSTA_OSS_DOMAIN` | your own apex, instead of the automatic sslip.io name |
+| `--email <addr>` | `INSTA_OSS_ACME_EMAIL` | the ACME account address |
+| `--version <vX.Y.Z>` | `INSTA_OSS_VERSION` | pin the image; omit for the newest release |
+| `--tls acme\|internal` | `INSTA_OSS_TLS` | public certificates, or an internal issuer for a private box |
+| `--data-img-gib <n>` | `INSTA_OSS_DATA_IMG_GIB` | size of the loop image when one is created |
+| `--data-dir <path>` | `INSTA_OSS_DATA_DIR` | required to change the data directory of an existing install |
+| `--print-firewall` | | print the firewall rules and exit |
+| `--print-daemon-json` | | print the Docker address-pool block and exit |
+| `--print-env`, `--print-compose`, `--print-caddyfile` | | print the file and exit |
+| `-y` | | assume yes |
+
+Every `INSTA_OSS_*` variable in the environment when you run the script is passed through into
+`instad.env`, so the idle and sleep knobs can be set at install time. They are all listed on the
+[sleep and wake](/self-hosting/sleep) page.
+
+```bash
+curl -fsSL https://get.instacloud.com | INSTA_OSS_IDLE_COMPUTE_SEC=900 sh -s -- --domain example.com --email ops@example.com
+```
+
+## Docker address pools
+
+Every branch gets its own user-defined Docker network, and stock dockerd can only hand out 31 of
+them: `172.17.0.0/16` through `172.31.0.0/16` minus `docker0`, plus 16 `/20` networks under
+`192.168.0.0/16`. Without a wider pool the 32nd `insta branch create` answers `507` with
+`docker has no free network subnets`.
+
+```json
+{ "default-address-pools": [ { "base": "10.100.0.0/14", "size": 24 } ] }
+```
+
+That is 1024 `/24` networks. The installer writes it only when `/etc/docker/daemon.json` is absent
+or has no `default-address-pools` key. A box that already sets the key keeps its own value, and the
+script prints the block for you to merge by hand when the file carries other keys.
+
+## Reflinks
+
+Branch creation copies the Postgres data directory and every volume with a reflink copy: the kernel
+shares the blocks and only writes diverge, so a fork of a 50 GiB database is a sub-second metadata
+operation. XFS with `reflink=1` and Btrfs support it. ext4 does not.
+
+The script probes with `cp --reflink=always` on two temporary files inside the data directory:
+
+- Probe succeeds: native reflinks, nothing else to do.
+- Probe fails and the data directory is empty: the script installs `xfsprogs`, checks for at least
+  15 GiB free, creates `/var/lib/instacloud.img` (`--data-img-gib`, or free space minus 5 GiB, at
+  least 10 GiB), formats it with `mkfs.xfs -m reflink=1`, adds the fstab line and mounts it.
+- Probe fails and the data directory already has data: the script warns and continues. This is not
+  an install failure. The daemon boots, logs one warning, and branch forks stream
+  `pg_basebackup` instead. They are correct, just proportional to the database size.
+
+Check afterwards:
+
+```bash
+findmnt -no FSTYPE /var/lib/instacloud     # xfs
+xfs_info /var/lib/instacloud | grep reflink=1
+```
+
+Grow the loop image later:
+
+```bash
+truncate -s +20G /var/lib/instacloud.img
+losetup -c "$(findmnt -no SOURCE /var/lib/instacloud)"
+xfs_growfs /var/lib/instacloud
+```
+
+## Security posture
+
+- The daemon mounts the Docker socket. That is root on the box. Treat the admin password and every
+  `insta_` token as root credentials.
+- Firewall everything except 80, 443 and the database ports you actually use.
+- Keep the `docker0` to host rules the installer adds. Container traffic to `api.<domain>`,
+  `s3.<domain>` and its own `DATABASE_URL` arrives at the host through the bridge gateway and
+  traverses the host `INPUT` chain, so a default-deny firewall silently drops every in-container
+  call while the same URLs keep working from outside.
+- There is one admin account and no organizations. Anyone with the password or a token can do
+  anything.
+
+## Local mode on a laptop
+
+No installer, no domain, no auth:
+
+```bash
+git clone https://github.com/InsForge/insta-oss.git && cd insta-oss
+npm install
+npm run build:ui                     # the dashboard, served by the daemon itself
+npm run dev                          # the daemon on http://127.0.0.1:8080
+```
+
+Then, in another terminal:
+
+```bash
+npm install -g insta
+export INSTA_API_URL=http://127.0.0.1:8080
+insta status                         # user: local
+```
+
+Prerequisites are Docker (running) and Node 22 or newer. The first run pulls the Postgres, Garage
+and rclone images. State lives in `~/.insta-oss`.
+
+App URLs in local mode are `http://<group>-<project>-<branch>.localhost:8080`.
+
+<Note>
+macOS and every current browser resolve `*.localhost` to 127.0.0.1 on their own. Containers and
+Linux hosts without `systemd-resolved` do not, which is why database DSNs in local mode use
+`127.0.0.1:<port>` rather than a name. If a `.localhost` URL does not resolve for you, add the
+name to `/etc/hosts`.
+</Note>
