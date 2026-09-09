@@ -19,6 +19,8 @@ import { assertHostLabel, bucketsOf, buildTable, databasesOf, hostFor as fqdnFor
 import type { State } from './state'
 // ---- end region WP2 ----
 // ---- region WP5 (templates/parity) ----
+import { TemplateCatalog } from './templates/catalog'
+import { TemplateExecutor } from './templates/executor'
 import { ENV_NAME_RE } from './templates/manifest'
 // ---- end region WP5 ----
 
@@ -89,7 +91,8 @@ export interface EngineOptions {
   // upstream?: UpstreamLike; scheduler?: Scheduler
   // ---- end region WP3 ----
   // ---- region WP5 (templates/parity) ----
-  // templates?: TemplateCatalog
+  templates?: TemplateCatalog        // default new TemplateCatalog(cfg.templatesDir)
+  executor?: TemplateExecutor        // default a TemplateExecutor over this engine (tests inject a probe)
   // ---- end region WP5 ----
 }
 
@@ -106,6 +109,8 @@ export class Engine {
     this.cfg = opts.cfg ?? loadConfig()
     this.data = opts.data ?? Engine.NOOP_DATA
     this.router = opts.router ?? { invalidate() { /* no router until WP2 */ } }
+    this.templates = opts.templates ?? new TemplateCatalog(this.cfg.templatesDir)   // WP5 (lazy: reads no file until asked)
+    this.executorInstance = opts.executor
   }
 
   /** Serialize container work per app. `deploy` re-asserts the standing lifecycle intent after
@@ -2164,6 +2169,25 @@ export class Engine {
   // ---- end region WP4 ----
 
   // ---- region WP5 (templates/parity) ----
+
+  /** The bundled template registry (`cfg.templatesDir`). Reads no file until a route asks. */
+  readonly templates: TemplateCatalog
+  private executorInstance: TemplateExecutor | undefined
+  /** The template executor, created on first use so nothing has to wire it up (main.ts calls
+   *  `abandonStale()` at boot; tests inject one with a fake health probe). */
+  get executor(): TemplateExecutor {
+    return (this.executorInstance ??= new TemplateExecutor(this))
+  }
+
+  /** User secrets bound to ONE service on ONE branch, by name. The template executor reads back
+   *  what a previous attempt wrote (the deployment record stores refs, never values). */
+  boundSecrets(projectId: string, branchName: string, service: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const u of loadState().userSecrets[projectId] ?? []) {
+      if (u.branch === branchName && u.service === service) out[u.name] = u.value
+    }
+    return out
+  }
 
   /** The project's postgres registrations, in creation order (the OLDEST holds the canonical
    *  unsuffixed `DATABASE_URL` alias, computed at read time so a removal shifts it). */
