@@ -3,6 +3,7 @@
 // redeploy the same app image(s); compute = the user's custom image(s), one per group.
 import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
+import { cpus, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { loadConfig, type Config } from './config'
 import { dataLayout, ensureDirSync, lazyDataDirOps, probedCapabilities } from './datadir'
@@ -18,6 +19,11 @@ import { checkDns, domainResult, DomainError, normalizeHostname, notAdded, type 
 import { assertHostLabel, bucketsOf, buildTable, databasesOf, hostFor as fqdnFor, hostOnly, labelFor, RESERVED_LABELS, type HostKind } from './router/table'
 import type { State } from './state'
 // ---- end region WP2 ----
+// ---- region WP3 (scheduler) ----
+import { DockerRuntime, NoContainerError, Scheduler, type Runtime, type ServiceTarget } from './scheduler'
+import { stateRev } from './state'
+import { Upstream, type UpstreamLike } from './upstream'
+// ---- end region WP3 ----
 // ---- region WP5 (templates/parity) ----
 import { TemplateCatalog } from './templates/catalog'
 import { TemplateExecutor } from './templates/executor'
@@ -88,7 +94,9 @@ export interface EngineOptions {
   data?: DataDirOps                  // scaffold default: the no-op Engine.NOOP_DATA; WP4 default: new DataDir(cfg)
   router?: { invalidate(): void }    // default no-op; main.ts sets engine.router after constructing the Router (WP2)
   // ---- region WP3 (scheduler) ----
-  // upstream?: UpstreamLike; scheduler?: Scheduler
+  upstream?: UpstreamLike            // default new Upstream(cfg); ONE instance for runtime, scheduler and router (decision 57)
+  runtime?: Runtime                  // default new DockerRuntime(cfg, upstream); tests pass FakeRuntime
+  scheduler?: Scheduler              // default: built here over `runtime`, NOT started (main.ts starts it)
   // ---- end region WP3 ----
   // ---- region WP5 (templates/parity) ----
   templates?: TemplateCatalog        // default new TemplateCatalog(cfg.templatesDir)
@@ -109,6 +117,24 @@ export class Engine {
     this.data = opts.data ?? Engine.NOOP_DATA
     this.router = opts.router ?? { invalidate() { /* no router until WP2 */ } }
     this.templates = opts.templates ?? new TemplateCatalog(this.cfg.templatesDir)   // WP5 (lazy: reads no file until asked)
+    // ---- region WP3 (scheduler) ----
+    // ONE Upstream for the runtime, the scheduler and (through `engine.upstream`) the router, so a
+    // sleep or a wake invalidates the address the next request would have dialled (decision 57).
+    // The scheduler is built here and NOT started: main.ts starts the ticker after the listener is
+    // up, and every fake-adapter test drives it on demand with the ticker off.
+    this.upstream = opts.upstream ?? new Upstream(this.cfg)
+    this.scheduler = opts.scheduler ?? new Scheduler(
+      opts.runtime ?? new DockerRuntime(this.cfg, this.upstream),
+      this.cfg,
+      () => this.serviceTargets(),
+      {
+        markSlept: (key, at) => { this.markSlept(key, at) },
+        emit: (key, kind, payload) => { this.emitForKey(key, kind, payload) },
+        booting: () => this.booting,
+      },
+      this.upstream,
+    )
+    // ---- end region WP3 ----
   }
 
   /** Serialize container work per app. `deploy` re-asserts the standing lifecycle intent after
@@ -867,14 +893,35 @@ export class Engine {
     if (!branch) throw new Error('branch not found')
     const serviceId = `cp-${group}`
     const ref = this.ref(project, branch)
+    const key = this.serviceKey(branch, serviceId)
     const desired = verb === 'start' ? 'running' : verb === 'stop' ? 'stopped' : 'suspended'
     let state = 'none'
     if (branch.apps[group]) {
       const op = this.compute[verb]
       if (!op) throw new Error(`${verb} is not supported by this compute adapter`)
-      await op.call(this.compute, ref, group).catch(() => { /* best-effort, platform parity */ })
-      mutate((s) => { s.branches[branch.id].apps[group].desiredState = desired })
-      state = await this.liveState(ref, group)
+      // WP3 edit point: the intent is written FIRST for a start, so the wake that follows cannot be
+      // refused by the very intent it is clearing (`insta compute start` also re-enables auto-wake).
+      if (verb === 'start') mutate((s) => { s.branches[branch.id].apps[group].desiredState = desired })
+      // The adapter op stays: it unpauses and starts (or stops with the configured grace) exactly as
+      // before. Best-effort, platform parity.
+      const graceSec = verb === 'stop' ? this.cfg.sleep.stopGraceSec : undefined
+      await (verb === 'stop'
+        ? this.compute.stop?.(ref, group, { graceSec })
+        : op.call(this.compute, ref, group)
+      )?.catch(() => { /* best-effort, platform parity */ })
+      if (verb === 'start') {
+        // ...and then WAIT for readiness through the scheduler (re-entrant: this holds the key),
+        // which also clears the sleep mark and stamps activity. A container that is not there any
+        // more is not an error for an intent write: the row keeps the intent and reports `none`.
+        await this.wake(key, { door: 'api' }).catch((e: unknown) => {
+          if (!(e instanceof NoContainerError)) throw e
+        })
+      } else {
+        mutate((s) => { s.branches[branch.id].apps[group].desiredState = desired })
+        if (verb === 'stop') this.scheduler.onStopped(key)
+        else this.scheduler.onPaused(key)
+      }
+      state = this.liveState(key)
     }
     this.emit(projectId, branch.name, 'resource', `service.${verb}`, { service: serviceId })
     const service = (await this.services(projectId, branch.name)).find((x) => x.id === this.qualifiedId(branch, serviceId))
@@ -896,7 +943,6 @@ export class Engine {
   private async restartLocked(projectId: string, branchId: string, group: string): Promise<{
     service: ServiceRow | undefined; state: string
   }> {
-    const project = this.getProject(projectId)!
     const branch = loadState().branches[branchId]
     if (!branch) throw new Error('branch not found')
     // Read the recorded image INSIDE the chain. A deploy queued ahead of this one has already
@@ -910,17 +956,16 @@ export class Engine {
     await this.deployLocked(projectId, branchId, group, { image: app.image, port: app.port, hostPort: app.hostPort })
     this.emit(projectId, branch.name, 'resource', 'service.restart', { service: `cp-${group}` })
     const service = (await this.services(projectId, branch.name)).find((x) => x.id === this.qualifiedId(branch, `cp-${group}`))
-    return { service, state: await this.liveState(this.ref(project, branch), group) }
+    return { service, state: this.liveState(this.serviceKey(branch, `cp-${group}`)) }
   }
 
   /** A compute service's desired (developer intent) vs. live runtime state. */
   async serviceState(projectId: string, serviceId: string, branchName?: string): Promise<{ desiredState: string; state: string }> {
     const { branch, group } = this.computeTarget(projectId, serviceId, branchName)
-    const project = this.getProject(projectId)!
     const app = branch.apps[group]
     return {
       desiredState: app?.desiredState ?? 'running',
-      state: app ? await this.liveState(this.ref(project, branch), group) : 'none',
+      state: app ? this.liveState(this.serviceKey(branch, `cp-${group}`)) : 'none',
     }
   }
 
@@ -1012,8 +1057,16 @@ export class Engine {
     return { branch, group: svc.name }
   }
 
-  private liveState(ref: string, group: string): Promise<string> {
-    return this.compute.state ? this.compute.state(ref, group) : Promise.resolve('unknown')
+  /** WP3 edit point (decision 53): the ONE runtime-state read the routes use, mapped from
+   *  `scheduler.stateOf` by contract section 13. Asleep and starting both report `suspended`,
+   *  which is what the CLI prints beside a `running` desired state. */
+  private liveState(key: ServiceKey): 'running' | 'stopped' | 'suspended' | 'none' {
+    switch (this.scheduler.stateOf(key)) {
+      case 'running': return 'running'
+      case 'paused': case 'asleep': case 'starting': return 'suspended'
+      case 'stopped': return 'stopped'
+      default: return 'none'
+    }
   }
 
   /** Bulk runtime health for a branch's compute + postgres + managed databases (storage omitted
@@ -2021,58 +2074,363 @@ export class Engine {
   // ---- end region WP2 ----
 
   // ---- region WP3 (scheduler) ----
-  private static readonly NOOP_SCHEDULER: SchedulerLike = {
-    register() { /* no scheduler until WP3 */ }, forget() { /* no scheduler until WP3 */ }, rekey() { /* no scheduler until WP3 */ },
-  }
-  /** filled by WP3: the real Scheduler (unstarted; main.ts starts it). Scaffold: the no-op stub. */
-  readonly scheduler: SchedulerLike = Engine.NOOP_SCHEDULER
-  /** filled by WP3 (already final): `${branchId}:${serviceId}`, contract section 4 ServiceKey. */
+  /** The ONE address cache (decision 57): `main.ts` hands the same instance to the router, and the
+   *  scheduler's `forget` after a sleep or a wake is what keeps the router from dialling a
+   *  container that has gone away. */
+  readonly upstream: UpstreamLike
+  /** The scheduler: sleep, wake, eviction, and THE per-key operation lock. Unstarted here. */
+  readonly scheduler: Scheduler
+  /** `${branchId}:${serviceId}`, contract section 4 ServiceKey. */
   serviceKey(branch: Branch, serviceId: string): ServiceKey { return `${branch.id}:${serviceId}` }
-  /** filled by WP3: THE per-key operation lock (decision 52; exclusive per key, sorted acquisition,
-   *  re-entrant, sweep-visible). Scaffold: today's per-app serialize() chain applied to each key in
-   *  sorted order, so container ops stay mutually exclusive from day one. Registers on the chain
-   *  synchronously (before any await), which the mid-deploy lifecycle test pins. */
-  withOp<T>(keys: ServiceKey[], fn: () => Promise<T>): Promise<T> {
-    const sorted = [...new Set(keys)].sort()
-    const run = sorted.reduceRight<() => Promise<T>>((inner, key) => () => this.serialize(key, inner), fn)
-    return run()
+
+  /** THE per-key operation lock (decision 52). Every container-mutating path goes through it:
+   *  deploy, restart, lifecycle, branch create, teardown, service add/remove/rename, volume ops,
+   *  limits, and the scheduler's own wake. Re-entrant inside the acquiring async context, so a
+   *  nested `wake` (lifecycle start, a fork waking its source) takes no second acquisition. */
+  withOp<T>(keys: ServiceKey[], fn: () => Promise<T>): Promise<T> { return this.scheduler.withOp(keys, fn) }
+
+  /** Start a sleeping service and wait until it accepts connections. `traffic` refuses a service
+   *  the developer stopped; `api` and `deploy` are explicit and never refused. */
+  wake(key: ServiceKey, opts: { door: 'traffic' | 'api' | 'deploy' }): Promise<void> { return this.scheduler.wake(key, opts) }
+  /** Put one service to sleep now (the sweep's own path; also `sleepNewBranch`). */
+  sleep(key: ServiceKey, reason: 'idle' | 'memory' | 'branch-create'): Promise<boolean> { return this.scheduler.sleep(key, reason) }
+  /** A request or a connection read: the only thing that resets the idle clock. */
+  touch(key: ServiceKey): void { this.scheduler.touch(key) }
+  stateOf(key: ServiceKey): 'running' | 'asleep' | 'stopped' | 'paused' | 'starting' | 'none' { return this.scheduler.stateOf(key) }
+  /** In-flight request/splice bookkeeping the router drives; a held key is never evicted. */
+  holds(key: ServiceKey): number { return this.scheduler.holds(key) }
+  beginHold(key: ServiceKey): void { this.scheduler.beginHold(key) }
+  endHold(key: ServiceKey): void { this.scheduler.endHold(key) }
+
+  /** A clone of a service that is not always-on is created and never started (asleep from birth). */
+  startAsleepFor(project: Project, target: Branch, group: string): boolean {
+    return !this.effectiveAlwaysOn(project, target, `cp-${group}`)
   }
-  /** filled by WP3: start a sleeping service and wait for readiness. Scaffold: nothing sleeps. */
-  async wake(_key: ServiceKey, _opts: { door: 'traffic' | 'api' | 'deploy' }): Promise<void> { /* nothing sleeps until WP3 */ }
-  /** filled by WP3: `!effectiveAlwaysOn(project, target, 'cp-' + group)`. Scaffold: clones start running. */
-  startAsleepFor(_project: Project, _target: Branch, _group: string): boolean { return false }
-  /** filled by WP3: whether a service opts out of sleep. Scaffold body is already the contract's
-   *  rule (section 4): the per-service setting, else `INSTA_OSS_ALWAYS_ON_DEFAULT`. WP5's
-   *  `services()` rows and template deploys read it; WP3 adds the sweep and the PUT route. */
-  effectiveAlwaysOn(project: Project, _branch: Branch, serviceId: string): boolean {
+
+  /** Whether a service opts out of sleep. Compute and managed databases carry the per-service
+   *  setting (else `INSTA_OSS_ALWAYS_ON_DEFAULT`); postgres carries the inverse of its own
+   *  per-branch `scaleToZero`, which is what `PATCH database/settings` writes. */
+  effectiveAlwaysOn(project: Project, branch: Branch, serviceId: string): boolean {
+    if (serviceId.startsWith('pg-')) return !(branch.databases?.[serviceId]?.scaleToZero ?? true)
     return project.serviceSettings?.[serviceId]?.alwaysOn ?? this.cfg.sleep.alwaysOnDefault
   }
-  /** filled by WP3: onUp / onAsleep / onStopped bookkeeping after a deploy. Scaffold: no-op. */
-  afterDeploy(_key: ServiceKey, _o: { started: boolean; startAsleep?: boolean }): void { /* no scheduler until WP3 */ }
-  /** filled by WP3: a clone's pg + managed keys sleep unless always-on. Scaffold: no-op. */
-  async sleepNewBranch(_project: Project, _branch: Branch): Promise<void> { /* no scheduler until WP3 */ }
-  /** filled by WP3: the services() `runtime` column from scheduler.stateOf. Scaffold: today's `docker
-   *  ps` derived value (online | stopped, `none` for an undeployed compute group, omitted when docker
-   *  is unreadable), read from the snapshot services() took. */
-  rowRuntime(key: ServiceKey): string | undefined {
-    const t = this.keyTarget(key)
-    if (!t) return undefined
-    if (t.serviceId.startsWith('cp-') && !t.app) return 'none'
-    return this.runtimeOf(t.container)
+
+  /** Bookkeeping after a deploy replaced the container: running, asleep from birth, or honouring a
+   *  standing stop. */
+  afterDeploy(key: ServiceKey, o: { started: boolean; startAsleep?: boolean }): void {
+    if (o.started) this.scheduler.onUp(key)
+    else if (o.startAsleep) this.scheduler.onAsleep(key, 'branch-create')
+    else this.scheduler.onStopped(key)
   }
-  /** filled by WP3: one runtime-health row from a container's docker state plus sleep bookkeeping.
-   *  Scaffold: today's mapping. running = healthy; paused = standby; restarting/created = starting;
-   *  exited against a running intent = crashed, otherwise standby; no container = none. */
-  healthOverlay(dockerState: string | undefined, desired: string, _sleptAt: number | null | undefined, _key: ServiceKey): { status: string; machines: number; failing: number } {
+
+  /** A clone's databases sleep until first use: they were provisioned and readied, and nothing has
+   *  asked them for anything yet. Always-on services stay up. */
+  async sleepNewBranch(project: Project, branch: Branch): Promise<void> {
+    for (const sid of this.branchServiceIds(project)) {
+      if (this.effectiveAlwaysOn(project, branch, sid)) continue
+      await this.sleep(this.serviceKey(branch, sid), 'branch-create').catch(() => false)
+    }
+  }
+
+  /** The services() `runtime` column, contract section 13's view mapping. A compute group that was
+   *  registered and never deployed has no container at all: `none`. */
+  rowRuntime(key: ServiceKey): string | undefined {
+    const serviceId = key.slice(key.indexOf(':') + 1)
+    if (!this.scheduler.targetOf(key)) return serviceId.startsWith('cp-') ? 'none' : undefined
+    switch (this.scheduler.stateOf(key)) {
+      case 'running': return 'online'
+      case 'asleep': case 'starting': return 'asleep'
+      case 'paused': return 'suspended'
+      case 'stopped': return 'stopped'
+      default: return 'none'
+    }
+  }
+
+  /** One runtime-health row (contract section 13): `standby` for asleep or suspended, `starting`
+   *  while a wake is in flight, and `crashed` ONLY for a container that exited with no sleep mark
+   *  against a running intent. `sleptAt` is what separates standby from crashed after a restart. */
+  healthOverlay(dockerState: string | undefined, desired: string, sleptAt: number | null | undefined, key: ServiceKey): { status: string; machines: number; failing: number } {
     if (!dockerState) return { status: 'none', machines: 0, failing: 0 }
-    const status = dockerState === 'running' ? 'healthy'
-      : dockerState === 'paused' ? 'standby'
-      : dockerState === 'restarting' || dockerState === 'created' ? 'starting'
-      : desired === 'running' ? 'crashed' : 'standby'
+    const live = this.scheduler.stateOf(key)
+    const status = live === 'starting' || dockerState === 'restarting' ? 'starting'
+      : dockerState === 'running' ? 'healthy'
+        : dockerState === 'paused' ? 'standby'
+          : sleptAt !== null && sleptAt !== undefined ? 'standby'
+            : dockerState === 'created' ? 'starting'
+              : desired === 'running' ? 'crashed' : 'standby'
     return { status, machines: 1, failing: status === 'crashed' ? 1 : 0 }
   }
-  /** filled by WP3: the cgroup ceiling recorded for a service. Scaffold: none. */
-  limitsFor(_project: Project, _serviceId: string): ServiceLimits | undefined { return undefined }
+
+  /** The cgroup ceiling recorded for a service: project-level for compute and managed databases,
+   *  per branch for postgres (its own `PATCH database/settings` writes it). */
+  limitsFor(project: Project, serviceId: string, branch?: Branch): ServiceLimits | undefined {
+    if (serviceId.startsWith('pg-')) return branch?.databases?.[serviceId]?.limits
+    return project.serviceSettings?.[serviceId]?.limits
+  }
+
+  // ---- targets: state.json projected for the scheduler -------------------------------------------
+
+  /** Every schedulable service on every branch. Memoized on the state revision, because `stateOf`
+   *  runs on the router's request path and `loadState()` clones (decision 54); `markSlept` patches
+   *  the cached row in place, since a sleep mark is an audit-class write that bumps no revision. */
+  private targetsCache: { rev: number; list: ServiceTarget[] } | undefined
+  serviceTargets(): ServiceTarget[] {
+    const rev = stateRev()
+    if (this.targetsCache?.rev === rev) return this.targetsCache.list
+    const s = loadState()
+    const list: ServiceTarget[] = []
+    for (const b of Object.values(s.branches)) {
+      const project = s.projects[b.projectId]
+      if (!project) continue
+      const ref = this.ref(project, b)
+      const common = { projectId: project.id, branchId: b.id, network: b.network }
+      for (const d of project.dbServices ?? []) {
+        const row = b.databases?.[d.id]
+        if (!row) continue
+        list.push({
+          ...common, key: this.serviceKey(b, d.id), kind: 'postgres', serviceId: d.id,
+          container: row.container, port: 5432,
+          alwaysOn: this.effectiveAlwaysOn(project, b, d.id),
+          desiredState: 'running',                                  // a database has no stop intent
+          idleSec: row.idleTimeoutSec ?? this.cfg.sleep.idleDbSec,
+          limits: row.limits, sleptAt: row.sleptAt ?? null,
+          createdAt: d.createdAt ?? b.createdAt,
+        })
+      }
+      for (const m of project.managedServices ?? []) {
+        if (!b.managed?.[m.id]) continue
+        list.push({
+          ...common, key: this.serviceKey(b, m.id), kind: 'managed', serviceId: m.id,
+          container: managedContainerName(ref, m.type, m.name), port: MANAGED_DB[m.type].port,
+          alwaysOn: this.effectiveAlwaysOn(project, b, m.id),
+          desiredState: 'running',
+          idleSec: this.cfg.sleep.idleDbSec,
+          limits: this.limitsFor(project, m.id), managedType: m.type,
+          sleptAt: b.managed[m.id].sleptAt ?? null,
+          createdAt: m.createdAt ?? b.createdAt,
+        })
+      }
+      // Compute groups only once they are deployed: a registered group has no container to schedule.
+      for (const [group, app] of Object.entries(b.apps)) {
+        const serviceId = `cp-${group}`
+        list.push({
+          ...common, key: this.serviceKey(b, serviceId), kind: 'compute', serviceId,
+          container: appContainerName(ref, group), port: app.port,
+          alwaysOn: this.effectiveAlwaysOn(project, b, serviceId),
+          desiredState: app.desiredState ?? 'running',
+          idleSec: this.cfg.sleep.idleComputeSec,
+          limits: this.limitsFor(project, serviceId),
+          sleptAt: app.sleptAt ?? null,
+          // The ROW's creation time, so a daemon restart does not hand every service a fresh create
+          // grace on top of its idle window (decision 10).
+          createdAt: project.serviceSettings?.[serviceId]?.createdAt ?? app.updatedAt ?? b.createdAt,
+        })
+      }
+    }
+    this.targetsCache = { rev, list }
+    return list
+  }
+
+  targetOf(key: ServiceKey): ServiceTarget | undefined { return this.scheduler.targetOf(key) }
+
+  /** The sleep mark on the service's own row: audit-class, so it never forces a router table
+   *  rebuild (decision 54). The memoized projection is patched in the same breath. */
+  private markSlept(key: ServiceKey, at: number | null): void {
+    const branchId = key.slice(0, key.indexOf(':'))
+    const serviceId = key.slice(key.indexOf(':') + 1)
+    mutate((s) => {
+      const b = s.branches[branchId]
+      if (!b) return
+      if (serviceId.startsWith('cp-')) {
+        const app = b.apps[serviceId.slice(3)]
+        if (app) app.sleptAt = at
+      } else if (serviceId.startsWith('pg-')) {
+        const row = b.databases?.[serviceId]
+        if (row) row.sleptAt = at
+      } else {
+        const row = b.managed?.[serviceId]
+        if (row) row.sleptAt = at
+      }
+    }, { audit: true })
+    const cached = this.targetsCache?.list.find((t) => t.key === key)
+    if (cached) cached.sleptAt = at
+  }
+
+  /** One scheduler event onto the project's timeline (decision 39): the payload carries the BARE
+   *  service id and the branch name, never the branch-qualified key. */
+  private emitForKey(key: ServiceKey, kind: string, payload: Record<string, unknown>): void {
+    const b = loadState().branches[key.slice(0, key.indexOf(':'))]
+    if (!b) return
+    this.emit(b.projectId, b.name, 'resource', kind, { ...payload, branch: b.name })
+  }
+
+  // ---- always-on and limits (the cloud's two service knobs) --------------------------------------
+
+  /** `PUT /projects/:id/services/:sid/always-on`. No container action: the flag only takes the
+   *  service out of the sweep (and, once off, lets the next idle window stop it). */
+  async setAlwaysOn(projectId: string, serviceId: string, enabled: boolean): Promise<{ service: ServiceRow | undefined }> {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const svc = this.serviceOf(projectId, serviceId)
+    if (svc.type !== 'compute' && !isManagedDbType(svc.type)) {
+      throw new Error('alwaysOn is only supported for compute and managed database services')
+    }
+    mutate((s) => {
+      const p = s.projects[projectId]
+      p.serviceSettings ??= {}
+      p.serviceSettings[serviceId] = { ...p.serviceSettings[serviceId], alwaysOn: enabled }
+    })
+    this.emit(projectId, null, 'resource', 'service.alwaysOn', { service: serviceId, enabled })
+    return { service: (await this.services(projectId)).find((x) => x.id === serviceId) }
+  }
+
+  /** The cloud's shared-cpu ladder (specs.ts): 256 to 2048 MB of memory per vCPU. */
+  private static CPU_LADDER = [1, 2, 4, 6, 8] as const
+  private static LIMITS_CAP = { cpu: 8, memoryMb: 8192, volumeGib: VOLUME_CAP_GIB }
+
+  /** Validate a requested ceiling against the grid, with the cloud's own wording (specs.ts:131-141,
+   *  the dash spelled `to`). An unset cpu is derived: the smallest ladder size that can carry the
+   *  memory. */
+  private validateLimits(memoryMb: number, cpu?: number): ServiceLimits {
+    if (!Number.isInteger(memoryMb)) throw new Error('memoryMb must be an integer number of MB')
+    const derived = cpu ?? Engine.CPU_LADDER.find((c) => memoryMb <= c * 2048)
+    if (derived === undefined) throw new Error(`no vCPU size can carry ${memoryMb} MB of memory`)
+    if (!(Engine.CPU_LADDER as readonly number[]).includes(derived)) {
+      throw new Error(`cpu must be one of ${Engine.CPU_LADDER.join(', ')} vCPU`)
+    }
+    if (memoryMb % 256 !== 0) throw new Error('memoryMb must be a multiple of 256')
+    const min = 256 * derived
+    const max = 2048 * derived
+    if (memoryMb < min || memoryMb > max) {
+      throw new Error(`${derived} vCPU supports ${min} to ${max} MB of memory`)
+    }
+    if (derived > Engine.LIMITS_CAP.cpu || memoryMb > Engine.LIMITS_CAP.memoryMb) {
+      throw new Error(`limits exceed this plan's ceiling (${Engine.LIMITS_CAP.cpu} vCPU / ${Engine.LIMITS_CAP.memoryMb} MB)`)
+    }
+    return { cpu: derived, memoryMb }
+  }
+
+  /** What a service runs under when nothing was set: the effective host ceiling, snapped to the
+   *  grid (decision 15). */
+  private hostCeiling(): ServiceLimits {
+    const cpu = [...Engine.CPU_LADDER].reverse().find((c) => c <= Math.min(Engine.LIMITS_CAP.cpu, cpus().length)) ?? 1
+    const snapped = Math.floor(totalmem() / (256 * 1024 * 1024)) * 256
+    const memoryMb = Math.max(256 * cpu, Math.min(Engine.LIMITS_CAP.memoryMb, 2048 * cpu, snapped))
+    return { cpu, memoryMb }
+  }
+
+  /** `GET /projects/:id/services/:sid/limits`. */
+  serviceLimits(projectId: string, serviceId: string): {
+    limits: ServiceLimits; cap: { cpu: number; memoryMb: number; volumeGib: number }; volume?: { sizeGib: number; mountPath: string }
+  } {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const svc = this.serviceOf(projectId, serviceId)
+    if (svc.type !== 'compute' && !isManagedDbType(svc.type)) {
+      throw new Error('limits are only supported for compute and managed database services')
+    }
+    const vol = svc.type === 'compute' ? project.computeVolumes?.[svc.name] : undefined
+    return {
+      limits: this.limitsFor(project, serviceId) ?? this.hostCeiling(),
+      cap: { ...Engine.LIMITS_CAP },
+      ...(vol ? { volume: { sizeGib: vol.sizeGib, mountPath: VOLUME_MOUNT_PATH } } : {}),
+    }
+  }
+
+  /** `PUT /projects/:id/services/:sid/limits`: validate, apply to every branch container of the
+   *  service (`docker update` is legal on a created or exited container too), then persist. A
+   *  partial apply is the cloud's 502 and leaves the STORED ceiling alone, so a retry is safe. */
+  async setServiceLimits(projectId: string, serviceId: string, patch: { memoryMb: number; cpu?: number }): Promise<{
+    service: ServiceRow | undefined; limits: ServiceLimits; cap: { cpu: number; memoryMb: number; volumeGib: number }; changed: boolean
+  }> {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const svc = this.serviceOf(projectId, serviceId)
+    if (svc.type !== 'compute' && !isManagedDbType(svc.type)) {
+      throw new Error('limits are only supported for compute and managed database services')
+    }
+    const limits = this.validateLimits(patch.memoryMb, patch.cpu)
+    const current = this.limitsFor(project, serviceId)
+    const changed = current?.cpu !== limits.cpu || current?.memoryMb !== limits.memoryMb
+    const branches = this.listBranches(projectId)
+    const keys = branches.map((b) => this.serviceKey(b, serviceId))
+    await this.withOp(keys, async () => {
+      const containers = branches
+        .map((b) => this.scheduler.targetOf(this.serviceKey(b, serviceId))?.container)
+        .filter((c): c is string => c !== undefined)
+      let applied = 0
+      const failures: string[] = []
+      for (const container of containers) {
+        try { await this.scheduler.runtimeUpdate(container, limits); applied++ }
+        catch (e) { failures.push(e instanceof Error ? e.message : String(e)) }
+      }
+      if (failures.length) {
+        const err = new Error(`resize failed on the compute provider: ${failures[0]} (applied to ${applied}/${containers.length} machines; the stored ceiling is unchanged)`)
+        Object.assign(err, { status: 502 })
+        throw err
+      }
+      if (changed) {
+        mutate((s) => {
+          const p = s.projects[projectId]
+          p.serviceSettings ??= {}
+          p.serviceSettings[serviceId] = { ...p.serviceSettings[serviceId], limits }
+        })
+      }
+    })
+    if (changed) this.emit(projectId, null, 'resource', 'service.limits', { service: serviceId, ...limits })
+    return { service: (await this.services(projectId)).find((x) => x.id === serviceId), limits, cap: { ...Engine.LIMITS_CAP }, changed }
+  }
+
+  /** A kubernetes-style cpu quantity (`2`, `2500m`) rounded UP to the ladder. */
+  parseCpuQuantity(raw: string | number): number {
+    const text = String(raw).trim()
+    const milli = /m$/.test(text) ? Number(text.slice(0, -1)) : Number(text) * 1000
+    if (!Number.isFinite(milli) || milli <= 0) throw new Error(`invalid cpu quantity: ${raw} (try '2' or '2000m')`)
+    const wanted = milli / 1000
+    const snapped = Engine.CPU_LADDER.find((c) => c >= wanted)
+    if (snapped === undefined) throw new Error(`cpu must be one of ${Engine.CPU_LADDER.join(', ')} vCPU`)
+    return snapped
+  }
+
+  /** A kubernetes-style memory quantity (`4Gi`, `2048Mi`, `512M`, bytes) in whole MB. */
+  parseMemoryQuantity(raw: string | number): number {
+    const text = String(raw).trim()
+    const m = /^(\d+(?:\.\d+)?)\s*(Gi|Mi|G|M|K|Ki)?$/.exec(text)
+    if (!m) throw new Error(`invalid memory quantity: ${raw} (try '512Mi' or '4Gi')`)
+    const n = Number(m[1])
+    const unit = m[2]
+    const mb = unit === 'Gi' ? n * 1024
+      : unit === 'G' ? (n * 1_000_000_000) / (1024 * 1024)
+        : unit === 'Mi' || unit === 'M' ? (unit === 'M' ? (n * 1_000_000) / (1024 * 1024) : n)
+          : unit === 'Ki' || unit === 'K' ? n / 1024
+            : n / (1024 * 1024)
+    return Math.round(mb)
+  }
+
+  // ---- postgres: management wakes, observability does not (decision 48) --------------------------
+
+  /** Before a MANAGEMENT query (password, databases, extensions): an explicit operation, so it
+   *  wakes the instance through the api door. Re-entrant: the caller already holds the key. */
+  private async ensurePgAwake(branch: Branch, serviceId: string): Promise<void> {
+    await this.wake(this.serviceKey(branch, serviceId), { door: 'api' })
+  }
+
+  /** Before an OBSERVABILITY query: a sleeping database reports that it is sleeping instead of
+   *  being woken by a dashboard poll. `server.ts` maps this message to 503. */
+  private assertPgAwake(branch: Branch, serviceId: string): void {
+    if (this.stateOf(this.serviceKey(branch, serviceId)) !== 'running') {
+      throw new Error('database is sleeping: it wakes on the next connection')
+    }
+  }
+
+  /** Run one management query with the instance awake and the key held for its duration. */
+  private async pgManage<T>(branch: Branch, serviceId: string, fn: () => Promise<T>): Promise<T> {
+    const key = this.serviceKey(branch, serviceId)
+    return this.withOp([key], async () => {
+      await this.ensurePgAwake(branch, serviceId)
+      return fn()
+    })
+  }
   // ---- end region WP3 ----
 
   // ---- region WP4 (data dir) ----

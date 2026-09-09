@@ -292,6 +292,13 @@ export class Scheduler {
     }
   }
 
+  /** One container's last observed docker state, by NAME: what the engine's non-schedulable rows
+   *  (the object store) read instead of taking a second `docker ps`. */
+  containerState(container: string): ContainerState | undefined { return this.stateCache.get(container)?.state }
+
+  /** `docker update` on one container, through the same seam the sweep uses (so a fake records it). */
+  runtimeUpdate(container: string, limits: ServiceLimits): Promise<void> { return this.runtime.update(container, limits) }
+
   /** Fill the snapshot `stateOf` answers from (ONE docker read), and let the upstream cache drop
    *  addresses of containers that restarted underneath it. */
   async refreshStates(): Promise<void> {
