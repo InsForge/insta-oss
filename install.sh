@@ -70,7 +70,7 @@ resolve() {
 }
 # The header comment is the usage text; under `curl ... | sh` there is no file to read, so point at it.
 usage() {
-  if [ -r "$0" ]; then sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+  if [ -r "$0" ]; then sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
   else log 'usage: see the header comment of install.sh (https://github.com/InsForge/insta-oss/blob/main/install.sh)'
   fi
 }
@@ -98,6 +98,31 @@ while [ $# -gt 0 ]; do
     *) die "unknown flag $1 (run with --help)" ;;
   esac
 done
+
+# ---- 1. preconditions (before anything is resolved: resolving needs curl and ip) ----
+pkg_install() {
+  if have apt-get; then apt-get update -qq >/dev/null 2>&1 || true; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null
+  elif have dnf; then dnf install -y -q "$@" >/dev/null
+  elif have yum; then yum install -y -q "$@" >/dev/null
+  elif have apk; then apk add --quiet --no-cache "$@" >/dev/null
+  elif have zypper; then zypper --non-interactive --quiet install "$@" >/dev/null
+  else return 1
+  fi
+}
+# A stock Ubuntu or Debian cloud image ships neither curl nor iproute2, and this script needs both
+# before it can resolve a single value: curl reads the newest release tag and the public address,
+# `ip` is the offline fallback for that address, `ss` finds whoever holds 80, 443 or 5432. Install
+# them here, not after the resolve block, or a box without them dies on a detection failure whose
+# real cause was the missing tool. The print modes resolve nothing that needs either, so they skip
+# this whole section and stay root-free.
+preflight() {
+  [ "$(id -u)" -eq 0 ] || die "run as root: curl -fsSL https://get.instacloud.com | sudo sh"
+  [ "$(uname -s)" = Linux ] || die "Linux only (a laptop runs the daemon with npm run dev, no installer)"
+  case $(uname -m) in x86_64|aarch64) ;; *) die "unsupported architecture $(uname -m) (x86_64 or aarch64)" ;; esac
+  have curl || pkg_install curl || die "curl is required and no supported package manager was found"
+  { have ip && have ss; } || pkg_install iproute2 >/dev/null 2>&1 || true
+}
+[ -n "$PRINT" ] || preflight
 
 # ---- resolve every value (shared by the print modes and the real run) ----
 UPGRADE=0
@@ -390,18 +415,7 @@ case $PRINT in
   firewall) render_firewall; exit 0 ;;
 esac
 
-# ---- 2. preconditions ----
-[ "$(id -u)" -eq 0 ] || die "run as root: curl -fsSL https://get.instacloud.com | sudo sh"
-[ "$(uname -s)" = Linux ] || die "Linux only (a laptop runs the daemon with npm run dev, no installer)"
-case $(uname -m) in x86_64|aarch64) ;; *) die "unsupported architecture $(uname -m) (x86_64 or aarch64)" ;; esac
-pkg_install() {
-  if have apt-get; then apt-get update -qq >/dev/null 2>&1 || true; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null
-  elif have dnf; then dnf install -y -q "$@" >/dev/null
-  elif have yum; then yum install -y -q "$@" >/dev/null
-  else return 1
-  fi
-}
-have curl || pkg_install curl || die "curl is required"
+# ---- 2. install or upgrade ----
 if [ "$UPGRADE" = 1 ]; then
   _ex=$(existing INSTA_OSS_DATA_DIR)
   if [ -n "$_ex" ] && [ "$_ex" != "$DATA" ] && [ -z "$F_DATA_DIR" ]; then
