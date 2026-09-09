@@ -1282,6 +1282,38 @@ test('a pre-scaffold branch row (no databases) keeps resolving its legacy io-<re
 })
 
 // ---- region WP1 (identity/config) ----
+test('local mode: /me is exactly the builtin local user, with no via field', async () => {
+  const res = await get('/me')
+  expect(res.statusCode).toBe(200)
+  expect(res.json()).toEqual({ user: { id: 'local', email: null, name: 'local' } })
+})
+
+test('local mode: the tokens routes stay 501 and no identity route is mounted', async () => {
+  for (const res of [await get('/tokens'), await post('/tokens', { name: 'x' }), await del_('/tokens/x')]) {
+    expect(res.statusCode).toBe(501)
+    expect(res.json().error).toContain('cloud-only')
+  }
+  expect((await get('/orgs')).statusCode).toBe(200)
+  expect((await post('/api/auth/sign-up/email', { email: 'a@b.test', password: 'hunter2hunter2' })).statusCode).toBe(404)
+  expect((await post('/auth/login', { email: 'a@b.test', password: 'hunter2hunter2' })).statusCode).toBe(404)
+})
+
+test('local mode: state.json carries no identity block', async () => {
+  const { loadState } = await import('../src/state')
+  await createProject('identity-free')
+  expect(loadState().identity).toBeUndefined()
+})
+
+test('the API prefixes cover the identity surface, so a GET there is never the SPA shell', async () => {
+  const { API_PREFIXES, isApiPath } = await import('../src/server')
+  expect(API_PREFIXES).toContain('/api')
+  expect(API_PREFIXES).toContain('/auth')
+  expect(API_PREFIXES).toContain('/tls')
+  expect(isApiPath('/api/auth/get-session')).toBe(true)
+  expect(isApiPath('/auth/login')).toBe(true)
+  expect(isApiPath('/tls/ask?domain=x')).toBe(true)
+  expect(isApiPath('/assets/index.js')).toBe(false)
+})
 // ---- end region WP1 ----
 
 // ---- region WP2 (router) ----

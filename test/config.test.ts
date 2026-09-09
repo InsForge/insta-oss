@@ -122,3 +122,18 @@ test('CONFIG_KEYS names every key loadConfig reads (the installer test asserts i
   for (const k of read) expect(CONFIG_KEYS, k).toContain(k)
   expect(new Set(CONFIG_KEYS).size).toBe(CONFIG_KEYS.length)
 })
+
+test('the session knobs and the cookie name follow the console scheme (WP1)', () => {
+  const base = { INSTA_OSS_MODE: 'server', INSTA_OSS_DOMAIN: 'x.test', INSTA_OSS_SECRET: 'y'.repeat(32) }
+  const secure = loadConfig({ ...base, INSTA_OSS_DATA_DIR: tmp() }, [])
+  expect(secure.auth.sessionTtlSec).toBe(604800)
+  expect(secure.auth.sessionUpdateAgeSec).toBe(86400)
+  const plain = loadConfig({ ...base, INSTA_OSS_DATA_DIR: tmp(), INSTA_OSS_CONSOLE_URL: 'http://box.lan:8080', INSTA_OSS_SESSION_TTL_SEC: '3600' }, [])
+  expect(plain.auth.cookieSecure).toBe(false)
+  expect(plain.auth.cookieName).toBe('better-auth.session_token')
+  expect(plain.auth.sessionTtlSec).toBe(3600)
+})
+
+test('extraListenHosts is filled by main.ts, never by loadConfig (WP1)', () => {
+  expect(loadConfig({ INSTA_OSS_DATA_DIR: tmp() }, []).extraListenHosts).toEqual([])
+})
