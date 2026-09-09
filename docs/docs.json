@@ -88,6 +88,14 @@
             ]
           },
           {
+            "group": "Migrate",
+            "icon": "right-left",
+            "pages": [
+              "migrate/render",
+              "migrate/railway"
+            ]
+          },
+          {
             "group": "Agent-native",
             "icon": "robot",
             "pages": [
@@ -454,7 +462,7 @@
     },
     {
       "source": "/platform/migrate/railway",
-      "destination": "/introduction"
+      "destination": "/migrate/railway"
     },
     {
       "source": "/postgres/backups",

@@ -1,0 +1,83 @@
+---
+title: "Migrate from Railway"
+description: "Move a Railway project, its variables, Postgres, and volumes onto InstaCloud."
+---
+
+Railway and InstaCloud think about deployments the same way, so the concepts map almost one to one. This guide takes you from a running Railway project to the same app on InstaCloud, with its data. Your coding agent does most of it.
+
+InstaCloud offers:
+
+- **Postgres with real branching.** A branch opens as a copy-on-write clone holding all of the parent's data, at its own connection string, so a feature or an agent task can run migrations nowhere near production.
+- **Built for coding agents.** A CLI and an MCP server your agent drives directly, with an approval gate on the actions that matter.
+- **Flexible deployments.** A GitHub repo with no Dockerfile needed, your own Dockerfile, or an image from any registry.
+- **Managed services alongside.** Postgres, Redis, MySQL, MongoDB, and object storage in one project.
+- **Real support.** An active community on [Discord](https://discord.com/invite/MPxwj5xVvW).
+
+## Migration steps
+
+We will migrate [Railway's own Django template](https://github.com/railwayapp-templates/django), a Python service with a Postgres database. Its `railway.json` says how it was built. Abridged here: the real `startCommand` also runs `collectstatic`:
+
+```json
+{
+  "build":  { "builder": "RAILPACK" },
+  "deploy": { "startCommand": "python manage.py migrate && gunicorn mysite.wsgi" }
+}
+```
+
+| On Railway | On InstaCloud |
+|---|---|
+| Service | a **compute** service |
+| Railway Postgres | a **postgres** service |
+| Variables | project secrets |
+| A `${{Postgres.DATABASE_URL}}` reference | a binding |
+| Volume | `insta compute volume`, mounted at `/data` |
+
+**One code change first.** InstaCloud hands Postgres to your app as a single `DATABASE_URL`. This template reads the five `PG*` variables Railway injects instead, so point it at the DSN before you start. In Django that is `dj-database-url`, and most other stacks take a DSN directly.
+
+### 1. Set up your coding agent
+
+```bash
+npx -y insta@latest setup agent
+```
+
+That installs the `insta` CLI, the `insta` skill, and the MCP server for every coding agent on this machine. The skill is what knows how a Railway project maps onto services here.
+
+### 2. Create a project
+
+```bash
+insta project create mysite
+```
+
+Or click **Create Project** in the [console](https://console.instacloud.com). A new project starts empty.
+
+{/* screenshot: console, Create Project */}
+
+### 3. Ask your agent to migrate
+
+Create a Railway project token first, under **Project Settings → Tokens**. Railway's CLI picks a project interactively otherwise, and your agent cannot answer a picker.
+
+```text title="Prompt" wrap
+Migrate my Railway service mysite and its Postgres data to InstaCloud. The repo is railwayapp-templates/django, and my Railway project token is in RAILWAY_TOKEN. Follow the insta skill's migration runbook, and stop before moving DNS.
+```
+
+It will ask you to approve anything that touches production, and it will hand two jobs back to you, because Railway has no command for either. **Order matters.** If you have a volume, download it *first*, while its service is still running, because Railway refuses to read a volume whose service is stopped. Only then scale every service to zero, workers and cron services included, so nothing is still writing when the database is copied.
+
+{/* screenshot: console, project with a compute service and a postgres service deployed */}
+
+### 4. Move the domain
+
+```text title="Prompt" wrap
+Attach <your-domain> to the compute service and give me the DNS records to publish.
+```
+
+Publish the records at your DNS provider, then ask your agent to check the domain. Keep the Railway project frozen, and do not delete it, until the old records have aged out of resolver caches.
+
+## Workers and cron services
+
+A Railway worker becomes a second compute service. Give it a port to listen on and leave always-on enabled, because a suspended worker has no traffic to wake it.
+
+Railway cron services have no direct equivalent. Use `pg_cron`, which InstaCloud's Postgres ships, or run a scheduler inside an always-on service.
+
+And that is it. Every InstaCloud action your agent took is a command you can run yourself, in the [CLI reference](/reference/cli/overview); the inspection on the other side used that provider's own CLI and API.
+
+Once you are settled in, [database branching](/postgres/branching) is the part most people came for: one command clones your database, storage and apps, data included, so work an agent does *on its branch* stays there. The branch boundary is separation, not authorization: any command taking `--branch` still reaches `main`, so set [policy](/governance/overview) for the actions that matter. Stuck anywhere? Come to [Discord](https://discord.com/invite/MPxwj5xVvW).
