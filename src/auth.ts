@@ -114,12 +114,14 @@ function registerAgentSessions(app: FastifyInstance): void {
   app.post('/agent/sessions', async (req, reply) => {
     const b = body(req)
     const projectId = typeof b.projectId === 'string' && b.projectId ? b.projectId : null
-    const client = typeof b.client === 'string' && b.client ? b.client : 'unknown'
-    return reply.code(201).send({
-      agentSessionId: randomUUID(),
+    // Exactly the cloud's four response keys and its `cache-control` (platform govern/agent-routes.ts
+    // `issueAgentSession`, openapi.yaml `/agent/sessions`). Its schema strips anything else, so a
+    // fifth key here would be a shape only this daemon emits; the CLI reads `client` off its own
+    // detection, never off the answer.
+    return reply.header('cache-control', 'no-store').code(201).send({
       token: `agsess_${randomUUID().replace(/-/g, '')}`,
+      agentSessionId: randomUUID(),
       projectId,
-      client,
       expiresAt: new Date(clock.now() + AGENT_SESSION_TTL_SEC * 1000).toISOString(),
     })
   })

@@ -359,8 +359,12 @@ test('an agent enrols itself: POST /agent/sessions needs the bearer and returns 
   expect(out.agentSessionId).toEqual(expect.any(String))
   expect(out.token).toMatch(/^agsess_/)
   expect(out.projectId).toBe('p1')
-  expect(out.client).toBe('claude-code')
   expect(Date.parse(out.expiresAt)).toBeGreaterThan(Date.now())
+  // The cloud's response schema is exactly these four keys and it strips the rest, so a receipt
+  // this daemon shaped differently would be a surface only insta-oss has.
+  expect(Object.keys(out).sort()).toEqual(['agentSessionId', 'expiresAt', 'projectId', 'token'])
+  // A minted bearer is never cached by anything between here and the CLI.
+  expect(res.headers['cache-control']).toBe('no-store')
   // The bootstrap call the CLI makes before it knows a project carries no projectId.
   const boot = await send('POST', '/agent/sessions', { headers: { authorization: `Bearer ${key}` }, payload: { client: 'codex' } })
   expect(boot.statusCode).toBe(201)
