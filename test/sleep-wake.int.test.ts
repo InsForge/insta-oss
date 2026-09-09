@@ -33,10 +33,13 @@ const APP_PORT = 18097
 const compute = new DockerCompute()
 const postgres = new LocalPostgres()
 
-/** The ticker is ON here (that is the point), with eviction disabled by a 0 floor. */
+/** The ticker is ON here (that is the point), with eviction disabled by a 0 floor. `SCHEDULER: '1'`
+ *  is explicit because CI sets `INSTA_OSS_SCHEDULER=0` for the whole `npm test` step (decision 12),
+ *  which is right for every OTHER Docker suite and wrong for this one. */
 const cfg = loadConfig({
   ...process.env,
   INSTA_OSS_MODE: 'local',
+  INSTA_OSS_SCHEDULER: '1',
   INSTA_OSS_RAM_FLOOR_PCT: '0',
   INSTA_OSS_SWEEP_SEC: '2',
   INSTA_OSS_IDLE_COMPUTE_SEC: '3',

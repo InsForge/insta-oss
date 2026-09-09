@@ -79,8 +79,8 @@ async function count(t: Teardown, fn: () => Promise<unknown>): Promise<void> {
 }
 // ---- end region WP5 ----
 
-/** The scheduler surface the engine drives (contract 00 section 1.1). The scaffold ships a no-op
- *  stub (region WP3 below); WP3 replaces it with the real `Scheduler`. */
+/** The registration surface the engine drives on every provision, teardown and rename. WP3 replaced
+ *  the scaffold's no-op stub with the real `Scheduler` (region WP3 below), which satisfies this. */
 export interface SchedulerLike {
   register(keys: ServiceKey[]): void
   forget(keys: ServiceKey[]): void
