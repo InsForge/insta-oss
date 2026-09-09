@@ -8,7 +8,7 @@ import { loadConfig, type Config } from './config'
 import { dataLayout, ensureDirSync, lazyDataDirOps, probedCapabilities } from './datadir'
 import { migrateLegacyData } from './datadir-migrate'
 import { docker } from './docker'
-import { MANAGED_DB, CANONICAL_MANAGED_KEYS, suffixBundle, managedServiceId, managedContainerName, isManagedDbType, pgContainerName, bucketName, appContainerName, dataPaths } from './manageddb'
+import { MANAGED_DB, CANONICAL_MANAGED_KEYS, CANONICAL_KEYS, suffixBundle, envSuffix, laneBundle, managedServiceId, managedContainerName, isManagedDbType, parseServiceId, pgContainerName, pgServiceId, storageServiceId, bucketName, appContainerName, dataPaths } from './manageddb'
 import * as observe from './observe'
 import { loadState, mutate } from './state'
 import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret, DataDirOps, PgTarget, ServiceKey, ServiceLimits } from './types'
@@ -18,6 +18,9 @@ import { checkDns, domainResult, DomainError, normalizeHostname, notAdded, type 
 import { assertHostLabel, bucketsOf, buildTable, databasesOf, hostFor as fqdnFor, hostOnly, labelFor, RESERVED_LABELS, type HostKind } from './router/table'
 import type { State } from './state'
 // ---- end region WP2 ----
+// ---- region WP5 (templates/parity) ----
+import { ENV_NAME_RE } from './templates/manifest'
+// ---- end region WP5 ----
 
 const DEFAULT_BRANCH = 'main'
 const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
@@ -30,6 +33,43 @@ const VOLUME_CAP_GIB = 100
 const DB_VOLUME_DEFAULT_GIB = 10
 const DB_CAP = { cpuMilli: 8000, memoryMib: 8192, volumeGib: VOLUME_CAP_GIB }
 const VOLUME_MOUNT_PATH = '/data'
+
+// ---- region WP5 (templates/parity) ----
+/** The major version of the postgres image the adapter runs (adapters/postgres.ts IMAGE), served
+ *  as the `pg_version` column of a postgres services row. */
+const PG_VERSION = 16
+
+/** One row of `GET /projects/:id/services`, and what every add/rename returns. */
+export interface ServiceRow {
+  id: string
+  type: string
+  name: string
+  status: string
+  machine_count?: number
+  domain?: string
+  endpoint?: string
+  runtime?: string
+  updated_at?: string
+  public?: boolean
+  desired_state?: string
+  volume_gib?: number | null
+  port?: number
+  always_on?: boolean
+  image?: string
+  pg_version?: number
+  template_deployment_id?: string
+  template_code?: string
+}
+
+/** What every DELETE route answers with (decision 50): how many provider objects went, and how
+ *  many refused to. `failed` is not an error — a bucket already gone is still gone. */
+export interface Teardown { destroyed: number; failed: number }
+const newTeardown = (): Teardown => ({ destroyed: 0, failed: 0 })
+/** Run one teardown step and count it. */
+async function count(t: Teardown, fn: () => Promise<unknown>): Promise<void> {
+  try { await fn(); t.destroyed++ } catch { t.failed++ }
+}
+// ---- end region WP5 ----
 
 /** The scheduler surface the engine drives (contract 00 section 1.1). The scaffold ships a no-op
  *  stub (region WP3 below); WP3 replaces it with the real `Scheduler`. */
@@ -1952,13 +1992,481 @@ export class Engine {
   // ---- end region WP4 ----
 
   // ---- region WP5 (templates/parity) ----
-  /** filled by WP5: minted (suffixed + canonical) + user secrets + bindings, before containerize.
-   *  Scaffold: today's deploy env, minted credentials (db + storage + managed databases) plus the
-   *  user secrets scoped to THIS group (project-wide + branch-unbound + bound to compute/<group>). */
+
+  /** The project's postgres registrations, in creation order (the OLDEST holds the canonical
+   *  unsuffixed `DATABASE_URL` alias, computed at read time so a removal shifts it). */
+  private dbList(projectId: string): NonNullable<Project['dbServices']> {
+    return this.getProject(projectId)?.dbServices ?? []
+  }
+  /** The project's storage registrations, in creation order (the oldest holds the S3 aliases). */
+  private stList(projectId: string): NonNullable<Project['storageServices']> {
+    return this.getProject(projectId)?.storageServices ?? []
+  }
+
+  /** One postgres service's handle on one branch. READ from the row; derived only for a row a
+   *  migration has not reached yet (decision 17). */
+  private dbHandle(project: Project, branch: Branch, serviceId: string): { url: string; container: string; dataId: string } | undefined {
+    const row = branch.databases?.[serviceId]
+    if (row) return row
+    const reg = this.dbList(project.id).find((d) => d.id === serviceId)
+    if (!reg || branch.dbUrl === undefined) return undefined
+    return { url: branch.dbUrl, container: `io-${this.ref(project, branch)}-pg`, dataId: reg.dataId }
+  }
+
+  /** One storage service's handle on one branch (bucket + its minted credential env). */
+  private bucketHandle(project: Project, branch: Branch, serviceId: string): { bucket: string; env: Record<string, string>; public?: boolean } | undefined {
+    const row = branch.buckets?.[serviceId]
+    if (row) return row
+    if (!this.stList(project.id).some((s) => s.id === serviceId) || branch.bucket === undefined) return undefined
+    return { bucket: branch.bucket, env: branch.s3 ?? {}, public: branch.storagePublic ?? false }
+  }
+
+  /** Every service id a branch materialises, in the order provisionBranch creates them. */
+  private branchServiceIds(project: Project): string[] {
+    return [...this.dbList(project.id).map((d) => d.id), ...this.managedList(project.id).map((m) => m.id)]
+  }
+
+  // ---- env assembly (contract 00 section 10, plan 05 section 5) ----------------------------------
+
+  /** Minted postgres credentials: every service SUFFIXED (`DATABASE_URL_<NAME>`), the oldest also
+   *  unsuffixed. The stored container-host DSN is what a container dials (docker DNS on the branch
+   *  network resolves it in both run modes); the host-facing lane form is what `credentials()`
+   *  returns. */
+  private dbSecretsFor(project: Project, branch: Branch): Record<string, string> {
+    const out: Record<string, string> = {}
+    let aliased = false
+    for (const d of this.dbList(project.id)) {
+      const row = this.dbHandle(project, branch, d.id)
+      if (!row) continue
+      out[`DATABASE_URL_${envSuffix(d.name)}`] = row.url
+      if (!aliased) { aliased = true; out.DATABASE_URL = row.url }
+    }
+    return out
+  }
+
+  /** Minted storage credentials on the same suffix + alias rule as postgres and managed. */
+  private storageSecretsFor(project: Project, branch: Branch): Record<string, string> {
+    const out: Record<string, string> = {}
+    let aliased = false
+    for (const s of this.stList(project.id)) {
+      const row = this.bucketHandle(project, branch, s.id)
+      if (!row) continue
+      Object.assign(out, suffixBundle(row.env, s.name))
+      if (!aliased) { aliased = true; Object.assign(out, row.env) }
+    }
+    return out
+  }
+
+  /** Env names one service mints on a branch (names only, for the inventory routes). */
+  private mintedNamesOf(project: Project, serviceId: string): string[] {
+    const parsed = parseServiceId(serviceId)
+    if (!parsed) return []
+    if (parsed.type === 'postgres') return ['DATABASE_URL', `DATABASE_URL_${envSuffix(parsed.name)}`]
+    if (parsed.type === 'storage') {
+      const branch = this.listBranches(project.id).find((b) => b.isDefault) ?? this.listBranches(project.id)[0]
+      const env = branch ? this.bucketHandle(project, branch, serviceId)?.env : undefined
+      const keys = env ? Object.keys(env) : [...CANONICAL_KEYS.storage]
+      return [...keys, ...keys.map((k) => `${k}_${envSuffix(parsed.name)}`)]
+    }
+    if (isManagedDbType(parsed.type)) return this.mintedManagedNames({ type: parsed.type, name: parsed.name })
+    return []
+  }
+
+  /** Secrets bound INTO one compute group by `${{services.x.KEY}}` bindings: `envName` takes the
+   *  named credential of the named source service. Bindings bypass `isReservedSecret` by design —
+   *  renaming a platform credential into an app's own env name is exactly what they are for. */
+  private bindingsFor(project: Project, branch: Branch, group: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const b of branch.bindings ?? []) {
+      if (b.target !== `compute/${group}`) continue
+      const [type, name] = [b.source.slice(0, b.source.indexOf('/')), b.source.slice(b.source.indexOf('/') + 1)]
+      const sid = type === 'postgres' ? pgServiceId(name)
+        : type === 'storage' ? storageServiceId(name)
+        : isManagedDbType(type) ? managedServiceId(type, name)
+        : undefined
+      if (!sid) continue
+      const value = this.credentialsOn(project, branch, sid)[b.sourceName]
+      if (value !== undefined) out[b.envName] = value
+    }
+    return out
+  }
+
+  /** The env one compute deploy receives, low precedence to high: minted postgres, minted storage,
+   *  minted managed databases, user secrets scoped to this group, then bindings. */
   envFor(project: Project, branch: Branch, group: string): Record<string, string> {
     return {
-      ...branch.s3, ...(branch.dbUrl !== undefined ? { DATABASE_URL: branch.dbUrl } : {}),
-      ...this.managedSecretsFor(project.id, branch), ...this.deploySecretsFor(project.id, branch.name, group),
+      ...this.dbSecretsFor(project, branch),
+      ...this.storageSecretsFor(project, branch),
+      ...this.managedSecretsFor(project.id, branch),
+      ...this.deploySecretsFor(project.id, branch.name, group),
+      ...this.bindingsFor(project, branch, group),
+    }
+  }
+
+  /** The canonical credential bundle of ONE service on ONE branch, host-facing: the DSN and host
+   *  values point at the lane a client outside the branch network dials (WP2's `laneAddress`),
+   *  which is what `insta db url` prints and what a binding reads. Compute services mint nothing. */
+  private credentialsOn(project: Project, branch: Branch, serviceId: string): Record<string, string> {
+    const parsed = parseServiceId(serviceId)
+    if (!parsed) return {}
+    if (parsed.type === 'postgres') {
+      const row = this.dbHandle(project, branch, serviceId)
+      if (!row) return {}
+      return { DATABASE_URL: this.laneUrl(project, branch, serviceId, row.url) }
+    }
+    if (parsed.type === 'storage') {
+      const row = this.bucketHandle(project, branch, serviceId)
+      return row ? { ...row.env } : {}
+    }
+    if (isManagedDbType(parsed.type)) {
+      const cred = branch.managed?.[serviceId]
+      if (!cred) return {}
+      const lane = this.laneAddress(project, branch, serviceId)
+      return laneBundle(parsed.type, lane.host, lane.port, cred.password, lane.tls)
+    }
+    return {}
+  }
+
+  /** A stored container-host DSN rewritten onto the service's lane, `sslmode=require` when the lane
+   *  terminates TLS (contract 00 section 10). */
+  private laneUrl(project: Project, branch: Branch, serviceId: string, stored: string): string {
+    const lane = this.laneAddress(project, branch, serviceId)
+    let u: URL
+    try { u = new URL(stored) } catch { return stored }
+    u.host = `${lane.host}:${lane.port}`
+    if (lane.tls) u.searchParams.set('sslmode', 'require')
+    return u.toString()
+  }
+
+  /** GET /projects/:id/services/:sid/credentials. */
+  credentials(projectId: string, serviceId: string, branchName?: string): Record<string, string> {
+    const { branch, serviceId: sid } = this.resolveSid(projectId, serviceId, branchName)
+    const project = this.getProject(projectId)!
+    this.serviceOf(projectId, sid) // 404 for an id no registration claims
+    return this.credentialsOn(project, branch, sid)
+  }
+
+  // ---- branch-qualified service ids (decision 49) ------------------------------------------------
+
+  /** The id a `services()` row carries: bare on the default branch, `<branchId>:<serviceId>`
+   *  elsewhere. The CLI takes an id from the branch-scoped list and calls credentials/state/stop
+   *  with NO branch, so a bare id off the default branch would silently act on main. */
+  qualifiedId(branch: Branch, serviceId: string): string {
+    return branch.isDefault ? serviceId : `${branch.id}:${serviceId}`
+  }
+
+  /** Resolve a possibly-qualified sid to its branch and BARE service id: the qualifier wins, then
+   *  `?branch`, then the default branch. A qualifier naming a branch that is gone (or belongs to
+   *  another project) is a 404, never a silent fall-through to main. */
+  resolveSid(projectId: string, sid: string, branchQuery?: string): { branch: Branch; serviceId: string } {
+    const parsed = parseServiceId(sid)
+    const serviceId = parsed?.serviceId ?? sid
+    if (parsed?.branchId !== undefined) {
+      const branch = loadState().branches[parsed.branchId]
+      if (!branch || branch.projectId !== projectId) throw new Error('branch not found')
+      return { branch, serviceId }
+    }
+    const { branch } = this.branchOrThrow(projectId, branchQuery)
+    return { branch, serviceId }
+  }
+
+  // ---- postgres service registrations -----------------------------------------------------------
+
+  private static NAME_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
+
+  private assertServiceName(name: string): void {
+    if (!Engine.NAME_RE.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+  }
+
+  /** The cloud's per-type branch cap, minus its dash and upgrade hint (there is no plan to buy). */
+  private assertTypeCap(count: number, type: string): void {
+    if (count >= this.cfg.services.maxPerType) {
+      throw new Error(`branch has reached this plan's limit of ${this.cfg.services.maxPerType} ${type} services (INSTA_OSS_MAX_SERVICES_PER_TYPE)`)
+    }
+  }
+
+  /** Register a postgres service and materialise one container per branch, like a managed database:
+   *  oss services are project-level registrations, so the service appears on EVERY branch. */
+  async addDbService(projectId: string, name: string, opts: { templateDeploymentId?: string } = {}): Promise<ServiceRow> {
+    return this.serialize('provision', async () => {
+      const project = this.getProject(projectId)
+      if (!project) throw new Error('project not found')
+      this.assertServiceName(name)
+      if (this.dbList(projectId).some((d) => d.name === name)) throw new Error('service already exists on this branch')
+      this.assertTypeCap(this.dbList(projectId).length, 'postgres')
+      const branches = this.listBranches(projectId)
+      const entry = { id: pgServiceId(name), name, dataId: randomUUID().slice(0, 8), createdAt: Date.now(), ...(opts.templateDeploymentId ? { templateDeploymentId: opts.templateDeploymentId } : {}) }
+      // ONE synchronous mutate reserves the name and every hostname it will mint, before any
+      // provisioning await (decision 51).
+      mutate((st) => {
+        for (const b of branches) this.assertHostFree(this.labelFor('postgres', name, this.ref(project, b)))
+        const pr = st.projects[projectId]
+        pr.dbServices = [...(pr.dbServices ?? []), entry]
+      })
+      const done: Array<{ branch: Branch; container: string; dataDir: string }> = []
+      try {
+        for (const b of branches) {
+          const ref = this.ref(project, b)
+          const container = pgContainerName(ref, name)
+          const dataDir = this.layout().pg(ref, entry.dataId)
+          const { url } = await this.db.provision({ container, network: b.network, dataDir }, { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, entry.id) })
+          done.push({ branch: b, container, dataDir })
+          const host = this.hostFor('postgres', name, ref)
+          mutate((st) => { (st.branches[b.id].databases ??= {})[entry.id] = { url, container, dataId: entry.dataId, host } })
+          this.scheduler.register([this.serviceKey(b, entry.id)])                                   // WP3
+        }
+      } catch (e) {
+        for (const d of done) {
+          await this.db.destroy(d.container).catch(() => {})
+          await this.data.remove(d.dataDir).catch(() => {})
+          mutate((st) => { delete st.branches[d.branch.id].databases?.[entry.id] })
+        }
+        mutate((st) => {
+          const pr = st.projects[projectId]
+          pr.dbServices = (pr.dbServices ?? []).filter((d) => d.id !== entry.id)
+        })
+        throw e
+      }
+      // The new lane must be listening before `insta db url` is followed by a psql.
+      this.router.invalidate()
+      this.emit(projectId, null, 'resource', 'service.added', { type: 'postgres', name })
+      return { id: entry.id, type: 'postgres', name, status: 'ready', pg_version: PG_VERSION }
+    })
+  }
+
+  /** Remove a postgres service from every branch (the data goes with it) and unregister it. */
+  async removeDbService(projectId: string, serviceId: string): Promise<Teardown> {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const reg = this.dbList(projectId).find((d) => d.id === serviceId)
+    if (!reg) throw new Error('service not found')
+    const branches = this.listBranches(projectId)
+    return this.withOp(branches.map((b) => this.serviceKey(b, serviceId)), async () => {
+      const t = newTeardown()
+      for (const b of branches) {
+        const row = this.dbHandle(project, b, serviceId)
+        if (row) await count(t, () => this.db.destroy(row.container))
+        await count(t, () => this.data.remove(this.layout().pg(this.ref(project, b), reg.dataId)))
+        mutate((st) => {
+          delete st.branches[b.id].databases?.[serviceId]
+          st.branches[b.id].bindings = (st.branches[b.id].bindings ?? []).filter((x) => x.source !== `postgres/${reg.name}`)
+        })
+      }
+      mutate((st) => {
+        const pr = st.projects[projectId]
+        pr.dbServices = (pr.dbServices ?? []).filter((d) => d.id !== serviceId)
+        st.userSecrets[projectId] = (st.userSecrets[projectId] ?? []).filter((u) => u.service !== `postgres/${reg.name}`)
+      })
+      this.scheduler.forget(branches.map((b) => this.serviceKey(b, serviceId)))                      // WP3
+      this.router.invalidate()
+      this.emit(projectId, null, 'resource', 'service.removed', { type: 'postgres', name: reg.name })
+      return t
+    })
+  }
+
+  /** Rename a postgres service everywhere its name appears: the registration and its id, every
+   *  branch's container and minted hostname, bindings and service-bound user secrets. The data
+   *  directory keeps its immutable `dataId` (decision 16). */
+  async renameDbService(projectId: string, serviceId: string, newName: string): Promise<ServiceRow> {
+    return this.serialize('provision', async () => {
+      const project = this.getProject(projectId)
+      if (!project) throw new Error('project not found')
+      const reg = this.dbList(projectId).find((d) => d.id === serviceId)
+      if (!reg) throw new Error('service not found')
+      this.assertServiceName(newName)
+      if (newName === reg.name) return { id: reg.id, type: 'postgres', name: reg.name, status: 'ready', pg_version: PG_VERSION }
+      if (this.dbList(projectId).some((d) => d.name === newName)) throw new Error(`postgres service "${newName}" already exists`)
+      const newId = pgServiceId(newName)
+      const branches = this.listBranches(projectId)
+      mutate(() => { for (const b of branches) this.assertHostFree(this.labelFor('postgres', newName, this.ref(project, b))) })
+      for (const b of branches) {
+        const row = this.dbHandle(project, b, serviceId)
+        if (!row) continue
+        const ref = this.ref(project, b)
+        const container = pgContainerName(ref, newName)
+        if (this.db.rename) await this.db.rename(row.container, container)
+        const host = this.hostFor('postgres', newName, ref)
+        mutate((st) => {
+          const rows = st.branches[b.id].databases
+          if (!rows?.[serviceId]) return
+          rows[newId] = { ...rows[serviceId], url: rows[serviceId].url.replace(row.container, container), container, host }
+          delete rows[serviceId]
+          for (const x of st.branches[b.id].bindings ?? []) if (x.source === `postgres/${reg.name}`) x.source = `postgres/${newName}`
+        })
+        this.scheduler.rekey(this.serviceKey(b, serviceId), this.serviceKey(b, newId))                // WP3
+      }
+      mutate((st) => {
+        const pr = st.projects[projectId]
+        pr.dbServices = (pr.dbServices ?? []).map((d) => (d.id === serviceId ? { ...d, id: newId, name: newName } : d))
+        for (const u of st.userSecrets[projectId] ?? []) if (u.service === `postgres/${reg.name}`) u.service = `postgres/${newName}`
+      })
+      this.router.invalidate()
+      this.emit(projectId, null, 'resource', 'service.rename', { type: 'postgres', from: reg.name, to: newName })
+      return { id: newId, type: 'postgres', name: newName, status: 'ready', pg_version: PG_VERSION }
+    })
+  }
+
+  // ---- storage service registrations -------------------------------------------------------------
+
+  /** Register a storage service and provision one bucket per branch. */
+  async addStorageService(projectId: string, name: string, opts: { public?: boolean } = {}): Promise<ServiceRow> {
+    return this.serialize('provision', async () => {
+      const project = this.getProject(projectId)
+      if (!project) throw new Error('project not found')
+      this.assertServiceName(name)
+      if (this.stList(projectId).some((s) => s.name === name)) throw new Error('service already exists on this branch')
+      this.assertTypeCap(this.stList(projectId).length, 'storage')
+      const branches = this.listBranches(projectId)
+      const entry = { id: storageServiceId(name), name, createdAt: Date.now(), ...(opts.public !== undefined ? { public: opts.public } : {}) }
+      mutate((st) => {
+        const pr = st.projects[projectId]
+        pr.storageServices = [...(pr.storageServices ?? []), entry]
+      })
+      const done: Array<{ branch: Branch; bucket: string }> = []
+      try {
+        for (const b of branches) {
+          const st = await this.storage.provision(this.ref(project, b), b.network, name)
+          done.push({ branch: b, bucket: st.bucket })
+          if (opts.public === true && this.storage.setAccess) await this.storage.setAccess(st.bucket, b.network, true)
+          mutate((s) => { (s.branches[b.id].buckets ??= {})[entry.id] = { bucket: st.bucket, env: st.env, ...(opts.public !== undefined ? { public: opts.public } : {}) } })
+        }
+      } catch (e) {
+        for (const d of done) {
+          await this.storage.destroy(d.bucket, d.branch.network).catch(() => {})
+          mutate((s) => { delete s.branches[d.branch.id].buckets?.[entry.id] })
+        }
+        mutate((s) => {
+          const pr = s.projects[projectId]
+          pr.storageServices = (pr.storageServices ?? []).filter((x) => x.id !== entry.id)
+        })
+        throw e
+      }
+      // The bucket vhost is a route in server mode, and the deploy alias list just grew.
+      this.router.invalidate()
+      this.emit(projectId, null, 'resource', 'service.added', { type: 'storage', name })
+      return { id: entry.id, type: 'storage', name, status: 'ready', public: opts.public ?? false }
+    })
+  }
+
+  /** Remove a storage service: purge and delete its bucket on every branch, unregister. */
+  async removeStorageService(projectId: string, serviceId: string): Promise<Teardown> {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const reg = this.stList(projectId).find((s) => s.id === serviceId)
+    if (!reg) throw new Error('service not found')
+    const t = newTeardown()
+    for (const b of this.listBranches(projectId)) {
+      const row = this.bucketHandle(project, b, serviceId)
+      if (row) await count(t, () => this.storage.destroy(row.bucket, b.network))
+      mutate((st) => {
+        delete st.branches[b.id].buckets?.[serviceId]
+        st.branches[b.id].bindings = (st.branches[b.id].bindings ?? []).filter((x) => x.source !== `storage/${reg.name}`)
+      })
+    }
+    mutate((st) => {
+      const pr = st.projects[projectId]
+      pr.storageServices = (pr.storageServices ?? []).filter((s) => s.id !== serviceId)
+      st.userSecrets[projectId] = (st.userSecrets[projectId] ?? []).filter((u) => u.service !== `storage/${reg.name}`)
+    })
+    this.router.invalidate()
+    this.emit(projectId, null, 'resource', 'service.removed', { type: 'storage', name: reg.name })
+    return t
+  }
+
+  /** Rename a storage service: a re-key only. The bucket handle is immutable (its name is baked
+   *  into every object URL and into the access key scoped to it), exactly like the cloud. */
+  async renameStorageService(projectId: string, serviceId: string, newName: string): Promise<ServiceRow> {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const reg = this.stList(projectId).find((s) => s.id === serviceId)
+    if (!reg) throw new Error('service not found')
+    this.assertServiceName(newName)
+    const row = (name: string, id: string): ServiceRow => ({ id, type: 'storage', name, status: 'ready', public: reg.public ?? false })
+    if (newName === reg.name) return row(reg.name, reg.id)
+    if (this.stList(projectId).some((s) => s.name === newName)) throw new Error(`storage service "${newName}" already exists`)
+    const newId = storageServiceId(newName)
+    mutate((st) => {
+      const pr = st.projects[projectId]
+      pr.storageServices = (pr.storageServices ?? []).map((s) => (s.id === serviceId ? { ...s, id: newId, name: newName } : s))
+      for (const b of Object.values(st.branches)) {
+        if (b.projectId !== projectId || !b.buckets?.[serviceId]) continue
+        b.buckets[newId] = b.buckets[serviceId]
+        delete b.buckets[serviceId]
+        for (const x of b.bindings ?? []) if (x.source === `storage/${reg.name}`) x.source = `storage/${newName}`
+      }
+      for (const u of st.userSecrets[projectId] ?? []) if (u.service === `storage/${reg.name}`) u.service = `storage/${newName}`
+    })
+    this.router.invalidate()
+    this.emit(projectId, null, 'resource', 'service.rename', { type: 'storage', from: reg.name, to: newName })
+    return row(newName, newId)
+  }
+
+  // ---- bindings (`${{services.x.KEY}}`) ----------------------------------------------------------
+
+  /** Bind one credential of one service into one compute group's env under a chosen name. */
+  setBinding(projectId: string, branchName: string, b: { envName: string; target: string; source: string; sourceName: string }): void {
+    const { branch } = this.branchOrThrow(projectId, branchName)
+    if (!ENV_NAME_RE.test(b.envName)) throw new Error(`invalid env name: ${b.envName}`)
+    mutate((st) => {
+      const row = st.branches[branch.id]
+      const list = (row.bindings ??= [])
+      const i = list.findIndex((x) => x.envName === b.envName && x.target === b.target)
+      if (i === -1) list.push({ ...b })
+      else list[i] = { ...b }
+    })
+    this.emit(projectId, branch.name, 'govern', 'secrets.write', { name: b.envName, scope: branch.name, service: b.target, binding: b.source })
+  }
+
+  unsetBinding(projectId: string, branchName: string, envName: string, target: string): void {
+    const { branch } = this.branchOrThrow(projectId, branchName)
+    mutate((st) => {
+      const row = st.branches[branch.id]
+      row.bindings = (row.bindings ?? []).filter((x) => !(x.envName === envName && x.target === target))
+    })
+  }
+
+  listBindings(projectId: string, branchName: string, target?: string): NonNullable<Branch['bindings']> {
+    const { branch } = this.branchOrThrow(projectId, branchName)
+    return (branch.bindings ?? []).filter((x) => (target ? x.target === target : true))
+  }
+
+  // ---- database routes over several postgres services (plan 05 section 6) -----------------------
+
+  /** Which postgres service a `/database/*` request means: `?group=`, or the project's sole one. */
+  dbTarget(projectId: string, branchName?: string, group?: string): { project: Project; branch: Branch; serviceId: string; container: string; url: string } {
+    const { project, branch } = this.branchOrThrow(projectId, branchName)
+    const list = this.dbList(projectId)
+    const reg = group !== undefined
+      ? list.find((d) => d.name === group) ?? (() => { throw new Error(`postgres service not found: ${group}`) })()
+      : list.length === 1 ? list[0]
+        : list.length === 0 ? (() => { throw new Error('no postgres service in this project (add one with `insta services add postgres <name>`)') })()
+          : (() => { throw new Error(`multiple postgres services - specify one: ${list.map((d) => d.name).sort().join(', ')}`) })()
+    const row = this.dbHandle(project, branch, reg.id)
+    if (!row) throw new Error(`postgres service not found: ${reg.name}`)
+    return { project, branch, serviceId: reg.id, container: row.container, url: row.url }
+  }
+
+  // ---- boot-time repair --------------------------------------------------------------------------
+
+  /** Best-effort rename of a legacy `io-<ref>-pg` container onto the `io-<ref>-pg-db` handle
+   *  (decision 17). A no-op after WP4's data migration, which renames while moving the bytes; kept
+   *  for an install that ran with `INSTA_OSS_DATA_MIGRATE=0`. */
+  async migrateLegacyContainers(): Promise<void> {
+    for (const b of Object.values(loadState().branches)) {
+      const project = this.getProject(b.projectId)
+      if (!project) continue
+      const row = b.databases?.['pg-db']
+      const legacy = `io-${this.ref(project, b)}-pg`
+      if (!row || row.container !== legacy) continue
+      const container = pgContainerName(this.ref(project, b), 'db')
+      try { await this.db.rename?.(legacy, container) } catch { continue }
+      mutate((st) => {
+        const target = st.branches[b.id].databases?.['pg-db']
+        if (!target) return
+        target.url = target.url.replace(legacy, container)
+        target.container = container
+      })
+      this.router.invalidate()
     }
   }
   // ---- end region WP5 ----
