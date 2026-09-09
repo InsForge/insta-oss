@@ -851,18 +851,19 @@ export class Engine {
     service: ServiceRow | undefined; state: string
   }> {
     const t = this.computeTarget(projectId, serviceId, branchName)
-    return this.withOp([this.serviceKey(t.branch, `cp-${t.group}`)], () => this.lifecycleLocked(projectId, serviceId, verb, t.branch.id, t.group))
+    return this.withOp([this.serviceKey(t.branch, `cp-${t.group}`)], () => this.lifecycleLocked(projectId, verb, t.branch.id, t.group))
   }
 
   // Branch ID, not a Branch — same reason as deployLocked: a snapshot taken before the chain is one
   // an op ahead has already moved. A stop queued behind a service's FIRST deploy saw a branch with
   // no app record at all and silently did nothing.
   private async lifecycleLocked(
-    projectId: string, serviceId: string, verb: 'start' | 'stop' | 'suspend', branchId: string, group: string,
+    projectId: string, verb: 'start' | 'stop' | 'suspend', branchId: string, group: string,
   ): Promise<{ service: ServiceRow | undefined; state: string }> {
     const project = this.getProject(projectId)!
     const branch = loadState().branches[branchId]
     if (!branch) throw new Error('branch not found')
+    const serviceId = `cp-${group}`
     const ref = this.ref(project, branch)
     const desired = verb === 'start' ? 'running' : verb === 'stop' ? 'stopped' : 'suspended'
     let state = 'none'
@@ -874,7 +875,7 @@ export class Engine {
       state = await this.liveState(ref, group)
     }
     this.emit(projectId, branch.name, 'resource', `service.${verb}`, { service: serviceId })
-    const service = (await this.services(projectId, branch.name)).find((x) => x.id === serviceId)
+    const service = (await this.services(projectId, branch.name)).find((x) => x.id === this.qualifiedId(branch, serviceId))
     return { service, state }
   }
 
@@ -887,10 +888,10 @@ export class Engine {
     service: ServiceRow | undefined; state: string
   }> {
     const t = this.computeTarget(projectId, serviceId, branchName)
-    return this.withOp([this.serviceKey(t.branch, `cp-${t.group}`)], () => this.restartLocked(projectId, serviceId, t.branch.id, t.group))
+    return this.withOp([this.serviceKey(t.branch, `cp-${t.group}`)], () => this.restartLocked(projectId, t.branch.id, t.group))
   }
 
-  private async restartLocked(projectId: string, serviceId: string, branchId: string, group: string): Promise<{
+  private async restartLocked(projectId: string, branchId: string, group: string): Promise<{
     service: ServiceRow | undefined; state: string
   }> {
     const project = this.getProject(projectId)!
@@ -905,8 +906,8 @@ export class Engine {
     if (desired !== 'running') throw new Error(`this service is ${desired} — start it with \`insta compute start\`, which also re-enables auto-wake`)
     // deployLocked, not deploy: this already holds the chain and it is not re-entrant.
     await this.deployLocked(projectId, branchId, group, { image: app.image, port: app.port, hostPort: app.hostPort })
-    this.emit(projectId, branch.name, 'resource', 'service.restart', { service: serviceId })
-    const service = (await this.services(projectId, branch.name)).find((x) => x.id === serviceId)
+    this.emit(projectId, branch.name, 'resource', 'service.restart', { service: `cp-${group}` })
+    const service = (await this.services(projectId, branch.name)).find((x) => x.id === this.qualifiedId(branch, `cp-${group}`))
     return { service, state: await this.liveState(this.ref(project, branch), group) }
   }
 
@@ -1001,10 +1002,11 @@ export class Engine {
 
   /** Resolve a lifecycle target: a compute service id + branch (default branch unless given). */
   private computeTarget(projectId: string, serviceId: string, branchName?: string): { branch: Branch; group: string } {
-    const svc = this.serviceOf(projectId, serviceId)
+    // The branch comes from a qualified sid FIRST, then ?branch, then the default (decision 49):
+    // the CLI reads an id off the branch-scoped list and calls this route with no branch at all.
+    const { branch, serviceId: sid } = this.resolveSid(projectId, serviceId, branchName)
+    const svc = this.serviceOf(projectId, sid)
     if (svc.type !== 'compute') throw new Error('lifecycle control is only supported for compute services')
-    const branch = branchName ? this.getBranchByName(projectId, branchName) : this.listBranches(projectId).find((b) => b.isDefault)
-    if (!branch) throw new Error(`branch "${branchName}" not found`)
     return { branch, group: svc.name }
   }
 
@@ -1049,38 +1051,48 @@ export class Engine {
     }
   }
 
-  /** Contract parity with the cloud: `services add postgres|storage` must succeed so one
-   *  onboarding script runs on both. insta-oss has exactly one of each per project (auto-
-   *  provisioned on create), so this is idempotent — returns the existing fixed service. */
-  fixedService(projectId: string, type: 'postgres' | 'storage'): { id: string; type: string; name: string; public?: boolean } {
-    if (!this.getProject(projectId)) throw new Error('project not found')
-    if (type === 'postgres') return { id: 'pg-db', type: 'postgres', name: 'db' }
-    const def = this.listBranches(projectId).find((b) => b.isDefault)
-    return { id: 'st-store', type: 'storage', name: 'store', public: def?.storagePublic ?? false }
-  }
-
   /** Register a compute group as a service (materializes on first deploy --group <name>).
    *  volumeGib optionally attaches a persistent /data volume; it can also attach any time later
    *  via setServiceVolume (platform #185 parity) and be deleted via removeServiceVolume (data
    *  destroyed) — but never detached. */
-  addComputeService(projectId: string, name: string, volumeGib?: number): { id: string; type: string; name: string; volume_gib: number | null } {
+  addComputeService(
+    projectId: string, name: string, volumeGib?: number,
+    opts: { alwaysOn?: boolean; port?: number; templateDeploymentId?: string; templateCode?: string } = {},
+  ): ServiceRow {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
+    this.assertServiceName(name)
     const groups = new Set(project.computeGroups ?? [])
     for (const b of this.listBranches(projectId)) for (const g of Object.keys(b.apps)) groups.add(g)
     if (groups.has(name)) throw new Error(`compute service "${name}" already exists`)
+    this.assertTypeCap(groups.size, 'compute')
     if (volumeGib !== undefined) {
       if (!Number.isInteger(volumeGib) || volumeGib < 1) throw new Error('volumeGib must be a positive integer (whole Gi)')
       if (volumeGib > VOLUME_CAP_GIB) throw new Error(`volume exceeds the cap (${VOLUME_CAP_GIB}Gi)`)
       if (!this.compute.supportsVolumes) throw new Error('/data volumes are not supported by this compute adapter — use the docker adapter')
     }
+    // The registration and every hostname it will mint are reserved in ONE synchronous mutate
+    // (decision 51); the container itself arrives on the first deploy --group <name>.
     mutate((st) => {
+      for (const b of this.listBranches(projectId)) this.assertHostFree(this.labelFor('compute', name, this.ref(project, b)))
       const pr = st.projects[projectId]
       pr.computeGroups = [...(pr.computeGroups ?? []), name]
       if (volumeGib !== undefined) (pr.computeVolumes ??= {})[name] = { id: randomUUID().slice(0, 8), sizeGib: volumeGib }
+      const settings: ServiceSettings = { createdAt: Date.now() }
+      if (opts.alwaysOn !== undefined) settings.alwaysOn = opts.alwaysOn
+      if (opts.port !== undefined) settings.port = opts.port
+      if (opts.templateDeploymentId !== undefined) settings.templateDeploymentId = opts.templateDeploymentId
+      if (opts.templateCode !== undefined) settings.templateCode = opts.templateCode
+      ;(pr.serviceSettings ??= {})[`cp-${name}`] = settings
     })
     this.emit(projectId, null, 'resource', 'service.added', { type: 'compute', name, ...(volumeGib !== undefined ? { volumeGib } : {}) })
-    return { id: `cp-${name}`, type: 'compute', name, volume_gib: volumeGib ?? null }
+    return {
+      id: `cp-${name}`, type: 'compute', name, status: 'ready', volume_gib: volumeGib ?? null,
+      always_on: opts.alwaysOn ?? this.cfg.sleep.alwaysOnDefault,
+      ...(opts.port !== undefined ? { port: opts.port } : {}),
+      ...(opts.templateDeploymentId !== undefined ? { template_deployment_id: opts.templateDeploymentId } : {}),
+      ...(opts.templateCode !== undefined ? { template_code: opts.templateCode } : {}),
+    }
   }
 
   /** Rename a compute group everywhere it appears: registration, every branch's deployment
@@ -1123,23 +1135,30 @@ export class Engine {
   }
 
   /** Remove a compute group: destroy its containers (and /data volumes) on every branch, unregister. */
-  async removeComputeService(projectId: string, name: string): Promise<void> {
+  async removeComputeService(projectId: string, name: string): Promise<Teardown> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     const vol = project.computeVolumes?.[name]
+    const t = newTeardown()
     for (const b of this.listBranches(projectId)) {
       if (!b.apps[name]) continue
-      await docker(['rm', '-f', '-v', `io-${this.ref(project, b)}-app-${name}`]).catch(() => {})
+      await count(t, () => docker(['rm', '-f', '-v', `io-${this.ref(project, b)}-app-${name}`]))
       // WP4: the /data bytes are a directory under the data dir; remove it AFTER the container.
-      if (vol) await this.data.remove(this.layout().vol(this.ref(project, b), vol.id)).catch(() => {})
-      mutate((st) => { delete st.branches[b.id].apps[name] })
+      if (vol) await count(t, () => this.data.remove(this.layout().vol(this.ref(project, b), vol.id)))
+      mutate((st) => {
+        delete st.branches[b.id].apps[name]
+        st.branches[b.id].bindings = (st.branches[b.id].bindings ?? []).filter((x) => x.target !== `compute/${name}`)
+      })
     }
     mutate((st) => {
       const pr = st.projects[projectId]
       pr.computeGroups = (pr.computeGroups ?? []).filter((g) => g !== name)
       if (pr.computeVolumes) delete pr.computeVolumes[name]
+      if (pr.serviceSettings) delete pr.serviceSettings[`cp-${name}`]
     })
+    this.router.invalidate()
     this.emit(projectId, null, 'resource', 'service.removed', { type: 'compute', name })
+    return t
   }
 
   // ---- managed databases (redis | mysql | mongodb — cloud parity, platform #235/#236) ----
@@ -1194,25 +1213,31 @@ export class Engine {
 
   /** Remove a managed database: destroy its container on every branch, unregister. The data goes
    *  with it — same irreversibility class as removing a compute service. */
-  async removeManagedService(projectId: string, serviceId: string): Promise<void> {
+  async removeManagedService(projectId: string, serviceId: string): Promise<Teardown> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     const m = this.managedList(projectId).find((x) => x.id === serviceId)
     if (!m) throw new Error('service not found')
     const branches = this.listBranches(projectId)
+    const t = newTeardown()
     for (const b of branches) {
       const ref = this.ref(project, b)
-      await this.managedDb.destroy(managedContainerName(ref, m.type, m.name)).catch(() => {})
+      await count(t, () => this.managedDb.destroy(managedContainerName(ref, m.type, m.name)))
       // WP4: the data goes with the container (same irreversibility class as the compute service).
-      await this.data.remove(this.layout().md(ref, m.type, m.dataId ?? m.name)).catch(() => {})
-      mutate((st) => { delete st.branches[b.id].managed?.[serviceId] })
+      await count(t, () => this.data.remove(this.layout().md(ref, m.type, m.dataId ?? m.name)))
+      mutate((st) => {
+        delete st.branches[b.id].managed?.[serviceId]
+        st.branches[b.id].bindings = (st.branches[b.id].bindings ?? []).filter((x) => x.source !== `${m.type}/${m.name}`)
+      })
     }
     mutate((st) => {
       const pr = st.projects[projectId]
       pr.managedServices = (pr.managedServices ?? []).filter((x) => x.id !== serviceId)
     })
     this.scheduler.forget(branches.map((b) => this.serviceKey(b, serviceId))) // WP3
+    this.router.invalidate()
     this.emit(projectId, null, 'resource', 'service.removed', { type: m.type, name: m.name })
+    return t
   }
 
   /** Rename a managed database everywhere it appears: registration (the id embeds the name),
@@ -1459,43 +1484,53 @@ export class Engine {
 
   /** Tear down one branch's containers, bucket and network (shared by branch and project delete).
    *  After the containers: data directories (WP4), scheduler keys (WP3), custom domains (WP2). */
-  private async teardownBranch(project: Project, b: Branch): Promise<void> {
+  private async teardownBranch(project: Project, b: Branch, t: Teardown): Promise<void> {
     const ref = this.ref(project, b)
-    await this.compute.destroy(ref)
-    await this.db.destroy(this.pgContainer(project, b))
-    await this.storage.destroy(this.bucketOf(project, b), b.network)
+    await count(t, () => this.compute.destroy(ref))
+    for (const d of this.dbList(project.id)) await count(t, () => this.db.destroy(this.pgContainer(project, b, d.id)))
+    for (const x of this.stList(project.id)) await count(t, () => this.storage.destroy(this.bucketOf(project, b, x.id), b.network))
     const managed = this.managedList(project.id)
-    for (const m of managed) await this.managedDb.destroy(managedContainerName(ref, m.type, m.name)).catch(() => {})
+    for (const m of managed) await count(t, () => this.managedDb.destroy(managedContainerName(ref, m.type, m.name)))
     try { await docker(['network', 'rm', b.network]) } catch { /* gone */ }
-    // WP4: the branch's bytes, after every container that held them. A remove failure is logged and
+    // WP4: the branch's bytes, after every container that held them. A remove failure is counted and
     // never fails the delete (an unreadable directory must not wedge `insta branch delete`).
     for (const root of this.layout().branchRoots(ref)) {
-      await this.data.remove(root).catch((e) => console.warn(`could not remove ${root}: ${e instanceof Error ? e.message : String(e)}`))
+      await count(t, () => this.data.remove(root).catch((e) => {
+        console.warn(`could not remove ${root}: ${e instanceof Error ? e.message : String(e)}`)
+        throw e
+      }))
     }
-    this.scheduler.forget(['pg-db', ...managed.map((m) => m.id), ...Object.keys(b.apps).map((g) => `cp-${g}`)].map((sid) => this.serviceKey(b, sid))) // WP3
+    const ids = [...this.dbList(project.id).map((d) => d.id), ...managed.map((m) => m.id), ...Object.keys(b.apps).map((g) => `cp-${g}`)]
+    this.scheduler.forget(ids.map((sid) => this.serviceKey(b, sid)))                                          // WP3
     this.releaseDomainsFor(project.id, b.id)                                                                  // WP2
   }
 
-  async destroyBranch(projectId: string, branchId: string): Promise<void> {
+  /** Delete one branch. Answers the cloud's teardown summary (decision 50): how many provider
+   *  objects went and how many refused to, counted across containers, buckets and directories. */
+  async destroyBranch(projectId: string, branchId: string): Promise<Teardown> {
     const project = this.getProject(projectId)
     const b = loadState().branches[branchId]
     if (!project || !b || b.projectId !== projectId) throw new Error('branch not found')
     if (b.isDefault) throw new Error('cannot delete the default branch')
-    await this.teardownBranch(project, b)
+    const t = newTeardown()
+    await this.teardownBranch(project, b, t)
     mutate((s) => { delete s.branches[branchId] })
     this.router.invalidate()
-    this.emit(projectId, b.name, 'resource', 'branch.deleted', {})
+    this.emit(projectId, b.name, 'resource', 'branch.deleted', { teardown: t })
+    return t
   }
 
-  async destroyProject(projectId: string): Promise<void> {
+  async destroyProject(projectId: string): Promise<Teardown> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
+    const t = newTeardown()
     for (const b of this.listBranches(projectId)) {
-      await this.teardownBranch(project, b)
+      await this.teardownBranch(project, b, t)
       mutate((s) => { delete s.branches[b.id] })
     }
     mutate((s) => { delete s.projects[projectId] })
     this.router.invalidate()
+    return t
   }
 
   // ---- observability (docker + SQL backed; cloud response shapes) ----

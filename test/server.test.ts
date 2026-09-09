@@ -27,9 +27,15 @@ const put = (url: string, payload?: unknown) => app.inject({ method: 'PUT', url,
 const patch = (url: string, payload?: unknown) => app.inject({ method: 'PATCH', url, payload })
 const del_ = (url: string) => app.inject({ method: 'DELETE', url })
 
+// Project create is EMPTY on both targets (contract 00 section 9: `resources: []`), so the fixture
+// adds the postgres + storage pair every downstream test assumes — the same two calls the CLI's
+// own onboarding makes. Tests that pin CREATE itself post to /orgs/local/projects directly.
 async function createProject(name = 'demo'): Promise<string> {
   const r = await post('/orgs/local/projects', { name })
-  return r.json().project.id
+  const id = r.json().project.id
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'db' })
+  await post(`/projects/${id}/services`, { type: 'storage', name: 'store' })
+  return id
 }
 
 test('me/orgs stubs satisfy the CLI (orgs[0].id drives project create)', async () => {

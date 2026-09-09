@@ -37,6 +37,10 @@ const ask = async (domain: string): Promise<{ status: number; body: string }> =>
 
 test('the ask endpoint answers 200 for every hostname this daemon serves and 404 for the rest', async () => {
   const { project } = await engine.createProject('demo')
+  // Project create provisions nothing (WP5): the pair whose hostnames this test asks about is
+  // added the way the CLI adds it.
+  await engine.addDbService(project.id, 'db')
+  await engine.addStorageService(project.id, 'store')
   await engine.deploy(project.id, 'main', { image: 'nginx', port: 80 })
   await engine.addManagedService(project.id, 'redis', 'cache')
 
