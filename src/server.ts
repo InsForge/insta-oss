@@ -43,7 +43,13 @@ export function isApiPath(url: string): boolean {
 /** `serverFactory` is forwarded straight into Fastify() so the router (WP2) can hand it the shared
  *  listener; undefined until then. `cfg` is the boot config (tests pass their own). */
 export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { serverFactory?: FastifyServerFactory } = {}): FastifyInstance {
-  const app = Fastify({ logger: false, trustProxy: cfg.trustProxy, forceCloseConnections: 'idle', ...(opts.serverFactory ? { serverFactory: opts.serverFactory } : {}) })
+  // 'loopback', not `true`. The only proxy in front of the daemon is the edge, on 127.0.0.1, and it
+  // APPENDS the peer to X-Forwarded-For. `trustProxy: true` trusts the whole chain and takes its
+  // LEFTMOST entry, which is whatever the remote client wrote, so `req.ip` was forgeable from
+  // outside and the sign-in limiter, which buckets by it, could be walked past with a fresh header
+  // per attempt. Trusting only the loopback hop takes the rightmost untrusted entry, which is the
+  // address the edge itself observed. Same reasoning as the router's `proto()`.
+  const app = Fastify({ logger: false, trustProxy: cfg.trustProxy ? 'loopback' : false, forceCloseConnections: 'idle', ...(opts.serverFactory ? { serverFactory: opts.serverFactory } : {}) })
 
   // Tolerate bodyless POSTs sent as application/json (the CLI does this on approve/deny).
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {

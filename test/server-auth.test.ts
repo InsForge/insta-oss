@@ -149,6 +149,28 @@ test('sign-in rate limit: the eleventh attempt from one ip is 429', async () => 
   expect(blocked.json().code).toBe('TOO_MANY_REQUESTS')
 })
 
+test('a forged X-Forwarded-For cannot buy a fresh rate-limit bucket', async () => {
+  await signUp()
+  // The edge appends the peer it saw, so the chain the daemon reads is `<whatever the client
+  // wrote>, <the real client>`. Trusting the whole chain would read the leftmost entry, and the
+  // attacker below would get one bucket per attempt and never be limited at all.
+  const attempt = (i: number): Promise<Res> => send('POST', '/api/auth/sign-in/email', {
+    payload: { email: EMAIL, password: 'wrong' },
+    headers: { 'x-forwarded-for': `10.0.0.${i}, 203.0.113.9` },
+  })
+  for (let i = 0; i < 10; i++) expect((await attempt(i)).statusCode).toBe(401)
+  const blocked = await attempt(99)
+  expect(blocked.statusCode).toBe(429)
+  expect(blocked.json().code).toBe('TOO_MANY_REQUESTS')
+  // And the address the session records is the one the edge observed, not the one it was handed.
+  const other = await send('POST', '/api/auth/sign-in/email', {
+    payload: { email: EMAIL, password: PASSWORD },
+    headers: { 'x-forwarded-for': '10.0.0.1, 198.51.100.4' },
+  })
+  expect(other.statusCode).toBe(200)
+  expect(loadState().identity?.sessions.at(-1)?.ipAddress).toBe('198.51.100.4')
+})
+
 test('rememberMe false gives a session cookie with no Max-Age', async () => {
   await signUp()
   const res = await signIn(EMAIL, PASSWORD, { rememberMe: false })
