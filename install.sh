@@ -151,13 +151,19 @@ latest_release() {
     | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1
 }
 # version: flag, env, the image tag, the newest GitHub release (upgrade), the existing value, 'latest'
+# The leading v is stripped from a version a human typed and from a release tag, because the
+# published image tags carry no v (release v0.1.0 is image :0.1.0). A tag that came from
+# INSTA_OSS_IMAGE is NOT touched: it already names a tag that exists, in a registry or in this
+# box's own Docker, and rewriting it invents one that does not. Stripping it turned
+# `INSTA_OSS_IMAGE=instacloud:v1` into a pull of `instacloud:1`, which fails the whole install
+# after instad.env has already been rewritten.
 VERSION=$F_VERSION
 [ -n "$VERSION" ] || VERSION=$(envval INSTA_OSS_VERSION)
+VERSION=${VERSION#v}
 [ -n "$VERSION" ] || VERSION=$IMAGE_TAG
-if [ -z "$VERSION" ] && [ -z "$PRINT" ]; then VERSION=$(latest_release || true); fi
+if [ -z "$VERSION" ] && [ -z "$PRINT" ]; then VERSION=$(latest_release || true); VERSION=${VERSION#v}; fi
 [ -n "$VERSION" ] || VERSION=$(existing INSTA_OSS_VERSION)
 [ -n "$VERSION" ] || VERSION=latest
-VERSION=${VERSION#v}
 
 TLS=$(resolve INSTA_OSS_TLS "$F_TLS" acme)
 case $TLS in acme|internal) ;; *) die "--tls must be acme or internal (got '$TLS')" ;; esac

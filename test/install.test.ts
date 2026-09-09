@@ -85,6 +85,12 @@ test('--print-env: precedence flag > environment > default; --version strips the
   expect(flag).toMatchObject({ INSTA_OSS_DOMAIN: 'flag.test', INSTA_OSS_TLS: 'internal', INSTA_OSS_VERSION: '1.2.3', INSTA_OSS_ACME_EMAIL: 'ops@flag.test' })
   const tagged = parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: 'example.test', INSTA_OSS_IMAGE: 'ghcr.io/insforge/instacloud:ci' }))
   expect(tagged).toMatchObject({ INSTA_OSS_IMAGE: 'ghcr.io/insforge/instacloud', INSTA_OSS_VERSION: 'ci' })
+  // A tag from INSTA_OSS_IMAGE keeps its leading v: it names a tag that exists, and stripping it
+  // made the stack pull an image nobody built.
+  const vtag = parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: 'example.test', INSTA_OSS_IMAGE: 'instacloud:v0test' }))
+  expect(vtag).toMatchObject({ INSTA_OSS_IMAGE: 'instacloud', INSTA_OSS_VERSION: 'v0test' })
+  // ...while a v the operator typed is still stripped, from the flag and from the environment
+  expect(parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: 'example.test', INSTA_OSS_VERSION: 'v9.9.9' })).INSTA_OSS_VERSION).toBe('9.9.9')
   expect(parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: 'Example.TEST.' })).INSTA_OSS_DOMAIN).toBe('example.test')
 })
 
