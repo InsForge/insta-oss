@@ -749,7 +749,7 @@ export class Engine {
     if (!branch || !project) return undefined
     const serviceId = key.slice(i + 1)
     const ref = this.ref(project, branch)
-    if (serviceId.startsWith('pg-')) return { project, branch, serviceId, container: branch.databases?.[serviceId]?.container ?? this.pgContainer(project, branch) }
+    if (serviceId.startsWith('pg-')) return { project, branch, serviceId, container: this.pgContainer(project, branch, serviceId) }
     if (serviceId.startsWith('cp-')) return { project, branch, serviceId, container: appContainerName(ref, serviceId.slice(3)), app: branch.apps[serviceId.slice(3)] }
     const m = this.managedList(project.id).find((x) => x.id === serviceId)
     return m ? { project, branch, serviceId, container: managedContainerName(ref, m.type, m.name) } : undefined
@@ -762,24 +762,35 @@ export class Engine {
     projectWide: string[]
     branches: Array<{ name: string; isDefault: boolean; services: Array<{ type: string; name: string; secrets: string[] }>; unbound: string[] }>
   } {
-    if (!this.getProject(projectId)) throw new Error('project not found')
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
     const list = loadState().userSecrets[projectId] ?? []
     const groups = this.computeGroupNames(projectId)
     const bound = (branch: string, service: string): string[] =>
       list.filter((u) => u.branch === branch && u.service === service).map((u) => u.name)
+    // A binding is a name this group's env carries too, so the inventory lists it under the TARGET
+    // group (where it appears) rather than under the service it reads from.
+    const boundIn = (b: Branch, group: string): string[] =>
+      (b.bindings ?? []).filter((x) => x.target === `compute/${group}`).map((x) => x.envName)
     return {
       projectWide: list.filter((u) => u.branch === null).map((u) => u.name).sort(),
       branches: this.listBranches(projectId).map((b) => ({
         name: b.name,
         isDefault: b.isDefault,
         services: [
-          { type: 'postgres', name: 'db', secrets: ['DATABASE_URL', ...bound(b.name, 'postgres/db')].sort() },
-          { type: 'storage', name: 'store', secrets: [...Object.keys(b.s3 ?? {}), ...bound(b.name, 'storage/store')].sort() },
+          ...this.dbList(projectId).map((d) => ({
+            type: 'postgres', name: d.name,
+            secrets: [...this.mintedNamesOf(project, d.id), ...bound(b.name, `postgres/${d.name}`)].sort(),
+          })),
+          ...this.stList(projectId).map((s) => ({
+            type: 'storage', name: s.name,
+            secrets: [...this.mintedNamesOf(project, s.id), ...bound(b.name, `storage/${s.name}`)].sort(),
+          })),
           ...this.managedList(projectId).map((m) => ({
             type: m.type, name: m.name,
             secrets: [...this.mintedManagedNames(m), ...bound(b.name, `${m.type}/${m.name}`)].sort(),
           })),
-          ...groups.map((g) => ({ type: 'compute', name: g, secrets: bound(b.name, `compute/${g}`).sort() })),
+          ...groups.map((g) => ({ type: 'compute', name: g, secrets: [...bound(b.name, `compute/${g}`), ...boundIn(b, g)].sort() })),
         ],
         unbound: list.filter((u) => u.branch === b.name && !u.service).map((u) => u.name).sort(),
       })),
@@ -793,14 +804,13 @@ export class Engine {
 
   /** A service's secret names (names only): minted credentials + user secrets bound to it. */
   serviceSecretNames(projectId: string, serviceId: string): string[] {
-    const svc = this.serviceOf(projectId, serviceId)
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const { serviceId: sid } = this.resolveSid(projectId, serviceId)
+    const svc = this.serviceOf(projectId, sid)
     const list = loadState().userSecrets[projectId] ?? []
     const bound = list.filter((u) => u.service === `${svc.type}/${svc.name}`).map((u) => u.name)
-    const minted = svc.type === 'postgres' ? ['DATABASE_URL']
-      : svc.type === 'storage' ? Object.keys(this.listBranches(projectId)[0]?.s3 ?? {})
-      : isManagedDbType(svc.type) ? this.mintedManagedNames({ type: svc.type, name: svc.name })
-      : []
-    return [...new Set([...minted, ...bound])].sort()
+    return [...new Set([...this.mintedNamesOf(project, sid), ...bound])].sort()
   }
 
   /** Structural merge (additive, no data — platform spec §6): materialize on the target branch
@@ -818,11 +828,11 @@ export class Engine {
     if (source.id === target.id) throw new Error('source and target are the same branch')
 
     const created: Array<{ type: string; name: string }> = []
+    // Every non-compute service is a project-level registration materialized on every branch, so
+    // the target always already has it (fresh + empty for managed databases — data never merges).
     const skipped: Array<{ type: string; name: string; reason: string }> = [
-      { type: 'postgres', name: 'db', reason: 'exists' },
-      { type: 'storage', name: 'store', reason: 'exists' },
-      // managed databases are project-level registrations materialized on every branch, so the
-      // target always already has them (fresh + empty — data never merges anywhere)
+      ...this.dbList(projectId).map((d) => ({ type: 'postgres', name: d.name, reason: 'exists' })),
+      ...this.stList(projectId).map((x) => ({ type: 'storage', name: x.name, reason: 'exists' })),
       ...this.managedList(projectId).map((m) => ({ type: m.type as string, name: m.name, reason: 'exists' })),
     ]
     for (const [group, app] of Object.entries(source.apps).sort(([a], [b]) => a.localeCompare(b))) {
@@ -913,26 +923,33 @@ export class Engine {
 
   /** Set a storage service's bucket access mode (anonymous public-read vs private). */
   async setServiceAccess(projectId: string, serviceId: string, isPublic: boolean, branchName?: string): Promise<ServiceRow | undefined> {
-    const svc = this.serviceOf(projectId, serviceId)
+    const { branch, serviceId: sid } = this.resolveSid(projectId, serviceId, branchName)
+    const svc = this.serviceOf(projectId, sid)
     if (svc.type !== 'storage') throw new Error('access control is only supported for storage services')
     const project = this.getProject(projectId)!
-    const branch = branchName ? this.getBranchByName(projectId, branchName) : this.listBranches(projectId).find((b) => b.isDefault)
-    if (!branch) throw new Error(`branch "${branchName}" not found`)
     if (!this.storage.setAccess) throw new Error('access control is not supported by this storage adapter')
-    await this.storage.setAccess(this.bucketOf(project, branch), branch.network, isPublic)
-    mutate((s) => { s.branches[branch.id].storagePublic = isPublic })
-    this.emit(projectId, branch.name, 'resource', 'service.setAccess', { service: serviceId, public: isPublic })
-    return (await this.services(projectId, branch.name)).find((x) => x.id === serviceId)
+    await this.storage.setAccess(this.bucketOf(project, branch, sid), branch.network, isPublic)
+    mutate((s) => {
+      const row = s.branches[branch.id].buckets?.[sid]
+      if (row) row.public = isPublic
+      // The registration carries the mode a NEW branch provisions with (services add --public).
+      const pr = s.projects[projectId]
+      pr.storageServices = (pr.storageServices ?? []).map((x) => (x.id === sid ? { ...x, public: isPublic } : x))
+      if (sid === 'st-store') s.branches[branch.id].storagePublic = isPublic
+    })
+    this.emit(projectId, branch.name, 'resource', 'service.setAccess', { service: sid, public: isPublic })
+    return (await this.services(projectId, branch.name)).find((x) => x.id === this.qualifiedId(branch, sid))
   }
 
   // ---- storage objects (platform parity: `insta storage list|get|delete`, console browser) ----
 
   /** Resolve an object-operation target: a storage service id + the branch's credential env. */
   private objectTarget(projectId: string, serviceId: string, branchName?: string): Branch & { s3: Record<string, string> } {
-    const svc = this.serviceOf(projectId, serviceId)
+    const { branch, serviceId: sid } = this.resolveSid(projectId, serviceId, branchName)
+    const svc = this.serviceOf(projectId, sid)
     if (svc.type !== 'storage') throw new Error('object operations are only supported for storage services')
-    const { branch } = this.branchOrThrow(projectId, branchName)
-    return { ...branch, s3: branch.s3 ?? {} }
+    const project = this.getProject(projectId)!
+    return { ...branch, s3: this.bucketHandle(project, branch, sid)?.env ?? {} }
   }
 
   private objectOps(): Required<Pick<StorageAdapter, 'listBucketObjects' | 'presignObjectGet' | 'presignObjectPost' | 'removeObject' | 'removeObjects'>> {
@@ -1018,7 +1035,10 @@ export class Engine {
     }
     return {
       services: [
-        { serviceId: 'pg-db', ...health(this.pgContainer(project, branch), 'running', undefined, 'pg-db') },
+        ...this.dbList(projectId).map((d) => ({
+          serviceId: d.id,
+          ...health(this.pgContainer(project, branch, d.id), 'running', branch.databases?.[d.id]?.sleptAt, d.id),
+        })),
         ...this.managedList(projectId).map((m) => ({ serviceId: m.id, ...health(managedContainerName(ref, m.type, m.name), 'running', branch.managed?.[m.id]?.sleptAt, m.id) })),
         ...this.computeGroupNames(projectId).map((g) => {
           const app = branch.apps[g]
@@ -1495,7 +1515,13 @@ export class Engine {
    *  the compute fan-out must not absorb database containers). */
   private observedContainers(project: Project, branch: Branch, component: ObservedComponent, group?: string): string[] {
     const ref = this.ref(project, branch)
-    if (component === 'db') return [this.pgContainer(project, branch)]
+    // 'db' fans out over the project's postgres services; `group` narrows it to one by NAME, the
+    // same `?group=` the database routes take.
+    if (component === 'db') {
+      return this.dbList(project.id)
+        .filter((d) => !group || d.name === group)
+        .map((d) => this.pgContainer(project, branch, d.id))
+    }
     if (component !== 'compute') {
       return this.managedList(project.id)
         .filter((m) => m.type === component && (!group || m.name === group) && branch.managed?.[m.id])
@@ -1582,8 +1608,14 @@ export class Engine {
     if (!project) throw new Error('project not found')
     const branches = this.listBranches(projectId)
     const resources = branches.flatMap((b) => [
-      { kind: 'postgres', name: null, branchId: b.id, ref: { url: b.dbUrl }, status: 'ready' },
-      { kind: 'storage', name: null, branchId: b.id, ref: { bucket: b.bucket }, status: 'ready' },
+      ...this.dbList(projectId).map((d) => ({
+        kind: 'postgres', name: d.name as string | null, branchId: b.id,
+        ref: { url: this.dbHandle(project, b, d.id)?.url }, status: 'ready',
+      })),
+      ...this.stList(projectId).map((x) => ({
+        kind: 'storage', name: x.name as string | null, branchId: b.id,
+        ref: { bucket: this.bucketHandle(project, b, x.id)?.bucket }, status: 'ready',
+      })),
       ...this.managedList(projectId).filter((m) => b.managed?.[m.id]).map((m) => ({
         kind: m.type as string, name: m.name as string | null, branchId: b.id,
         ref: { host: managedContainerName(this.ref(project, b), m.type, m.name), port: MANAGED_DB[m.type].port }, status: 'ready',
@@ -2155,16 +2187,22 @@ export class Engine {
     return out
   }
 
-  /** Env names one service mints on a branch (names only, for the inventory routes). */
+  /** Env names one service mints (names only, for the inventory routes): always its SUFFIXED set,
+   *  plus the canonical unsuffixed keys when it is the oldest of its type and therefore holds the
+   *  aliases. Derived from the same rule the value assembly above applies. */
   private mintedNamesOf(project: Project, serviceId: string): string[] {
     const parsed = parseServiceId(serviceId)
     if (!parsed) return []
-    if (parsed.type === 'postgres') return ['DATABASE_URL', `DATABASE_URL_${envSuffix(parsed.name)}`]
+    if (parsed.type === 'postgres') {
+      const canonical = this.dbList(project.id)[0]?.id === parsed.serviceId
+      return [...(canonical ? ['DATABASE_URL'] : []), `DATABASE_URL_${envSuffix(parsed.name)}`]
+    }
     if (parsed.type === 'storage') {
       const branch = this.listBranches(project.id).find((b) => b.isDefault) ?? this.listBranches(project.id)[0]
-      const env = branch ? this.bucketHandle(project, branch, serviceId)?.env : undefined
+      const env = branch ? this.bucketHandle(project, branch, parsed.serviceId)?.env : undefined
       const keys = env ? Object.keys(env) : [...CANONICAL_KEYS.storage]
-      return [...keys, ...keys.map((k) => `${k}_${envSuffix(parsed.name)}`)]
+      const canonical = this.stList(project.id)[0]?.id === parsed.serviceId
+      return [...(canonical ? keys : []), ...keys.map((k) => `${k}_${envSuffix(parsed.name)}`)]
     }
     if (isManagedDbType(parsed.type)) return this.mintedManagedNames({ type: parsed.type, name: parsed.name })
     return []
