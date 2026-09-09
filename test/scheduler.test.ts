@@ -508,6 +508,28 @@ test('eviction picks the least recently active service and stops once free memor
   expect(h.events.map((e) => e.payload.reason)).toEqual(['memory'])
 })
 
+test('one pass stops ONE service when the runtime cannot see the memory it just freed', async () => {
+  // Budget mode: `memory()` answers `budget - lastRssTotal`, and that total is only re-sampled by
+  // stats(), so nothing improves inside the pass. The pass must still stop the least recently
+  // active service and then stop, not drain the pool.
+  const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '20' })
+  const oldest = h.add(K)
+  const newer = h.add(K2)
+  const third = h.add('11111111-1111-1111-1111-111111111111:cp-third', { container: 'io-x-app-third' })
+  await h.sched.sweep()
+  vi.advanceTimersByTime(20_000)
+  h.sched.touch(K2)
+  h.sched.touch('11111111-1111-1111-1111-111111111111:cp-third')
+  vi.advanceTimersByTime(20_000)
+  calls.length = 0
+  pressure(h, 100)                                     // 100 MiB free against a 200 MiB floor
+  await h.sched.evictForRoom(0, new Set())             // no stop hook: memory never improves
+  // One compute default RSS (256 MiB) covers the 100 MiB gap, so one victim is enough.
+  expect(calls.filter((c) => c.startsWith('runtime.stop:'))).toEqual([`runtime.stop:${oldest.container}:10`])
+  expect(newer.sleptAt).toBeNull()
+  expect(third.sleptAt).toBeNull()
+})
+
 test('a 0 RAM floor disables the pressure pass everywhere: the sweep and a wake both stop nothing', async () => {
   const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '0', INSTA_OSS_IDLE_COMPUTE_SEC: '0', INSTA_OSS_IDLE_DB_SEC: '0' })
   const idle = h.add(K)

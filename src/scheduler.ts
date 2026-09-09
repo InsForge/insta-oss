@@ -459,16 +459,24 @@ export class Scheduler {
     if (!first) return
     const floor = first.totalBytes * (this.cfg.sleep.ramFloorPct / 100)
     const tried = new Set<ServiceKey>()
+    // What this pass has already freed. The runtime does not always see it in time: in budget mode
+    // `memory()` answers `budget - lastRssTotal` and that total is only re-sampled by `stats()`,
+    // which no wake and no later loop turn calls. Without this, one pass would keep finding the same
+    // pressure and sleep EVERY eligible service instead of the least recently active one.
+    let freed = 0
     for (let guard = 0; guard < 32; guard++) {
       const mem = this.runtime.memory()
       if (!mem) return
-      if (mem.availableBytes - needBytes >= floor) return
+      // Whichever is larger: what the runtime reports (authoritative once it notices a stop) or the
+      // pass's own baseline plus what it freed. Never the sum, which would count a stop twice.
+      const available = Math.max(mem.availableBytes, first.availableBytes + freed)
+      if (available - needBytes >= floor) return
       const now = Date.now()
       const pool = this.targets().filter((t) => this.isVictim(t, now, exclude, tried))
       if (!pool.length) {
         if (!this.evictionLogged) {
           this.evictionLogged = true
-          console.warn(`memory pressure: ${Math.round(mem.availableBytes / MiB)} MiB free is under the ${this.cfg.sleep.ramFloorPct}% floor and no service can be evicted`)
+          console.warn(`memory pressure: ${Math.round(available / MiB)} MiB free is under the ${this.cfg.sleep.ramFloorPct}% floor and no service can be evicted`)
         }
         return
       }
@@ -478,7 +486,9 @@ export class Scheduler {
       })
       const victim = pool[0]
       tried.add(victim.key)
-      await this.sleep(victim.key, 'memory')
+      if (await this.sleep(victim.key, 'memory')) {
+        freed += this.rec(victim.key).lastRssBytes ?? DEFAULT_RSS[victim.kind]
+      }
     }
   }
 
@@ -583,6 +593,9 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 export class DockerRuntime implements Runtime {
   private meminfoMissing = false
   private lastRssTotal = 0
+  /** The last per-container sample of `stats()`, so `stop()` can take that container out of the
+   *  running total instead of waiting for the next sweep to re-sample it (budget mode). */
+  private lastRss = new Map<string, number>()
 
   constructor(private cfg: Config, private upstream: UpstreamLike) {}
 
@@ -608,6 +621,7 @@ export class DockerRuntime implements Runtime {
       if (name.startsWith('io-')) total += bytes
     }
     this.lastRssTotal = total
+    this.lastRss = map
     return map
   }
 
@@ -640,6 +654,13 @@ export class DockerRuntime implements Runtime {
    *  the signal reaches an app whose PID 1 is a shell (decision 60). */
   async stop(container: string, graceSec: number): Promise<void> {
     await withTimeout(docker(['stop', '-t', String(graceSec), container]), DOCKER_TIMEOUT_MS + graceSec * 1000, 'stop')
+    // Budget mode has no kernel to ask, so the total it subtracts from the budget is maintained
+    // here: a container that is gone is not holding its last sample any more.
+    const sample = this.lastRss.get(container)
+    if (sample !== undefined) {
+      this.lastRss.delete(container)
+      this.lastRssTotal = Math.max(0, this.lastRssTotal - sample)
+    }
   }
 
   async unpause(container: string): Promise<void> {
