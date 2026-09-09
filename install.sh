@@ -161,12 +161,20 @@ EMAIL=$(resolve INSTA_OSS_ACME_EMAIL "$F_EMAIL" '')
 PORT=$(resolve INSTA_OSS_PORT '' 8080)
 INTERNAL_PORT=$(resolve INSTA_OSS_INTERNAL_PORT '' 8081)
 
+# route_src: the address this box uses to reach the internet (its own, even behind NAT)
+route_src() {
+  have ip || return 0
+  ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'
+}
+# ip_is_local ADDR: true when ADDR is configured on an interface of this box
+ip_is_local() {
+  have ip || return 1
+  ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -Fxq "$1"
+}
 detect_ip() {
   _ip=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null) || _ip=''
   if ! valid_ip "$_ip"; then _ip=$(curl -4 -fsS --max-time 5 https://ifconfig.me/ip 2>/dev/null) || _ip=''; fi
-  if ! valid_ip "$_ip" && have ip; then
-    _ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}') || _ip=''
-  fi
+  if ! valid_ip "$_ip"; then _ip=$(route_src) || _ip=''; fi
   if valid_ip "$_ip"; then printf '%s' "$_ip"; fi
 }
 PUBLIC_IP=$(resolve INSTA_OSS_PUBLIC_IP '' '')
@@ -571,13 +579,28 @@ mkdir -p "$DATA/pg" "$DATA/vol" "$DATA/md" "$DATA/garage/meta" "$DATA/garage/dat
 chmod 700 "$DATA"
 
 # ---- 6. domain ----
+# NAT_NOTE: repeated next to the setup URL at the end, because that URL is the one thing an
+# operator copies out of this script and a name that resolves somewhere else is silent.
+NAT_NOTE=''
 if [ "$DOMAIN_AUTO" = 1 ]; then
   log "domain: $DOMAIN (auto, from the public IP; pass --domain to use your own)"
-  if [ -n "$PUBLIC_IP" ] && private_ip "$PUBLIC_IP"; then
-    warn "$PUBLIC_IP is a private address: certificates fall back to the internal issuer until a public name points here"
-  fi
 else
   log "domain: $DOMAIN"
+fi
+# The checks below are about the sslip.io name derived from the detected address, on a re-run as
+# much as on the first install: an upgrade is often the run an operator actually reads.
+if [ -n "$PUBLIC_IP" ] && [ "$DOMAIN" = "$(printf '%s' "$PUBLIC_IP" | tr . -).sslip.io" ]; then
+  if private_ip "$PUBLIC_IP"; then
+    warn "$PUBLIC_IP is a private address: certificates fall back to the internal issuer until a public name points here"
+  elif ! ip_is_local "$PUBLIC_IP"; then
+    # The address the internet sees is on no interface here: a cloud box with a floating or elastic
+    # IP (fine, DNS points at it) or a laptop VM behind a home router (not fine, nothing forwards).
+    # The script cannot tell those apart, so it says what to check.
+    _lan=$(route_src)
+    NAT_NOTE="$PUBLIC_IP is not an address of this box (NAT), so those URLs answer only if $PUBLIC_IP forwards 80 and 443 here."
+    [ -z "$_lan" ] || NAT_NOTE="$NAT_NOTE On a laptop VM re-run with --domain $(printf '%s' "$_lan" | tr . -).sslip.io, which points at this box."
+    warn "$NAT_NOTE"
+  fi
 fi
 
 # ---- 7. secrets and files ----
@@ -646,6 +669,7 @@ log ''
 log 'InstaCloud is running.'
 log "  Setup:    https://console.$DOMAIN/setup"
 log "  API:      https://api.$DOMAIN"
+[ -z "$NAT_NOTE" ] || log "  Note:     $NAT_NOTE"
 log "  CLI:      insta login --api-key <token from the setup page> --api-url https://api.$DOMAIN"
 [ -z "$CA_FILE" ] || log "  CA:       $CA_FILE (internal issuer: pass it to curl --cacert, PGSSLROOTCERT, NODE_EXTRA_CA_CERTS)"
 log "  Config $CFG   Data $DATA   Reflinks: $REFLINK"
