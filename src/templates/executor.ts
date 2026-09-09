@@ -563,8 +563,11 @@ export class TemplateExecutor {
 
   // ---- health gates -----------------------------------------------------------------------------
 
-  /** A managed postgres is ready once its container is up. `standby` counts: the lane wakes it on
-   *  the first connection. */
+  /** A managed postgres is ready once its container is up. `standby` counts (the lane wakes it on
+   *  the first connection), and so do `none` and `unknown`: the adapter has just returned from
+   *  provisioning it, so a docker read that cannot see it is a reading problem, not a database
+   *  problem, and blocking a deploy on that for the whole health budget helps nobody. Only
+   *  `crashed` is terminal. */
   private async awaitDbReady(projectId: string, branchName: string, entry: Entry): Promise<{ ready: boolean; reason?: string }> {
     const deadline = Date.now() + this.engine.cfg.templates.healthTimeoutMs
     let last = 'unknown'
@@ -573,8 +576,8 @@ export class TemplateExecutor {
         const health = await this.engine.runtimeHealth(projectId, branchName)
         const row = health.services.find((r) => r.serviceId === entry.serviceId)
         last = row?.status ?? 'unknown'
-        if (last === 'healthy' || last === 'standby' || last === 'unknown') return { ready: true }
         if (last === 'crashed') return { ready: false, reason: 'the database container crashed' }
+        if (last !== 'starting') return { ready: true }
       } catch { /* transient docker read: keep polling */ }
       if (Date.now() >= deadline) return { ready: false, reason: `not ready within ${Math.round(this.engine.cfg.templates.healthTimeoutMs / 1000)}s (last status: ${last})` }
       await sleep(this.engine.cfg.templates.healthPollMs)

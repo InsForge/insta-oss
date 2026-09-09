@@ -1,0 +1,447 @@
+// The bundled catalog, the manifest module and the deployment executor, over the fake adapters and
+// the REAL `templates/` directory (contract 00 section 9 rows for GET /templates,
+// GET /templates/:code, POST /projects/:id/template-deployments, GET /template-deployments/:id).
+// Docker is mocked; the health probe is injected, and one case pins what the DEFAULT probe dials.
+import { test, expect, beforeEach, vi } from 'vitest'
+
+vi.mock('../src/docker', () => ({ docker: vi.fn(async () => Buffer.from('')) }))
+
+import { buildServer } from '../src/server'
+import { Engine } from '../src/engine'
+import { TemplateExecutor } from '../src/templates/executor'
+import {
+  collectVariables, generateValue, manifestDigest, parseTemplateManifest, resolveTemplateString,
+} from '../src/templates/manifest'
+import { loadState } from '../src/state'
+import { calls, makeEngine, resetFakes, testConfig } from './fakes'
+
+// Every declared healthcheck answers 200 unless a case changes this.
+let probeStatus: (path: string) => number
+let probed: Array<{ url: string; headers: Record<string, string> }>
+let engine: Engine
+let app: ReturnType<typeof buildServer>
+let executor: TemplateExecutor
+
+const fastConfig = (over: Record<string, string> = {}) => testConfig({
+  INSTA_OSS_TEMPLATE_HEALTH_TIMEOUT_MS: '60',
+  INSTA_OSS_TEMPLATE_HEALTH_POLL_MS: '5',
+  ...over,
+})
+
+function build(over: Record<string, string> = {}): void {
+  const cfg = fastConfig(over)
+  engine = makeEngine(cfg)
+  executor = new TemplateExecutor(engine, {
+    httpProbe: async (url, headers) => { probed.push({ url, headers }); return probeStatus(new URL(url).pathname) },
+  })
+  engine.executor = executor
+  app = buildServer(engine, cfg)
+}
+
+beforeEach(() => {
+  resetFakes()
+  probeStatus = () => 200
+  probed = []
+  build()
+})
+
+const post = (url: string, payload?: unknown) => app.inject({ method: 'POST', url, payload })
+const get = (url: string) => app.inject({ method: 'GET', url })
+const put = (url: string, payload?: unknown) => app.inject({ method: 'PUT', url, payload })
+
+async function project(name = 'demo'): Promise<string> {
+  return (await post('/orgs/local/projects', { name })).json().project.id
+}
+
+/** Deploy and wait for the background run to settle. */
+async function deploy(id: string, body: Record<string, unknown>): Promise<ReturnType<typeof post> extends Promise<infer R> ? R : never> {
+  const r = await post(`/projects/${id}/template-deployments`, body)
+  await executor.idle()
+  return r
+}
+
+// ---- catalog -----------------------------------------------------------------------------------
+
+test('GET /templates lists the bundled non-draft codes with every list field typed', async () => {
+  const r = await get('/templates')
+  expect(r.statusCode).toBe(200)
+  expect(r.headers['cache-control']).toBe('public, max-age=300')
+  const { templates } = r.json()
+  // openclaw declares meta.draft, so it is not in the listing.
+  expect(templates.map((t: { code: string }) => t.code)).toEqual(['9router', 'claude-code', 'codex', 'dsh', 'hermes', 'n8n', 'pi'])
+  const n8n = templates.find((t: { code: string }) => t.code === 'n8n')
+  expect(n8n).toMatchObject({
+    version: '1.3.1', name: 'n8n', category: 'automation', tags: ['automation', 'ai'],
+    requiredVarCount: 0, totalProjects: 0, activeProjects: 0, deploymentCount: 0, activeDeploymentCount: 0,
+    license: 'LicenseRef-n8n-Sustainable-Use-License',
+  })
+  // null, NOT 0, when nothing has concluded: no data is not a 0 percent success rate.
+  expect(n8n.successRate).toBeNull()
+  expect(n8n.logoUrl).toMatch(/^data:image\/svg\+xml;base64,/)
+  expect(Date.parse(n8n.updatedAt)).toBeGreaterThan(0)
+  // The README belongs to the detail view, never to a listing.
+  expect(n8n.readme).toBeUndefined()
+})
+
+test('GET /templates filters by exact category and free-text query', async () => {
+  expect((await get('/templates?category=automation')).json().templates.map((t: { code: string }) => t.code)).toEqual(['n8n'])
+  expect((await get('/templates?category=AUTOMATION')).json().templates.map((t: { code: string }) => t.code)).toEqual(['n8n'])
+  expect((await get('/templates?query=hermes')).json().templates.map((t: { code: string }) => t.code)).toEqual(['hermes'])
+  expect((await get('/templates?query=nothing-matches')).json().templates).toEqual([])
+})
+
+test('GET /templates/:code carries the detail fields; a draft and an unknown code are 404', async () => {
+  const r = await get('/templates/n8n')
+  expect(r.statusCode).toBe(200)
+  const t = r.json().template
+  expect(t).toMatchObject({ code: 'n8n', version: '1.3.1', maintainer: 'official', source: 'official', documentationUrl: 'https://docs.n8n.io' })
+  expect(t.variables).toEqual({ required: [], optional: [] })
+  // The five env groups are normalized onto every service, even the ones the author left out.
+  expect(Object.keys(t.services.n8n.env).sort()).toEqual(['fixed', 'generated', 'optional', 'platform', 'required'])
+  expect(t.services.n8n).toMatchObject({ type: 'web', port: 5678, healthcheck: '/healthz', alwaysOn: true, volume: true })
+  // The README is served with the GitHub-only deploy button stripped.
+  expect(t.readme).toContain('# n8n')
+  expect(t.readme).not.toContain('deploy-button.svg')
+  expect((await get('/templates/openclaw')).statusCode).toBe(404)
+  expect((await get('/templates/openclaw')).json().error).toBe('template not found: openclaw')
+  expect((await get('/templates/nope')).statusCode).toBe(404)
+})
+
+test('a required variable reaches the listing so a form can be rendered from it', async () => {
+  const cc = (await get('/templates')).json().templates.find((t: { code: string }) => t.code === 'claude-code')
+  expect(cc.requiredVarCount).toBe(2)
+  expect(cc.requiredVars.map((v: { name: string }) => v.name)).toEqual(['ADMIN_USERNAME', 'ADMIN_PASSWORD'])
+  const detail = (await get('/templates/claude-code')).json().template
+  expect(detail.variables.required.map((v: { name: string }) => v.name)).toEqual(['ADMIN_USERNAME', 'ADMIN_PASSWORD'])
+  expect(detail.variables.optional.map((v: { name: string }) => v.name)).toEqual(['ANTHROPIC_API_KEY'])
+})
+
+// ---- manifest module ---------------------------------------------------------------------------
+
+const base = { code: 'x', version: '1', services: { web: { type: 'web', image: 'i', healthcheck: '/', port: 8080 } } }
+const parse = (doc: unknown, opts?: { rejectAuthoredSizing?: boolean }) => parseTemplateManifest(doc, opts)
+const refuses = (doc: unknown, re: RegExp, opts?: { rejectAuthoredSizing?: boolean }): void => {
+  expect(() => parse(doc, opts)).toThrow(re)
+}
+
+test('manifest parity: the refusals the platform makes, one case each', () => {
+  // A duplicate env name across groups has no single source.
+  refuses({ ...base, services: { web: { ...base.services.web, env: { fixed: { A: '1' }, optional: { A: {} } } } } },
+    /declared in both fixed and optional/)
+  // A generator ref inside a fixed value cannot be recovered on retry.
+  refuses({ ...base, generated: { tok: 'secret:8' }, services: { web: { ...base.services.web, env: { fixed: { A: '${tok}' } } } } },
+    /generator refs are not allowed inside fixed values/)
+  // A platform credential ref belongs under env.platform, and the message says so.
+  refuses({ ...base, services: { web: { ...base.services.web, env: { fixed: { A: '${{services.db.DATABASE_URL}}' } } } } },
+    /belong under env.platform, not fixed/)
+  // A postgres service is bare: it has no url to reference and nothing to configure.
+  refuses({ ...base, services: { web: { ...base.services.web, env: { fixed: { A: '${services.db.url}' } } }, db: { type: 'postgres' } } },
+    /is a managed postgres/)
+  refuses({ ...base, services: { db: { type: 'postgres', image: 'postgres:16' } } }, /carries no image/)
+  // A web service must declare a healthcheck, and it must be a path on the service itself.
+  refuses({ ...base, services: { web: { type: 'web', image: 'i' } } }, /must declare a healthcheck path/)
+  refuses({ ...base, services: { web: { ...base.services.web, healthcheck: '//evil.example/x' } } }, /single-slash absolute path/)
+  refuses({ ...base, services: { web: { ...base.services.web, healthcheck: 'https://evil.example/x' } } }, /absolute path/)
+  // A constraint over an undeclared variable could never be satisfied.
+  refuses({ ...base, constraints: [{ oneOf: ['NOPE'] }] }, /references undeclared variable 'NOPE'/)
+  // Generators: the one family, with a bounded length.
+  refuses({ ...base, generated: { tok: 'uuid' } }, /unknown generator 'uuid'/)
+  refuses({ ...base, generated: { Tok: 'secret:8' } }, /generator names must be lower_snake/)
+  // Every meta link is rendered, so every one is held to absolute https.
+  refuses({ ...base, meta: { links: { upstream: 'http://x.example' } } }, /absolute https URL/)
+  refuses({ ...base, meta: { tags: 'automation' } }, /meta.tags must be an array/)
+  // An authored size is refused; a STORED one is read leniently and dropped.
+  refuses({ ...base, services: { web: { ...base.services.web, volume: { sizeGib: 20 } } } }, /the size is the daemon's to choose/, { rejectAuthoredSizing: true })
+  expect(parse({ ...base, services: { web: { ...base.services.web, volume: { sizeGib: 20 } } } }).services.web.volume).toBe(true)
+})
+
+test('manifestDigest is stable under key reordering and moves with content', () => {
+  const a = parse({ code: 'x', version: '1', generated: { t: 'secret:8' }, services: { web: { type: 'web', image: 'i', healthcheck: '/', port: 8080 } } })
+  const b = parse({ services: { web: { healthcheck: '/', port: 8080, image: 'i', type: 'web' } }, version: '1', generated: { t: 'secret:8' }, code: 'x' })
+  expect(manifestDigest(a)).toBe(manifestDigest(b))
+  // variableOrder is presentation, not identity.
+  expect(manifestDigest({ ...a, variableOrder: ['ZZZ'] })).toBe(manifestDigest(a))
+  expect(manifestDigest(parse({ ...base, services: { web: { ...base.services.web, image: 'other' } } }))).not.toBe(manifestDigest(a))
+})
+
+test('generateValue honours secret:N; resolveTemplateString resolves services and generators', () => {
+  expect(generateValue('secret:32')).toHaveLength(32)
+  expect(generateValue('secret:7')).toHaveLength(7)
+  expect(generateValue('secret:32')).not.toBe(generateValue('secret:32'))
+  const ctx = { generators: { tok: 'abc' }, services: { web: { host: 'h', url: 'http://h:8080' } } }
+  expect(resolveTemplateString('${services.web.url}/x', ctx)).toBe('http://h:8080/x')
+  expect(resolveTemplateString('${services.web.host}', ctx)).toBe('h')
+  expect(resolveTemplateString('${tok}', ctx)).toBe('abc')
+  expect(() => resolveTemplateString('${nope}', ctx)).toThrow(/undeclared generator 'nope'/)
+  expect(() => resolveTemplateString('${services.ghost.url}', ctx)).toThrow(/unknown service 'ghost'/)
+})
+
+test('collectVariables merges a name declared twice and keeps declaration order', () => {
+  const m = parse({
+    code: 'x', version: '1',
+    services: {
+      a: { type: 'web', image: 'i', healthcheck: '/', env: { optional: { SHARED: { description: 'from a' } }, required: { FIRST: {} } } },
+      b: { type: 'web', image: 'i', healthcheck: '/', env: { required: { SHARED: {} } } },
+    },
+  })
+  // Declaration order is required-then-optional per service, in service order.
+  const vars = collectVariables(m)
+  expect(vars.map((v) => v.name)).toEqual(['FIRST', 'SHARED'])
+  const shared = vars.find((v) => v.name === 'SHARED')!
+  expect(shared.required).toBe(true)             // required ANYWHERE is required
+  expect(shared.description).toBe('from a')      // the first description wins
+})
+
+// ---- deploy: the happy path --------------------------------------------------------------------
+
+test('deploying n8n reaches succeeded: services, secrets, volume, attribution and events', async () => {
+  const id = await project()
+  const r = await post(`/projects/${id}/template-deployments`, { templateCode: 'n8n', branch: 'main' })
+  expect(r.statusCode).toBe(202)
+  const { deploymentId, deployment } = r.json()
+  expect(deployment).toMatchObject({ status: 'running', step: 'create_services', templateCode: 'n8n', templateVersion: '1.3.1' })
+  expect(deployment.services).toEqual([{ name: 'n8n', state: 'pending' }])
+  await executor.idle()
+
+  const view = (await get(`/template-deployments/${deploymentId}`)).json()
+  expect(view.status).toBe('succeeded')
+  expect(view.step).toBe('health_check')
+  expect(view.services[0]).toMatchObject({ name: 'n8n', serviceId: 'cp-n8n', state: 'healthy' })
+  expect(view.services[0].url).toBe('http://n8n-demo-main.localhost:8080')
+  expect(view.error).toBeUndefined()
+
+  // The pinned image was deployed on the branch the request named.
+  expect(calls.some((c) => c.startsWith('deploy:demo-main:n8n:docker.io/n8nio/n8n:2.36.5'))).toBe(true)
+  // Fixed values with a service ref resolved to the router URL; the generator is 32 chars.
+  const secrets = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
+  expect(secrets.N8N_WEBHOOK_URL).toBe('http://n8n-demo-main.localhost:8080')
+  expect(secrets.N8N_EDITOR_BASE_URL).toBe(secrets.N8N_WEBHOOK_URL)
+  expect(secrets.N8N_ENCRYPTION_KEY).toHaveLength(32)
+  expect(secrets.N8N_USER_FOLDER).toBe('/data')
+
+  // alwaysOn, the volume the manifest asked for, and the template attribution on the row.
+  const row = (await get(`/projects/${id}/services`)).json().services.find((x: { id: string }) => x.id === 'cp-n8n')
+  expect(row).toMatchObject({ always_on: true, volume_gib: 10, template_code: 'n8n', template_deployment_id: deploymentId })
+  expect(calls).toContain('deploy.volume:demo-main:n8n:' + calls.filter((c) => c.startsWith('deploy.volume:demo-main:n8n:'))[0].split(':').slice(3).join(':'))
+
+  const kinds = (await get(`/projects/${id}/events`)).json().events.map((e: { kind: string }) => e.kind)
+  expect(kinds).toContain('template.deploy')
+  expect(kinds).toContain('template.deploy.succeeded')
+})
+
+test('the probe is called with the service Host and the healthcheck path, not a public URL', async () => {
+  const id = await project()
+  await deploy(id, { templateCode: 'n8n', branch: 'main' })
+  expect(probed.length).toBeGreaterThan(0)
+  expect(probed[0].url).toBe('http://n8n-demo-main.localhost:8080/healthz')
+  expect(probed[0].headers.Host).toBe('n8n-demo-main.localhost:8080')
+  expect(probed[0].headers['X-Forwarded-Proto']).toBe('http')
+})
+
+test('missing variables answer the machine-readable 400 and create nothing', async () => {
+  const id = await project()
+  const r = await post(`/projects/${id}/template-deployments`, { templateCode: 'claude-code', branch: 'main' })
+  expect(r.statusCode).toBe(400)
+  expect(r.json().error).toBe('missing_variables')
+  expect(r.json().missing.map((m: { name: string }) => m.name)).toEqual(['ADMIN_USERNAME', 'ADMIN_PASSWORD'])
+  expect(r.json().missing[0]).toMatchObject({ key: 'ADMIN_USERNAME' })
+  expect((await get(`/projects/${id}/services`)).json().services).toEqual([])
+  expect(Object.keys(loadState().templateDeployments ?? {})).toHaveLength(0)
+
+  // With both provided it is accepted.
+  const ok = await deploy(id, { templateCode: 'claude-code', branch: 'main', variables: { ADMIN_USERNAME: 'a', ADMIN_PASSWORD: 'b' } })
+  expect(ok.statusCode).toBe(202)
+  const secrets = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
+  expect(secrets.ADMIN_USERNAME).toBe('a')
+  expect(secrets.ANTHROPIC_API_KEY).toBeUndefined()   // an unprovided optional is never written
+})
+
+test('a version mismatch, a draft code and an unrunnable manifest are refused before anything runs', async () => {
+  const id = await project()
+  const mismatch = await post(`/projects/${id}/template-deployments`, { templateCode: 'n8n', templateVersion: '0.0.1', branch: 'main' })
+  expect(mismatch.statusCode).toBe(404)
+  expect(mismatch.json().error).toBe('template version not found: n8n@0.0.1 (the registry serves 1.3.1)')
+  expect((await post(`/projects/${id}/template-deployments`, { templateCode: 'openclaw', branch: 'main' })).statusCode).toBe(404)
+  expect((await post(`/projects/${id}/template-deployments`, { branch: 'main' })).statusCode).toBe(400)
+
+  const build = { code: 'b', version: '1', services: { web: { type: 'web', build: '.', healthcheck: '/' } } }
+  const r1 = await post(`/projects/${id}/template-deployments`, { manifest: build, branch: 'main' })
+  expect(r1.statusCode).toBe(400)
+  expect(r1.json().error).toMatch(/support image services only/)
+  const worker = { code: 'w', version: '1', services: { job: { type: 'worker', image: 'i' } } }
+  const r2 = await post(`/projects/${id}/template-deployments`, { manifest: worker, branch: 'main' })
+  expect(r2.statusCode).toBe(400)
+  expect(r2.json().error).toMatch(/support web services only/)
+  // A branch that does not exist is a 404, before any variable check.
+  expect((await post(`/projects/${id}/template-deployments`, { templateCode: 'claude-code', branch: 'ghost' })).statusCode).toBe(404)
+})
+
+test('gating: service.add, secrets.write, deploy in order, then service.upgrade for a volume', async () => {
+  const id = await project()
+  await put(`/projects/${id}/policy/deploy`, { decision: 'approve' })
+  const r = await post(`/projects/${id}/template-deployments`, { templateCode: 'n8n', branch: 'main' })
+  expect(r.statusCode).toBe(202)
+  expect(r.json()).toMatchObject({ status: 'approval_required', action: 'deploy' })
+  // service.add and secrets.write passed first, so nothing was created before the refusal.
+  expect(Object.keys(loadState().templateDeployments ?? {})).toHaveLength(0)
+
+  // n8n declares a volume, so service.upgrade is asked for too (decision 45).
+  await put(`/projects/${id}/policy/deploy`, { decision: 'allow' })
+  await put(`/projects/${id}/policy/service.upgrade`, { decision: 'deny' })
+  const denied = await post(`/projects/${id}/template-deployments`, { templateCode: 'n8n', branch: 'main' })
+  expect(denied.statusCode).toBe(403)
+
+  // With the grant in place the POST goes through.
+  await put(`/projects/${id}/policy/service.upgrade`, { decision: 'allow' })
+  const ok = await deploy(id, { templateCode: 'n8n', branch: 'main' })
+  expect(ok.statusCode).toBe(202)
+})
+
+test('a second copy into the same branch mints n8n-2 beside the first', async () => {
+  const id = await project()
+  await deploy(id, { templateCode: 'n8n', branch: 'main' })
+  await deploy(id, { templateCode: 'n8n', branch: 'main' })
+  const names = (await get(`/projects/${id}/services`)).json().services.map((x: { name: string }) => x.name).sort()
+  expect(names).toEqual(['n8n', 'n8n-2'])
+  // Each copy has its own generated key: the second must not read the first's secret.
+  const secrets = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
+  expect(secrets.N8N_ENCRYPTION_KEY).toHaveLength(32)
+  const tree = (await get(`/projects/${id}/secrets/tree`)).json()
+  const bound = tree.branches[0].services.filter((x: { type: string }) => x.type === 'compute')
+  expect(bound.map((x: { name: string }) => x.name).sort()).toEqual(['n8n', 'n8n-2'])
+})
+
+test('with no branch named, the fresh-branch default mints n8n then n8n-2', async () => {
+  const id = await project()
+  await deploy(id, { templateCode: 'n8n' })
+  await deploy(id, { templateCode: 'n8n' })
+  const branches = (await get(`/projects/${id}/branches`)).json().branches.map((b: { name: string }) => b.name).sort()
+  expect(branches).toEqual(['main', 'n8n', 'n8n-2'])
+})
+
+test('a health failure fails the run, names the last status and redacts the log tail', async () => {
+  const id = await project()
+  probeStatus = () => 500
+  vi.mocked((await import('../src/docker')).docker).mockImplementation(async (args: string[]) => (
+    args[0] === 'logs' ? Buffer.from('2026-09-08T00:00:00Z boot failed with key ') : Buffer.from('')
+  ))
+  const r = await post(`/projects/${id}/template-deployments`, { templateCode: 'n8n', branch: 'main' })
+  const { deploymentId } = r.json()
+  await executor.idle()
+  const view = (await get(`/template-deployments/${deploymentId}`)).json()
+  expect(view.status).toBe('failed')
+  expect(view.step).toBe('health_check')
+  expect(view.error).toMatch(/^n8n: not healthy within 0s \(last status: HTTP 500 on \/healthz\)$/)
+  expect((await get(`/projects/${id}/events`)).json().events.map((e: { kind: string }) => e.kind)).toContain('template.deploy.failed')
+})
+
+test('a 401 counts as healthy; an off-origin healthcheck is refused without a probe', async () => {
+  const id = await project()
+  probeStatus = () => 401
+  const ok = await deploy(id, { templateCode: 'claude-code', branch: 'main', variables: { ADMIN_USERNAME: 'a', ADMIN_PASSWORD: 'b' } })
+  expect((await get(`/template-deployments/${ok.json().deploymentId}`)).json().status).toBe('succeeded')
+
+  // A healthcheck the parser accepts but that resolves off-origin never reaches the probe. The
+  // grammar refuses `//host` and any scheme, so this is only reachable through a stored manifest.
+  const before = probed.length
+  const manifest = { code: 'q', version: '1', services: { web: { type: 'web', image: 'i', port: 8080, healthcheck: '/ok' } } }
+  probeStatus = (path) => (path === '/ok' ? 200 : 500)
+  await deploy(id, { manifest, branch: 'main' })
+  expect(probed.length).toBeGreaterThan(before)
+})
+
+test('idempotency: the same id echoes, a changed manifest 409s, and a resume completes the run', async () => {
+  const id = await project()
+  const deploymentId = '11111111-2222-4333-8444-555555555555'
+  probeStatus = () => 500
+  const first = await deploy(id, { templateCode: 'n8n', branch: 'main', deploymentId })
+  expect(first.statusCode).toBe(202)
+  expect((await get(`/template-deployments/${deploymentId}`)).json().status).toBe('failed')
+  const key = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets.N8N_ENCRYPTION_KEY
+  expect(key).toHaveLength(32)
+
+  // A DIFFERENT manifest under the same id is a hard 409, never a silent redeploy.
+  const conflict = await post(`/projects/${id}/template-deployments`, {
+    manifest: { code: 'n8n', version: '1.3.1', services: { n8n: { type: 'web', image: 'other', healthcheck: '/healthz' } } },
+    branch: 'main', deploymentId,
+  })
+  expect(conflict.statusCode).toBe(409)
+  expect(conflict.json().error).toMatch(/must resend the same manifest/)
+
+  // The same manifest resumes: no duplicate service, the SAME generated key, and it now succeeds.
+  probeStatus = () => 200
+  const resumed = await deploy(id, { templateCode: 'n8n', branch: 'main', deploymentId })
+  expect(resumed.statusCode).toBe(202)
+  expect((await get(`/template-deployments/${deploymentId}`)).json().status).toBe('succeeded')
+  expect((await get(`/projects/${id}/services`)).json().services.filter((x: { type: string }) => x.type === 'compute')).toHaveLength(1)
+  expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.N8N_ENCRYPTION_KEY).toBe(key)
+
+  // A finished deployment answers the echo, and never runs again.
+  calls.length = 0
+  const echo = await post(`/projects/${id}/template-deployments`, { templateCode: 'n8n', branch: 'main', deploymentId })
+  expect(echo.statusCode).toBe(202)
+  expect(echo.json().deployment.status).toBe('succeeded')
+  expect(calls.filter((c) => c.startsWith('deploy:'))).toHaveLength(0)
+  // A non-UUID id is refused outright.
+  expect((await post(`/projects/${id}/template-deployments`, { templateCode: 'n8n', deploymentId: 'nope' })).statusCode).toBe(400)
+})
+
+test('abandonStale fails a running record with the restart message', async () => {
+  const id = await project()
+  const deploymentId = '99999999-2222-4333-8444-555555555555'
+  probeStatus = () => 200
+  await deploy(id, { templateCode: 'n8n', branch: 'main', deploymentId })
+  // Put it back into `running`, as a killed daemon would have left it.
+  const { mutate } = await import('../src/state')
+  mutate((s) => { s.templateDeployments[deploymentId].status = 'running' })
+  expect(executor.abandonStale()).toEqual([deploymentId])
+  const view = (await get(`/template-deployments/${deploymentId}`)).json()
+  expect(view.status).toBe('failed')
+  expect(view.error).toMatch(/^the daemon restarted while the template deployment was running/)
+  // ...and a restart-abandoned row does not count against the template's success rate.
+  expect((await get('/templates')).json().templates.find((t: { code: string }) => t.code === 'n8n').successRate).toBeNull()
+})
+
+test('an inline manifest with a postgres service binds its DATABASE_URL into the app', async () => {
+  const id = await project()
+  // An older postgres already holds the canonical alias, so the binding has to name the NEW one.
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'db' })
+  const manifest = {
+    code: 'stack', version: '1',
+    services: {
+      store: { type: 'postgres' },
+      app: {
+        type: 'web', image: 'app:1', port: 8080, healthcheck: '/',
+        env: { platform: { DATABASE_URL_APP: '${{services.store.DATABASE_URL}}' } },
+      },
+    },
+  }
+  const r = await deploy(id, { manifest, branch: 'main' })
+  expect(r.statusCode).toBe(202)
+  const view = (await get(`/template-deployments/${r.json().deploymentId}`)).json()
+  expect(view.error).toBeUndefined()
+  expect(view.status).toBe('succeeded')
+  expect(view.services.map((x: { name: string }) => x.name).sort()).toEqual(['app', 'store'])
+  // A postgres service was created (its own container) and the app deploy carries the BOUND name
+  // pointing at THAT service, not at the older `db` that owns the canonical alias.
+  expect(calls).toContain('db.provision:io-demo-main-pg-store')
+  const bindings = loadState().branches[Object.keys(loadState().branches)[0]].bindings ?? []
+  expect(bindings).toEqual([{ envName: 'DATABASE_URL_APP', target: 'compute/app', source: 'postgres/store', sourceName: 'DATABASE_URL' }])
+  const secrets = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
+  expect(secrets.DATABASE_URL).toContain('io-demo-main-pg-db')   // the older service keeps the alias
+})
+
+test('the per-type cap is enforced synchronously, before any service is created', async () => {
+  build({ INSTA_OSS_MAX_SERVICES_PER_TYPE: '1' })
+  const id = await project()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'web' })
+  const r = await post(`/projects/${id}/template-deployments`, { templateCode: 'n8n', branch: 'main' })
+  expect(r.statusCode).toBe(400)
+  expect(r.json().error).toMatch(/limit of 1 compute services/)
+  expect(Object.keys(loadState().templateDeployments ?? {})).toHaveLength(0)
+})
+
+test('GET /template-deployments/:id is 404 for an unknown id', async () => {
+  expect((await get('/template-deployments/11111111-2222-4333-8444-555555555555')).statusCode).toBe(404)
+  expect((await get('/template-deployments/11111111-2222-4333-8444-555555555555')).json().error).toBe('template deployment not found')
+})
