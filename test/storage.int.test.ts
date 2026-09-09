@@ -103,6 +103,12 @@ test('object ops round-trip on the host port: list → presigned GET → upload 
   const bulk = await engine.deleteServiceObjects(projectId, 'st-store', { keys: ['b1.txt', 'b2.txt'] })
   expect(bulk.deleted).toBe(2)
   expect(bulk.failed).toEqual([])
+  // The audit row counts what went, not what was asked for: a bulk delete over keys that are not
+  // there must not read as a bulk delete that removed them.
+  const gone = await engine.deleteServiceObjects(projectId, 'st-store', { keys: ['b1.txt', 'nope.txt'] })
+  const rows = engine.listEvents(projectId).filter((e) => e.kind === 'storage.objects.delete')
+  const last = rows[rows.length - 1]
+  expect(last?.payload).toMatchObject({ requested: 2, count: gone.deleted })
   const after = await engine.listServiceObjects(projectId, 'st-store', {})
   expect(after.objects.map((o) => o.key)).not.toContain('b1.txt')
 })

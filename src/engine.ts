@@ -1049,7 +1049,11 @@ export class Engine {
     if (opts.keys.length > 1000) throw new Error("keys must hold at most 1000 object keys (S3's DeleteObjects cap)")
     const b = this.objectTarget(projectId, serviceId, opts.branch)
     const out = await this.objectOps().removeObjects(b.s3, opts.keys)
-    this.emit(projectId, b.name, 'resource', 'storage.objects.delete', { service: serviceId, count: opts.keys.length })
+    // What the provider actually removed, not what the caller asked for. The two differ whenever a
+    // key is missing or the delete is refused, and an audit row that always reports the request
+    // size tells the reader a bulk delete of 1000 keys removed 1000 objects when it removed none.
+    // `failed` rides along for the same reason: a partial success has to read as one.
+    this.emit(projectId, b.name, 'resource', 'storage.objects.delete', { service: serviceId, count: out.deleted, requested: opts.keys.length, failed: out.failed.length })
     return out
   }
 
