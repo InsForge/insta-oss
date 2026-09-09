@@ -232,6 +232,39 @@ export function flushTouchLater(): void {
 }
 
 // ---- region WP5 (templates/parity) ----
-/** WP5: pure; legacy dbUrl/bucket/s3/storagePublic -> dbServices/storageServices/databases/buckets. Scaffold: identity. */
-export function migrateState(s: State): State { return s }
+/** Present a pre-multi-service document as the registration model, in memory, on every parse
+ *  (contract 00 section 5, plan 05 §9). Pure and idempotent: a project with a branch and no
+ *  `dbServices` gains the `pg-db` / `st-store` pair, and every branch lacking `databases` /
+ *  `buckets` gains the rows derived from its legacy `dbUrl` / `bucket` / `s3` / `storagePublic`
+ *  fields. The legacy fields are LEFT in place (an older daemon reading the same file keeps
+ *  working) and never read again by this code.
+ *
+ *  The container name is the legacy `io-<ref>-pg` and the dataId the literal `db` (decision 16):
+ *  WP4's boot migration renames the container while moving its bytes, and writes the new handle
+ *  onto the row, so nothing here has to guess which side of that migration a branch is on. */
+export function migrateState(s: State): State {
+  const branchesOf = (projectId: string): Branch[] => Object.values(s.branches).filter((b) => b.projectId === projectId)
+  const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
+  for (const project of Object.values(s.projects)) {
+    const branches = branchesOf(project.id)
+    if (!branches.length) continue
+    const def = branches.find((b) => b.isDefault) ?? branches[0]
+    if (!project.dbServices) {
+      project.dbServices = [{ id: 'pg-db', name: 'db', dataId: 'db', createdAt: project.createdAt }]
+    }
+    if (!project.storageServices) {
+      project.storageServices = [{ id: 'st-store', name: 'store', createdAt: project.createdAt, public: def.storagePublic ?? false }]
+    }
+    for (const b of branches) {
+      const ref = b.ref ?? `${project.refSlug ?? slug(project.name)}-${slug(b.name)}`
+      if (!b.databases && b.dbUrl !== undefined) {
+        b.databases = { 'pg-db': { url: b.dbUrl, container: `io-${ref}-pg`, dataId: 'db' } }
+      }
+      if (!b.buckets && b.bucket !== undefined) {
+        b.buckets = { 'st-store': { bucket: b.bucket, env: b.s3 ?? {}, public: b.storagePublic ?? false } }
+      }
+    }
+  }
+  return s
+}
 // ---- end region WP5 ----
