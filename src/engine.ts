@@ -1408,7 +1408,7 @@ export class Engine {
       connectionPooling: false, deletionProtection: false,
       scaleToZero: row?.scaleToZero ?? true,
       idleTimeoutSecs: row?.idleTimeoutSec ?? this.cfg.sleep.idleDbSec,
-      ...(limits ? { cpuMilli: limits.cpu * 1000, memoryMib: limits.memoryMb } : { cpuMilli: null, memoryMib: null }),
+      ...(limits ? { cpuMilli: limits.cpu * 1000, memoryMib: limits.memoryMb } : {}),
       volumeSize: `${gib}Gi`, volumeGib: gib,
       storageSize: `${gib}Gi`, storageGiB: gib, // DEPRECATED aliases — dropped when the platform drops them
       cap: { ...DB_CAP },
@@ -2348,17 +2348,18 @@ export class Engine {
    *  the dash spelled `to`). An unset cpu is derived: the smallest ladder size that can carry the
    *  memory. */
   private validateLimits(memoryMb: number, cpu?: number): ServiceLimits {
-    if (!Number.isInteger(memoryMb)) throw new Error('memoryMb must be an integer number of MB')
     const derived = cpu ?? Engine.CPU_LADDER.find((c) => memoryMb <= c * 2048)
     if (derived === undefined) throw new Error(`no vCPU size can carry ${memoryMb} MB of memory`)
     if (!(Engine.CPU_LADDER as readonly number[]).includes(derived)) {
-      throw new Error(`cpu must be one of ${Engine.CPU_LADDER.join(', ')} vCPU`)
+      throw new Error(`cpu must be one of ${Engine.CPU_LADDER.join(', ')} (provider vCPU sizes); got ${derived}`)
     }
-    if (memoryMb % 256 !== 0) throw new Error('memoryMb must be a multiple of 256')
+    if (!Number.isInteger(memoryMb) || memoryMb % 256 !== 0) {
+      throw new Error(`memoryMb must be a multiple of 256; got ${memoryMb}`)
+    }
     const min = 256 * derived
     const max = 2048 * derived
     if (memoryMb < min || memoryMb > max) {
-      throw new Error(`${derived} vCPU supports ${min} to ${max} MB of memory`)
+      throw new Error(`${derived} vCPU allows ${min} to ${max} MB of memory; got ${memoryMb}`)
     }
     if (derived > Engine.LIMITS_CAP.cpu || memoryMb > Engine.LIMITS_CAP.memoryMb) {
       throw new Error(`limits exceed this plan's ceiling (${Engine.LIMITS_CAP.cpu} vCPU / ${Engine.LIMITS_CAP.memoryMb} MB)`)

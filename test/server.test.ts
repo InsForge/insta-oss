@@ -1485,9 +1485,9 @@ test('GET limits: the host ceiling, the cap and the volume; PUT derives cpu and 
   // cpu is derived from the memory when it is not given: 4096 MB needs 2 vCPU.
   expect((await put(`/projects/${id}/services/cp-web/limits`, { memoryMb: 4096 })).json().limits).toEqual({ cpu: 2, memoryMb: 4096 })
   const bad: Array<[Record<string, number>, RegExp]> = [
-    [{ memoryMb: 512, cpu: 3 }, /one of 1, 2, 4, 6, 8/],
-    [{ memoryMb: 300 }, /multiple of 256/],
-    [{ memoryMb: 8192, cpu: 1 }, /1 vCPU supports 256 to 2048 MB/],
+    [{ memoryMb: 512, cpu: 3 }, /cpu must be one of 1, 2, 4, 6, 8 \(provider vCPU sizes\); got 3/],
+    [{ memoryMb: 300 }, /memoryMb must be a multiple of 256; got 300/],
+    [{ memoryMb: 8192, cpu: 1 }, /1 vCPU allows 256 to 2048 MB of memory; got 8192/],
     [{ memoryMb: 16384, cpu: 8 }, /8 vCPU supports 2048 to 16384 MB|ceiling/],
   ]
   for (const [body, msg] of bad) {
