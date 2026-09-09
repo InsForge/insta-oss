@@ -45,13 +45,20 @@ test('me/orgs stubs satisfy the CLI (orgs[0].id drives project create)', async (
   expect(orgs[0].id).toBe('local')
 })
 
-test('project create returns {project, defaultBranch, resources[].kind} and provisions main', async () => {
+test('project create returns {project, defaultBranch, resources: []} and provisions NOTHING', async () => {
   const r = await post('/orgs/local/projects', { name: 'demo' })
   expect(r.statusCode).toBe(201)
   const body = r.json()
   expect(body.project.name).toBe('demo')
   expect(body.defaultBranch.name).toBe('main')
-  expect(body.resources.map((x: { kind: string }) => x.kind)).toEqual(expect.arrayContaining(['postgres', 'storage', 'compute']))
+  // EMPTY, like the cloud: a project is a branch and nothing else until services are added.
+  expect(body.resources).toEqual([])
+  expect(calls).not.toContain('db.provision:io-demo-main-pg-db')
+  expect(calls).not.toContain('st.provision:demo-main:store')
+  // ...and the two adds provision the pair on the default branch.
+  const id = body.project.id
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'db' })
+  await post(`/projects/${id}/services`, { type: 'storage', name: 'store' })
   expect(calls).toContain('db.provision:io-demo-main-pg-db')
   expect(calls).toContain('st.provision:demo-main:store')
 })
@@ -74,7 +81,10 @@ test('branch create clones data + redeploys apps; branches list has is_default/s
   const feat = branches.find((b: { name: string }) => b.name === 'feat')
   const del = await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${feat.id}` })
   expect(del.statusCode).toBe(200)
-  expect(del.json()).toEqual({})
+  // The cloud's teardown summary (decision 50): compute, the postgres container, the bucket and
+  // the branch's data roots, counted.
+  expect(del.json().teardown).toMatchObject({ failed: 0 })
+  expect(del.json().teardown.destroyed).toBeGreaterThan(0)
 })
 
 test('secrets returns the branch bundle (seam) and is gateable', async () => {
@@ -105,7 +115,7 @@ test('project.delete defaults to approve: 202 → approve → retry succeeds →
 
   const second = await app.inject({ method: 'DELETE', url: `/projects/${id}` })
   expect(second.statusCode).toBe(200) // consumed the grant
-  expect(second.json()).toEqual({})
+  expect(second.json().teardown).toMatchObject({ failed: 0 })
   expect((await get('/orgs/local/projects')).json().projects).toHaveLength(0)
 })
 
@@ -214,34 +224,48 @@ test('services list: fixed postgres+storage + compute groups; CLI shape', async 
   expect(api).toMatchObject({ id: 'cp-api', type: 'compute', status: 'ready', machine_count: 1 })
 })
 
-test('services add compute registers a group; duplicates 409; pg/storage add is idempotent (contract parity)', async () => {
+test('services add: compute, a SECOND postgres and a public bucket; duplicates 409; junk type 400', async () => {
   const id = await createProject()
   const r = await post(`/projects/${id}/services`, { type: 'compute', name: 'worker' })
   expect(r.statusCode).toBe(201)
   expect(r.json().service).toMatchObject({ id: 'cp-worker', type: 'compute', name: 'worker' })
   expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'worker' })).statusCode).toBe(409)
-  // the same `services add postgres|storage` onboarding script must run on both targets
-  const pg = await post(`/projects/${id}/services`, { type: 'postgres', name: 'db2' })
+  // A second postgres is its own container on every branch, not an idempotent no-op.
+  const pg = await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics' })
   expect(pg.statusCode).toBe(201)
-  expect(pg.json().service).toMatchObject({ id: 'pg-db', type: 'postgres', name: 'db' })
-  const st = await post(`/projects/${id}/services`, { type: 'storage', name: 'blobs' })
+  expect(pg.json().service).toMatchObject({ id: 'pg-analytics', type: 'postgres', name: 'analytics', status: 'ready', pg_version: 16 })
+  expect(calls).toContain('db.provision:io-demo-main-pg-analytics')
+  // The name is taken now, on every branch.
+  expect((await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics' })).statusCode).toBe(409)
+  const st = await post(`/projects/${id}/services`, { type: 'storage', name: 'blobs', public: true })
   expect(st.statusCode).toBe(201)
-  expect(st.json().service).toMatchObject({ id: 'st-store', type: 'storage', name: 'store', public: false })
-  const publicSt = await post(`/projects/${id}/services`, { type: 'storage', name: 'blobs', public: true })
-  expect(publicSt.statusCode).toBe(201)
-  expect(publicSt.json().service).toMatchObject({ id: 'st-store', type: 'storage', name: 'store', public: true })
+  expect(st.json().service).toMatchObject({ id: 'st-blobs', type: 'storage', name: 'blobs', public: true })
+  expect(calls).toContain('st.provision:demo-main:blobs')
+  expect(calls).toContain('st.access:io-demo-main-blobs:true')
   expect((await post(`/projects/${id}/services`, { type: 'queue', name: 'q' })).statusCode).toBe(400)
+  // Grammar and the per-type cap are the cloud's, with the env var named.
+  expect((await post(`/projects/${id}/services`, { type: 'postgres', name: 'Bad Name' })).statusCode).toBe(400)
 })
 
-test('services remove compute destroys the group; pg/storage remove → 501', async () => {
+test('services remove: compute, postgres and storage all tear down and report the summary', async () => {
   const id = await createProject()
   await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
   const del = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/cp-api` })
   expect(del.statusCode).toBe(200)
-  expect(del.json()).toEqual({})
+  expect(del.json().teardown).toMatchObject({ failed: 0 })
   const { services } = (await get(`/projects/${id}/services`)).json()
   expect(services.some((s: { name: string }) => s.name === 'api')).toBe(false)
-  expect((await app.inject({ method: 'DELETE', url: `/projects/${id}/services/pg-db` })).statusCode).toBe(501)
+
+  // postgres and storage remove for real now (decision 50), counting one container / bucket per branch
+  const pg = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/pg-db` })
+  expect(pg.statusCode).toBe(200)
+  expect(pg.json().teardown).toMatchObject({ failed: 0 })
+  expect(calls).toContain('db.destroy:io-demo-main-pg-db')
+  const st = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/st-store` })
+  expect(st.statusCode).toBe(200)
+  expect(calls).toContain('st.destroy:io-demo-main-store')
+  expect((await get(`/projects/${id}/services`)).json().services).toEqual([])
+  expect((await app.inject({ method: 'DELETE', url: `/projects/${id}/services/pg-ghost` })).statusCode).toBe(404)
 })
 
 // ---- user-defined secrets (insta secrets set/unset) ----
@@ -378,7 +402,8 @@ test('secret service binding requires a branch and an existing service', async (
 
 test('service secrets endpoint returns names only, per service', async () => {
   const id = await createProject()
-  expect((await get(`/projects/${id}/services/pg-db/secrets`)).json().secrets).toEqual(['DATABASE_URL'])
+  // The oldest postgres holds the canonical alias AND its own suffixed name (platform parity).
+  expect((await get(`/projects/${id}/services/pg-db/secrets`)).json().secrets).toEqual(['DATABASE_URL', 'DATABASE_URL_DB'])
   expect((await get(`/projects/${id}/services/st-store/secrets`)).json().secrets).toContain('AWS_ACCESS_KEY_ID')
   expect((await get(`/projects/${id}/services/cp-nope/secrets`)).statusCode).toBe(404)
 })
