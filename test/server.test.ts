@@ -1400,6 +1400,284 @@ test('dashboard serving: identity and gallery routes reach the SPA shell', async
 // ---- end region WP2 ----
 
 // ---- region WP3 (scheduler) ----
+// The scheduler's HTTP surface: always-on, limits, the sleep vocabulary the CLI and the dashboard
+// print, and the two database rules (management wakes, observability refuses). Each test builds its
+// OWN engine so it can drive the scheduler directly, the way the sweep would.
+import { runtime as fakeRuntime } from './fakes'
+
+/** A project on a fresh engine this test can reach into (`app` is rebound to it). */
+async function wp3Project(name = 'demo'): Promise<{ engine: Engine; id: string }> {
+  const engine = makeEngine()
+  app = buildServer(engine)
+  const id = await createProject(name)
+  return { engine, id }
+}
+
+/** The branch's id (what a ServiceKey is built from). */
+async function branchId(id: string, name = 'main'): Promise<string> {
+  return (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === name).id
+}
+
+const keyFor = (bid: string, serviceId: string): string => `${bid}:${serviceId}`
+
+test('PUT always-on: 200 with always_on on the row, 400 for postgres and storage, 404 unknown, and an event', async () => {
+  const { id } = await wp3Project()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'default' })
+  const r = await put(`/projects/${id}/services/cp-default/always-on`, { enabled: true })
+  expect(r.statusCode).toBe(200)
+  expect(r.json().service).toMatchObject({ id: 'cp-default', always_on: true })
+  expect((await get(`/projects/${id}/events`)).json().events.map((e: { kind: string }) => e.kind)).toContain('service.alwaysOn')
+  // ...and off again.
+  expect((await put(`/projects/${id}/services/cp-default/always-on`, { enabled: false })).json().service.always_on).toBe(false)
+  // A database that scales to zero has its own lever (PATCH database/settings), and object storage
+  // has no runtime at all.
+  for (const sid of ['pg-db', 'st-store']) {
+    const bad = await put(`/projects/${id}/services/${sid}/always-on`, { enabled: true })
+    expect(bad.statusCode, sid).toBe(400)
+    expect(bad.json().error).toBe('alwaysOn is only supported for compute and managed database services')
+  }
+  expect((await put(`/projects/${id}/services/cp-nope/always-on`, { enabled: true })).statusCode).toBe(404)
+  expect((await put(`/projects/${id}/services/cp-default/always-on`, { enabled: 'yes' })).statusCode).toBe(400)
+})
+
+test('services rows carry always_on on compute and managed rows only', async () => {
+  const { id } = await wp3Project()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'default' })
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  const rows = (await get(`/projects/${id}/services`)).json().services
+  const byId = Object.fromEntries(rows.map((r: { id: string }) => [r.id, r]))
+  expect(byId['cp-default'].always_on).toBe(false)
+  expect(byId['rd-cache'].always_on).toBe(false)
+  expect(byId['pg-db'].always_on).toBeUndefined()
+  expect(byId['st-store'].always_on).toBeUndefined()
+})
+
+test('a branch-qualified sid writes the BARE project-level key and resizes every branch container', async () => {
+  const { id } = await wp3Project()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'web' })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'web' })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  const feat = await branchId(id, 'feat')
+  calls.length = 0
+  // The id the CLI reads off `GET /services?branch=feat` (decision 49).
+  const r = await put(`/projects/${id}/services/${feat}:cp-web/limits`, { memoryMb: 512 })
+  expect(r.statusCode).toBe(200)
+  expect(r.json().limits).toEqual({ cpu: 1, memoryMb: 512 })
+  // Both branches' containers are resized, and the SETTING is stored under the bare service id, so
+  // `GET limits` with no branch reads it back.
+  expect(calls).toContain('runtime.update:io-demo-main-app-web:1/512')
+  expect(calls).toContain('runtime.update:io-demo-feat-app-web:1/512')
+  expect((await get(`/projects/${id}/services/cp-web/limits`)).json().limits).toEqual({ cpu: 1, memoryMb: 512 })
+  expect((await put(`/projects/${id}/services/${feat}:cp-web/always-on`, { enabled: true })).statusCode).toBe(200)
+  expect((await get(`/projects/${id}/services`)).json().services.find((x: { id: string }) => x.id === 'cp-web').always_on).toBe(true)
+})
+
+test('GET limits: the host ceiling, the cap and the volume; PUT derives cpu and validates the grid', async () => {
+  const { id } = await wp3Project()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'web', volumeGib: 3 })
+  const unset = (await get(`/projects/${id}/services/cp-web/limits`)).json()
+  expect(unset.cap).toEqual({ cpu: 8, memoryMb: 8192, volumeGib: 100 })
+  expect(unset.volume).toEqual({ sizeGib: 3, mountPath: '/data' })
+  // Unset reports the effective host ceiling snapped to the grid (decision 15).
+  expect(unset.limits.cpu).toBeGreaterThanOrEqual(1)
+  expect(unset.limits.memoryMb % 256).toBe(0)
+
+  // cpu is derived from the memory when it is not given: 4096 MB needs 2 vCPU.
+  expect((await put(`/projects/${id}/services/cp-web/limits`, { memoryMb: 4096 })).json().limits).toEqual({ cpu: 2, memoryMb: 4096 })
+  const bad: Array<[Record<string, number>, RegExp]> = [
+    [{ memoryMb: 512, cpu: 3 }, /one of 1, 2, 4, 6, 8/],
+    [{ memoryMb: 300 }, /multiple of 256/],
+    [{ memoryMb: 8192, cpu: 1 }, /1 vCPU supports 256 to 2048 MB/],
+    [{ memoryMb: 16384, cpu: 8 }, /8 vCPU supports 2048 to 16384 MB|ceiling/],
+  ]
+  for (const [body, msg] of bad) {
+    const r = await put(`/projects/${id}/services/cp-web/limits`, body)
+    expect(r.statusCode, JSON.stringify(body)).toBe(400)
+    expect(r.json().error, JSON.stringify(body)).toMatch(msg)
+  }
+  // The stored ceiling is untouched by every refusal above.
+  expect((await get(`/projects/${id}/services/cp-web/limits`)).json().limits).toEqual({ cpu: 2, memoryMb: 4096 })
+  expect((await get(`/projects/${id}/services/pg-db/limits`)).statusCode).toBe(400)
+  expect((await get(`/projects/${id}/services/cp-nope/limits`)).statusCode).toBe(404)
+})
+
+test('a resize that fails on one machine is a 502 and leaves the stored ceiling alone', async () => {
+  const { id } = await wp3Project()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  expect((await put(`/projects/${id}/services/cp-default/limits`, { memoryMb: 512 })).statusCode).toBe(200)
+  // The feat container disappears (a hand-removed container, a crashed machine).
+  fakeRuntime.drop('io-demo-feat-app-default')
+  const r = await put(`/projects/${id}/services/cp-default/limits`, { memoryMb: 1024 })
+  expect(r.statusCode).toBe(502)
+  expect(r.json().error).toMatch(/resize failed on the compute provider:.*applied to 1\/2 machines; the stored ceiling is unchanged/)
+  expect((await get(`/projects/${id}/services/cp-default/limits`)).json().limits).toEqual({ cpu: 1, memoryMb: 512 })
+})
+
+test('PUT limits is gated service.upgrade, and a no-op re-submit records no event', async () => {
+  const { id } = await wp3Project()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'default' })
+  expect((await get(`/projects/${id}/policy`)).json().policy['service.upgrade']).toBe('allow')
+  await put(`/projects/${id}/policy/service.upgrade`, { decision: 'approve' })
+  const held = await put(`/projects/${id}/services/cp-default/limits`, { memoryMb: 512 })
+  expect(held.statusCode).toBe(202)
+  expect(held.json()).toMatchObject({ status: 'approval_required', action: 'service.upgrade' })
+  await post(`/projects/${id}/approvals/${held.json().approvalId}/approve`)
+  expect((await put(`/projects/${id}/services/cp-default/limits`, { memoryMb: 512 })).statusCode).toBe(200)
+
+  await put(`/projects/${id}/policy/service.upgrade`, { decision: 'allow' })
+  const before = (await get(`/projects/${id}/events`)).json().events.filter((e: { kind: string }) => e.kind === 'service.limits').length
+  expect((await put(`/projects/${id}/services/cp-default/limits`, { memoryMb: 512 })).json().limits).toEqual({ cpu: 1, memoryMb: 512 })
+  const after = (await get(`/projects/${id}/events`)).json().events.filter((e: { kind: string }) => e.kind === 'service.limits').length
+  expect(after).toBe(before)
+})
+
+test('a deploy carries the recorded ceiling into the new container', async () => {
+  const { id } = await wp3Project()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'default' })
+  await put(`/projects/${id}/services/cp-default/limits`, { memoryMb: 512, cpu: 1 })
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  expect(calls).toContain('deploy.limits:demo-main:default:1/512')
+})
+
+test('after a sleep: state suspended against a running intent, runtime asleep, health standby', async () => {
+  const { engine, id } = await wp3Project()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  const bid = await branchId(id)
+  expect(await engine.sleep(keyFor(bid, 'cp-default'), 'idle')).toBe(true)
+
+  expect((await get(`/projects/${id}/services/cp-default/state`)).json()).toEqual({ desiredState: 'running', state: 'suspended' })
+  const row = (await get(`/projects/${id}/services`)).json().services.find((x: { id: string }) => x.id === 'cp-default')
+  expect(row.runtime).toBe('asleep')
+  expect(row.desired_state).toBe('running')
+  // runtime-health separates standby from crashed by the sleep mark, which survives a restart.
+  vi.mocked(dockerFn).mockImplementation(async (args: readonly string[]) =>
+    args[0] === 'ps' && args[1] === '-a' ? Buffer.from('io-demo-main-app-default\texited\n') : Buffer.from(''))
+  const health = (await get(`/projects/${id}/runtime-health`)).json().services
+  expect(health.find((r: { serviceId: string }) => r.serviceId === 'cp-default')).toMatchObject({ status: 'standby', failing: 0 })
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+})
+
+test('a user stop reads stopped, and an exit with no sleep mark reads crashed', async () => {
+  const { id } = await wp3Project()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await post(`/projects/${id}/services/cp-default/stop`)
+  const row = (await get(`/projects/${id}/services`)).json().services.find((x: { id: string }) => x.id === 'cp-default')
+  expect(row.runtime).toBe('stopped')
+  expect(row.desired_state).toBe('stopped')
+  // Back to a running intent, with the container still exited and no sleep mark: that is a crash.
+  await post(`/projects/${id}/services/cp-default/start`)
+  fakeRuntime.put('io-demo-main-app-default', 'exited')
+  vi.mocked(dockerFn).mockImplementation(async (args: readonly string[]) =>
+    args[0] === 'ps' && args[1] === '-a' ? Buffer.from('io-demo-main-app-default\texited\n') : Buffer.from(''))
+  const health = (await get(`/projects/${id}/runtime-health`)).json().services
+  expect(health.find((r: { serviceId: string }) => r.serviceId === 'cp-default')).toMatchObject({ status: 'crashed', failing: 1 })
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+})
+
+test('the start verb wakes an asleep service: docker start, then readiness, then runtime online', async () => {
+  const { engine, id } = await wp3Project()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  const bid = await branchId(id)
+  await engine.sleep(keyFor(bid, 'cp-default'), 'idle')
+  calls.length = 0
+  const r = await post(`/projects/${id}/services/cp-default/start`)
+  expect(r.statusCode).toBe(200)
+  expect(r.json().state).toBe('running')
+  expect(calls.some((c) => c === 'runtime.start:io-demo-main-app-default' || c === 'compute.start:demo-main:default')).toBe(true)
+  expect((await get(`/projects/${id}/services`)).json().services.find((x: { id: string }) => x.id === 'cp-default').runtime).toBe('online')
+})
+
+test('branch create: the clone starts asleep and its databases sleep, unless they are always-on', async () => {
+  const { id } = await wp3Project()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  calls.length = 0
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  const feat = await branchId(id, 'feat')
+  // Compute: created, never started (asleep from birth).
+  expect(calls).toContain('deploy.nostart:demo-feat:default')
+  // Databases: provisioned, readied, then slept with the branch-create reason and their own graces.
+  expect(calls).toContain('runtime.stop:io-demo-feat-pg-db:30')
+  expect(calls).toContain('runtime.stop:io-demo-feat-rd-cache:30')
+  const kinds = (await get(`/projects/${id}/events`)).json().events
+    .filter((e: { kind: string }) => e.kind === 'service.sleep')
+    .map((e: { payload: { reason: string; service: string } }) => `${e.payload.service}:${e.payload.reason}`)
+  expect(kinds).toEqual(expect.arrayContaining(['pg-db:branch-create', 'rd-cache:branch-create']))
+  const rows = (await get(`/projects/${id}/services?branch=feat`)).json().services
+  expect(rows.find((x: { id: string }) => x.id === `${feat}:cp-default`).runtime).toBe('asleep')
+  expect(rows.find((x: { id: string }) => x.id === `${feat}:pg-db`).runtime).toBe('asleep')
+
+  // ...and with always-on set on the compute service (a project-level setting), the same clone
+  // comes up running. A database's scale-to-zero is per BRANCH, so the clone's own instance starts
+  // on the default and sleeps: a preview branch is exactly what should not stay up.
+  await put(`/projects/${id}/services/cp-default/always-on`, { enabled: true })
+  await patch(`/projects/${id}/database/settings`, { scaleToZero: false })
+  calls.length = 0
+  await post(`/projects/${id}/branches`, { name: 'keep', from: 'main' })
+  expect(calls).not.toContain('deploy.nostart:demo-keep:default')
+  expect(calls).toContain('runtime.stop:io-demo-keep-pg-db:30')
+  // main's own instance keeps running, though: its always-on is what the flag was set on.
+  expect(calls).not.toContain('runtime.stop:io-demo-main-pg-db:30')
+})
+
+test('database management wakes a sleeping instance; observability answers 503 and runs no SQL', async () => {
+  const { engine, id } = await wp3Project()
+  const bid = await branchId(id)
+  const pgKey = keyFor(bid, 'pg-db')
+  expect(await engine.sleep(pgKey, 'idle')).toBe(true)
+
+  calls.length = 0
+  for (const [method, url] of [['GET', 'metrics'], ['GET', 'activity'], ['GET', 'query-stats'], ['GET', 'insight']] as const) {
+    const r = await app.inject({ method, url: `/projects/${id}/database/${url}` })
+    expect(r.statusCode, url).toBe(503)
+    expect(r.json().error).toBe('database is sleeping: it wakes on the next connection')
+  }
+  expect(calls.filter((c) => c.startsWith('db.query'))).toEqual([])
+  expect(calls.filter((c) => c.startsWith('runtime.start:'))).toEqual([])
+
+  // Management is an explicit operation: it starts the container first, then runs its SQL.
+  calls.length = 0
+  expect((await get(`/projects/${id}/database/databases`)).statusCode).toBe(200)
+  expect(calls.indexOf('runtime.start:io-demo-main-pg-db')).toBeGreaterThanOrEqual(0)
+  expect(calls.findIndex((c) => c.startsWith('db.query'))).toBeGreaterThan(calls.indexOf('runtime.start:io-demo-main-pg-db'))
+  // ...and now that it is awake, the observability pages answer again.
+  expect((await get(`/projects/${id}/database/metrics`)).statusCode).toBe(200)
+})
+
+test('PATCH database/settings: scaleToZero, idleTimeout and the cpu/memory grid, echoed by the instance', async () => {
+  const { id } = await wp3Project()
+  const before = (await get(`/projects/${id}/database/instance`)).json()
+  expect(before.scaleToZero).toBe(true)
+  expect(before.idleTimeoutSecs).toBe(600)
+  expect(before.routeKey).toBe('pg-db-demo-main')
+
+  const r = await patch(`/projects/${id}/database/settings`, { scaleToZero: false, idleTimeout: 120 })
+  expect(r.statusCode).toBe(200)
+  expect(r.json()).toMatchObject({ scaleToZero: false, idleTimeoutSecs: 120 })
+  expect((await get(`/projects/${id}/database/instance`)).json()).toMatchObject({ scaleToZero: false, idleTimeoutSecs: 120 })
+  // scaleToZero off is what always-on means for a database.
+  expect((await get(`/projects/${id}/events`)).json().events.some((e: { kind: string; payload: { service: string } }) =>
+    e.kind === 'service.alwaysOn' && e.payload.service === 'pg-db')).toBe(true)
+
+  calls.length = 0
+  const sized = await patch(`/projects/${id}/database/settings`, { cpu: '2', memory: '4Gi' })
+  expect(sized.statusCode).toBe(200)
+  expect(sized.json()).toMatchObject({ cpuMilli: 2000, memoryMib: 4096 })
+  expect(calls).toContain('runtime.update:io-demo-main-pg-db:2/4096')
+  // The same grid as compute: 4 GiB does not fit on 1 vCPU, and junk quantities are refused.
+  expect((await patch(`/projects/${id}/database/settings`, { cpu: '1', memory: '4Gi' })).statusCode).toBe(400)
+  expect((await patch(`/projects/${id}/database/settings`, { memory: 'lots' })).statusCode).toBe(400)
+  expect((await patch(`/projects/${id}/database/settings`, { idleTimeout: -5 })).statusCode).toBe(400)
+  // 0 disables sleep for this instance without touching the always-on flag.
+  expect((await patch(`/projects/${id}/database/settings`, { idleTimeout: 0 })).json().idleTimeoutSecs).toBe(0)
+})
+
+test('GET /policy lists service.upgrade, the action PUT limits gates on', async () => {
+  const { id } = await wp3Project()
+  expect(Object.keys((await get(`/projects/${id}/policy`)).json().policy)).toContain('service.upgrade')
+})
 // ---- end region WP3 ----
 
 // ---- region WP4 (data dir) ----
