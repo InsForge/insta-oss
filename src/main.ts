@@ -13,6 +13,7 @@ import { docker } from './docker'
 import { resetAdmin } from './auth'
 import { loadConfig, type Config } from './config'
 import { mkdirSync } from 'node:fs'
+import { networkInterfaces } from 'node:os'
 import { acquireLock, initStatePath, loadState, releaseLock } from './state'
 // ---- region WP4 (data dir) ----
 import { capabilitiesLine, sharedDataDir } from './datadir'
@@ -32,6 +33,13 @@ import { buildTable } from './router/table'
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) })
 
+/** Every IP this process can actually bind. */
+function ownAddresses(): Set<string> {
+  const out = new Set<string>()
+  for (const addrs of Object.values(networkInterfaces())) for (const a of addrs ?? []) out.add(a.address)
+  return out
+}
+
 /** Local mode on Linux only: the docker bridge gateway, so a container started with
  *  `--add-host <name>:host-gateway` reaches the daemon's own listener. On Docker Desktop
  *  host.docker.internal already forwards to host loopback, so the list stays empty there. A failure
@@ -41,7 +49,15 @@ async function bridgeGateway(cfg: Config): Promise<string[]> {
   try {
     const out = await docker(['network', 'inspect', 'bridge', '-f', '{{(index .IPAM.Config 0).Gateway}}'])
     const ip = out.toString('utf8').trim()
-    if (ip) return [ip]
+    if (ip && ownAddresses().has(ip)) return [ip]
+    if (ip) {
+      // instad itself in a bridge-networked container sees the HOST's gateway here, and that
+      // address lives in the host's namespace: `listen` fails with EADDRNOTAVAIL, and because the
+      // extra listener comes up before the boot finishes it would take the whole daemon with it.
+      // Only the convenience path is lost; host.docker.internal still reaches us.
+      console.warn(`warn: the docker bridge gateway ${ip} is not an address of this host; containers reach the daemon through host.docker.internal only`)
+      return []
+    }
   } catch { /* no bridge network, or a docker without that template: warn and carry on */ }
   console.warn('warn: could not read the docker bridge gateway; containers reach the daemon through host.docker.internal only')
   return []
