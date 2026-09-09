@@ -15,15 +15,16 @@
 import { randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import type { Engine } from '../engine'
+import { hostArch } from '../hostarch'
 import { loadState, mutate } from '../state'
 import { parseServiceId } from '../manageddb'
 import type { GatedAction, TemplateDeploymentRecord } from '../types'
 import { TemplateCatalog, TemplateNotFoundError } from './catalog'
 import {
   capLogTail, constraintViolations, DIGEST_EPOCH, envForService, envSpecForService,
-  generateValue, manifestDigest, ManifestError, MissingTemplateVariablesError, parsePlatformRef,
-  parseTemplateManifest, redactLogTail, referencedServices, resolveVariables,
-  LOG_TAIL_LINES, type TemplateManifest,
+  generateValue, manifestArchitectures, manifestDigest, ManifestError,
+  MissingTemplateVariablesError, parsePlatformRef, parseTemplateManifest, redactLogTail,
+  referencedServices, resolveVariables, LOG_TAIL_LINES, type TemplateManifest,
 } from './manifest'
 
 /** A 'running' record younger than this belongs to a live run and answers a poll instead of
@@ -225,6 +226,20 @@ export class TemplateExecutor {
     for (const [name, svc] of Object.entries(manifest.services)) {
       if (svc.build) throw new TemplateError(400, `services.${name} uses build: - template deploys support image services only (build-based templates are deployed via their published image)`)
       if (svc.type === 'worker') throw new TemplateError(400, `services.${name} is a worker - template deploys support web services only in v1 (a portless worker path is a follow-up)`)
+    }
+    // Architecture, here rather than at the pull. A template whose image is published for one
+    // architecture only fails on an arm64 box with docker's `no matching manifest for
+    // linux/arm64/v8`, and it fails in the BACKGROUND, in the deploy step, after the services and
+    // secrets exist: a failed run keeps what it created, so the operator is left tidying up a
+    // half-template to learn something the manifest already knew. Refused synchronously instead,
+    // before the 202, with the two architectures named.
+    const arches = manifestArchitectures(manifest)
+    const host = hostArch()
+    if (arches && !arches.includes(host)) {
+      throw new TemplateError(400,
+        `${manifest.code}@${manifest.version} publishes ${arches.join(' and ')} images only, and this machine is ${host}: `
+        + `its image has no ${host} manifest to pull. Run the template on ${arches.join(' or ')} hardware, or, if you have `
+        + `emulation set up and accept the speed, deploy the image yourself with 'insta deploy --image <ref>'.`)
     }
   }
 

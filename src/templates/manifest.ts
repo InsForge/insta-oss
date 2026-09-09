@@ -92,7 +92,14 @@ export type TemplateMeta = {
   name?: string; tagline?: string; category?: string; tags?: string[]
   logo?: string; links?: Record<string, string>
   draft?: boolean
+  /** CPU architectures the template's deployable image is published for, in OCI naming. Absent is
+   *  "no claim", not "both": an inline manifest a caller composed says nothing about a registry. */
+  architectures?: string[]
 }
+
+/** The architectures a template may claim: the two `install.sh` accepts as a host. A third one
+ *  belongs here only once the installer and the release image agree it is supported. */
+export const TEMPLATE_ARCHITECTURES: readonly string[] = ['amd64', 'arm64']
 
 /** The upstream pin, served verbatim (open shape). `license` is a typed catalog field. */
 export type TemplateUpstream = { repo?: string; image?: string; pinned?: string; license?: string; [key: string]: unknown }
@@ -424,6 +431,23 @@ export function parseTemplateManifest(input: unknown, opts?: { rejectAuthoredSiz
       if (typeof doc.meta.draft !== 'boolean') return bad('meta.draft must be a boolean')
       meta.draft = doc.meta.draft
     }
+    // Validated, never rewritten: the values are stored exactly as authored, so `manifestDigest`
+    // is the same on both sides of the parser split (the platform spreads meta verbatim and does
+    // not know this key yet). A misspelt architecture is refused rather than silently meaning
+    // "runs nowhere", which is what an unrecognised name would amount to at deploy time.
+    if (doc.meta.architectures !== undefined) {
+      if (!Array.isArray(doc.meta.architectures) || doc.meta.architectures.length === 0) {
+        return bad('meta.architectures must be a non-empty array of architecture names')
+      }
+      const arches = doc.meta.architectures.map((a, i) => scalarString(a, `meta.architectures[${i}]`))
+      for (const a of arches) {
+        if (!TEMPLATE_ARCHITECTURES.includes(a)) {
+          return bad(`meta.architectures: '${a}' is not one of ${TEMPLATE_ARCHITECTURES.join(', ')}`)
+        }
+      }
+      if (new Set(arches).size !== arches.length) return bad('meta.architectures lists the same architecture twice')
+      meta.architectures = arches
+    }
     // Links are served (documentation -> documentationUrl) and rendered as outbound anchors, so
     // EVERY value is held to the same absolute-https rule rather than only the one key the catalog
     // reads today.
@@ -474,6 +498,14 @@ function variableOrderOf(stored: unknown, services: Record<string, TemplateServi
 /** Byte cap on a README the catalog serves. The bundled ones run 2.3 to 5.2 KiB, so 128 KiB is
  *  ~25x the largest real one; oversize reads as absent rather than being truncated. */
 export const TEMPLATE_README_MAX_BYTES = 128 * 1024
+
+/** The architectures a manifest claims its images are published for, or `null` when it makes no
+ *  claim. Null is not "both": a manifest that says nothing is not evidence, so the deploy path
+ *  lets it through and the catalog reports the silence rather than inventing an answer. */
+export function manifestArchitectures(manifest: TemplateManifest): string[] | null {
+  const declared = manifest.meta?.architectures
+  return Array.isArray(declared) && declared.length > 0 ? [...declared] : null
+}
 
 /** The manifest's deploy-time variables, merged into the global variable namespace. */
 export function collectVariables(manifest: TemplateManifest): TemplateVariable[] {

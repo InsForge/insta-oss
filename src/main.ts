@@ -10,6 +10,7 @@ import { DockerCompute } from './adapters/compute'
 import { LocalGarage } from './adapters/garage'
 import { LocalManagedDb } from './adapters/manageddb'
 import { docker } from './docker'
+import { initHostArch } from './hostarch'
 import { resetAdmin } from './auth'
 import { loadConfig, type Config } from './config'
 import { mkdirSync } from 'node:fs'
@@ -83,8 +84,14 @@ async function main(): Promise<void> {
   // 60 s so a compose restart whose predecessor was SIGKILLed still boots)
   acquireLock(cfg.dataDir)
   process.on('exit', releaseLock)
-  // docker check
-  try { await docker(['version', '--format', '{{.Server.Version}}']) }
+  // docker check. The same probe reads the daemon's architecture, which decides whether a
+  // template's image can run here at all: dockerd is what pulls, so its answer is the authority,
+  // not this process's. Appended to the existing format string rather than a second `docker`
+  // call, and a blank second field just leaves the process-architecture fallback in place.
+  try {
+    const version = (await docker(['version', '--format', '{{.Server.Version}} {{.Server.Arch}}'])).toString().trim()
+    initHostArch(version.split(/\s+/)[1] ?? null)
+  }
   catch { console.error('error: Docker is required and must be running (insta-oss provisions branches as containers)'); process.exit(1) }
   // extraListenHosts (local + linux: the docker bridge gateway) on a frozen copy of cfg; the
   // primary listener stays cfg.listenHost and WP2's lanes bind the extras (decision 3).

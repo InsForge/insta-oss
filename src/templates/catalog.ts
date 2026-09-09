@@ -8,10 +8,11 @@
 // numbers are per daemon: this box's own deployments, not a global gallery counter.
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { extname, join, resolve, sep } from 'node:path'
+import { hostArch } from '../hostarch'
 import { loadState } from '../state'
 import type { TemplateDeploymentRecord } from '../types'
 import {
-  collectVariables, parseTemplateManifest, TEMPLATE_README_MAX_BYTES,
+  collectVariables, manifestArchitectures, parseTemplateManifest, TEMPLATE_README_MAX_BYTES,
   type TemplateManifest, type TemplateVariable,
 } from './manifest'
 
@@ -259,8 +260,14 @@ export class TemplateCatalog {
     return { required: vars.filter((v) => v.required), optional: vars.filter((v) => !v.required) }
   }
 
-  /** GET /templates: non-draft templates, filtered by exact category and free-text query. */
-  listTemplates(q: { query?: string; category?: string } = {}): { templates: Array<Record<string, unknown>> } {
+  /** GET /templates: non-draft templates, filtered by exact category and free-text query.
+   *
+   *  `hostArchitecture` rides the envelope because it belongs to the BOX, not to any template:
+   *  every row carries the architectures its image is published for, and a consumer that has both
+   *  can grey out what this machine cannot run before someone clicks Deploy. The cloud's own
+   *  gallery has no use for either field (it picks the machine), so this is additive on a route
+   *  that already differs by serving the logo inline. */
+  listTemplates(q: { query?: string; category?: string } = {}): { templates: Array<Record<string, unknown>>; hostArchitecture: string } {
     const wanted = q.category?.toLowerCase()
     const needle = q.query?.toLowerCase()
     const state = loadState()
@@ -291,6 +298,7 @@ export class TemplateCatalog {
           // The README belongs to the detail view: it would make this listing megabytes wide.
           logoUrl: e.logoUrl,
           license: e.license,
+          architectures: manifestArchitectures(e.manifest),
           updatedAt: e.updatedAt,
         }
       })
@@ -299,11 +307,11 @@ export class TemplateCatalog {
         const hay = `${entry.code} ${entry.name} ${entry.tagline ?? ''} ${(entry.tags as string[]).join(' ')}`.toLowerCase()
         return hay.includes(needle)
       })
-    return { templates }
+    return { templates, hostArchitecture: hostArch() }
   }
 
   /** GET /templates/:code: the detail view; a draft or unknown code is a 404. */
-  getTemplate(code: string): { template: Record<string, unknown> } {
+  getTemplate(code: string): { template: Record<string, unknown>; hostArchitecture: string } {
     const e = this.find(code)
     if (!e || e.draft) throw new TemplateNotFoundError(code)
     const meta = e.manifest.meta ?? {}
@@ -332,9 +340,11 @@ export class TemplateCatalog {
         logoUrl: e.logoUrl,
         readme: e.readme,
         license: e.license,
+        architectures: manifestArchitectures(e.manifest),
         documentationUrl: e.documentationUrl,
         updatedAt: e.updatedAt,
       },
+      hostArchitecture: hostArch(),
     }
   }
 }

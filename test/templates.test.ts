@@ -71,7 +71,7 @@ test('GET /templates lists the bundled non-draft codes with every list field typ
   expect(templates.map((t: { code: string }) => t.code)).toEqual(['9router', 'claude-code', 'codex', 'dsh', 'hermes', 'n8n', 'pi'])
   const n8n = templates.find((t: { code: string }) => t.code === 'n8n')
   expect(n8n).toMatchObject({
-    version: '1.3.1', name: 'n8n', category: 'automation', tags: ['automation', 'ai'],
+    version: '1.3.2', name: 'n8n', category: 'automation', tags: ['automation', 'ai'],
     requiredVarCount: 0, totalProjects: 0, activeProjects: 0, deploymentCount: 0, activeDeploymentCount: 0,
     license: 'LicenseRef-n8n-Sustainable-Use-License',
   })
@@ -94,7 +94,7 @@ test('GET /templates/:code carries the detail fields; a draft and an unknown cod
   const r = await get('/templates/n8n')
   expect(r.statusCode).toBe(200)
   const t = r.json().template
-  expect(t).toMatchObject({ code: 'n8n', version: '1.3.1', maintainer: 'official', source: 'official', documentationUrl: 'https://docs.n8n.io' })
+  expect(t).toMatchObject({ code: 'n8n', version: '1.3.2', maintainer: 'official', source: 'official', documentationUrl: 'https://docs.n8n.io' })
   expect(t.variables).toEqual({ required: [], optional: [] })
   // The five env groups are normalized onto every service, even the ones the author left out.
   expect(Object.keys(t.services.n8n.env).sort()).toEqual(['fixed', 'generated', 'optional', 'platform', 'required'])
@@ -203,7 +203,7 @@ test('deploying n8n reaches succeeded: services, secrets, volume, attribution an
   const r = await post(`/projects/${id}/template-deployments`, { templateCode: 'n8n', branch: 'main' })
   expect(r.statusCode).toBe(202)
   const { deploymentId, deployment } = r.json()
-  expect(deployment).toMatchObject({ status: 'running', step: 'create_services', templateCode: 'n8n', templateVersion: '1.3.1' })
+  expect(deployment).toMatchObject({ status: 'running', step: 'create_services', templateCode: 'n8n', templateVersion: '1.3.2' })
   expect(deployment.services).toEqual([{ name: 'n8n', state: 'pending' }])
   await executor.idle()
 
@@ -264,7 +264,7 @@ test('a version mismatch, a draft code and an unrunnable manifest are refused be
   const id = await project()
   const mismatch = await post(`/projects/${id}/template-deployments`, { templateCode: 'n8n', templateVersion: '0.0.1', branch: 'main' })
   expect(mismatch.statusCode).toBe(404)
-  expect(mismatch.json().error).toBe('template version not found: n8n@0.0.1 (the registry serves 1.3.1)')
+  expect(mismatch.json().error).toBe('template version not found: n8n@0.0.1 (the registry serves 1.3.2)')
   expect((await post(`/projects/${id}/template-deployments`, { templateCode: 'openclaw', branch: 'main' })).statusCode).toBe(404)
   expect((await post(`/projects/${id}/template-deployments`, { branch: 'main' })).statusCode).toBe(400)
 
@@ -403,7 +403,7 @@ test('idempotency: the same id echoes, a changed manifest 409s, and a resume com
 
   // A DIFFERENT manifest under the same id is a hard 409, never a silent redeploy.
   const conflict = await post(`/projects/${id}/template-deployments`, {
-    manifest: { code: 'n8n', version: '1.3.1', services: { n8n: { type: 'web', image: 'other', healthcheck: '/healthz' } } },
+    manifest: { code: 'n8n', version: '1.3.2', services: { n8n: { type: 'web', image: 'other', healthcheck: '/healthz' } } },
     branch: 'main', deploymentId,
   })
   expect(conflict.statusCode).toBe(409)
