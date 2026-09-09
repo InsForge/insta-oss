@@ -1366,14 +1366,12 @@ export class Engine {
     const t = this.dbTarget(projectId, branchName, group)
     const branch = t.branch
     const gib = branch.dbVolumeGib ?? DB_VOLUME_DEFAULT_GIB
-    const lane = this.laneAddress(t.project, branch, t.serviceId)                                     // WP2
-    const name = t.serviceId.replace(/^pg-/, '')
+    // `host`/`port` stay the container's until WP3 lands (contract 7.2 gives that row's lane
+    // address, routeKey and scale-to-zero fields to WP3, with WP2's laneAddress underneath); WP5
+    // only makes the row name WHICH postgres service it describes.
     return {
-      id: t.serviceId, name, state: branch.status,
-      // Where a CLIENT dials: the lane, not the container (a container name resolves only from
-      // inside the branch network). `routeKey` is the minted label the router matches on.
-      host: lane.host, port: lane.port,
-      routeKey: branch.databases?.[t.serviceId]?.host ?? this.labelFor('postgres', name, this.ref(t.project, branch)),
+      id: t.serviceId, name: t.serviceId.replace(/^pg-/, ''), state: branch.status,
+      host: t.container, port: 5432,
       connectionPooling: false, deletionProtection: false, scaleToZero: false,
       volumeSize: `${gib}Gi`, volumeGib: gib,
       storageSize: `${gib}Gi`, storageGiB: gib, // DEPRECATED aliases — dropped when the platform drops them

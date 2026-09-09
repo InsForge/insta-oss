@@ -334,8 +334,12 @@ test('services carry dashboard fields (runtime/endpoint/updated_at) and are bran
   expect(cp.updated_at).toBeTruthy()
   expect(cp.status).toBe('ready') // CLI-printed field untouched
 
+  // Off the default branch every row id carries the branch qualifier (decision 49), because the
+  // CLI takes an id from THIS list and calls the follow-up route with no branch at all.
+  const featId = (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === 'feat').id
   const feat = (await get(`/projects/${id}/services?branch=feat`)).json().services
-  expect(feat.find((s: { id: string }) => s.id === 'cp-default').endpoint).toBe('default-demo-feat.localhost:8080')
+  expect(feat.find((s: { id: string }) => s.id === `${featId}:cp-default`).endpoint).toBe('default-demo-feat.localhost:8080')
+  expect(feat.map((s: { id: string }) => s.id)).toContain(`${featId}:pg-db`)
   expect((await get(`/projects/${id}/services?branch=nope`)).statusCode).toBe(404)
 })
 
@@ -737,7 +741,12 @@ test('service rename: re-keys group, containers, bindings; conflicts 409; pg/sto
   await post(`/projects/${id}/services`, { type: 'compute', name: 'worker' })
   expect((await post(`/projects/${id}/services/cp-worker/rename`, { name: 'gateway' })).statusCode).toBe(409)
   expect((await post(`/projects/${id}/services/cp-gateway/rename`, { name: 'Bad_Name' })).statusCode).toBe(400)
-  expect((await post(`/projects/${id}/services/pg-db/rename`, { name: 'primary' })).statusCode).toBe(501)
+  // postgres renames for real now: the container and the minted hostname move, the data
+  // directory keeps its immutable id (decision 16).
+  const pgRename = await post(`/projects/${id}/services/pg-db/rename`, { name: 'primary' })
+  expect(pgRename.statusCode).toBe(200)
+  expect(pgRename.json().service).toMatchObject({ id: 'pg-primary', type: 'postgres', name: 'primary' })
+  expect(calls).toContain('db.rename:io-demo-main-pg-db->io-demo-main-pg-primary')
   expect((await post(`/projects/${id}/services/cp-nope/rename`, { name: 'x' })).statusCode).toBe(404)
 })
 
@@ -1105,6 +1114,7 @@ test('object routes answer 501 when the storage adapter has no object support', 
   const local = buildServer(new Engine(db, compute, bare, managed))
   const r = await local.inject({ method: 'POST', url: '/orgs/local/projects', payload: { name: 'demo' } })
   const pid = r.json().project.id
+  await local.inject({ method: 'POST', url: `/projects/${pid}/services`, payload: { type: 'storage', name: 'store' } })
   const res = await local.inject({ method: 'GET', url: `/projects/${pid}/services/st-store/objects` })
   expect(res.statusCode).toBe(501)
   expect(res.json().error).toMatch(/not supported by this storage adapter/)
@@ -1301,11 +1311,23 @@ test('metrics/logs target managed-db containers per type; junk components 400', 
 test('a pre-scaffold branch row (no databases) keeps resolving its legacy io-<ref>-pg container', async () => {
   const id = await createProject()
   await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
-  mutate((s) => { for (const b of Object.values(s.branches)) if (b.projectId === id) delete b.databases })
+  // The pre-WP5 shape: the deprecated single-service fields, and no `databases`/`buckets` rows.
+  // migrateState presents them as pg-db / st-store on every parse.
+  mutate((s) => {
+    for (const b of Object.values(s.branches)) {
+      if (b.projectId !== id) continue
+      b.dbUrl = b.databases!['pg-db'].url
+      b.bucket = b.buckets!['st-store'].bucket
+      b.s3 = b.buckets!['st-store'].env
+      delete b.databases
+      delete b.buckets
+    }
+  })
 
   expect((await get(`/projects/${id}/database/instance`)).json().host).toBe('io-demo-main-pg')
+  const featBranchId = (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === 'feat').id
   const services = (await get(`/projects/${id}/services?branch=feat`)).json().services
-  expect(services.find((s: { id: string }) => s.id === 'pg-db').endpoint).toMatch(/^127\.0\.0\.1:2\d{4}$/)
+  expect(services.find((s: { id: string }) => s.id === `${featBranchId}:pg-db`).endpoint).toMatch(/^127\.0\.0\.1:2\d{4}$/)
   // the legacy DSN still comes off `dbUrl`
   expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.DATABASE_URL).toBe('postgres://postgres:pw@io-demo-main-pg-db:5432/app')
 
