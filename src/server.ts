@@ -515,6 +515,33 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.get('/projects/:id/backups', async (_req, reply) => notCloud(reply, 'managed backups (locally: pg_dump with the DATABASE_URL from `insta secrets`)'))
   app.delete('/projects/:id/backups/:bid', async (_req, reply) => notCloud(reply, 'managed backups'))
   app.post('/projects/:id/backups/:bid/restore', async (_req, reply) => notCloud(reply, 'managed backups'))
+  // GitHub repo connect needs the GitHub App, a public webhook URL and the remote build gateway.
+  app.post('/orgs/:id/github/setup', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/orgs/:id/github/setup/complete', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/github/installations', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/github/installations/:iid/repos', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/projects/:id/github/detect', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/projects/:id/github/public-repo/resolve', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/projects/:id/github/repo-binding', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/projects/:id/github/repo-binding', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.delete('/projects/:id/github/repo-binding', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/projects/:id/github/builds', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.put('/projects/:id/services/:sid/source', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.patch('/projects/:id/services/:sid/source', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.delete('/projects/:id/services/:sid/source', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/projects/:id/services/:sid/source/deploy', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/projects/:id/services/:sid/source/builds', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  // A local compute service always runs an image, so its source is a real answer, not a 501.
+  app.get('/projects/:id/services/:sid/source', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    const branch = (req.query as { branch?: string }).branch
+    try {
+      const svc = (await engine.services(id, branch)).find((s) => s.id === sid)
+      if (!svc) return reply.code(404).send({ error: 'service not found' })
+      if (svc.type !== 'compute') return reply.code(400).send({ error: 'only a compute service has a source' })
+      return { source: { type: 'image', image: svc.image ?? null } }
+    } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : 'project not found' }) }
+  })
   // Not-yet surfaces (real local answers exist meanwhile):
   app.get('/projects/:id/deploy-events', async (_req, reply) => notYet(reply, 'the deploy-event feed', 'use `insta events` and `insta logs`'))
 
@@ -670,7 +697,7 @@ export function buildServer(engine: Engine): FastifyInstance {
   // no CORS, no auth). API routes above always win; unknown non-API GETs fall back to the SPA.
   const uiDist = process.env.INSTA_OSS_UI_DIST ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'ui', 'dist')
   const isApiPath = (url: string): boolean =>
-    ['/projects', '/orgs', '/me', '/tokens', '/healthz', '/regions', '/images', '/invitations'].some((p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`))
+    ['/projects', '/orgs', '/me', '/tokens', '/healthz', '/regions', '/images', '/invitations', '/github'].some((p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`))
   if (existsSync(join(uiDist, 'index.html'))) {
     app.register(fastifyStatic, { root: uiDist, wildcard: false })
     app.setNotFoundHandler((req, reply) => {

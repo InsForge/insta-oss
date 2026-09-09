@@ -413,7 +413,7 @@ export class Engine {
   async services(projectId: string, branchName?: string): Promise<Array<{
     id: string; type: string; name: string; status: string; machine_count?: number; domain?: string
     runtime?: string; endpoint?: string; updated_at?: string; public?: boolean; desired_state?: string
-    volume_gib?: number | null; port?: number
+    volume_gib?: number | null; port?: number; image?: string | null
   }>> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
@@ -459,6 +459,7 @@ export class Engine {
         const app = branch?.apps[g]
         return {
           id: `cp-${g}`, type: 'compute', name: g, status: 'ready', machine_count: 1,
+          image: app?.image ?? null,
           volume_gib: project.computeVolumes?.[g]?.sizeGib ?? null, // platform Service.volume_gib (compute only)
           desired_state: app?.desiredState ?? 'running',
           domain: app?.url,

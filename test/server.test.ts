@@ -230,6 +230,13 @@ test('every cloud-only or not-yet route answers a clean 501, never a bare 404', 
     ['POST', '/projects/x/backups'], ['GET', '/projects/x/backups'], ['DELETE', '/projects/x/backups/b1'], ['POST', '/projects/x/backups/b1/restore'],
     ['GET', '/orgs/local/billing/cycle'], ['GET', '/orgs/local/billing/overview'],
     ['POST', '/orgs/local/billing/checkout'], ['POST', '/orgs/local/billing/portal'],
+    ['POST', '/orgs/local/github/setup'], ['POST', '/orgs/local/github/setup/complete'],
+    ['GET', '/github/installations'], ['GET', '/github/installations/7/repos'],
+    ['POST', '/projects/x/github/detect'], ['POST', '/projects/x/github/public-repo/resolve'],
+    ['GET', '/projects/x/github/repo-binding'], ['POST', '/projects/x/github/repo-binding'], ['DELETE', '/projects/x/github/repo-binding'],
+    ['GET', '/projects/x/github/builds'],
+    ['PUT', '/projects/x/services/cp-x/source'], ['PATCH', '/projects/x/services/cp-x/source'], ['DELETE', '/projects/x/services/cp-x/source'],
+    ['POST', '/projects/x/services/cp-x/source/deploy'], ['GET', '/projects/x/services/cp-x/source/builds'],
   ]
   for (const [method, url] of cloudOnly) {
     const r = await app.inject({ method: method as 'GET', url })
@@ -384,6 +391,9 @@ test('dashboard serving: SPA fallback for non-API GETs; API routes always win', 
   const api = await ui.inject({ method: 'GET', url: '/projects/nope' })
   expect(api.statusCode).toBe(404)
   expect(api.json().error).toBeTruthy() // JSON error, not the SPA shell
+  const gh = await ui.inject({ method: 'GET', url: '/github/nope' })
+  expect(gh.statusCode).toBe(404)
+  expect(gh.json().error).toBeTruthy()
 })
 
 test('dashboard serving: without a build, / explains how to get the UI', async () => {
@@ -1312,4 +1322,14 @@ test('metrics/logs target managed-db containers per type; junk components 400', 
   expect(bad.statusCode).toBe(400)
   expect(bad.json().error).toBe('component must be db|compute|redis|mysql|mongodb')
   expect((await get(`/projects/${id}/logs?component=junk`)).statusCode).toBe(400)
+})
+
+test('a compute service answers its source locally — it always runs an image; the repo routes stay cloud-only', async () => {
+  const id = await createProject('source-demo')
+  await app.inject({ method: 'POST', url: `/projects/${id}/services`, payload: { type: 'compute', name: 'web' } })
+  const r = await app.inject({ method: 'GET', url: `/projects/${id}/services/cp-web/source` })
+  expect(r.statusCode).toBe(200)
+  expect(r.json()).toEqual({ source: { type: 'image', image: null } })
+  expect((await app.inject({ method: 'GET', url: `/projects/${id}/services/cp-nope/source` })).statusCode).toBe(404)
+  expect((await app.inject({ method: 'GET', url: `/projects/${id}/services/pg-db/source` })).statusCode).toBe(400)
 })
