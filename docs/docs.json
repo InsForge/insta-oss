@@ -92,6 +92,7 @@
             "icon": "right-left",
             "pages": [
               "migrate/heroku",
+              "migrate/render",
               "migrate/railway"
             ]
           },

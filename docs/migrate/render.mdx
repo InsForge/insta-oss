@@ -1,0 +1,139 @@
+---
+title: "Migrate from Render"
+description: "Move a Render web service, its environment, and its Postgres onto InstaCloud."
+---
+
+Render maps onto InstaCloud closely: a web service becomes a **compute** service, Render Postgres becomes a **postgres** service, and environment variables become project secrets bound into the app's environment. Your `render.yaml`, if you have one, is the fastest inventory you will get.
+
+## TL;DR
+
+```bash
+render services -o json --confirm             # inventory: what is actually deployed
+npx -y insta@latest setup agent --create      # install the CLI, link this dir to a new project
+insta services add compute app
+insta services add postgres db
+insta secrets bind DATABASE_URL postgres/db --to compute/app
+insta compute connect-repo <owner/repo> app   # no Dockerfile needed — nixpacks detects the runtime
+# copy env vars (step 3), then the data (step 4 — read the version note first)
+insta compute restart app
+insta compute set-domain <your-domain> --group app
+```
+
+<Steps>
+  <Step title="Inventory the Render service" titleSize="h2">
+    The Render CLI is interactive by default. `-o json` and `--confirm` make it scriptable.
+
+    ```bash
+    render services -o json --confirm         # services AND databases, in one call
+    render postgres list -o json --confirm
+    ```
+
+    If the repo has a **`render.yaml`**, read it instead of clicking around: it declares every service, every database, and how the environment is wired — `fromDatabase` for connection strings, `fromService` for cross-service values, `generateValue` for secrets Render invented, and `sync: false` for the ones a human typed in. Those last two matter here: a `generateValue` secret has no source of truth outside Render, and a `sync: false` one was never in the file at all.
+
+    <Note>
+      A **free** Render Postgres reports an `expiresAt` — 30 days from creation, then a 14-day grace period before deletion. If your source database is on the free tier, check that date before planning a migration window, and note that free instances have no backups and no logical exports, so `pg_dump` over the connection string is the only way data leaves.
+    </Note>
+  </Step>
+
+  <Step title="Create the project and its services" titleSize="h2">
+    ```bash
+    npx -y insta@latest setup agent --create
+    insta services add compute app
+    insta services add postgres db          # add redis/mysql/mongodb/storage to match
+    ```
+
+    A new project starts empty — nothing is provisioned until you ask for it.
+  </Step>
+
+  <Step title="Bind the database, get the app running, then copy the env" titleSize="h2">
+    Nothing is auto-injected into compute — bind each credential the app needs first.
+
+    ```bash
+    insta secrets bind DATABASE_URL postgres/db --to compute/app
+    ```
+
+    A Render service almost certainly has **no Dockerfile** — Render's buildpacks did that job — so the shortest path is to let InstaCloud do the same:
+
+    ```bash
+    insta compute connect-repo <owner/repo> app
+    ```
+
+    That attaches your repo to the compute service you just made and builds it server-side, detecting the runtime with nixpacks when there is no Dockerfile. `--public` skips the GitHub App installation; `--root-dir` picks one directory out of a monorepo. If you would rather write a Dockerfile, `insta build . --port <n>` prints the install and start commands it detected as a starting point, and `insta deploy --image <registry/image> --port <n>` works if you already publish an image.
+
+    Then the environment. Two groups get skipped: Render's own injected variables (`RENDER_*`, `PORT`), and **anything you bound above** — `DATABASE_URL`, `REDIS_URL`, the `AWS_*` storage credentials — because those come from the service that minted them and InstaCloud refuses a plain secret that collides with a binding.
+
+    ```bash
+    insta secrets set <NAME>                  # one per call; value read from stdin
+    ```
+
+    <Warning>
+      **Values read on stdin are trimmed.** A value whose leading or trailing whitespace is meaningful is silently corrupted that way; pass it as an argument instead — `insta secrets set NAME "  padded  "` preserves it byte-for-byte, at the cost of the value appearing in your shell history. An **empty** value is refused either way.
+    </Warning>
+
+    <Warning>
+      `--port` must equal the port your server actually listens on. `PORT` is injected for you, so an app that reads `$PORT` is fine; a hardcoded port boots "successfully" and refuses every request.
+    </Warning>
+  </Step>
+
+  <Step title="Move the data" titleSize="h2">
+    Stop the writers first. Render has no maintenance-mode switch, so scale the web service to zero (or suspend it) and do the same for any background worker and cron job — a suspended web service with a live worker is still writing.
+
+    <Warning>
+      **Check both Postgres majors before you start.** Render provisions Postgres **18**; InstaCloud provisions **16**, and the major is not selectable — `insta services list` prints it (`postgres/db [pg16]`). That makes this a major-version **downgrade**, and `pg_dump` does not support restoring into an older major: a pg16 client refuses to read an 18 server, and a pg18 client emits statements pg16 rejects, starting with `SET transaction_timeout` (a PG17+ setting).
+
+      So this step is not a plain `pg_dump | psql`. Either filter the incompatible prelude out of a plain-format pg18 dump, or dump `--data-only` and build the schema against pg16 yourself. Verify afterwards that sequences, constraints and indexes survived — a restore that exits `0` having dropped a sequence position is still a failed migration.
+    </Warning>
+
+    Whatever route you take, verify rather than trusting the exit code:
+
+    ```bash
+    T="$(insta db url --group db)"
+    psql "$T" -c "select relname, n_live_tup from pg_stat_user_tables order by n_live_tup desc limit 5"
+    psql "$T" -c "select sequencename, last_value from pg_sequences order by sequencename"
+    psql "$T" -c "select extname from pg_extension order by extname"
+    ```
+
+    Run the same three against Render (`render psql <postgres-id> --command "…" -o json --confirm`) and diff. Compare extension **sets** rather than asserting presence: a fresh InstaCloud postgres already ships `pgcrypto`, `uuid-ossp`, `pgaudit`, `vector`, `pg_stat_monitor` and `pg_stat_statements`, so a `CREATE EXTENSION IF NOT EXISTS` in the dump is a no-op and proves nothing.
+  </Step>
+
+  <Step title="Point the app at the new database" titleSize="h2">
+    ```bash
+    insta compute restart app
+    ```
+
+    A restart re-runs the image already recorded — no rebuild — and re-resolves the environment.
+
+    <Warning>
+      If you stopped the InstaCloud service earlier, `insta compute start` alone is **not** enough: it brings the machine back with the environment it was deployed with, so the app keeps talking to whatever it was bound to before. Run `start` and then `restart`. Confirm at the machine, not at the binding:
+
+      ```bash
+      insta compute exec app -- printenv DATABASE_URL
+      ```
+
+      `insta secrets bindings` reports what *should* be bound and will happily show the new source while the running machine still holds the old one.
+    </Warning>
+  </Step>
+
+  <Step title="Move the domain" titleSize="h2">
+    ```bash
+    insta compute set-domain <your-domain> --group app
+    insta compute check-domain <your-domain> --group app
+    ```
+
+    `set-domain` does not change your DNS — it attaches the domain and returns the records to publish at your provider. Publish them, then re-run `check-domain`. Keep Render write-frozen until the old records have aged out of resolver caches.
+
+    Once traffic is served from InstaCloud and you have soaked for a while, suspend the Render service.
+  </Step>
+</Steps>
+
+## Workers and cron jobs
+
+**Background workers** become a second compute service. Give the worker a port and let it listen — one line is enough (`require('net').createServer().listen(process.env.PORT)`) — and leave always-on enabled, because a suspended worker has no incoming traffic to wake it.
+
+**Render cron jobs** have no direct equivalent. Either run an in-process scheduler inside a web service (keep it always-on, and note that replicas each run every tick, so two replicas fire every job twice), or use `pg_cron`, which InstaCloud's Postgres ships.
+
+## What this guide does not cover
+
+Rolling back after the new database has taken writes, moving objects out of Render Disks or an external bucket, and zero-downtime cutovers via logical replication.
+
+Your coding agent has the full runbook — the ordered cutover with its pass conditions and rollback boundary — in the `insta` skill installed by `setup agent`. Ask it to migrate the service and it will follow that procedure rather than this summary.
