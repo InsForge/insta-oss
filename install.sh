@@ -82,7 +82,7 @@ usage() {
 
 # ---- flags ----
 PRINT=''; F_DOMAIN=''; F_EMAIL=''; F_VERSION=''; F_TLS=''; F_IMG_GIB=''; F_DATA_DIR=''
-need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"; }
+need() { if [ $# -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value"; fi; }
 while [ $# -gt 0 ]; do
   case $1 in
     --domain) need "$@"; F_DOMAIN=$2; shift 2 ;;
@@ -211,9 +211,22 @@ CA_FILE=''
 if [ "$TLS" = internal ] && { [ -n "$PRINT" ] || [ -f "$DATA/edge/ca.pem" ]; }; then CA_FILE=$DATA/edge/ca.pem; fi
 
 # Docker address pools known to the box (for the firewall rules); refined by ensure_pools.
+# Every base is checked against the CIDR grammar before it is kept. It comes out of a file this
+# script does not own, it is interpolated into the firewall lines, and run_rules evals those, so
+# anything that is not a.b.c.d/len is dropped with a warning rather than carried into a root shell.
+valid_cidr() { printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'; }
+keep_cidrs() {
+  _out=''
+  for _c in $1; do
+    if valid_cidr "$_c"; then _out="$_out $_c"
+    else warn "ignoring an address pool base that is not a CIDR block: $_c"
+    fi
+  done
+  printf '%s' "${_out# }"
+}
 POOL_BASES=$POOL_BASE_DEFAULT
 if [ -r "$DAEMON_JSON" ] && grep -q '"default-address-pools"' "$DAEMON_JSON"; then
-  POOL_BASES=$(grep -o '"base" *: *"[^"]*"' "$DAEMON_JSON" | sed 's/.*: *"//; s/"$//' | tr '\n' ' ')
+  POOL_BASES=$(keep_cidrs "$(grep -o '"base" *: *"[^"]*"' "$DAEMON_JSON" | sed 's/.*: *"//; s/"$//' | tr '\n' ' ')")
 fi
 
 # ---- renderers ----
@@ -516,6 +529,7 @@ ensure_pools() {
     # The pools this script writes are the normal state of an installed box, so seeing them on an
     # upgrade is not a warning. Anything else is: it caps the box at that many branch networks.
     if [ "$_p" = "$POOL_BASE_DEFAULT" ]; then log "$DAEMON_JSON already sets default-address-pools ($_p)"
+    elif [ -z "$_p" ]; then warn "$DAEMON_JSON sets default-address-pools but none of its bases parse as a CIDR block: left as is, and no per-pool firewall rule is written for them"
     else warn "$DAEMON_JSON already sets default-address-pools ($_p): left as is; each branch needs one network"
     fi
     return
@@ -530,7 +544,7 @@ ensure_pools() {
   render_daemon_json > "$DAEMON_JSON"
   POOL_BASES=$POOL_BASE_DEFAULT
   log "wrote $DAEMON_JSON (default-address-pools 10.100.0.0/14, one /24 per branch network); restarting Docker"
-  [ "$DOCKER_FRESH" = 1 ] && [ "$STACK_UP" = 0 ] || log "  (running containers restart with it)"
+  if [ "$DOCKER_FRESH" != 1 ] || [ "$STACK_UP" != 0 ]; then log "  (running containers restart with it)"; fi
   restart_docker
 }
 ensure_pools

@@ -27,8 +27,8 @@ PROJECT=e2e-server-$RUN
 API=https://api.$DOMAIN
 CA=/var/lib/instacloud/edge/ca.pem
 INSTALL_LOG=${E2E_INSTALL_LOG:-$ROOT/install.log}
-export INSTA_OSS_DOMAIN=$DOMAIN
-export INSTA_OSS_TLS=$TLS
+export INSTA_OSS_DOMAIN="$DOMAIN"
+export INSTA_OSS_TLS="$TLS"
 export API
 
 INSTA_OSS_IDLE_COMPUTE_SEC=${INSTA_OSS_IDLE_COMPUTE_SEC:-15}
