@@ -72,10 +72,22 @@ have work to flush.
 - **A request on any lane.** HTTP, Postgres, Redis, MongoDB or MySQL. The connection is held while
   the container starts, for up to 60 seconds, plus up to 30 seconds of readiness retries after
   that. You see a slow first request, not an error.
+
+  Readiness here means the port accepts a connection. That is the whole test for an HTTP service,
+  and it is not the same thing as the app being ready to answer: an app that binds its port early
+  and mounts its routes later will take the forwarded request and answer it out of its own
+  half-built stack, so the first page after a wake can come back 404 or 502 from the app rather
+  than slow. The declared template healthcheck gates a deploy, not a wake. Databases are probed on
+  the wire instead, so they do not have this window.
 - **`insta compute start`**, and any management call that needs the service up.
 - **A deploy**, which starts the replacement container.
 
-Wake takes 1 to 3 seconds for an app and a little longer for Postgres.
+Wake takes 1 to 3 seconds for a small app and a little longer for Postgres. Measured on a 2 vCPU,
+2 GiB box: a static web image woke in 0.5 to 1.3 seconds and Postgres in 1.2 to 2.2 seconds, both
+as documented. A large image is a different number entirely, because the wake is a cold process
+start and the work is the app's own boot: the automation and agent-gateway templates on that same
+box woke in 14 to 28 seconds, and one cold wake under memory pressure took 164 seconds. Size the
+expectation to the image, and keep anything that has to answer a browser promptly always-on.
 
 `insta compute stop` is different: it is a durable intent, and traffic never wakes a service you
 stopped. Requests answer 503 until you run `insta compute start`.
@@ -116,7 +128,7 @@ Set these in `/etc/instacloud/instad.env`, then `cd /etc/instacloud && docker co
 | `INSTA_OSS_CREATE_GRACE_SEC` | 600 | protection for a newly created service |
 | `INSTA_OSS_STOP_GRACE_SEC` | 10 | seconds before SIGKILL for compute |
 | `INSTA_OSS_STOP_GRACE_DB_SEC` | 30 | seconds before SIGKILL for a database |
-| `INSTA_OSS_WAKE_TIMEOUT_SEC` | 60 | how long a request is held for a wake |
+| `INSTA_OSS_WAKE_TIMEOUT_SEC` | 60 | how long a request is held for a wake. A client that gives up and retries starts a fresh hold, so a slow image can cost several of these before it answers |
 | `INSTA_OSS_READY_WINDOW_MS` | 30000 | retry window for a just woken upstream |
 | `INSTA_OSS_RAM_FLOOR_PCT` | 15 | free-memory floor for pressure eviction, 0 disables it |
 | `INSTA_OSS_MEM_BUDGET_MB` | unset | assumed total memory, needed for eviction on macOS |
