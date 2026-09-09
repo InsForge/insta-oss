@@ -112,18 +112,24 @@ cstate() {
   printf '%s\n' "$_s"
 }
 
-# url_host URL -> the host part, without scheme, port or path.
+# url_host URL -> the host part, without scheme, userinfo, port or path. The userinfo matters:
+# every DSN this file is asked about carries `user:password@` in front of the host.
 url_host() {
-  printf '%s\n' "$1" | sed -e 's|^[a-z]*://||' -e 's|/.*$||' -e 's|:.*$||'
+  printf '%s\n' "$1" | sed -e 's|^[a-z]*://||' -e 's|^.*@||' -e 's|/.*$||' -e 's|:.*$||'
 }
 
-# resolves NAME : does this host resolve? Through node, because `getent` is a glibc tool that
-# does not exist on macOS, where the *.localhost names of local mode do resolve and the probe
-# has to say so.
+# resolves NAME : can this host be reached by name? The system resolver first, which is what psql
+# and every non-curl client use, then curl, which maps the reserved .localhost TLD to loopback
+# itself (RFC 6761) on a box whose resolver does not, and is what these scripts use for app URLs.
+# `getent` did both jobs on glibc and exists on no other platform.
 resolves() {
-  node -e '
-    require("dns").lookup(process.argv[1], function (e) { process.exit(e ? 1 : 0) })
-  ' "$1" >/dev/null 2>&1
+  if node -e 'require("dns").lookup(process.argv[1], function (e) { process.exit(e ? 1 : 0) })' \
+      "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  _rc=0
+  curl -s -o /dev/null --connect-timeout 2 --max-time 3 "http://$1:1/" >/dev/null 2>&1 || _rc=$?
+  [ "$_rc" != "6" ]   # 6 is curl's "could not resolve host"; anything else got that far
 }
 
 # ensure_host NAME [IP] : make NAME resolve, falling back to /etc/hosts.
