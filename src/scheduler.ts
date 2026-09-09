@@ -14,6 +14,7 @@
 // so runtime-health can tell standby from crashed after a restart.
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { Config } from './config'
 import { docker } from './docker'
 import { parseSize } from './observe'
@@ -349,7 +350,7 @@ export class Scheduler {
     // saying otherwise sends them looking for a missing /proc/meminfo they do not need.
     if (this.cfg.sleep.ramFloorPct > 0 && !this.runtime.memory() && !this.memoryWarned) {
       this.memoryWarned = true
-      console.warn('memory-pressure eviction disabled (no /proc/meminfo and no INSTA_OSS_MEM_BUDGET_MB)')
+      console.warn('memory-pressure eviction disabled (no cgroup ceiling, no /proc/meminfo and no INSTA_OSS_MEM_BUDGET_MB)')
     }
   }
 
@@ -608,11 +609,41 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   })
 }
 
+/** The memory ceiling of THIS process's own cgroup, or null when it has none.
+ *
+ *  cgroup v2 only, and deliberately so: `memory.max` on the root cgroup of a machine does not exist,
+ *  so a daemon running straight on a Linux box answers null here and /proc/meminfo stands. A daemon
+ *  inside a container sees its own limit, which /proc/meminfo cannot show it. `memory.current`
+ *  counts page cache, and cache inside the ceiling is reclaimable rather than pressure, so the
+ *  reclaimable part is added back the way MemAvailable does it for the machine.
+ *  `root` is a parameter for the tests; nothing in the daemon passes it. */
+export function cgroupMemory(root = '/sys/fs/cgroup'): { availableBytes: number; totalBytes: number } | null {
+  try {
+    const max = readFileSync(join(root, 'memory.max'), 'utf8').trim()
+    if (max === 'max') return null
+    const totalBytes = Number(max)
+    if (!Number.isFinite(totalBytes) || totalBytes <= 0) return null
+    const current = Number(readFileSync(join(root, 'memory.current'), 'utf8').trim())
+    if (!Number.isFinite(current)) return null
+    let reclaimable = 0
+    try {
+      const stat = readFileSync(join(root, 'memory.stat'), 'utf8')
+      const field = (name: string): number => Number(new RegExp(`^${name} (\\d+)`, 'm').exec(stat)?.[1] ?? 0)
+      reclaimable = field('inactive_file') + field('slab_reclaimable')
+    } catch { /* no memory.stat: count the cache as used, which only evicts sooner */ }
+    return { totalBytes, availableBytes: Math.max(0, Math.min(totalBytes, totalBytes - current + reclaimable)) }
+  } catch {
+    return null
+  }
+}
+
 /** The `Runtime` over the docker CLI. One `docker ps -a` per sweep and one `docker stats` when
- *  anything runs; `memory()` is synchronous, so it answers from /proc/meminfo (Linux) or from the
- *  synthetic budget minus the last RSS sample (`INSTA_OSS_MEM_BUDGET_MB`, tests and macOS). */
+ *  anything runs; `memory()` is synchronous, so it answers from this process's cgroup ceiling or
+ *  /proc/meminfo (Linux, whichever is tighter) or from the synthetic budget minus the last RSS
+ *  sample (`INSTA_OSS_MEM_BUDGET_MB`, tests and macOS). */
 export class DockerRuntime implements Runtime {
   private meminfoMissing = false
+  private cgroupMissing = false
   private lastRssTotal = 0
   /** The last per-container sample of `stats()`, so `stop()` can take that container out of the
    *  running total instead of waiting for the next sweep to re-sample it (budget mode). */
@@ -652,6 +683,17 @@ export class DockerRuntime implements Runtime {
       const totalBytes = budget * MiB
       return { totalBytes, availableBytes: Math.max(0, totalBytes - this.lastRssTotal) }
     }
+    const host = this.meminfo()
+    // /proc/meminfo describes the MACHINE even when this process is inside a container, so an
+    // instad under a cgroup ceiling smaller than the box would never see pressure and the kernel
+    // would OOM-kill a container before the sweep evicted one. The tighter of the two views wins.
+    const ceiling = this.cgroupMissing ? null : cgroupMemory()
+    if (!ceiling) this.cgroupMissing = true
+    if (ceiling && (!host || ceiling.totalBytes < host.totalBytes)) return ceiling
+    return host
+  }
+
+  private meminfo(): { availableBytes: number; totalBytes: number } | null {
     if (this.meminfoMissing) return null
     try {
       const text = readFileSync('/proc/meminfo', 'utf8')
