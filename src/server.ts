@@ -105,7 +105,9 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   // cloud's own words: `no postgres service in this project (add one with ...)` is a 404 on every
   // route that resolves a database, not a 400 or a 502 (plan 05 section 6).
   const notFoundish = (m: string): boolean => m.includes('not found') || m.startsWith('no postgres service in this project')
-  const obsCode = (m: string): number => (notFoundish(m) ? 404 : 502)
+  // WP3 (decision 48): an observability read never wakes a database. When the instance is asleep the
+  // engine says so and the page reports 503, so a dashboard poll is not what keeps it up.
+  const obsCode = (m: string): number => (notFoundish(m) ? 404 : /sleeping/.test(m) ? 503 : 502)
   // Each managed type is its own component, never folded into compute (cloud parity, platform
   // #243). Absent stays the historical compute default; junk is the cloud's 400.
   const COMPONENTS = ['db', 'compute', 'redis', 'mysql', 'mongodb'] as const
@@ -461,10 +463,19 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
 
   app.patch('/projects/:id/database/settings', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const body = (req.body ?? {}) as { volumeSize?: string; storageSize?: string }
+    // WP3: `scaleToZero`, `idleTimeout`, `cpu` and `memory` are real levers on the branch's own
+    // postgres container now, not accepted-and-ignored cloud fields.
+    const body = (req.body ?? {}) as {
+      volumeSize?: string; storageSize?: string
+      scaleToZero?: boolean; idleTimeout?: number | string; cpu?: number | string; memory?: number | string
+    }
     const q = req.query as { branch?: string; group?: string }
-    try { return engine.dbSettings(id, body, q.branch, q.group) }
-    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+    try { return await engine.dbSettings(id, body, q.branch, q.group) }
+    catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      const status = (e as { status?: number }).status
+      return reply.code(typeof status === 'number' ? status : errCode(m)).send({ error: m })
+    }
   })
 
   // ---- database management (password / databases / extensions / insight — cloud parity).
@@ -750,11 +761,49 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   // ---- end region B ----
 
   // ---- region C (WP3 scheduler) ----
-  // Limits are tier caps, always-on is the scale-to-zero lever. Locally nothing scales to zero and
-  // nothing enforces a quota until the scheduler lands.
-  app.get('/projects/:id/services/:sid/limits', async (_req, reply) => notCloud(reply, 'machine limits'))
-  app.put('/projects/:id/services/:sid/limits', async (_req, reply) => notCloud(reply, 'machine limits'))
-  app.put('/projects/:id/services/:sid/always-on', async (_req, reply) => notCloud(reply, 'always-on (scale-to-zero is a cloud lever; local containers already stay up)'))
+  // The two service knobs the scheduler makes real: the cgroup ceiling (`insta compute limits`) and
+  // the opt-out from sleep (`insta compute always-on`). Both resolve the branch from a qualified sid
+  // first (decision 49) and then act on the BARE service id, because limits and always-on are
+  // project-level settings that apply to the service on every branch.
+  const sidOf = (req: { params: unknown; query: unknown }): string => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    return engine.resolveSid(id, sid, (req.query as { branch?: string }).branch).serviceId
+  }
+  /** A limits failure's status: the engine attaches 502 to a partial resize; the rest is the usual
+   *  404-or-400 split. */
+  const limitsFail = (e: unknown, reply: FastifyReply): FastifyReply => {
+    const m = e instanceof Error ? e.message : String(e)
+    const status = (e as { status?: number }).status
+    return reply.code(typeof status === 'number' ? status : errCode(m)).send({ error: m })
+  }
+
+  app.get('/projects/:id/services/:sid/limits', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    try { return engine.serviceLimits(id, sidOf(req)) } catch (e) { return limitsFail(e, reply) }
+  })
+
+  // Gated `service.upgrade`, like the cloud (it changes what the machine costs to run).
+  app.put('/projects/:id/services/:sid/limits', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'service.upgrade', reply)) return reply
+    const body = (req.body ?? {}) as { memoryMb?: unknown; cpu?: unknown }
+    if (typeof body.memoryMb !== 'number') return reply.code(400).send({ error: 'memoryMb required (MB, a multiple of 256)' })
+    if (body.cpu !== undefined && typeof body.cpu !== 'number') return reply.code(400).send({ error: 'cpu must be a number of vCPU' })
+    try {
+      const { service, limits, cap } = await engine.setServiceLimits(id, sidOf(req), { memoryMb: body.memoryMb, cpu: body.cpu })
+      return { service, limits, cap }
+    } catch (e) { return limitsFail(e, reply) }
+  })
+
+  app.put('/projects/:id/services/:sid/always-on', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    const { enabled } = (req.body ?? {}) as { enabled?: unknown }
+    if (typeof enabled !== 'boolean') return reply.code(400).send({ error: 'enabled must be a boolean' })
+    try { return await engine.setAlwaysOn(id, sidOf(req), enabled) } catch (e) { return limitsFail(e, reply) }
+  })
   // ---- end region C ----
 
   // ---- region D (WP5 templates/parity) ----
