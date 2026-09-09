@@ -177,8 +177,8 @@ else
   SKIP "branch create took ${MEASURED_MS}ms (no reflink support on this filesystem)"
 fi
 insta branch list --json | grep -q 'feat' || FAIL "feat is missing from branch list"
-FEAT_IDS=$(insta services list --branch feat --json | jsel 'd.services.map(function(s){return s.id}).join(",")')
-MAIN_IDS=$(insta services list --branch main --json | jsel 'd.services.map(function(s){return s.id}).join(",")')
+FEAT_IDS=$(insta services list --branch feat --json | jsel '(d.services||d).map(function(s){return s.id}).join(",")')
+MAIN_IDS=$(insta services list --branch main --json | jsel '(d.services||d).map(function(s){return s.id}).join(",")')
 case $FEAT_IDS in
   *:pg-db*) OK "feat service ids are branch qualified" ;;
   *) FAIL "expected branch-qualified ids on feat, got $FEAT_IDS" ;;
@@ -217,7 +217,7 @@ MARKER=$(docker exec "$VOLC2" cat /data/marker)
 OK "compute volume forked with its files"
 EVENTS=$(insta events --json)
 printf '%s\n' "$EVENTS" | grep -q 'branch.created' || FAIL "no branch.created event"
-METHOD=$(printf '%s\n' "$EVENTS" | jsel 'd.events.filter(function(e){return e.kind==="branch.created"}).map(function(e){return (e.payload&&e.payload.db&&e.payload.db.method)||""}).filter(Boolean)[0]')
+METHOD=$(printf '%s\n' "$EVENTS" | jsel '(d.events||d).filter(function(e){return e.kind==="branch.created"}).map(function(e){return (e.payload&&e.payload.db&&e.payload.db.method)||""}).filter(Boolean)[0]')
 OK "branch.created recorded, db.method=${METHOD:-unreported}"
 
 STEP "7. sleep and wake"

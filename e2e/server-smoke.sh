@@ -191,7 +191,7 @@ psql "$DBURL" -v ON_ERROR_STOP=1 -qtAc \
   "create table qa_bulk as select generate_series(1,700000) i, repeat('x',64) p" \
   >/dev/null || FAIL "could not seed 50 MB of bulk data"
 measure insta branch create feat --from main >/dev/null || FAIL "branch create failed"
-FEAT_IDS=$(insta services list --branch feat --json | jsel 'd.services.map(function(s){return s.id}).join(",")')
+FEAT_IDS=$(insta services list --branch feat --json | jsel '(d.services||d).map(function(s){return s.id}).join(",")')
 case $FEAT_IDS in
   *:pg-db*) OK "feat service ids are branch qualified" ;;
   *) FAIL "expected branch-qualified ids on feat, got $FEAT_IDS" ;;
@@ -211,7 +211,7 @@ FEAT_APP=$(printf '%s\n' "$URL" | sed -e 's/-main\./-feat./')
 ensure_host "$(url_host "$FEAT_APP")"
 wait_for 90 curl_ok "$FEAT_APP/" || FAIL "$FEAT_APP never answered after hold and wake"
 OK "the feat app answers after hold and wake"
-METHOD=$(insta events --json | jsel 'd.events.filter(function(e){return e.kind==="branch.created"}).map(function(e){return (e.payload&&e.payload.db&&e.payload.db.method)||""}).filter(Boolean)[0]')
+METHOD=$(insta events --json | jsel '(d.events||d).filter(function(e){return e.kind==="branch.created"}).map(function(e){return (e.payload&&e.payload.db&&e.payload.db.method)||""}).filter(Boolean)[0]')
 if [ "$REFLINK" = "1" ]; then
   [ "$METHOD" = "reflink" ] || FAIL "expected a reflink fork, branch.created says '$METHOD'"
   [ "${MEASURED_MS:-999999}" -lt 5000 ] \
