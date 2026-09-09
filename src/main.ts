@@ -131,7 +131,11 @@ async function main(): Promise<void> {
     console.log('  insta project create <name>   # then branch/deploy/secrets/manifest as usual')
   }
   // ---- region WP6 ----
-  // version banner
+  // version banner: server mode only (the image bakes INSTA_OSS_VERSION; instad.env sets the tag the
+  // stack runs). Local mode prints nothing extra so `npm run dev` output stays byte-identical.
+  if (cfg.mode === 'server') {
+    console.log(`instacloud image ${cfg.version}: re-run install.sh to upgrade (add --version vX.Y.Z to pin); templates ${cfg.templatesDir}`)
+  }
   // ---- end region WP6 ----
 
   // signals: shut down inside the compose stop_grace_period (30 s) and never leave a fresh lock

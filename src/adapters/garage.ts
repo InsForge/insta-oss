@@ -74,6 +74,11 @@ export class LocalGarage implements StorageAdapter {
     const out = await docker(['ps', '-aq', '--filter', `name=^${GARAGE}$`])
     if (out.toString().trim()) {
       await docker(['start', GARAGE]).catch(() => { /* already running */ })
+    } else if (this.opts.mode === 'server') {
+      // WP6 (packaging): on a VPS the compose stack owns io-garage (container_name in compose.yml,
+      // bind dirs under <dataDir>/garage written by install.sh); the daemon only initialises the
+      // layout. Starting it here would race compose and mount named volumes the installer never sees.
+      throw new Error('io-garage is managed by compose in server mode: run docker compose up -d in /etc/instacloud')
     } else {
       const base = ['run', '-d', '--restart', 'unless-stopped', '--name', GARAGE,
         '-v', `${cfg}:/etc/garage.toml:ro`,

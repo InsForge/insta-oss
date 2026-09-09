@@ -8,21 +8,23 @@
   },
   "scripts": {
     "dev": "tsx src/main.ts",
+    "start": "tsx src/main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "build:ui": "npm --prefix ui install && npm --prefix ui run build"
+    "build:ui": "npm --prefix ui install && npm --prefix ui run build",
+    "build:image": "docker build --build-arg VERSION=$(node -p \"require('./package.json').version\") -t instacloud:dev ."
   },
   "license": "Apache-2.0",
   "dependencies": {
     "@fastify/static": "^7.0.4",
     "fastify": "^4.28.0",
+    "tsx": "^4.19.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
-    "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.0.0",
     "vitest": "^2.1.0"
