@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import type { Engine } from '../engine'
 import { loadState, mutate } from '../state'
+import { parseServiceId } from '../manageddb'
 import type { GatedAction, TemplateDeploymentRecord } from '../types'
 import { TemplateCatalog, TemplateNotFoundError } from './catalog'
 import {
@@ -340,8 +341,10 @@ export class TemplateExecutor {
     const additions: Record<string, number> = {}
     for (const [name, svc] of Object.entries(manifest.services)) {
       const type = svc.type === 'postgres' ? 'postgres' : 'compute'
-      // Only a service this deployment has not already created counts.
-      if (spec[name].serviceId && rows.some((r) => r.name === spec[name].serviceName)) continue
+      // Only a service this deployment has not already created counts, and only while its row is
+      // still there: deleting it between attempts makes the retry create it again, and skipping it
+      // here would turn a synchronous 400 into a 202 that fails in the background.
+      if (spec[name].serviceId && rows.some((r) => r.type === type && r.name === spec[name].serviceName)) continue
       additions[type] = (additions[type] ?? 0) + 1
     }
     const cap = this.engine.cfg.services.maxPerType
@@ -384,7 +387,9 @@ export class TemplateExecutor {
           if (existingRow.template_deployment_id !== id) {
             throw new TemplateError(409, `service ${platformName} on branch ${branchName} was claimed by another owner while this deployment was starting - retry it`)
           }
-          entry.serviceId = existingRow.id
+          // The BARE id: a services() row id is branch-qualified off the default branch, and this
+          // record is read back by every later step (and by the catalog's live check).
+          entry.serviceId = parseServiceId(existingRow.id)?.serviceId ?? existingRow.id
         } else if (svc.type === 'postgres') {
           const row = await this.engine.addDbService(projectId, platformName, { templateDeploymentId: id })
           entry.serviceId = row.id
