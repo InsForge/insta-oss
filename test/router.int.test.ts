@@ -27,7 +27,8 @@ import { test, expect, beforeAll, afterAll } from 'vitest'
 import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { connect as netConnect, createServer as createNetServer, type Socket } from 'node:net'
+import { request as httpRequest } from 'node:http'
+import { connect as netConnect, createServer as createNetServer } from 'node:net'
 import { loadConfig, type Config } from '../src/config'
 import { docker } from '../src/docker'
 import { sharedDataDir } from '../src/datadir'
@@ -82,9 +83,21 @@ const state = async (container: string): Promise<string | null> => {
 const inspect = async (container: string, fmt: string): Promise<string> =>
   (await docker(['inspect', '-f', fmt, container])).toString().trim()
 
-/** A request through the router's HTTP listener with an explicit Host, as the edge would send it. */
-const viaHost = (host: string, path = '/'): Promise<Response> =>
-  fetch(`http://127.0.0.1:${cfg.port}${path}`, { headers: { Host: host }, redirect: 'manual' })
+/** A request through the router's HTTP listener with an explicit Host, as the edge would send it.
+ *  `node:http` and not `fetch`: Host is a forbidden header name in fetch, so undici silently
+ *  replaces it with the address dialled, and every request in this file would reach the API. */
+function viaHost(host: string, path = '/'): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port: cfg.port, path, method: 'GET', headers: { host } }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (d: Buffer) => chunks.push(d))
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString() }))
+    })
+    req.setTimeout(120_000, () => { req.destroy(new Error(`no answer for Host ${host} within 120 s`)) })
+    req.once('error', reject)
+    req.end()
+  })
+}
 
 beforeAll(async () => {
   const port = await freePort()
@@ -145,21 +158,18 @@ test('Host routing reaches the real container, and a daemon host still reaches t
   const res = await viaHost(APP_HOST)
   expect(res.status).toBe(200)
   // nginx's own index, so the bytes really came from that container and not from Fastify.
-  expect(await res.text()).toContain('Welcome to nginx')
+  expect(res.body).toContain('Welcome to nginx')
   // The upstream the lane dialled is the app's published loopback port, and the proxy told the app
   // who asked: an app's redirects and cookie domains depend on the Host arriving unchanged.
   const forwarded = await viaHost(APP_HOST, '/nope')
   expect(forwarded.status).toBe(404)
 
   // Same listener, a daemon host: the API, not the lane (decision 4).
-  const api = await viaHost(`api.${DOMAIN}`)
-  expect(await api.json()).toEqual({ api: true })
-  const local = await viaHost('localhost')
-  expect(await local.json()).toEqual({ api: true })
+  expect((await viaHost(`api.${DOMAIN}`)).body).toBe('{"api":true}')
+  expect((await viaHost('localhost')).body).toBe('{"api":true}')
 
   // An unknown host in local mode is also the API, which is what keeps a LAN name working.
-  const unknown = await viaHost('something-else.invalid')
-  expect(await unknown.json()).toEqual({ api: true })
+  expect((await viaHost('something-else.invalid')).body).toBe('{"api":true}')
 }, 120_000)
 
 test('a request for a sleeping service waits for it instead of failing', async () => {
@@ -170,7 +180,7 @@ test('a request for a sleeping service waits for it instead of failing', async (
   const t0 = Date.now()
   const res = await viaHost(APP_HOST)
   expect(res.status).toBe(200)
-  expect(await res.text()).toContain('Welcome to nginx')
+  expect(res.body).toContain('Welcome to nginx')
   // The wake happened on the request's own thread: the answer came back only once the container
   // was up, which is the whole point of holding rather than 502-ing.
   expect(await state(APP)).toBe('running')
@@ -185,7 +195,7 @@ test('a service the developer stopped answers a readable error and is NOT woken 
 
   const res = await viaHost(APP_HOST)
   expect(res.status).toBe(503)
-  expect(await res.json()).toEqual({ error: 'service is stopped' })
+  expect(JSON.parse(res.body)).toEqual({ error: 'service is stopped' })
   // Still down: traffic must not resurrect something a person switched off.
   expect(await state(APP)).toBe('exited')
 
@@ -254,8 +264,11 @@ test('local mode publishes nothing beyond loopback', async () => {
     .filter((n): n is NonNullable<typeof n> => !!n && n.family === 'IPv4' && !n.internal)
     .map((n) => n.address)
     .filter((ip) => !cfg.extraListenHosts.includes(ip))
-  for (const ip of routable) {
-    for (const port of [cfg.port, appPort, lanePort]) {
+  for (const port of [cfg.port, appPort, lanePort]) {
+    // Live on loopback FIRST, so a refusal below means "bound to loopback" and not "nothing is
+    // listening at all", which is what would make this whole test vacuous.
+    expect(await accepts('127.0.0.1', port), `nothing is listening on 127.0.0.1:${port}`).toBe(true)
+    for (const ip of routable) {
       expect(await accepts(ip, port), `${ip}:${port} accepted a connection`).toBe(false)
     }
   }
@@ -339,9 +352,13 @@ test('the pg-wire lane end to end: a real psql picks its database by SNI over TL
 
     expect(await state(PG)).toBe('running')
     expect(engine.stateOf(dbKey)).toBe('running')
-    // Whichever address this box can dial, the lane used it: on Linux the container IP on the
-    // branch network, which is the production path.
-    expect(typeof direct).toBe('boolean')
+    // The branch above was on a capability, so pin the capability: `direct` means this host really
+    // can dial the container IP on the branch network (the production server-mode path), and its
+    // absence means the only reachable address is the loopback port local mode published.
+    const ip = await inspect(PG, `{{(index .NetworkSettings.Networks "io-${REF}").IPAddress}}`)
+    expect(ip).not.toBe('')
+    if (direct) expect(await accepts(ip, 5432)).toBe(true)
+    else expect(await inspect(PG, '{{json .NetworkSettings.Ports}}')).toContain('127.0.0.1')
   } finally {
     await tls.stop()
   }
