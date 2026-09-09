@@ -49,6 +49,11 @@ service, one at a time, until it is back above the floor.
 Never evicted: an always-on service, a service that woke in the last minute, and a service
 answering a request right now.
 
+On Linux the total is the machine's, read from `/proc/meminfo`, or the daemon's own cgroup ceiling
+when it runs in a container that has one, whichever is smaller. A ceiling matters because
+`/proc/meminfo` describes the machine even from inside a container, so a memory-limited daemon
+would otherwise believe it had the whole box and evict nothing.
+
 On macOS the reading Docker reports is not the host memory, so pressure eviction is off unless you
 set `INSTA_OSS_MEM_BUDGET_MB` to the budget you want the daemon to assume.
 
