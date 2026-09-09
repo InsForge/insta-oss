@@ -41,7 +41,7 @@ export INSTA_OSS_CREATE_GRACE_SEC INSTA_OSS_RAM_FLOOR_PCT
 
 cleanup() {
   if command -v insta >/dev/null 2>&1; then
-    insta policy set project.delete allow >/dev/null 2>&1 || true
+    allow_delete >/dev/null 2>&1 || true
   fi
   if [ "${E2E_UNINSTALL:-0}" = "1" ]; then
     ( cd /etc/instacloud && docker compose --env-file instad.env down -v ) || true
@@ -287,7 +287,7 @@ docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$PGC" \
 OK "upgrade is idempotent and data survived"
 
 STEP "11. teardown"
-insta policy set project.delete allow >/dev/null || FAIL "policy set failed"
+allow_delete || FAIL "could not set project.delete to allow"
 insta project delete --yes >/dev/null 2>&1 || insta project delete >/dev/null \
   || FAIL "project delete failed"
 LEFT=$(docker ps -aq --filter "name=io-$SLUG-")

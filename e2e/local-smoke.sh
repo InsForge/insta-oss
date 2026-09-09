@@ -46,7 +46,7 @@ cleanup() {
   CLEANED=1
   STEP "11. teardown"
   if command -v insta >/dev/null 2>&1; then
-    insta policy set project.delete allow >/dev/null 2>&1 || true
+    allow_delete >/dev/null 2>&1 || true
     insta project delete --yes >/dev/null 2>&1 || insta project delete >/dev/null 2>&1 || true
   fi
   if [ -n "$DAEMON_PID" ]; then
@@ -63,7 +63,7 @@ NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
 command -v insta >/dev/null 2>&1 || npm i -g insta@latest
 command -v psql >/dev/null 2>&1 || FAIL "psql is required (postgresql-client)"
 HAVE_LOCALHOST_DNS=1
-getent hosts e2e-probe.localhost >/dev/null 2>&1 || HAVE_LOCALHOST_DNS=0
+resolves e2e-probe.localhost || HAVE_LOCALHOST_DNS=0
 OK "preflight (localhost wildcard dns: $HAVE_LOCALHOST_DNS)"
 
 STEP "1. daemon"
@@ -278,7 +278,7 @@ fi
 
 STEP "11. teardown sweep"
 CLEANED=1
-insta policy set project.delete allow >/dev/null || FAIL "policy set failed"
+allow_delete || FAIL "could not set project.delete to allow"
 insta project delete --yes >/dev/null 2>&1 || insta project delete >/dev/null \
   || FAIL "project delete failed"
 LEFT=$(docker ps -aq --filter "name=io-$SLUG-")

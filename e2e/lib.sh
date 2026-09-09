@@ -80,6 +80,16 @@ jsel() {
   ' "$1"
 }
 
+# allow_delete : flip the linked project's project.delete gate to allow, so the teardown is not
+# stopped by an approval. Through the route, because the shipped CLI has no `policy` verb: the
+# governance surface it exposes is `insta approvals`, and a cleanup path must not depend on
+# consuming a one-shot grant.
+allow_delete() {
+  _pid=$(insta manifest --json 2>/dev/null | jsel 'd.project.id')
+  [ -n "$_pid" ] || return 1
+  [ "$(api_code PUT "/projects/$_pid/policy/project.delete" '{"decision":"allow"}')" = "200" ]
+}
+
 # wait_for SECONDS CMD... : run CMD every second until it succeeds. Returns 1 on timeout.
 wait_for() {
   _deadline=$1
@@ -107,13 +117,22 @@ url_host() {
   printf '%s\n' "$1" | sed -e 's|^[a-z]*://||' -e 's|/.*$||' -e 's|:.*$||'
 }
 
+# resolves NAME : does this host resolve? Through node, because `getent` is a glibc tool that
+# does not exist on macOS, where the *.localhost names of local mode do resolve and the probe
+# has to say so.
+resolves() {
+  node -e '
+    require("dns").lookup(process.argv[1], function (e) { process.exit(e ? 1 : 0) })
+  ' "$1" >/dev/null 2>&1
+}
+
 # ensure_host NAME [IP] : make NAME resolve, falling back to /etc/hosts.
 # Needed for *.localhost on Linux hosts without systemd-resolved, and for sslip.io
 # names on a runner with no outbound DNS.
 ensure_host() {
   _name=$1
   _ip=${2:-127.0.0.1}
-  if getent hosts "$_name" >/dev/null 2>&1; then
+  if resolves "$_name"; then
     return 0
   fi
   if grep -q "[[:space:]]$_name\$" /etc/hosts 2>/dev/null; then
