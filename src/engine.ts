@@ -11,7 +11,7 @@ import { docker } from './docker'
 import { MANAGED_DB, CANONICAL_MANAGED_KEYS, CANONICAL_KEYS, suffixBundle, envSuffix, laneBundle, managedServiceId, managedContainerName, isManagedDbType, parseServiceId, pgContainerName, pgServiceId, storageServiceId, bucketName, appContainerName, dataPaths } from './manageddb'
 import * as observe from './observe'
 import { loadState, mutate } from './state'
-import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret, DataDirOps, PgTarget, ServiceKey, ServiceLimits } from './types'
+import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret, DataDirOps, PgTarget, ServiceKey, ServiceLimits, ServiceSettings } from './types'
 // ---- region WP2 (router): the router's pure modules feed the seams at the end of this class ----
 import { findCertFiles } from './router/certs'
 import { checkDns, domainResult, DomainError, normalizeHostname, notAdded, type ComputeDomainResult } from './router/domains'
@@ -148,18 +148,21 @@ export class Engine {
     return this.listBranches(projectId).find((b) => b.name === name)
   }
 
-  /** The postgres handle of a branch's single database service: READ from the row (decision 17);
-   *  a row provisioned before the scaffold has no `databases` and still runs today's `io-<ref>-pg`
-   *  container until WP4's boot migration renames it. A string ref is the provision-time path. */
-  private pgContainer(project: Project, branch: Branch | string): string {
-    if (typeof branch === 'string') return pgContainerName(this.ref(project, branch), 'db')
-    return branch.databases?.['pg-db']?.container ?? `io-${this.ref(project, branch)}-pg`
+  /** The postgres handle of ONE database service on a branch: READ from the row (decision 17); a
+   *  row provisioned before the data migration still runs today's `io-<ref>-pg` container. */
+  private pgContainer(project: Project, branch: Branch, serviceId = 'pg-db'): string {
+    const row = this.dbHandle(project, branch, serviceId)
+    if (row) return row.container
+    const reg = this.dbList(project.id).find((d) => d.id === serviceId)
+    return pgContainerName(this.ref(project, branch), reg?.name ?? 'db')
   }
-  /** The stored DSN of the branch's single database service (legacy rows carry it on `dbUrl`). */
-  private pgUrl(branch: Branch): string | undefined { return branch.databases?.['pg-db']?.url ?? branch.dbUrl }
-  /** The bucket handle of a branch's single storage service: read from the row when present (legacy
-   *  rows carry `io-<ref>`), derived only before the row exists. */
-  private bucketOf(project: Project, branch: Branch): string { return branch.bucket ?? bucketName(this.ref(project, branch), 'store') }
+  /** The bucket handle of ONE storage service on a branch (legacy rows carry `io-<ref>`). */
+  private bucketOf(project: Project, branch: Branch, serviceId = 'st-store'): string {
+    const row = this.bucketHandle(project, branch, serviceId)
+    if (row) return row.bucket
+    const reg = this.stList(project.id).find((s) => s.id === serviceId)
+    return bucketName(this.ref(project, branch), reg?.name ?? 'store')
+  }
 
   /** Provision one branch stack. `source` null = fresh (initdb); a Branch = fork its database
    *  (adapter-level: reflink or dump/restore). `branchId` is minted by the caller so the lane
@@ -524,9 +527,13 @@ export class Engine {
     return { ...this.mintedSecretsFor(projectId, b), ...this.userSecretsFor(projectId, branchName) }
   }
 
-  /** The branch's minted credentials: DATABASE_URL, the S3 bundle, the managed-database bundles. */
+  /** The branch's minted credentials: every postgres DSN, every S3 bundle and every
+   *  managed-database bundle, each SUFFIXED with its service name, the oldest of each type also
+   *  under the canonical unsuffixed keys. Bindings are NOT here: they are per target group. */
   private mintedSecretsFor(projectId: string, b: Branch): Record<string, string> {
-    return { ...(b.dbUrl !== undefined ? { DATABASE_URL: b.dbUrl } : {}), ...b.s3, ...this.managedSecretsFor(projectId, b) }
+    const project = this.getProject(projectId)
+    if (!project) return {}
+    return { ...this.dbSecretsFor(project, b), ...this.storageSecretsFor(project, b), ...this.managedSecretsFor(projectId, b) }
   }
 
   /** Minted managed-database credentials for a branch, on the cloud's naming contract: every
@@ -586,7 +593,9 @@ export class Engine {
     if (branch && !this.getBranchByName(projectId, branch)) throw new Error(`branch "${branch}" not found`)
     if (service) {
       if (!branch) throw new Error('binding a secret to a service requires a branch')
-      const valid = ['postgres/db', 'storage/store',
+      const valid = [
+        ...this.dbList(projectId).map((d) => `postgres/${d.name}`),
+        ...this.stList(projectId).map((s) => `storage/${s.name}`),
         ...this.computeGroupNames(projectId).map((g) => `compute/${g}`),
         ...this.managedList(projectId).map((m) => `${m.type}/${m.name}`)]
       if (!valid.includes(service)) throw new Error(`service not found: ${service}`)
@@ -600,18 +609,24 @@ export class Engine {
     this.emit(projectId, branch, 'govern', 'secrets.write', { name, scope: branch ?? 'project', service })
   }
 
-  unsetUserSecret(projectId: string, name: string, branch: string | null): void {
+  /** Remove a user secret. `service` narrows the removal to a secret bound to THAT service, which
+   *  is what the template executor's authoritative env replace needs: a stale name it wrote onto
+   *  one compute group must go without touching a same-named secret on another. */
+  unsetUserSecret(projectId: string, name: string, branch: string | null, service?: string | null): void {
     mutate((st) => {
-      st.userSecrets[projectId] = (st.userSecrets[projectId] ?? []).filter((u) => !(u.name === name && u.branch === branch))
+      st.userSecrets[projectId] = (st.userSecrets[projectId] ?? []).filter((u) => !(
+        u.name === name && u.branch === branch && (service === undefined || (u.service ?? null) === service)
+      ))
     })
     this.emit(projectId, branch, 'govern', 'secrets.unset', { name, scope: branch ?? 'project' })
   }
 
   // ---- services view (services model parity) ----
 
-  /** host:port of a branch's S3 server, from its minted endpoint credential. */
-  private s3Host(b: Branch): string | undefined {
-    try { return new URL(b.s3?.AWS_ENDPOINT_URL_S3 ?? '').host } catch { return undefined }
+  /** host:port of the S3 server one storage service was minted against (its own credential, so a
+   *  bucket provisioned by an older adapter still reports the server it actually answers on). */
+  private s3Host(project: Project, b: Branch, serviceId = 'st-store'): string | undefined {
+    try { return new URL(this.bucketHandle(project, b, serviceId)?.env.AWS_ENDPOINT_URL_S3 ?? '').host } catch { return undefined }
   }
 
   /** Every compute group name: registered on the project plus any group already deployed. */
@@ -630,28 +645,28 @@ export class Engine {
     return this.getProject(projectId)?.managedServices ?? []
   }
 
-  /** Resolve a stable oss service id (pg-db | st-store | cp-<group> | rd/my/mo-<name>) to its type + name. */
+  /** Resolve a service id (`pg-<name>` | `st-<name>` | `cp-<group>` | `rd/my/mo-<name>`, with or
+   *  without a `<branchId>:` qualifier) to its type + name, checked against the project's
+   *  registrations. An id no registration claims is a 404. */
   private serviceOf(projectId: string, serviceId: string): { type: 'postgres' | 'storage' | 'compute' | ManagedDbType; name: string } {
-    if (serviceId === 'pg-db') return { type: 'postgres', name: 'db' }
-    if (serviceId === 'st-store') return { type: 'storage', name: 'store' }
-    if (serviceId.startsWith('cp-') && this.computeGroupNames(projectId).includes(serviceId.slice(3))) {
-      return { type: 'compute', name: serviceId.slice(3) }
-    }
-    const managed = this.managedList(projectId).find((m) => m.id === serviceId)
-    if (managed) return { type: managed.type, name: managed.name }
-    throw new Error('service not found')
+    const parsed = parseServiceId(serviceId)
+    if (!parsed) throw new Error('service not found')
+    const { type, name } = parsed
+    const known = type === 'postgres' ? this.dbList(projectId).some((d) => d.id === parsed.serviceId)
+      : type === 'storage' ? this.stList(projectId).some((s) => s.id === parsed.serviceId)
+        : type === 'compute' ? this.computeGroupNames(projectId).includes(name)
+          : this.managedList(projectId).some((m) => m.id === parsed.serviceId)
+    if (!known) throw new Error('service not found')
+    return { type, name }
   }
 
-  /** The project's services as the CLI expects them: the fixed postgres + storage pair and
-   *  one compute service per group (registered or already deployed on the default branch).
-   *  Additive dashboard fields (never touching `status`, which the CLI prints): `runtime`
-   *  from live docker ps, `endpoint` (everything is local — container:port or host url),
-   *  `updated_at`. Branch-aware via `branchName` (defaults to the default branch). */
-  async services(projectId: string, branchName?: string): Promise<Array<{
-    id: string; type: string; name: string; status: string; machine_count?: number; domain?: string
-    runtime?: string; endpoint?: string; updated_at?: string; public?: boolean; desired_state?: string
-    volume_gib?: number | null; port?: number
-  }>> {
+  /** The project's services as the CLI expects them: one row per registration (postgres, storage,
+   *  managed database) plus one per compute group (registered or already deployed on the branch).
+   *  Additive dashboard fields (never touching `status`, which the CLI prints): `runtime` from live
+   *  docker ps, `domain`/`endpoint`, `always_on`, `template_*`, `updated_at`. Branch-aware via
+   *  `branchName` (defaults to the default branch); OFF the default branch every row id carries the
+   *  `<branchId>:` qualifier, because the CLI calls the follow-up route with no branch (decision 49). */
+  async services(projectId: string, branchName?: string): Promise<ServiceRow[]> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     const branches = this.listBranches(projectId)
@@ -662,34 +677,48 @@ export class Engine {
     await this.snapshotRunning()
     const iso = (ms?: number): string | undefined => (ms ? new Date(ms).toISOString() : undefined)
     const rt = (serviceId: string): string | undefined => (branch ? this.rowRuntime(this.serviceKey(branch, serviceId)) : undefined)
+    const id = (serviceId: string): string => (branch ? this.qualifiedId(branch, serviceId) : serviceId)
+    const settings = (serviceId: string): ServiceSettings => project.serviceSettings?.[serviceId] ?? {}
     return [
-      { id: 'pg-db', type: 'postgres', name: 'db', status: 'ready',
-        ...this.rowNetwork(project, branch, { id: 'pg-db', type: 'postgres', name: 'db' }),
-        runtime: rt('pg-db'),
-        updated_at: iso(branch?.createdAt) },
+      ...this.dbList(projectId).map((d) => ({
+        id: id(d.id), type: 'postgres', name: d.name, status: 'ready', pg_version: PG_VERSION,
+        ...this.rowNetwork(project, branch, { id: d.id, type: 'postgres', name: d.name }),
+        runtime: rt(d.id),
+        ...(d.templateDeploymentId ? { template_deployment_id: d.templateDeploymentId } : {}),
+        updated_at: iso(d.createdAt),
+      })),
       // Storage endpoint/container derive from the branch's OWN minted creds, so branches
       // provisioned by an older storage adapter still report their real server.
-      { id: 'st-store', type: 'storage', name: 'store', status: 'ready',
-        public: branch?.storagePublic ?? false,
-        ...this.rowNetwork(project, branch, { id: 'st-store', type: 'storage', name: 'store' }),
-        runtime: branch ? this.runtimeOf(this.s3Host(branch)?.split(':')[0] ?? '') : undefined,
-        updated_at: iso(branch?.createdAt) },
+      ...this.stList(projectId).map((s) => ({
+        id: id(s.id), type: 'storage', name: s.name, status: 'ready',
+        public: (branch ? this.bucketHandle(project, branch, s.id)?.public : s.public) ?? s.public ?? false,
+        ...this.rowNetwork(project, branch, { id: s.id, type: 'storage', name: s.name }),
+        runtime: branch ? this.runtimeOf(this.s3Host(project, branch, s.id)?.split(':')[0] ?? '') : undefined,
+        updated_at: iso(s.createdAt),
+      })),
       // Managed databases (redis/mysql/mongodb): one private container per branch. `port` +
       // `volume_gib` are what the CLI renders (`tcp/6379  vol 1Gi`); the volume size is the
       // cloud's fixed 1Gi, advisory locally like every other recorded size.
       ...this.managedList(projectId).map((m) => ({
-        id: m.id, type: m.type, name: m.name, status: 'ready',
+        id: id(m.id), type: m.type, name: m.name, status: 'ready',
         port: MANAGED_DB[m.type].port, volume_gib: MANAGED_DB[m.type].volumeGib,
+        always_on: branch ? this.effectiveAlwaysOn(project, branch, m.id) : undefined,
         ...this.rowNetwork(project, branch, { id: m.id, type: m.type, name: m.name }),
         runtime: rt(m.id),
         updated_at: iso(m.createdAt),
       })),
       ...[...groups].sort().map((g) => {
         const app = branch?.apps[g]
+        const cfgd = settings(`cp-${g}`)
         return {
-          id: `cp-${g}`, type: 'compute', name: g, status: 'ready', machine_count: 1,
+          id: id(`cp-${g}`), type: 'compute', name: g, status: 'ready', machine_count: 1,
           volume_gib: project.computeVolumes?.[g]?.sizeGib ?? null, // platform Service.volume_gib (compute only)
           desired_state: app?.desiredState ?? 'running',
+          always_on: branch ? this.effectiveAlwaysOn(project, branch, `cp-${g}`) : undefined,
+          ...(app?.image !== undefined ? { image: app.image } : {}),
+          ...(app?.port ?? cfgd.port ? { port: app?.port ?? cfgd.port } : {}),
+          ...(cfgd.templateDeploymentId ? { template_deployment_id: cfgd.templateDeploymentId } : {}),
+          ...(cfgd.templateCode ? { template_code: cfgd.templateCode } : {}),
           ...this.rowNetwork(project, branch, { id: `cp-${g}`, type: 'compute', name: g }),
           runtime: branch ? rt(`cp-${g}`) : app ? undefined : 'none',
           updated_at: iso(app?.updatedAt),
@@ -809,7 +838,7 @@ export class Engine {
    *  Branch-scoped — oss service ids don't encode a branch, so callers pass one (default branch
    *  otherwise). Returns the service row + live runtime state, the shape the CLI prints. */
   async lifecycle(projectId: string, serviceId: string, verb: 'start' | 'stop' | 'suspend', branchName?: string): Promise<{
-    service: Record<string, unknown> | undefined; state: string
+    service: ServiceRow | undefined; state: string
   }> {
     const t = this.computeTarget(projectId, serviceId, branchName)
     return this.withOp([this.serviceKey(t.branch, `cp-${t.group}`)], () => this.lifecycleLocked(projectId, serviceId, verb, t.branch.id, t.group))
@@ -820,7 +849,7 @@ export class Engine {
   // no app record at all and silently did nothing.
   private async lifecycleLocked(
     projectId: string, serviceId: string, verb: 'start' | 'stop' | 'suspend', branchId: string, group: string,
-  ): Promise<{ service: Record<string, unknown> | undefined; state: string }> {
+  ): Promise<{ service: ServiceRow | undefined; state: string }> {
     const project = this.getProject(projectId)!
     const branch = loadState().branches[branchId]
     if (!branch) throw new Error('branch not found')
@@ -845,14 +874,14 @@ export class Engine {
    *  config — so a restart that picks up a changed secret has to be a redeploy on both sides.
    *  Refused unless the desired state is 'running', mirroring the platform's refusal. */
   async restart(projectId: string, serviceId: string, branchName?: string): Promise<{
-    service: Record<string, unknown> | undefined; state: string
+    service: ServiceRow | undefined; state: string
   }> {
     const t = this.computeTarget(projectId, serviceId, branchName)
     return this.withOp([this.serviceKey(t.branch, `cp-${t.group}`)], () => this.restartLocked(projectId, serviceId, t.branch.id, t.group))
   }
 
   private async restartLocked(projectId: string, serviceId: string, branchId: string, group: string): Promise<{
-    service: Record<string, unknown> | undefined; state: string
+    service: ServiceRow | undefined; state: string
   }> {
     const project = this.getProject(projectId)!
     const branch = loadState().branches[branchId]
@@ -883,7 +912,7 @@ export class Engine {
   }
 
   /** Set a storage service's bucket access mode (anonymous public-read vs private). */
-  async setServiceAccess(projectId: string, serviceId: string, isPublic: boolean, branchName?: string): Promise<Record<string, unknown> | undefined> {
+  async setServiceAccess(projectId: string, serviceId: string, isPublic: boolean, branchName?: string): Promise<ServiceRow | undefined> {
     const svc = this.serviceOf(projectId, serviceId)
     if (svc.type !== 'storage') throw new Error('access control is only supported for storage services')
     const project = this.getProject(projectId)!
@@ -1037,13 +1066,13 @@ export class Engine {
   /** Rename a compute group everywhere it appears: registration, every branch's deployment
    *  (runtime artifact included, via the adapter), and service-bound user secrets. insta-oss
    *  mints no per-service secret names for compute, so there is nothing to re-key. */
-  async renameComputeService(projectId: string, oldName: string, newName: string): Promise<Record<string, unknown> | undefined> {
+  async renameComputeService(projectId: string, oldName: string, newName: string): Promise<ServiceRow | undefined> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(newName)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
     const groups = this.computeGroupNames(projectId)
     if (!groups.includes(oldName)) throw new Error('service not found')
-    const current = async (): Promise<Record<string, unknown> | undefined> =>
+    const current = async (): Promise<ServiceRow | undefined> =>
       (await this.services(projectId)).find((s) => s.id === `cp-${newName}`)
     if (newName === oldName) return current()
     if (groups.includes(newName)) throw new Error(`compute service "${newName}" already exists`)
@@ -1216,7 +1245,7 @@ export class Engine {
    *  platform #185; grow-only; ≤ cap) so the CLI flow is identical; the size itself is advisory
    *  locally (a docker named volume has no quota to extend). */
   async setServiceVolume(projectId: string, serviceId: string, sizeGib: number): Promise<{
-    service: Record<string, unknown> | undefined; volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }; attached?: boolean
+    service: ServiceRow | undefined; volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }; attached?: boolean
   }> {
     const svc = this.serviceOf(projectId, serviceId)
     if (svc.type !== 'compute') throw new Error('volumes are only supported for compute services')
@@ -1253,7 +1282,7 @@ export class Engine {
    *  mounted with the record already gone — locally a retry or redeploy converges, and nothing
    *  bills meanwhile (John-bot note on this PR). */
   async removeServiceVolume(projectId: string, serviceId: string): Promise<{
-    service: Record<string, unknown> | undefined; volume: null; cap: { volumeGib: number }; removed: true
+    service: ServiceRow | undefined; volume: null; cap: { volumeGib: number }; removed: true
   }> {
     const svc = this.serviceOf(projectId, serviceId)
     if (svc.type !== 'compute') throw new Error('volumes are only supported for compute services')
@@ -1788,9 +1817,9 @@ export class Engine {
       return { domain: minted, endpoint: `${lane.host}:${lane.port}` }
     }
     if (row.type === 'storage') {
-      const bucket = this.bucketOf(project, branch)
+      const bucket = this.bucketOf(project, branch, row.id)
       if (this.cfg.mode === 'server') return { domain: `${bucket}.s3.${this.cfg.domain}`, endpoint: `s3.${this.cfg.domain}/${bucket}` }
-      return { endpoint: `${this.s3Host(branch) ?? 'storage'}/${bucket}` }
+      return { endpoint: `${this.s3Host(project, branch, row.id) ?? 'storage'}/${bucket}` }
     }
     return {}
   }
@@ -1938,6 +1967,12 @@ export class Engine {
   async wake(_key: ServiceKey, _opts: { door: 'traffic' | 'api' | 'deploy' }): Promise<void> { /* nothing sleeps until WP3 */ }
   /** filled by WP3: `!effectiveAlwaysOn(project, target, 'cp-' + group)`. Scaffold: clones start running. */
   startAsleepFor(_project: Project, _target: Branch, _group: string): boolean { return false }
+  /** filled by WP3: whether a service opts out of sleep. Scaffold body is already the contract's
+   *  rule (section 4): the per-service setting, else `INSTA_OSS_ALWAYS_ON_DEFAULT`. WP5's
+   *  `services()` rows and template deploys read it; WP3 adds the sweep and the PUT route. */
+  effectiveAlwaysOn(project: Project, _branch: Branch, serviceId: string): boolean {
+    return project.serviceSettings?.[serviceId]?.alwaysOn ?? this.cfg.sleep.alwaysOnDefault
+  }
   /** filled by WP3: onUp / onAsleep / onStopped bookkeeping after a deploy. Scaffold: no-op. */
   afterDeploy(_key: ServiceKey, _o: { started: boolean; startAsleep?: boolean }): void { /* no scheduler until WP3 */ }
   /** filled by WP3: a clone's pg + managed keys sleep unless always-on. Scaffold: no-op. */
