@@ -3,7 +3,7 @@ title: "Migrate from Render"
 description: "Move a Render web service and its Postgres onto InstaCloud."
 ---
 
-This guide takes you from a running Render service to the same app running on InstaCloud, with its data. You will spend most of it telling your coding agent what to do.
+This guide takes you from a running Render service to the same app on InstaCloud, with its data. Your coding agent does most of it.
 
 InstaCloud offers:
 
@@ -15,9 +15,7 @@ InstaCloud offers:
 
 ## Migration steps
 
-We will migrate [Render's own Django example](https://github.com/render-examples/django), a Python web service with a Postgres database. Substitute your own names as you go.
-
-Here is its `render.yaml`:
+We will migrate [Render's own Django example](https://github.com/render-examples/django), a Python web service with a Postgres database. Here is its `render.yaml`:
 
 ```yaml
 databases:
@@ -28,7 +26,6 @@ services:
     name: mysite
     runtime: python
     buildCommand: "./build.sh"
-    startCommand: "python -m gunicorn mysite.asgi:application -k uvicorn.workers.UvicornWorker"
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -47,38 +44,37 @@ services:
 | Environment variables | project secrets |
 | `DATABASE_URL` via `fromDatabase` | a binding, not a copied string |
 
-Workers and cron jobs are at the end of the page.
-
 ### 1. Set up your coding agent
 
 ```bash
-npx -y insta@latest setup agent --create
+npx -y insta@latest setup agent
 ```
 
-That installs the `insta` CLI, creates a project, links this directory to it, and registers the `insta` skill with every coding agent on this machine. The skill is what carries the migration runbook.
+That installs the `insta` CLI, the `insta` skill, and the MCP server for every coding agent on this machine. The skill is what knows how to read a `render.yaml` and turn it into services.
 
-You can also create the project in the [console](https://console.instacloud.com) and connect an agent from its Quick Start page.
+### 2. Create a project
 
-{/* screenshot: console, project Quick Start page with the connect-agent one-liner */}
+```bash
+insta project create mysite
+```
 
-### 2. Collect what your agent cannot reach
+Or click **Create Project** in the [console](https://console.instacloud.com). A new project starts empty.
 
-Two things do not exist anywhere your agent can read:
-
-- **Values Render invented.** `SECRET_KEY` above is `generateValue: true`, so Render made it up and nothing outside Render has a copy. Anything marked `sync: false` is the same story, typed by a human and never in the file. Copy them off your service's **Environment** page now. For `SECRET_KEY` in particular, changing it logs every Django session out, so bring the existing value rather than generating a new one.
-- **Your DNS provider login**, for the last step.
+{/* screenshot: console, Create Project */}
 
 ### 3. Ask your agent to migrate
 
+Get a Render API key first, under **Account Settings → API Keys** in the Render dashboard. Your agent needs it to read your environment variables, which the Render CLI has no command for.
+
 ```text title="Prompt" wrap
-Migrate my Render service mysite and its Postgres database mysitedb to InstaCloud. The repo is render-examples/django. Follow the insta skill's migration runbook, and stop before moving DNS.
+Migrate my Render service mysite and its Postgres database mysitedb to InstaCloud. The repo is render-examples/django, and my Render API key is in RENDER_API_KEY. Follow the insta skill's migration runbook, and stop before moving DNS.
 ```
 
-Your agent follows the migration runbook in the `insta` skill: it adds the services, wires the database credential, deploys your repo, moves the data, and checks that it landed. It will ask you to approve the actions that touch production.
+Your agent reads your `render.yaml`, provisions the services it maps onto, binds the database credential, deploys the repo, moves the data, and checks that it landed. It will ask you to approve the actions that touch production.
 
 One thing is worth knowing, because it is the reason the runbook exists. Your agent stops Render from taking writes before InstaCloud starts taking them. Once the new database has writes of its own, going back to Render quietly loses them.
 
-{/* screenshot: console, project canvas with a compute service and a postgres service deployed */}
+{/* screenshot: console, project with a compute service and a postgres service deployed */}
 
 ### 4. Move the domain
 
@@ -86,11 +82,11 @@ One thing is worth knowing, because it is the reason the runbook exists. Your ag
 Attach <your-domain> to the compute service and give me the DNS records to publish.
 ```
 
-Publish the records at your provider, then ask your agent to check the domain. Keep the Render service suspended, and do not delete it, until the old records have aged out of resolver caches.
+Publish the records at your DNS provider, then ask your agent to check the domain. Keep the Render service suspended, and do not delete it, until the old records have aged out of resolver caches.
 
 ### 5. Branch the database
 
-Now that you are here, branch your database along with your code. Ask for a branch per feature, or per agent task, and each one gets its own Postgres and its own compute.
+Now that you are here, branch your database along with your code.
 
 ```text title="Prompt" wrap
 Create a branch called <name> and deploy the current code to it.
@@ -100,18 +96,17 @@ There is nothing to migrate for this one. For most people it is the reason to mo
 
 ## Prefer to run it yourself?
 
-Everything your agent does is a command you can run. The [CLI reference](/reference/cli/overview) has all of them, and these are the ones this migration turns on:
+Everything your agent does is a command you can run. The [CLI reference](/reference/cli/overview) has all of them, and this is the shape of it:
 
 ```bash
-insta services add compute mysite
+insta services add compute mysite --port <n>
 insta services add postgres mysitedb
 insta secrets bind DATABASE_URL postgres/mysitedb --to compute/mysite
 insta compute connect-repo render-examples/django mysite
 insta secrets set SECRET_KEY                   # value read from stdin
-insta secrets set WEB_CONCURRENCY 4
 ```
 
-The database move is the one worth seeing in full. Scale Render to zero first, including workers and cron jobs, so nothing is still writing:
+Scale Render to zero first, including workers and cron jobs, then move the data:
 
 ```bash
 pg_dump --no-owner --no-privileges "$RENDER_DATABASE_URL" \
