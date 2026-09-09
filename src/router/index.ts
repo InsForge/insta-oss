@@ -82,6 +82,8 @@ export class Router {
   private readonly held = new Map<ServiceKey, number>()
   private ticker: NodeJS.Timeout | null = null
   private stopped = false
+  /** Tail of the reconcile chain: see reconcileSerial. */
+  private chain: Promise<void> = Promise.resolve()
 
   constructor(private readonly deps: RouterDeps) {
     this.cfg = deps.cfg
@@ -116,7 +118,18 @@ export class Router {
     if (this.stopped) return
     this.cached = null
     this.table()
-    void this.reconcile().catch((e) => this.log(`router: lane reconcile failed: ${e instanceof Error ? e.message : String(e)}`))
+    void this.reconcileSerial().catch((e) => this.log(`router: lane reconcile failed: ${e instanceof Error ? e.message : String(e)}`))
+  }
+
+  /** One reconcile at a time. Adding a service fires several mutates, so the passes used to overlap:
+   *  both saw the lane missing, the second lost the bind race against the first, read EADDRINUSE as
+   *  "a laptop handed that port to someone else", moved the service to another port and overwrote the
+   *  first pass's entry in `this.lanes` — leaking a listener nothing could close, on a port no state
+   *  row named, which the next allocation then handed out and could not bind. */
+  private reconcileSerial(): Promise<void> {
+    const next = this.chain.then(() => this.reconcile(), () => this.reconcile())
+    this.chain = next.then(() => undefined, () => undefined)
+    return next
   }
 
   // ---- holds -----------------------------------------------------------------------------------
@@ -214,7 +227,7 @@ export class Router {
       this.internal.on('connection', (c: Socket) => this.track(c))
       await this.listen(this.internal, '127.0.0.1', this.cfg.internalPort, `internal listener 127.0.0.1:${this.cfg.internalPort}`)
     }
-    await this.reconcile()
+    await this.reconcileSerial()
   }
 
   async stop(): Promise<void> {
