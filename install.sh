@@ -750,13 +750,15 @@ cert_present() { [ -n "$(find "$CERT_DIR" -type f -name "api.$DOMAIN.crt" 2>/dev
 # The internal issuer is local and answers in seconds; ACME does not, and four minutes covers a
 # first issuance plus one retry. Past that the edge keeps trying on its own, so this is a warning.
 if [ "$TLS" = internal ]; then CERT_WAIT=60; else CERT_WAIT=240; fi
+# Each attempt gets a full minute because Caddy issues INSIDE the handshake: a client that hangs up
+# early can take the issuance with it, so a short timeout retried often is worse than a long one.
 _i=0
 while :; do
-  curl -sk --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 20 -o /dev/null "https://api.$DOMAIN/healthz" || true
+  curl -sk --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 60 -o /dev/null "https://api.$DOMAIN/healthz" || true
   if cert_present; then break; fi
-  _i=$((_i + 25))
+  _i=$((_i + 65))
   if [ "$_i" -ge "$CERT_WAIT" ]; then break; fi
-  if [ "$_i" -eq 25 ]; then log "waiting for the edge to issue the certificate for api.$DOMAIN (up to ${CERT_WAIT}s)"; fi
+  if [ "$_i" -eq 65 ]; then log "waiting for the edge to issue the certificate for api.$DOMAIN (up to ${CERT_WAIT}s)"; fi
   sleep 5
 done
 if cert_present; then
