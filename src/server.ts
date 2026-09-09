@@ -2,17 +2,18 @@
 // Instacloud platform control-plane, so the stock `insta` CLI and MCP work unchanged — just
 // pointed at localhost. Single-tenant: no OAuth; a builtin "local" org/user stand in for the
 // account system. Cloud-only surfaces (billing, usage, tokens, members) return 501.
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyServerFactory } from 'fastify'
 import fastifyStatic from '@fastify/static'
+import { registerAuth } from './auth'
 import { loadConfig, type Config } from './config'
 import type { Engine } from './engine'
 import * as govern from './govern'
 import { isManagedDbType, parseManagedServiceId } from './manageddb'
+import { loadState } from './state'
 import { isGatedAction, type Approval, type AuditEvent, type GatedAction } from './types'
 
-const LOCAL_USER = { id: 'local', email: null, name: 'local' }
 const LOCAL_ORG = { id: 'local', name: 'local', is_personal: true, role: 'owner' }
 
 const approvalOut = (a: Approval) => ({
@@ -26,14 +27,21 @@ const eventOut = (e: AuditEvent) => ({
  *  Each package appends its prefixes on its marked line (contract 00 section 1.1). */
 export const API_PREFIXES: string[] = [
   '/projects', '/orgs', '/me', '/tokens', '/healthz', '/regions', '/images', '/invitations',
-  // WP1: '/api', '/auth', '/tls'
+  '/api', '/auth', '/tls',
   // WP5: '/templates', '/template-deployments'
 ]
+
+/** True when the API owns `url`: a GET outside these prefixes falls back to the dashboard shell
+ *  (SPA routing) and, in server mode, needs no credentials (decision 9). A function declaration, so
+ *  the server/auth import cycle (auth.ts reads the allowlist) is safe at module init. */
+export function isApiPath(url: string): boolean {
+  return API_PREFIXES.some((p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`))
+}
 
 /** `serverFactory` is forwarded straight into Fastify() so the router (WP2) can hand it the shared
  *  listener; undefined until then. `cfg` is the boot config (tests pass their own). */
 export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { serverFactory?: FastifyServerFactory } = {}): FastifyInstance {
-  const app = Fastify({ logger: false, ...(opts.serverFactory ? { serverFactory: opts.serverFactory } : {}) })
+  const app = Fastify({ logger: false, trustProxy: cfg.trustProxy, forceCloseConnections: 'idle', ...(opts.serverFactory ? { serverFactory: opts.serverFactory } : {}) })
 
   // Tolerate bodyless POSTs sent as application/json (the CLI does this on approve/deny).
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
@@ -41,6 +49,10 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     if (s === '') return done(null, undefined)
     try { done(null, JSON.parse(s)) } catch (e) { done(e as Error) }
   })
+
+  // Identity (WP1): in server mode the guard plus /api/auth/*, /auth/*, /me and /tokens; in local
+  // mode exactly today's /me and the three /tokens 501s, and no hook.
+  registerAuth(app, cfg)
 
   const notCloud = (reply: FastifyReply, what: string) =>
     reply.code(501).send({ error: `${what} is cloud-only — insta-oss is a single-tenant local runtime` })
@@ -670,10 +682,8 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   // them inside its own region. Region A = WP1, B = WP2, C = WP3, D = WP5.
 
   // ---- region A (WP1 identity/config) ----
-  app.get('/me', async () => ({ user: LOCAL_USER }))
-  app.get('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
-  app.post('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
-  app.delete('/tokens/:tid', async (_req, reply) => notCloud(reply, 'agent tokens'))
+  // /me and /tokens are registered by registerAuth() above: one call site mints the right pair for
+  // the run mode, so the local surface stays byte-identical and the server one is guarded.
   // ---- end region A ----
 
   // ---- region B (WP2 router) ----
@@ -697,12 +707,25 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   // ---- local dashboard: serve ui/dist when built (same origin as the API — localhost trust,
   // no CORS, no auth). API routes above always win; unknown non-API GETs fall back to the SPA.
   const uiDist = cfg.uiDist
-  const isApiPath = (url: string): boolean =>
-    API_PREFIXES.some((p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`))
   if (existsSync(join(uiDist, 'index.html'))) {
-    app.register(fastifyStatic, { root: uiDist, wildcard: false })
+    // index: false, so fastifyStatic never serves index.html raw: every shell response is injected.
+    app.register(fastifyStatic, { root: uiDist, wildcard: false, index: false })
+    const shellHtml = readFileSync(join(uiDist, 'index.html'), 'utf8')
+    const sendShell = (reply: FastifyReply): FastifyReply => {
+      // setupRequired is read per request: it flips to false the moment the admin is created.
+      const boot = JSON.stringify({
+        mode: cfg.mode,
+        setupRequired: cfg.auth.enabled && !loadState().identity?.admin,
+        apiUrl: cfg.apiUrl,
+        consoleUrl: cfg.consoleUrl,
+      }).replace(/</g, '\\u003c')
+      const script = `<script>window.__INSTA_OSS__=${boot}</script>`
+      const html = shellHtml.includes('</head>') ? shellHtml.replace('</head>', `${script}</head>`) : script + shellHtml
+      return reply.type('text/html; charset=utf-8').send(html)
+    }
+    app.get('/', async (_req, reply) => sendShell(reply))
     app.setNotFoundHandler((req, reply) => {
-      if (req.method === 'GET' && !isApiPath(req.url)) return reply.sendFile('index.html')
+      if (req.method === 'GET' && !isApiPath(req.url)) return sendShell(reply)
       return reply.code(404).send({ error: 'not found' })
     })
   } else {

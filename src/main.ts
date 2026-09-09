@@ -10,20 +10,45 @@ import { DockerCompute } from './adapters/compute'
 import { LocalGarage } from './adapters/garage'
 import { LocalManagedDb } from './adapters/manageddb'
 import { docker } from './docker'
-import { loadConfig } from './config'
-import { initStatePath, acquireLock } from './state'
+import { resetAdmin } from './auth'
+import { loadConfig, type Config } from './config'
+import { mkdirSync } from 'node:fs'
+import { acquireLock, initStatePath, loadState, releaseLock } from './state'
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) })
+
+/** Local mode on Linux only: the docker bridge gateway, so a container started with
+ *  `--add-host <name>:host-gateway` reaches the daemon's own listener. On Docker Desktop
+ *  host.docker.internal already forwards to host loopback, so the list stays empty there. A failure
+ *  is logged once and is never fatal (decision 3). */
+async function bridgeGateway(cfg: Config): Promise<string[]> {
+  if (cfg.mode !== 'local' || process.platform !== 'linux') return []
+  try {
+    const out = await docker(['network', 'inspect', 'bridge', '-f', '{{(index .IPAM.Config 0).Gateway}}'])
+    const ip = out.toString('utf8').trim()
+    if (ip) return [ip]
+  } catch { /* no bridge network, or a docker without that template: warn and carry on */ }
+  console.warn('warn: could not read the docker bridge gateway; containers reach the daemon through host.docker.internal only')
+  return []
+}
 
 async function main(): Promise<void> {
   // config (WP1: --reset-admin runs here and exits)
-  const cfg = loadConfig()
+  let cfg = loadConfig()
+  if (process.argv.includes('--reset-admin')) process.exit(resetAdmin(cfg))
+  mkdirSync(cfg.dataDir, { recursive: true })
   // state path
   initStatePath(cfg.statePath)
-  // lock (WP1: <dataDir>/instad.lock heartbeat)
+  // lock (WP1: instad.lock in the data dir, 20 s heartbeat; a FRESH lock is retried for up to
+  // 60 s so a compose restart whose predecessor was SIGKILLed still boots)
   acquireLock(cfg.dataDir)
+  process.on('exit', releaseLock)
   // docker check
   try { await docker(['version', '--format', '{{.Server.Version}}']) }
   catch { console.error('error: Docker is required and must be running (insta-oss provisions branches as containers)'); process.exit(1) }
-  // WP1: extraListenHosts (local + linux: the docker bridge gateway), stored on a frozen copy of cfg
+  // extraListenHosts (local + linux: the docker bridge gateway) on a frozen copy of cfg; the
+  // primary listener stays cfg.listenHost and WP2's lanes bind the extras (decision 3).
+  cfg = Object.freeze({ ...cfg, extraListenHosts: await bridgeGateway(cfg) })
 
   // ---- region WP4 (probe) ----
   // DataDir + probe(); passed as EngineOptions.data
@@ -58,26 +83,38 @@ async function main(): Promise<void> {
   // engine.scheduler.start()
   // ---- end region WP3 (start) ----
 
-  // banner (WP1: server-mode banner + setup hint)
-  console.log(`insta-oss daemon listening on http://${cfg.listenHost}:${cfg.port}`)
-  console.log('point the insta CLI here (this is its default):')
-  console.log('  insta project create <name>   # then branch/deploy/secrets/manifest as usual')
+  if (cfg.mode === 'server') {
+    console.log(`instad ${cfg.version} mode=server api=${cfg.apiUrl} console=${cfg.consoleUrl} data=${cfg.dataDir}`)
+    if (!loadState().identity?.admin) console.log(`setup: ${cfg.consoleUrl}/setup`)
+  } else {
+    console.log(`insta-oss daemon listening on http://${cfg.listenHost}:${cfg.port}`)
+    console.log('point the insta CLI here (this is its default):')
+    console.log('  insta project create <name>   # then branch/deploy/secrets/manifest as usual')
+  }
   // ---- region WP6 ----
   // version banner
   // ---- end region WP6 ----
 
-  // signals (WP1: bounded close so the compose stop_grace_period is respected and the lock is released).
-  // Scaffold: NO handlers (today's default signal exit); WP1 lands the bodies, the inner markers stay.
-  // const shutdown = async () => {
-  //   // ---- region WP2 (stop) ----
-  //   // await router.stop()
-  //   // ---- end region WP2 (stop) ----
-  //   // ---- region WP3 (stop) ----
-  //   // await engine.scheduler.stop()
-  //   // ---- end region WP3 (stop) ----
-  //   await app.close(); releaseLock(); process.exit(0)
-  // }
-  // process.on('SIGTERM', () => { void shutdown() }); process.on('SIGINT', () => { void shutdown() })
+  // signals: shut down inside the compose stop_grace_period (30 s) and never leave a fresh lock
+  // behind. Order matters: stop accepting traffic, then the scheduler, then a BOUNDED app.close()
+  // (SSE, WebSocket and pg splices share these sockets, so an unbounded close could outlast the
+  // grace, get SIGKILLed, skip releaseLock and make the replacement container refuse the lock).
+  let stopping = false
+  const shutdown = async (): Promise<void> => {
+    if (stopping) return
+    stopping = true
+    // ---- region WP2 (stop) ----
+    // await router.stop()
+    // ---- end region WP2 (stop) ----
+    // ---- region WP3 (stop) ----
+    // await engine.scheduler.stop()
+    // ---- end region WP3 (stop) ----
+    await Promise.race([app.close(), sleep(10_000)])
+    releaseLock()
+    process.exit(0)
+  }
+  process.on('SIGTERM', () => { void shutdown() })
+  process.on('SIGINT', () => { void shutdown() })
 }
 
 main().catch((e: unknown) => { console.error(e instanceof Error ? e.message : String(e)); process.exit(1) })

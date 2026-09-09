@@ -1,0 +1,281 @@
+// Identity routes and the request guard (contract 00 sections 9 and 11; plan 01 sections 3 to 5, 8).
+// Server mode: a bearer-or-signed-cookie guard on every route outside the allowlist, the cloud's
+// Better Auth mount paths (/api/auth/*), its /auth/login|refresh|logout wrappers for `insta login
+// --email`, /me as PublicUser + via, and /tokens minting `insta_` keys. Local mode registers exactly
+// today's /me and the three /tokens 501s and no hook, so the local surface stays byte-identical.
+// No endpoint here is missing on the cloud (contract 00 section 9, WP1 rows).
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import type { Config } from './config'
+import { isApiPath } from './server'
+import { acquireLock, initStatePath, loadState, mutate, releaseLock, type State } from './state'
+import {
+  AdminExists, DUMMY_HASH, HttpError, SignInLimiter, apiTokenOut, betterAuthUser, checkPassword, clearCookieHeader, clock,
+  createAdmin, findSession, hashPassword, mintSession, mintToken, normalizeEmail, publicUser, readSessionCookie, revokeSession,
+  revokeToken, sessionOut, setCookieHeader, verifyPassword, verifyToken, type AdminRow, type SessionRow,
+} from './identity'
+
+/** Who a request acts as, set by the guard on every non-public route in server mode. */
+export interface Actor { userId: string; via: 'jwt' | 'api'; scopes?: string[]; source: 'bearer' | 'cookie' }
+
+declare module 'fastify' {
+  interface FastifyRequest { actor?: Actor | null }
+}
+
+const LOCAL_USER = { id: 'local', email: null, name: 'local' }
+
+/** Server-mode allowlist (decision 9): /healthz, the Better Auth mount, the /auth wrappers, GET /templates*, and any GET outside the API prefixes (static assets and the SPA shell). */
+export function isPublicPath(method: string, path: string): boolean {
+  if (path === '/healthz') return true
+  if (path.startsWith('/api/auth/')) return true
+  if (path.startsWith('/auth/')) return true
+  if (method === 'GET' && (path === '/templates' || path.startsWith('/templates/'))) return true
+  if (method === 'GET' && !isApiPath(path)) return true
+  return false
+}
+
+const body = (req: FastifyRequest): Record<string, unknown> => (req.body ?? {}) as Record<string, unknown>
+const ua = (req: FastifyRequest): string => String(req.headers['user-agent'] ?? '')
+const pathOf = (req: FastifyRequest): string => req.url.split('?')[0]
+
+const unauthorized = (reply: FastifyReply): FastifyReply =>
+  reply.header('WWW-Authenticate', 'Bearer realm="insta-oss"').code(401).send({ error: 'unauthorized' })
+
+type Resolved = { actor: Actor; token: string; session?: SessionRow; admin: AdminRow }
+
+/** Plan 01 section 4: a Bearer `insta_` key verifies as a token and NEVER falls through to the session lookup; any other bearer is a session token; no bearer means the signed cookie. Every actor requires the admin to exist and to own the session (covers --reset-admin). */
+function resolveActor(req: FastifyRequest, cfg: Config, s: State): Resolved | null {
+  const admin = s.identity?.admin
+  if (!admin) return null
+  const header = req.headers.authorization
+  const bearer = typeof header === 'string' ? /^Bearer\s+(.*)$/i.exec(header.trim()) : null
+  if (bearer) {
+    const t = bearer[1].trim()
+    if (!t) return null
+    if (t.startsWith('insta_')) {
+      const row = verifyToken(s, t)
+      return row ? { actor: { userId: admin.id, via: 'api', scopes: row.scopes, source: 'bearer' }, token: t, admin } : null
+    }
+    const session = findSession(s, cfg.auth, t)
+    return session && session.userId === admin.id ? { actor: { userId: session.userId, via: 'jwt', source: 'bearer' }, token: t, session, admin } : null
+  }
+  const ct = readSessionCookie(cfg.auth, req.headers.cookie)
+  if (!ct) return null
+  const session = findSession(s, cfg.auth, ct)
+  return session && session.userId === admin.id ? { actor: { userId: session.userId, via: 'jwt', source: 'cookie' }, token: ct, session, admin } : null
+}
+
+/** CSRF belt (decision 59): a cookie-authenticated write is cross-site when a PRESENT Origin (else Referer) names another host, or Sec-Fetch-Site says so; with none of the three headers (curl, the headless setup recipe) it passes. */
+export function isCrossSite(headers: { origin?: string; referer?: string; host?: string; 'sec-fetch-site'?: string }): boolean {
+  const presented = headers.origin ?? headers.referer
+  if (presented !== undefined) {
+    let host: string | null = null
+    try { host = new URL(presented).host.toLowerCase() } catch { host = null }
+    if (!host || host !== String(headers.host ?? '').trim().toLowerCase()) return true
+  }
+  return headers['sec-fetch-site'] === 'cross-site'
+}
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+
+function sendError(reply: FastifyReply, e: unknown): FastifyReply {
+  if (e instanceof HttpError) return reply.code(e.status).send(e.body)
+  if (e instanceof AdminExists) return reply.code(422).send({ code: 'USER_ALREADY_EXISTS', message: e.message })
+  throw e
+}
+
+const authResult = (token: string, session: SessionRow, admin: AdminRow) => ({
+  accessToken: token,
+  refreshToken: token,
+  expiresIn: Math.max(0, Math.floor((Date.parse(session.expiresAt) - clock.now()) / 1000)),
+  user: publicUser(admin),
+})
+
+type SignIn =
+  | { ok: true; token: string; session: SessionRow; admin: AdminRow }
+  | { ok: false; reason: 'invalid_email' | 'invalid_credentials' | 'too_many' }
+
+/** Registers the identity surface for `cfg.mode`; call right after the content-type parser. */
+export function registerAuth(app: FastifyInstance, cfg: Config): void {
+  if (!cfg.auth.enabled) {
+    // Local mode: byte-identical to the pre-identity daemon (contract 00 section 11).
+    const notCloud = (reply: FastifyReply, what: string) =>
+      reply.code(501).send({ error: `${what} is cloud-only — insta-oss is a single-tenant local runtime` })
+    app.get('/me', async () => ({ user: LOCAL_USER }))
+    app.get('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
+    app.post('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
+    app.delete('/tokens/:tid', async (_req, reply) => notCloud(reply, 'agent tokens'))
+    return
+  }
+
+  app.decorateRequest('actor', null)
+  const limiter = new SignInLimiter()
+
+  // ---- guard (plan 01 section 3) ----
+  app.addHook('onRequest', async (req, reply) => {
+    const path = pathOf(req)
+    if (isPublicPath(req.method, path)) return
+    const r = resolveActor(req, cfg, loadState())
+    if (!r) return unauthorized(reply)
+    if (r.actor.source === 'cookie' && !SAFE_METHODS.has(req.method) && isCrossSite(req.headers as Record<string, string | undefined>)) {
+      return reply.code(403).send({ error: 'cross-site request rejected' })
+    }
+    req.actor = r.actor
+  })
+
+  /** Shared by /api/auth/sign-in/email and /auth/login: limiter first, one scrypt either way, failures recorded per IP. */
+  const signIn = (req: FastifyRequest, b: Record<string, unknown>, rememberMe: boolean): SignIn => {
+    const ip = req.ip
+    if (limiter.blocked(ip)) return { ok: false, reason: 'too_many' }
+    let email: string
+    try { email = normalizeEmail(b.email) } catch { return { ok: false, reason: 'invalid_email' } }
+    const password = typeof b.password === 'string' ? b.password : ''
+    const admin = loadState().identity?.admin
+    if (!admin || admin.email !== email) {
+      verifyPassword(password, DUMMY_HASH)
+      limiter.fail(ip)
+      return { ok: false, reason: 'invalid_credentials' }
+    }
+    if (!verifyPassword(password, admin.passwordHash)) {
+      limiter.fail(ip)
+      return { ok: false, reason: 'invalid_credentials' }
+    }
+    limiter.clear(ip)
+    const { token, row } = mutate((s) => mintSession(s, cfg.auth, admin.id, ip, ua(req), rememberMe))
+    return { ok: true, token, session: row, admin }
+  }
+
+  // ---- Better Auth mount (the dashboard's client) ----
+  app.post('/api/auth/sign-up/email', async (req, reply) => {
+    const b = body(req)
+    try {
+      const email = normalizeEmail(b.email)
+      const password = checkPassword(b.password)
+      const name = typeof b.name === 'string' ? b.name : undefined
+      if (loadState().identity?.admin) throw new AdminExists()
+      const passwordHash = hashPassword(password)
+      const { admin, token } = mutate((s) => {
+        const admin = createAdmin(s, { email, name, passwordHash })
+        const { token } = mintSession(s, cfg.auth, admin.id, req.ip, ua(req), true)
+        return { admin, token }
+      })
+      reply.header('set-cookie', setCookieHeader(cfg.auth, token, true))
+      return { token, user: betterAuthUser(admin) }
+    } catch (e) { return sendError(reply, e) }
+  })
+
+  app.post('/api/auth/sign-in/email', async (req, reply) => {
+    const b = body(req)
+    const rememberMe = b.rememberMe !== false
+    const r = signIn(req, b, rememberMe)
+    if (!r.ok) {
+      if (r.reason === 'too_many') return reply.code(429).send({ code: 'TOO_MANY_REQUESTS', message: 'Too many requests. Please try again later.' })
+      if (r.reason === 'invalid_email') return reply.code(400).send({ code: 'INVALID_EMAIL', message: 'Invalid email' })
+      return reply.code(401).send({ code: 'INVALID_EMAIL_OR_PASSWORD', message: 'Invalid email or password' })
+    }
+    reply.header('set-cookie', setCookieHeader(cfg.auth, r.token, rememberMe))
+    reply.header('set-auth-token', r.token)
+    return { redirect: false, token: r.token, user: betterAuthUser(r.admin) }
+  })
+
+  app.get('/api/auth/get-session', async (req, reply) => {
+    const r = resolveActor(req, cfg, loadState())
+    if (!r || r.actor.via !== 'jwt' || !r.session) return reply.type('application/json').send('null')
+    return { session: sessionOut(r.session, r.token), user: betterAuthUser(r.admin) }
+  })
+
+  app.post('/api/auth/sign-out', async (req, reply) => {
+    const r = resolveActor(req, cfg, loadState())
+    if (r?.session) mutate((s) => revokeSession(s, r.token))
+    reply.header('set-cookie', clearCookieHeader(cfg.auth))
+    return { success: true }
+  })
+
+  app.post('/api/auth/device/code', async (_req, reply) =>
+    reply.code(501).send({ error: 'device and OAuth login are cloud-only; use insta login --api-key or --email' }))
+
+  // ---- the cloud's /auth wrappers (the CLI's `insta login --email`) ----
+  app.post('/auth/login', async (req, reply) => {
+    const r = signIn(req, body(req), true)
+    if (!r.ok) {
+      if (r.reason === 'too_many') return reply.code(429).send({ error: 'too many attempts' })
+      if (r.reason === 'invalid_email') return reply.code(400).send({ error: 'invalid email' })
+      return reply.code(401).send({ error: 'invalid credentials' })
+    }
+    return authResult(r.token, r.session, r.admin)
+  })
+
+  app.post('/auth/refresh', async (req, reply) => {
+    const t = body(req).refreshToken
+    if (typeof t !== 'string' || !t) return reply.code(400).send({ error: 'refreshToken is required' })
+    const s = loadState()
+    const admin = s.identity?.admin
+    if (!admin || t.startsWith('insta_')) return reply.code(401).send({ error: 'invalid refresh token' })
+    const session = findSession(s, cfg.auth, t)
+    if (!session || session.userId !== admin.id) return reply.code(401).send({ error: 'invalid refresh token' })
+    return authResult(t, session, admin)
+  })
+
+  app.post('/auth/logout', async (req) => {
+    const t = body(req).refreshToken
+    if (typeof t === 'string' && t && !t.startsWith('insta_')) mutate((s) => revokeSession(s, t))
+    return { ok: true }
+  })
+
+  app.post('/auth/signup', async (_req, reply) =>
+    reply.code(501).send({ error: `email-verification signup is cloud-only; create the admin at ${cfg.consoleUrl}/setup` }))
+
+  // ---- account ----
+  app.get('/me', async (req, reply) => {
+    const admin = loadState().identity?.admin
+    const a = req.actor
+    if (!admin || !a) return unauthorized(reply)
+    return { user: publicUser(admin), via: a.via }
+  })
+
+  app.get('/tokens', async () => ({ tokens: (loadState().identity?.tokens ?? []).map(apiTokenOut) }))
+
+  app.post('/tokens', async (req, reply) => {
+    const b = body(req)
+    if (b.orgId !== undefined && b.orgId !== null) return reply.code(400).send({ error: 'orgId must be omitted on a single-tenant daemon' })
+    try {
+      const { key, row } = mutate((s) => mintToken(s, { name: b.name, scopes: b.scopes, expiresInDays: b.expiresInDays }))
+      return reply.code(201).send({ token: key, record: apiTokenOut(row) })
+    } catch (e) { return sendError(reply, e) }
+  })
+
+  app.delete('/tokens/:tokenId', async (req, reply) => {
+    const { tokenId } = req.params as { tokenId: string }
+    const live = loadState().identity?.tokens.some((r) => r.id === tokenId && !r.revokedAt) ?? false
+    if (!live || !mutate((s) => revokeToken(s, tokenId))) return reply.code(404).send({ error: 'token not found' })
+    return { ok: true }
+  })
+}
+
+/** `instad --reset-admin` (plan 01 section 8): takes the data-dir lock like a boot (so a running daemon can never serve a deleted admin from its cache), removes the admin and every session, keeps the `insta_` tokens, and remembers the admin id so the next sign-up reuses it. Returns the exit code. */
+export function resetAdmin(cfg: Config, out: { log(msg: string): void; error(msg: string): void } = console): number {
+  if (!cfg.auth.enabled) {
+    out.error('--reset-admin applies to server mode only (local mode has no admin)')
+    return 1
+  }
+  initStatePath(cfg.statePath)
+  try { acquireLock(cfg.dataDir, { timeoutMs: 0 }) }
+  catch (e) {
+    out.error(`${e instanceof Error ? e.message : String(e)}\nstop the daemon first (docker compose stop instad) then re-run`)
+    return 1
+  }
+  try {
+    if (!loadState().identity?.admin) {
+      out.log('no admin exists')
+      return 0
+    }
+    mutate((s) => {
+      const id = s.identity
+      if (!id?.admin) return
+      id.previousAdminId = id.admin.id
+      id.admin = null
+      id.sessions = []
+    })
+    out.log(`admin removed; open ${cfg.consoleUrl}/setup to create a new one (existing insta_ tokens keep working once it exists)`)
+    return 0
+  } finally { releaseLock() }
+}
