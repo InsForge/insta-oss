@@ -341,8 +341,12 @@ test('with no branch named, the fresh-branch default mints n8n then n8n-2', asyn
 test('a health failure fails the run, names the last status and redacts the log tail', async () => {
   const id = await project()
   probeStatus = () => 500
+  // The mock reads the generated key at CALL time: the run mints it, then the tail echoes it, which
+  // is exactly the accident `redactLogTail` exists for.
+  const generatedKey = (): string =>
+    (loadState().userSecrets[id] ?? []).find((u) => u.name === 'N8N_ENCRYPTION_KEY')?.value ?? ''
   vi.mocked((await import('../src/docker')).docker).mockImplementation(async (args: string[]) => (
-    args[0] === 'logs' ? Buffer.from('2026-09-08T00:00:00Z boot failed with key ') : Buffer.from('')
+    args[0] === 'logs' ? Buffer.from(`2026-09-08T00:00:00Z boot failed with key ${generatedKey()}`) : Buffer.from('')
   ))
   const r = await post(`/projects/${id}/template-deployments`, { templateCode: 'n8n', branch: 'main' })
   const { deploymentId } = r.json()
@@ -351,6 +355,11 @@ test('a health failure fails the run, names the last status and redacts the log 
   expect(view.status).toBe('failed')
   expect(view.step).toBe('health_check')
   expect(view.error).toMatch(/^n8n: not healthy within 0s \(last status: HTTP 500 on \/healthz\)$/)
+  // The tail is DURABLE and this route serves it, so the key the run generated must not be in it.
+  const key = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets.N8N_ENCRYPTION_KEY as string
+  expect(key).toHaveLength(32)
+  expect(view.logsTail).toContain('boot failed with key [redacted]')
+  expect(view.logsTail).not.toContain(key)
   expect((await get(`/projects/${id}/events`)).json().events.map((e: { kind: string }) => e.kind)).toContain('template.deploy.failed')
 })
 
@@ -362,11 +371,24 @@ test('a 401 counts as healthy; an off-origin healthcheck is refused without a pr
 
   // A healthcheck the parser accepts but that resolves off-origin never reaches the probe. The
   // grammar refuses `//host` and any scheme, so this is only reachable through a stored manifest.
-  const before = probed.length
   const manifest = { code: 'q', version: '1', services: { web: { type: 'web', image: 'i', port: 8080, healthcheck: '/ok' } } }
   probeStatus = (path) => (path === '/ok' ? 200 : 500)
-  await deploy(id, { manifest, branch: 'main' })
-  expect(probed.length).toBeGreaterThan(before)
+  const dep = await deploy(id, { manifest, branch: 'main' })
+  const web = (await get(`/template-deployments/${dep.json().deploymentId}`)).json()
+    .services.find((x: { name: string }) => x.name === 'web') as { name: string; url: string }
+  // ...and the refusal itself, which no manifest can reach through the grammar: the executor is
+  // driven directly with the off-origin path a STORED row could carry.
+  const before = probed.length
+  const entry = {
+    serviceName: web.name, type: 'web' as const, image: 'i', port: 8080,
+    healthcheck: 'https://evil.example/x', url: web.url, env: {}, state: 'deployed' as const,
+  }
+  const verdict = await (executor as unknown as {
+    awaitHealthy(p: string, b: string, e: typeof entry): Promise<{ healthy: boolean; reason?: string }>
+  }).awaitHealthy(id, 'main', entry)
+  expect(verdict.healthy).toBe(false)
+  expect(verdict.reason).toMatch(/resolves off the service origin \(https:\/\/evil.example\) - refusing to probe it/)
+  expect(probed.length).toBe(before)
 })
 
 test('idempotency: the same id echoes, a changed manifest 409s, and a resume completes the run', async () => {
