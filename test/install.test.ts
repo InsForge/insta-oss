@@ -4,7 +4,8 @@
 // Everything that needs Docker lives in compose.int.test.ts and image.int.test.ts.
 import { test, expect } from 'vitest'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CONFIG_KEYS } from '../src/config'
 
@@ -329,4 +330,67 @@ test('only a CIDR block survives into the firewall lines the installer evals', (
   expect(hostile.stdout).not.toContain('curl')
   // A bare address with no prefix length, and a name, are not CIDR blocks either.
   expect(keep('10.100.0.0 fd00::/8 example.test').stdout).toBe('')
+})
+
+// The documented minimums (2 vCPU, 2 GiB RAM, 15 GiB free) used to be enforced nowhere except the
+// loop-image path, so an undersized box installed cleanly and failed later on an error that said
+// nothing about sizing. The two readings behind the check are sliced out of the shipped script and
+// run here, so the test cannot drift away from what the installer actually measures.
+const sizingHelpers = (): string => {
+  const start = script.indexOf('MEM_FLOOR_MIB=')
+  const end = script.indexOf('check_resources() {', start)
+  expect(start, 'the sizing check is gone from install.sh').toBeGreaterThan(0)
+  expect(end).toBeGreaterThan(start)
+  return script.slice(start, end)
+}
+
+test('the sizing check reads MemTotal and the free space of the filesystem that will hold the data', () => {
+  const sh = (body: string, ...args: string[]) =>
+    spawnSync('sh', ['-c', `${sizingHelpers()}\n${body}`, 'sh', ...args], { encoding: 'utf8' })
+
+  const dir = mkdtempSync(join(tmpdir(), 'insta-sizing-'))
+  // A box sold as 2 GiB reports a little under it, so the floor has to sit below 2048 MiB or every
+  // documented-minimum machine would be refused. This is the MemTotal of a real 2 GiB cloud host.
+  const twoGiB = join(dir, 'meminfo-2g')
+  writeFileSync(twoGiB, 'MemTotal:        2007268 kB\nMemFree:          123456 kB\n')
+  const mem2 = sh('mem_total_mib "$1"', twoGiB)
+  expect(mem2.status).toBe(0)
+  expect(Number(mem2.stdout.trim())).toBe(1960)
+  expect(Number(mem2.stdout.trim())).toBeGreaterThanOrEqual(1900)   // passes the floor
+
+  const oneGiB = join(dir, 'meminfo-1g')
+  writeFileSync(oneGiB, 'MemTotal:        1010420 kB\n')
+  expect(Number(sh('mem_total_mib "$1"', oneGiB).stdout.trim())).toBeLessThan(1900)   // refused
+
+  // No MemTotal line, and no file at all: the reading fails rather than reporting 0, which is what
+  // makes the caller skip the check instead of refusing the install.
+  const empty = join(dir, 'meminfo-empty')
+  writeFileSync(empty, 'SwapTotal: 0 kB\n')
+  expect(sh('mem_total_mib "$1"', empty).status).not.toBe(0)
+  expect(sh('mem_total_mib "$1"', join(dir, 'absent')).status).not.toBe(0)
+
+  // free_gib walks up to the nearest existing ancestor, because the data directory is measured
+  // before it is created: /var/lib/instacloud has to report /var/lib on a first install.
+  const here = sh('free_gib "$1"', dir).stdout.trim()
+  expect(here).toMatch(/^\d+$/)
+  expect(sh('free_gib "$1"', join(dir, 'not', 'yet', 'there')).stdout.trim()).toBe(here)
+
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('an undersized box is refused on a first install and only warned about on an upgrade', () => {
+  // Not gated on STACK_UP the way the port check is: the ports are held by our own stack on a
+  // re-run, memory and disk are not.
+  expect(script).toContain('\ncheck_resources\n')
+  expect(script).toMatch(/MEM_FLOOR_MIB=1900\nDISK_FLOOR_GIB=15\n/)
+  const body = script.slice(script.indexOf('check_resources() {'), script.indexOf('\ncheck_resources\n'))
+  expect(body).toContain('_mem=$(mem_total_mib)')
+  expect(body).toContain('_free=$(free_gib "$DATA")')
+  expect(body).toContain('if [ "$UPGRADE" = 1 ]; then')
+  expect(body).toMatch(/UPGRADE" = 1 \]; then\n {4}warn /)     // an upgrade continues
+  expect(body).toContain('die "this box is under the documented minimum')
+  // one core runs, slowly: that one is a warning at every point, never a refusal
+  expect(body).toMatch(/_cpu" -lt 2 \]; then warn /)
+  // and the header the operator reads says the same numbers the code enforces
+  expect(script).toContain('2 vCPU, 2 GiB RAM, 15 GiB free disk')
 })

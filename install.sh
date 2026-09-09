@@ -496,6 +496,61 @@ check_ports() {
 }
 [ "$STACK_UP" = 1 ] || check_ports
 
+# ---- 3a. cpu, memory and disk ----
+# The minimums this script documents were enforced nowhere except the loop-image path, so a box
+# under them installed cleanly and then failed later under load, on an error that says nothing
+# about sizing. They are checked here, once, by name. A first install refuses; an upgrade only
+# warns, because an installer that will not update a box that is already running helps nobody.
+# A machine sold as 2 GiB reports a little less, since firmware and the kernel's own reserve come
+# off MemTotal (a 2 GiB cloud instance shows about 1.9 GiB), so the floor is 1900 MiB: the
+# documented 2 GiB machine passes and a 1 GiB one does not.
+MEM_FLOOR_MIB=1900
+DISK_FLOOR_GIB=15
+# The file is an argument so the check is testable without a Linux box.
+mem_total_mib() {
+  _f=${1:-/proc/meminfo}
+  [ -r "$_f" ] || return 1
+  awk '/^MemTotal:/ {print int($2 / 1024); found = 1} END {exit !found}' "$_f"
+}
+# The filesystem that will hold the data directory: the directory itself when it already exists (an
+# operator who pre-mounted a volume there), otherwise its nearest existing ancestor.
+free_gib() {
+  _d=$1
+  while [ ! -d "$_d" ] && [ "$_d" != / ]; do _d=$(dirname "$_d"); done
+  df -Pk "$_d" 2>/dev/null | awk 'NR==2 {print int($4 / 1048576)}'
+}
+check_resources() {
+  _cpu=$(nproc 2>/dev/null) || _cpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || _cpu=''
+  case $_cpu in
+    ''|*[!0-9]*) ;;
+    *) if [ "$_cpu" -lt 2 ]; then warn "$_cpu vCPU: the minimum is 2, and one core makes every deploy and branch fork slow"; fi ;;
+  esac
+  UNDERSIZED=0
+  _mem=$(mem_total_mib) || _mem=''
+  case $_mem in
+    ''|*[!0-9]*) warn "could not read MemTotal from /proc/meminfo: skipping the memory check" ;;
+    *) if [ "$_mem" -lt "$MEM_FLOOR_MIB" ]; then
+         warn "${_mem} MiB of RAM: the minimum is 2 GiB, which is what the daemon, the edge, Garage and one Postgres need together"
+         UNDERSIZED=1
+       fi ;;
+  esac
+  _free=$(free_gib "$DATA")
+  case $_free in
+    ''|*[!0-9]*) warn "could not read the free space for $DATA: skipping the disk check" ;;
+    *) if [ "$_free" -lt "$DISK_FLOOR_GIB" ]; then
+         warn "${_free} GiB free where $DATA lives: the minimum is $DISK_FLOOR_GIB GiB, and images, database directories and branch forks all land there"
+         UNDERSIZED=1
+       fi ;;
+  esac
+  if [ "$UNDERSIZED" = 0 ]; then return 0; fi
+  if [ "$UPGRADE" = 1 ]; then
+    warn "continuing: this is an upgrade of an install that already exists on this box"
+    return 0
+  fi
+  die "this box is under the documented minimum (2 vCPU, 2 GiB RAM, $DISK_FLOOR_GIB GiB free): resize it, or put the data on a larger filesystem with --data-dir <path>"
+}
+check_resources
+
 # ---- 4. docker, compose plugin, address pools ----
 DOCKER_FRESH=0
 if ! have docker; then
