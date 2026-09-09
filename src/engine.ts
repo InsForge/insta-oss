@@ -186,12 +186,11 @@ export class Engine {
     const dbs = this.dbList(project.id)
     const stores = this.stList(project.id)
     const managedRegs = this.managedList(project.id)
-    // Reserve every hostname this branch will mint and every lane port it needs BEFORE the first
-    // provisioning await, inside the engine-wide provision chain (decision 51).
-    mutate(() => {
-      for (const d of dbs) this.assertHostFree(this.labelFor('postgres', d.name, ref))
-      for (const m of managedRegs) this.assertHostFree(this.labelFor(m.type, m.name, ref))
-    })
+    // Check every hostname this branch will mint and reserve every lane port it needs BEFORE the
+    // first provisioning await, inside the engine-wide provision chain (decision 51). The check
+    // itself writes nothing, so it stays out of a mutate: the chain is what makes it atomic.
+    for (const d of dbs) this.assertHostFree(this.labelFor('postgres', d.name, ref))
+    for (const m of managedRegs) this.assertHostFree(this.labelFor(m.type, m.name, ref))
     const lanes = this.allocLanes(project, branchId, this.branchServiceIds(project))                      // WP2
     // Every provider object this call created, so one compensation path can undo the whole stack.
     const madeDbs: PgTarget[] = []
@@ -2478,7 +2477,7 @@ export class Engine {
       if (this.dbList(projectId).some((d) => d.name === newName)) throw new Error(`postgres service "${newName}" already exists`)
       const newId = pgServiceId(newName)
       const branches = this.listBranches(projectId)
-      mutate(() => { for (const b of branches) this.assertHostFree(this.labelFor('postgres', newName, this.ref(project, b))) })
+      for (const b of branches) this.assertHostFree(this.labelFor('postgres', newName, this.ref(project, b)))
       for (const b of branches) {
         const row = this.dbHandle(project, b, serviceId)
         if (!row) continue
