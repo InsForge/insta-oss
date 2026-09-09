@@ -412,7 +412,14 @@ else
   log "installing InstaCloud into $CFG (version $VERSION)"
 fi
 
-compose() { (cd "$CFG" && docker compose --env-file instad.env "$@"); }
+# Compose interpolation lets the CALLING SHELL outrank --env-file, and this script is routinely
+# invoked as `INSTA_OSS_IMAGE=... sh install.sh`. An INSTA_OSS_IMAGE that carries a tag would then
+# reach compose whole and render `repo:tag:tag`, so every value compose.yml interpolates is pinned
+# here to what this run resolved, which is also what instad.env was just written with.
+compose() {
+  (cd "$CFG" && INSTA_OSS_IMAGE=$IMAGE INSTA_OSS_VERSION=$VERSION INSTA_OSS_CA_FILE=$CA_FILE \
+    docker compose --env-file instad.env "$@")
+}
 STACK_UP=0
 if have docker && [ -f "$CFG/compose.yml" ] && [ -n "$(compose ps -q 2>/dev/null || true)" ]; then STACK_UP=1; fi
 
