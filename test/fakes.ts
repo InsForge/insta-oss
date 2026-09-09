@@ -5,19 +5,95 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, DataDirOps } from '../src/types'
+import type { DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, DataDirOps, ServiceKey, ServiceLimits } from '../src/types'
 import type { Config } from '../src/config'
 import { loadConfig } from '../src/config'
 import { Engine, type EngineOptions } from '../src/engine'
 import { initStatePath } from '../src/state'
+// ---- region WP3 (scheduler) ----
+// FakeRuntime is THE fake container store (decision 53): the four adapters above move it, the
+// engine's `liveState`, `runtime` column and runtime-health read it through `scheduler.stateOf`,
+// and the scheduler's own sweep, wake and sleep act on it. Two module-level singletons, cleared by
+// `resetFakes`, because the adapters that move them are module-level too. The store field is
+// `store`, not `containers`: the `Runtime` interface needs that name for its one docker read.
+export class FakeRuntime implements Runtime {
+  store = new Map<string, { state: ContainerState; id: string }>()
+  /** RSS bytes per container: the eviction tie-break and a wake's room estimate. */
+  rss = new Map<string, number>()
+  /** null = this box cannot report memory, which disables eviction entirely. */
+  mem: { availableBytes: number; totalBytes: number } | null = null
+  /** Readiness. The default answers for a running container; a test can refuse or delay. */
+  probeFn: (t: ServiceTarget) => boolean | Promise<boolean> = (t) => this.store.get(t.container)?.state === 'running'
+  private seq = 0
+
+  put(name: string, state: ContainerState): void {
+    this.store.set(name, { state, id: this.store.get(name)?.id ?? `cid${++this.seq}` })
+  }
+  /** A restart under our feet: same name, a new id (what `forgetIfChanged` is for). */
+  replace(name: string, state: ContainerState): void { this.store.set(name, { state, id: `cid${++this.seq}` }) }
+  drop(name: string): void { this.store.delete(name) }
+  dropPrefix(prefix: string): void { for (const k of [...this.store.keys()]) if (k.startsWith(prefix)) this.store.delete(k) }
+  move(from: string, to: string): void {
+    const c = this.store.get(from)
+    if (c) { this.store.set(to, c); this.store.delete(from) }
+  }
+  stateOfContainer(name: string): ContainerState | undefined { return this.store.get(name)?.state }
+  reset(): void {
+    this.store.clear(); this.rss.clear(); this.mem = null
+    this.probeFn = (t) => this.store.get(t.container)?.state === 'running'
+  }
+
+  async containers(): Promise<Map<string, { state: ContainerState; id: string }>> { return new Map(this.store) }
+  async stats(): Promise<Map<string, number>> { return new Map(this.rss) }
+  memory(): { availableBytes: number; totalBytes: number } | null { return this.mem }
+  async start(container: string): Promise<void> { calls.push(`runtime.start:${container}`); this.put(container, 'running') }
+  async stop(container: string, graceSec: number): Promise<void> { calls.push(`runtime.stop:${container}:${graceSec}`); this.put(container, 'exited') }
+  async unpause(container: string): Promise<void> { calls.push(`runtime.unpause:${container}`); this.put(container, 'running') }
+  async update(container: string, limits: ServiceLimits): Promise<void> {
+    calls.push(`runtime.update:${container}:${limits.cpu}/${limits.memoryMb}`)
+    if (!this.store.has(container)) throw new Error(`No such container: ${container}`)
+  }
+  async probe(t: ServiceTarget): Promise<boolean> { return this.probeFn(t) }
+}
+
+/** The upstream twin: an address exists exactly while the container runs. */
+export class FakeUpstream implements UpstreamLike {
+  addrs = new Map<string, { host: string; port: number }>()
+  constructor(private rt: FakeRuntime) {}
+  async resolve(container: string, _network: string, port: number): Promise<UpstreamAddr | null> {
+    const live = this.rt.store.get(container)
+    if (live?.state !== 'running') return null
+    const a = this.addrs.get(container) ?? { host: '127.0.0.1', port }
+    return { host: a.host, port: a.port, containerId: live.id, startedAt: '' }
+  }
+  forget(container: string): void { calls.push(`upstream.forget:${container}`) }
+  forgetIfChanged(container: string, containerId: string): void { calls.push(`upstream.checked:${container}:${containerId}`) }
+  async dial(container: string, network: string, port: number): Promise<boolean> { return (await this.resolve(container, network, port)) !== null }
+  reset(): void { this.addrs.clear() }
+}
+
+export const runtime = new FakeRuntime()
+export const upstream = new FakeUpstream(runtime)
+
+/** One ServiceTarget for test/scheduler.test.ts, which drives the Scheduler directly. */
+export function fakeTarget(over: Partial<ServiceTarget> & { key: ServiceKey }): ServiceTarget {
+  const serviceId = over.serviceId ?? over.key.slice(over.key.indexOf(':') + 1)
+  return {
+    kind: 'compute', container: `io-demo-main-app-${serviceId.replace(/^cp-/, '')}`, network: 'io-demo-main', port: 8080,
+    projectId: 'p1', branchId: over.key.slice(0, over.key.indexOf(':')), serviceId,
+    alwaysOn: false, desiredState: 'running', idleSec: 300, sleptAt: null, createdAt: 0,
+    ...over,
+  }
+}
+// ---- end region WP3 ----
 
 export const calls: string[] = []
 
 // The fake DSN is the contract §6 container-host form (what WP2's laneAddress rewrites host:port
 // of and WP5's credentials bundle reads); a fork keeps the source's password, host swapped.
 export const db: DatabaseAdapter = {
-  provision: async (t) => { calls.push(`db.provision:${t.container}`); return { url: `postgres://postgres:pw@${t.container}:5432/app` } },
-  fork: async (src, dst) => { calls.push(`db.fork:${src.container}->${dst.container}`); return { url: src.url.replace(src.container, dst.container), method: 'reflink', ms: 1 } },
+  provision: async (t) => { calls.push(`db.provision:${t.container}`); runtime.put(t.container, 'running'); return { url: `postgres://postgres:pw@${t.container}:5432/app` } },
+  fork: async (src, dst) => { calls.push(`db.fork:${src.container}->${dst.container}`); runtime.put(dst.container, 'running'); return { url: src.url.replace(src.container, dst.container), method: 'reflink', ms: 1 } },
   // Answers the observability SQL with canned JSON (order matters: metrics SQL also mentions pg_stat_activity).
   query: async (_container, sql) => {
     calls.push(`db.query:${sql.split(/\s+/).slice(0, 3).join(' ')}`)
@@ -38,8 +114,8 @@ export const db: DatabaseAdapter = {
     if (sql.includes('pg_stat_activity')) return JSON.stringify([{ pid: 42, state: 'active', durationMs: 12.5, query: 'select 1' }])
     return ''
   },
-  destroy: async (container) => { calls.push(`db.destroy:${container}`) },
-  rename: async (container, to) => { calls.push(`db.rename:${container}->${to}`) },
+  destroy: async (container) => { calls.push(`db.destroy:${container}`); runtime.drop(container) },
+  rename: async (container, to) => { calls.push(`db.rename:${container}->${to}`); runtime.move(container, to) },
 }
 
 export const compute: ComputeAdapter = {
@@ -52,17 +128,22 @@ export const compute: ComputeAdapter = {
     if (o.volume) calls.push(`deploy.volume:${ref}:${o.group}:${o.volume.hostPath}`)
     if (o.hostAliases?.length) calls.push(`deploy.aliases:${ref}:${o.group}:${o.hostAliases.join(',')}`)
     if (o.limits) calls.push(`deploy.limits:${ref}:${o.group}:${o.limits.cpu}/${o.limits.memoryMb}`)
+    // WP3 (decision 53): the adapter moves the ONE fake container store, so liveState, the services
+    // `runtime` column and the scheduler all read the same truth. A deploy replaces the container.
+    runtime.put(appContainerName(ref, o.group), o.start === false ? 'created' : 'running')
     return { url: `http://localhost:${o.hostPort}` }
   },
-  destroy: async (ref) => { calls.push(`compute.destroy:${ref}`) },
-  start: async (ref, group) => { calls.push(`compute.start:${ref}:${group}`) },
-  // graceSec is appended only when given, so today's `compute.stop:<ref>:<group>` strings still match.
-  stop: async (ref, group, opts) => { calls.push(`compute.stop:${ref}:${group}${opts?.graceSec !== undefined ? `:${opts.graceSec}` : ''}`) },
-  suspend: async (ref, group) => { calls.push(`compute.suspend:${ref}:${group}`) },
-  rename: async (ref, from_, to) => { calls.push(`compute.rename:${ref}:${from_}->${to}`) },
-  // scaffold interim only (decision 53): WP3 deletes it and makes deploy/start/stop/suspend/destroy
-  // update FakeRuntime.containers so liveState reads the same store the scheduler reads
-  state: async () => 'running',
+  destroy: async (ref) => { calls.push(`compute.destroy:${ref}`); runtime.dropPrefix(`io-${ref}-app-`) },
+  start: async (ref, group) => { calls.push(`compute.start:${ref}:${group}`); runtime.put(appContainerName(ref, group), 'running') },
+  // The grace lands on its OWN line, so today's `compute.stop:<ref>:<group>` strings still match
+  // byte for byte now that the engine passes one on every lifecycle stop.
+  stop: async (ref, group, opts) => {
+    calls.push(`compute.stop:${ref}:${group}`)
+    if (opts?.graceSec !== undefined) calls.push(`compute.stop.grace:${ref}:${group}:${opts.graceSec}`)
+    runtime.put(appContainerName(ref, group), 'exited')
+  },
+  suspend: async (ref, group) => { calls.push(`compute.suspend:${ref}:${group}`); runtime.put(appContainerName(ref, group), 'paused') },
+  rename: async (ref, from_, to) => { calls.push(`compute.rename:${ref}:${from_}->${to}`); runtime.move(appContainerName(ref, from_), appContainerName(ref, to)) },
 }
 
 export const storage: StorageAdapter = {
@@ -89,9 +170,9 @@ export const storage: StorageAdapter = {
 }
 
 export const managed: ManagedDbAdapter = {
-  provision: async (t) => { calls.push(`md.provision:${t.container}`) },
-  destroy: async (container) => { calls.push(`md.destroy:${container}`) },
-  rename: async (container, to) => { calls.push(`md.rename:${container}->${to}`) },
+  provision: async (t) => { calls.push(`md.provision:${t.container}`); runtime.put(t.container, 'running') },
+  destroy: async (container) => { calls.push(`md.destroy:${container}`); runtime.drop(container) },
+  rename: async (container, to) => { calls.push(`md.rename:${container}->${to}`); runtime.move(container, to) },
 }
 
 export const data: DataDirOps = {
@@ -116,15 +197,19 @@ export function serverConfig(over: Record<string, string> = {}): Config {
   return testConfig({ INSTA_OSS_MODE: 'server', INSTA_OSS_DOMAIN: 'example.test', INSTA_OSS_SECRET: 's'.repeat(32), INSTA_OSS_AUTH: '1', ...over })
 }
 
-/** An Engine over the fakes; points the state module at cfg.statePath first. */
+/** An Engine over the fakes; points the state module at cfg.statePath first. The engine builds its
+ *  own (unstarted) Scheduler over the shared FakeRuntime and FakeUpstream, so the routes and the
+ *  scheduler read ONE container store (decisions 53 and 57). */
 export function makeEngine(cfg: Config = testConfig(), extra: Partial<EngineOptions> = {}): Engine {
   initStatePath(cfg.statePath)
-  return new Engine(db, compute, storage, managed, { cfg, data, ...extra })
+  return new Engine(db, compute, storage, managed, { cfg, data, upstream, runtime, ...extra })
 }
 
 /** Clear the recorder and start from an empty state file. */
 export function resetFakes(): void {
   calls.length = 0
+  runtime.reset()
+  upstream.reset()
   initStatePath(join(mkdtempSync(join(tmpdir(), 'io-')), 'state.json'))
 }
 
@@ -133,7 +218,86 @@ export function resetFakes(): void {
 // ---- region WP2 (router) ----
 // ---- end region WP2 ----
 // ---- region WP3 (scheduler) ----
-// FakeRuntime (the single fake state store), FakeUpstream, makeEngine's unstarted scheduler
+// FakeRuntime is THE fake container store (decision 53): the four adapters above move it, the
+// engine's `liveState`, `runtime` column and runtime-health read it through `scheduler.stateOf`,
+// and the scheduler's own sweep/wake/sleep act on it. Two module-level singletons, cleared by
+// `resetFakes`, because the adapters are module-level too.
+export class FakeRuntime implements Runtime {
+  containers = new Map<string, { state: ContainerState; id: string }>()
+  /** RSS bytes per container, for the eviction pool's tie-break and a wake's room estimate. */
+  rss = new Map<string, number>()
+  /** null = this box cannot report memory, which disables eviction entirely. */
+  mem: { availableBytes: number; totalBytes: number } | null = null
+  /** Readiness. The default answers for a running container; a test can refuse or delay. */
+  probeFn: (t: ServiceTarget) => boolean | Promise<boolean> = (t) => this.containers.get(t.container)?.state === 'running'
+  /** Set to fail the next docker read, the way a busy daemon times out. */
+  failContainers = false
+  private seq = 0
+
+  put(name: string, state: ContainerState): void {
+    this.containers.set(name, { state, id: this.containers.get(name)?.id ?? `cid${++this.seq}` })
+  }
+  /** A restart under our feet: same name, new id (what `forgetIfChanged` is for). */
+  replace(name: string, state: ContainerState): void { this.containers.set(name, { state, id: `cid${++this.seq}` }) }
+  drop(name: string): void { this.containers.delete(name) }
+  dropPrefix(prefix: string): void { for (const k of [...this.containers.keys()]) if (k.startsWith(prefix)) this.containers.delete(k) }
+  move(from: string, to: string): void {
+    const c = this.containers.get(from)
+    if (c) { this.containers.set(to, c); this.containers.delete(from) }
+  }
+  stateOfContainer(name: string): ContainerState | undefined { return this.containers.get(name)?.state }
+  reset(): void {
+    this.containers.clear(); this.rss.clear(); this.mem = null; this.failContainers = false
+    this.probeFn = (t) => this.containers.get(t.container)?.state === 'running'
+  }
+
+  async containers_(): Promise<Map<string, { state: ContainerState; id: string }>> { return new Map(this.containers) }
+  async containersRead(): Promise<Map<string, { state: ContainerState; id: string }>> { return this.containers_() }
+
+  async stats(): Promise<Map<string, number>> { return new Map(this.rss) }
+  memory(): { availableBytes: number; totalBytes: number } | null { return this.mem }
+  async start(container: string): Promise<void> { calls.push(`runtime.start:${container}`); this.put(container, 'running') }
+  async stop(container: string, graceSec: number): Promise<void> { calls.push(`runtime.stop:${container}:${graceSec}`); this.put(container, 'exited') }
+  async unpause(container: string): Promise<void> { calls.push(`runtime.unpause:${container}`); this.put(container, 'running') }
+  async update(container: string, limits: ServiceLimits): Promise<void> {
+    calls.push(`runtime.update:${container}:${limits.cpu}/${limits.memoryMb}`)
+    if (!this.containers.has(container)) throw new Error(`No such container: ${container}`)
+  }
+  async probe(t: ServiceTarget): Promise<boolean> { return this.probeFn(t) }
+}
+// `containers()` is declared last so the overridable async read stays one method (the interface
+// name), while the plain Map above is what tests poke.
+Object.defineProperty(FakeRuntime.prototype, 'containers_', { value: FakeRuntime.prototype.containers_, enumerable: false })
+
+/** The upstream twin: an address exists while the container runs. */
+export class FakeUpstream implements UpstreamLike {
+  addrs = new Map<string, { host: string; port: number }>()
+  constructor(private rt: FakeRuntime) {}
+  async resolve(container: string, _network: string, port: number): Promise<UpstreamAddr | null> {
+    const live = this.rt.containers.get(container)
+    if (live?.state !== 'running') return null
+    const a = this.addrs.get(container) ?? { host: '127.0.0.1', port }
+    return { host: a.host, port: a.port, containerId: live.id, startedAt: '' }
+  }
+  forget(container: string): void { calls.push(`upstream.forget:${container}`) }
+  forgetIfChanged(container: string, containerId: string): void { calls.push(`upstream.checked:${container}:${containerId}`) }
+  async dial(container: string, network: string, port: number): Promise<boolean> { return (await this.resolve(container, network, port)) !== null }
+  reset(): void { this.addrs.clear() }
+}
+
+export const runtime = new FakeRuntime()
+export const upstream = new FakeUpstream(runtime)
+
+/** One ServiceTarget for the scheduler suite, which drives the Scheduler directly. */
+export function fakeTarget(over: Partial<ServiceTarget> & { key: ServiceKey }): ServiceTarget {
+  const serviceId = over.serviceId ?? over.key.slice(over.key.indexOf(':') + 1)
+  return {
+    kind: 'compute', container: `io-demo-main-app-${serviceId.replace(/^cp-/, '')}`, network: 'io-demo-main', port: 8080,
+    projectId: 'p1', branchId: over.key.slice(0, over.key.indexOf(':')), serviceId,
+    alwaysOn: false, desiredState: 'running', idleSec: 300, sleptAt: null, createdAt: 0,
+    ...over,
+  }
+}
 // ---- end region WP3 ----
 // ---- region WP4 (data dir) ----
 // ---- end region WP4 ----
