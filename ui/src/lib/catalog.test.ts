@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ALL_CATEGORIES, categoryCounts, filterTemplates, matchesTemplate, type CatalogItem } from './catalog'
+import { ALL_CATEGORIES, categoryCounts, filterTemplates, matchesTemplate, runsHere, type CatalogItem } from './catalog'
 
 const items: CatalogItem[] = [
   { code: 'n8n', name: 'n8n', tagline: 'Workflow automation', category: 'automation', tags: ['workflow', 'low-code'] },
@@ -52,5 +52,23 @@ describe('categoryCounts', () => {
 
   it('skips rows without a category and handles an empty catalog', () => {
     expect(categoryCounts([])).toEqual([{ key: ALL_CATEGORIES, count: 0 }])
+  })
+})
+
+describe('runsHere', () => {
+  it('is false only when the template names architectures and this box is not one', () => {
+    expect(runsHere({ architectures: ['amd64'], hostArchitecture: 'arm64' })).toBe(false)
+    expect(runsHere({ architectures: ['amd64', 'arm64'], hostArchitecture: 'arm64' })).toBe(true)
+    expect(runsHere({ architectures: ['arm64'], hostArchitecture: 'arm64' })).toBe(true)
+  })
+
+  it('reads an unknown either way as yes, because the daemon is the authority', () => {
+    // A catalog row from a daemon that predates the field, and a template that claims nothing:
+    // neither is evidence the image will not run, and hiding it would be the worse mistake.
+    expect(runsHere({ hostArchitecture: 'arm64' })).toBe(true)
+    expect(runsHere({ architectures: null, hostArchitecture: 'arm64' })).toBe(true)
+    expect(runsHere({ architectures: [], hostArchitecture: 'arm64' })).toBe(true)
+    expect(runsHere({ architectures: ['amd64'] })).toBe(true)
+    expect(runsHere({})).toBe(true)
   })
 })

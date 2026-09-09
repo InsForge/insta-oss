@@ -25,6 +25,15 @@ export function filterTemplates<T extends CatalogItem>(items: T[], query: string
   return items.filter((t) => (category === ALL_CATEGORIES || (t.category ?? '') === category) && matchesTemplate(t, query))
 }
 
+/** Whether this box can run a template's image. Both halves come from `GET /templates`: the row's
+ *  own `architectures` and the envelope's `hostArchitecture`, which the api helper stamps onto
+ *  every row. Unknown either way reads as yes: the daemon is the authority and refuses the deploy
+ *  itself when it disagrees, so a missing field must not hide a template that would work. */
+export function runsHere(t: { architectures?: string[] | null; hostArchitecture?: string }): boolean {
+  if (!t.architectures?.length || !t.hostArchitecture) return true
+  return t.architectures.includes(t.hostArchitecture)
+}
+
 export interface CategoryCount { key: string; count: number }
 
 /** The category rail: `all` first with the total, then each category by count then name. */

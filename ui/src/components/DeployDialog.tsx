@@ -4,7 +4,7 @@ import {
 } from '@insforge/ui'
 import { api, type Service, type TemplateDetail, type TemplateListItem } from '../api'
 import { usePoll } from '../hooks'
-import { ALL_CATEGORIES, categoryCounts, filterTemplates } from '../lib/catalog'
+import { ALL_CATEGORIES, categoryCounts, filterTemplates, runsHere } from '../lib/catalog'
 import { applyMissing, canSubmit, flattenVariables, payloadVariables } from '../lib/templateVars'
 import { soleUrl, normalizeServices } from '../lib/deployment'
 import type { PendingApproval } from './ApprovalPrompt'
@@ -187,6 +187,11 @@ function PickerRow({ t, onPick }: { t: TemplateListItem; onPick: () => void }) {
         </span>
         <span className="block truncate text-xs text-muted-foreground">{t.tagline}</span>
       </span>
+      {!runsHere(t) && (
+        <Badge variant="default" className="font-mono" title={`This machine is ${t.hostArchitecture}`}>
+          {(t.architectures ?? []).join('/')} only
+        </Badge>
+      )}
       <Badge variant="default" className="capitalize">{categoryLabel(t.category)}</Badge>
     </button>
   )
@@ -203,7 +208,9 @@ function TemplateLane({ projectId, branch, code, onBack, onClose, onApproval, on
   const [actionError, setActionError] = useState<string>()
 
   const vars = useMemo(() => (detail ? flattenVariables(detail) : []), [detail])
-  const ready = !!detail && canSubmit(vars, values)
+  // The daemon refuses this pair outright (its image has no manifest for this box), so the button
+  // that would earn that 400 is off rather than armed.
+  const ready = !!detail && runsHere(detail) && canSubmit(vars, values)
 
   const submit = async () => {
     if (!detail) return
@@ -235,6 +242,13 @@ function TemplateLane({ projectId, branch, code, onBack, onClose, onApproval, on
         </div>
         <Badge variant="default" className="ml-auto font-mono">{detail.code}@{detail.version}</Badge>
       </div>
+      {!runsHere(detail) && (
+        <p className="rounded-md border border-border bg-alpha-4 p-3 text-xs text-muted-foreground">
+          {detail.code} publishes {(detail.architectures ?? []).join(' and ')} images and this machine is{' '}
+          <span className="font-mono">{detail.hostArchitecture}</span>. There is no image to pull, so this deploy
+          cannot start.
+        </p>
+      )}
       <TemplateVarsBlock detail={detail} values={values} missing={missing}
         onChange={(name, value) => setValues((v) => ({ ...v, [name]: value }))} />
       <p className="text-xs text-muted-foreground">Deploying to branch <span className="font-mono">{branch}</span>.</p>

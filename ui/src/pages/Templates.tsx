@@ -4,7 +4,7 @@ import { Badge, Button, cn, SearchInput } from '@insforge/ui'
 import { ExternalLink } from 'lucide-react'
 import { api, type TemplateDetail, type TemplateListItem } from '../api'
 import { usePoll } from '../hooks'
-import { ALL_CATEGORIES, categoryCounts, filterTemplates } from '../lib/catalog'
+import { ALL_CATEGORIES, categoryCounts, filterTemplates, runsHere } from '../lib/catalog'
 import { flattenVariables } from '../lib/templateVars'
 import { ApprovalPrompt, type PendingApproval } from '../components/ApprovalPrompt'
 import { DeployDialog } from '../components/DeployDialog'
@@ -86,9 +86,20 @@ function Card({ t, onOpen }: { t: TemplateListItem; onOpen: () => void }) {
       <div className="mt-auto flex items-center gap-2 pt-1">
         <Badge variant="default" className="capitalize">{categoryLabel(t.category)}</Badge>
         <span className="font-mono text-[11px] text-muted-foreground">v{t.version}</span>
+        {!runsHere(t) && <ArchBadge architectures={t.architectures} host={t.hostArchitecture} />}
         {t.license && <span className="ml-auto text-[11px] text-muted-foreground">{t.license}</span>}
       </div>
     </button>
+  )
+}
+
+/** Shown only when the answer is no, so the common case stays uncluttered: on a box that can run
+ *  everything the gallery looks exactly as it did. */
+function ArchBadge({ architectures, host }: { architectures?: string[] | null; host?: string }) {
+  return (
+    <Badge variant="default" className="font-mono" title={`This machine is ${host}`}>
+      {(architectures ?? []).join('/')} only
+    </Badge>
   )
 }
 
@@ -104,7 +115,7 @@ function DetailDialog({ code, branch, onClose, onDeploy }: {
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>Close</Button>
-          <Button variant="primary" onClick={onDeploy} disabled={!detail}>Deploy to {branch}</Button>
+          <Button variant="primary" onClick={onDeploy} disabled={!detail || !runsHere(detail)}>Deploy to {branch}</Button>
         </>
       }
     >
@@ -112,7 +123,16 @@ function DetailDialog({ code, branch, onClose, onDeploy }: {
       {!detail ? (
         <p className="text-sm text-muted-foreground">Loading the template...</p>
       ) : (
-        <DetailBody detail={detail} />
+        <>
+          {!runsHere(detail) && (
+            <p className="mb-3 rounded-md border border-border bg-alpha-4 p-3 text-xs text-muted-foreground">
+              This template publishes {(detail.architectures ?? []).join(' and ')} images and this machine is{' '}
+              <span className="font-mono">{detail.hostArchitecture}</span>, so there is no image to pull. Deploying it
+              would be refused. Run it on {(detail.architectures ?? []).join(' or ')} hardware instead.
+            </p>
+          )}
+          <DetailBody detail={detail} />
+        </>
       )}
     </Modal>
   )

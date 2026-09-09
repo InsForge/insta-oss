@@ -203,8 +203,17 @@ export const api = {
     call<{ service: Service }>('POST', `/projects/${p}/services`, b),
   deployImage: (p: string, b: { image: string; port: number; group: string; branch: string }) =>
     call<DeployResult>('POST', `/projects/${p}/deploy`, b),
-  templates: async () => (await get<{ templates: TemplateListItem[] }>('/templates')).templates,
-  template: async (code: string) => (await get<{ template: TemplateDetail }>(`/templates/${encodeURIComponent(code)}`)).template,
+  // `hostArchitecture` rides the envelope on both routes because it belongs to the BOX, not to a
+  // template. Stamped onto each row here so a card can answer "will this run on this machine"
+  // without threading a second value through four components.
+  templates: async () => {
+    const r = await get<{ templates: TemplateListItem[]; hostArchitecture?: string }>('/templates')
+    return r.templates.map((t) => ({ ...t, hostArchitecture: r.hostArchitecture }))
+  },
+  template: async (code: string) => {
+    const r = await get<{ template: TemplateDetail; hostArchitecture?: string }>(`/templates/${encodeURIComponent(code)}`)
+    return { ...r.template, hostArchitecture: r.hostArchitecture }
+  },
   deployTemplate: (p: string, b: { templateCode: string; branch: string; variables: Record<string, string>; deploymentId?: string }) =>
     call<{ deploymentId: string; deployment: TemplateDeployment }>('POST', `/projects/${p}/template-deployments`, b),
   templateDeployment: (id: string) => get<TemplateDeployment>(`/template-deployments/${encodeURIComponent(id)}`),
@@ -255,6 +264,11 @@ export type DbInstance = {
 export type TemplateListItem = {
   code: string; version: string; name: string; tagline: string; category: string; tags: string[]
   logoUrl: string | null; license: string | null; updatedAt?: string
+  /** OCI architecture names the deployable image is published for; absent when the manifest makes
+   *  no claim. Self-host only: the cloud picks the machine, so its gallery has no use for it. */
+  architectures?: string[] | null
+  /** Not a field of the row on the wire: the api helper copies it off the response envelope. */
+  hostArchitecture?: string
   requiredVarCount?: number; requiredVars?: TemplateVariable[]
   totalProjects?: number; activeProjects?: number; successRate?: number | null
   deploymentCount?: number; activeDeploymentCount?: number
