@@ -205,14 +205,21 @@ STEP "6b. volume fork"
 insta services add compute voljob --volume 1 >/dev/null || FAIL "services add compute --volume failed"
 insta deploy --image "$IMAGE" --port 80 --group voljob >/dev/null || FAIL "voljob deploy failed"
 VOLC=$(svc_container "$REF" voljob)
-wait_for 60 docker exec "$VOLC" true || FAIL "$VOLC never started"
-docker exec "$VOLC" sh -c 'echo forked > /data/marker' || FAIL "could not write the volume marker"
+wait_for 60 sh -c "[ \"\$(docker inspect -f '{{.State.Status}}' $VOLC)\" = running ]" \
+  || FAIL "$VOLC never started, state is $(cstate "$VOLC")"
+# The marker goes in and comes out with `docker cp`, not `docker exec`: the image under test is
+# whoami, a scratch image with no shell and no coreutils, so an exec of `sh` or `true` can only
+# ever fail. cp still goes through the container's own /data, which is the mount being proved.
+printf 'forked\n' > "$DATA/volmarker"
+docker cp "$DATA/volmarker" "$VOLC:/data/marker" || FAIL "could not write the volume marker"
 insta branch create feat2 --from main >/dev/null || FAIL "branch create feat2 failed"
 VOLC2=$(svc_container "$SLUG-feat2" voljob)
 FEAT2URL=$(printf '%s\n' "$URL" | sed -e "s/-main\./-feat2./" -e "s|http://web-|http://voljob-|")
 [ "$HAVE_LOCALHOST_DNS" = "1" ] || ensure_host "$(url_host "$FEAT2URL")"
 wait_for 60 curl -sf "$FEAT2URL/" || FAIL "$FEAT2URL never answered"
-MARKER=$(docker exec "$VOLC2" cat /data/marker)
+rm -f "$DATA/volmarker.got"
+docker cp "$VOLC2:/data/marker" "$DATA/volmarker.got" || FAIL "the forked volume carries no marker"
+MARKER=$(cat "$DATA/volmarker.got")
 [ "$MARKER" = "forked" ] || FAIL "the volume did not fork, marker is '$MARKER'"
 OK "compute volume forked with its files"
 EVENTS=$(insta events --json)
