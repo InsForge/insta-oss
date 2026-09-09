@@ -61,7 +61,8 @@
             "icon": "flag",
             "pages": [
               "introduction",
-              "quickstart"
+              "quickstart",
+              "projects/branches"
             ]
           },
           {
@@ -102,7 +103,13 @@
             "group": "Self-hosting",
             "icon": "server",
             "pages": [
-              "self-hosting/overview"
+              "self-hosting/overview",
+              "self-hosting/install",
+              "self-hosting/setup",
+              "self-hosting/domains",
+              "self-hosting/sleep",
+              "self-hosting/branching",
+              "self-hosting/upgrade"
             ]
           }
         ]
@@ -675,10 +682,6 @@
     {
       "source": "/storage/volumes",
       "destination": "/storage/overview"
-    },
-    {
-      "source": "/self-hosting/install",
-      "destination": "/self-hosting/overview"
     },
     {
       "source": "/self-hosting/architecture",

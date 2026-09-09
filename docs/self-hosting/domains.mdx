@@ -1,0 +1,122 @@
+---
+title: "Domains and TLS"
+description: "Every hostname the daemon mints, how to bring your own, and how databases are reachable from anywhere."
+---
+
+## The names the daemon mints
+
+In server mode every service gets a name under your domain, minted when the service is created:
+
+| Service | Hostname | Port |
+| --- | --- | --- |
+| compute group `web` | `web-shop-main.<domain>` | 443 |
+| postgres `db` | `pg-db-shop-main.<domain>` | 5432 |
+| redis `cache` | `redis-cache-shop-main.<domain>` | 6379 |
+| mongodb `docs` | `mongodb-docs-shop-main.<domain>` | 27017 |
+| mysql `app` | `mysql-app-shop-main.<domain>` | its own port |
+| the API | `api.<domain>` | 443 |
+| the dashboard | `console.<domain>` | 443 |
+| storage | `s3.<domain>` and `<bucket>.s3.<domain>` | 443 |
+
+The `shop-main` part is the ref: the project slug and the branch slug, frozen when the branch is
+created. Renaming the project later does not move the URL.
+
+A DNS label cannot exceed 63 characters, and a long service name beside a long project and branch
+pair can. When that happens the label is shortened to a prefix plus a 6-character hash of the full
+name. It is stable, and `insta services list` shows the real host, so copy it from there rather
+than composing it by hand.
+
+## The automatic domain
+
+With no `--domain` the installer resolves the public IPv4 address of the box and uses
+`<a-b-c-d>.sslip.io`, which resolves every subdomain back to that address. It is enough to get a
+working URL in one command.
+
+<Warning>
+The sslip.io suffix shares certificate rate limits with everyone else using it. For anything you
+depend on, pass `--domain` with a domain you control.
+</Warning>
+
+## Your own domain
+
+At install time, with a wildcard record (`*.example.com` and `example.com` to the box), or
+per-host A records:
+
+```bash
+curl -fsSL https://get.instacloud.com | sh -s -- --domain example.com --email ops@example.com
+```
+
+For one app on a host you own, point it at an existing install:
+
+```bash
+insta compute set-domain shop.example.com --group web
+insta compute check-domain shop.example.com
+insta compute remove-domain shop.example.com
+```
+
+`set-domain` prints the DNS record to create: a `CNAME` to `api.<domain>`, or an A record to the
+address of the box. `check-domain` reports the record and whether the host is being served, and is
+the command to poll until it prints that it is serving `https://shop.example.com`. The certificate
+is issued on the first request that arrives with that name.
+
+## TLS
+
+The edge issues a certificate per hostname, on demand, the first time a request arrives for a
+name the daemon recognises. Nothing is pre-provisioned, so adding a service or a branch needs no
+certificate step.
+
+`INSTA_OSS_TLS=acme` (the default) uses a public CA and needs the name to resolve to the box from
+the internet. `INSTA_OSS_TLS=internal` uses a local issuer instead, for a box on a private
+network. The installer copies the root certificate to `/var/lib/instacloud/edge/ca.pem`, and
+clients need to trust it:
+
+```bash
+curl --cacert /var/lib/instacloud/edge/ca.pem https://api.example.com/healthz
+export PGSSLROOTCERT=/var/lib/instacloud/edge/ca.pem
+export NODE_EXTRA_CA_CERTS=/var/lib/instacloud/edge/ca.pem
+```
+
+## Databases from anywhere
+
+Postgres, Redis and MongoDB share one public port each, and the daemon routes by the hostname in
+the TLS handshake:
+
+```bash
+psql "$(insta db url)"
+insta db connect
+```
+
+`insta db url` prints a DSN of the form
+`postgres://postgres:<password>@pg-db-shop-main.example.com:5432/app?sslmode=require`. Because the
+lane demultiplexes on SNI, the client has to send the hostname in the handshake. Recent clients do:
+libpq 14 or newer, the JDBC driver 42.2.x or newer, node-postgres, psycopg 3. An older client gets
+a clear error that says there was no SNI in the TLS handshake, and the fix is to upgrade the client
+or connect from inside the branch.
+
+Redis is on 6379 and MongoDB on 27017 the same way, with TLS. MySQL does not multiplex, so each
+MySQL service gets its own plaintext port, printed in its credentials.
+
+A sleeping database wakes on connect. The first connection can take a few seconds; after that it
+is a normal local Postgres.
+
+## Buckets
+
+`AWS_ENDPOINT_URL_S3` is `https://s3.<domain>`. Both request styles work against it: path-style
+(`https://s3.example.com/<bucket>/<key>`) and virtual-hosted
+(`https://<bucket>.s3.example.com/<key>`), which is what most SDKs send by default. A bucket that
+you have made public serves anonymous GET and HEAD requests from the same host, while signed and
+non-GET requests go to the S3 API.
+
+## Inside a branch
+
+Containers reach every one of those names too, resolving to the box itself, so an app can use its
+own `DATABASE_URL`, `AWS_ENDPOINT_URL_S3`, `api.<domain>` and the custom domains of its own
+compute groups with no change between local development and the server. The daemon injects the
+names into every container it creates. A sleeping database wakes when the app connects to it.
+
+## Local mode
+
+No TLS, no domain. Apps are on `http://<group>-<project>-<branch>.localhost:8080` and databases on
+`127.0.0.1:<port>` with a per-service port from the lane range. Inside containers the same
+databases are at `host.docker.internal:<port>`. There is no `s3.` host: the S3 API stays on
+`http://127.0.0.1:3900`.

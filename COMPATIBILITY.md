@@ -1,54 +1,84 @@
-# CLI & MCP compatibility
+# CLI and MCP compatibility
 
 Command-by-command behavior of insta-oss against the standard insta surface.
 
-insta-oss implements the standard `insta` command surface: no daemon-only commands. This page
-is the command-by-command result of running every registered CLI command and every insta-mcp
-tool against the daemon. Cloud-only concepts return `501` with guidance rather than pretending
-to work.
+insta-oss implements the standard `insta` command surface: no daemon-only commands. This page is
+the command-by-command result of running every registered CLI command and every insta-mcp tool
+against the daemon. Cloud-only concepts return `501` with guidance rather than pretending to work.
+
+Two rows differ by run mode. **Server mode** is a box installed with `install.sh`: a domain, one
+admin account, `insta_` tokens. **Local mode** is `npm run dev` on your laptop: no auth, no
+domain. See [self-hosting](https://docs.instacloud.com/self-hosting/overview).
 
 ## CLI commands
 
 | Command | insta-oss behavior |
 | --- | --- |
-| `status` | ✅ (`user: local`) |
-| `org list` | ✅ builtin single org (`local`) |
-| `project create/link/list/delete` | ✅ (delete is govern-gated) |
-| `branch create/switch/delete/list` | ✅ (create = clone: db copy + bucket copy + app redeploy) |
-| `branch merge <source>` | ✅ structural + additive: compute groups missing on the target materialize against its OWN db/bucket; data never merges (gated `service.add`) |
-| `deploy` | ✅ image mode (govern-gated); source mode (`insta deploy ./dir`) works too: the CLI builds the image locally when the daemon 501s `/deploy-token` |
-| `secrets` / `secrets list` / `secrets tree` | ✅ full bundle (gated) + the names-only project→branch→service binding tree |
-| `secrets set/unset NAME [--branch] [--service]` | ✅ project-wide, branch override, or service-bound (injected only into that group's deploys); reserved names rejected (gated `secrets.write`) |
-| `services list/add/remove` | ✅ (gated); `add postgres\|storage` is idempotent: one of each per project, auto-provisioned; `add redis\|mysql\|mongodb <name>` runs a private managed-db container per branch (fresh empty instance per branch clone, cloud parity) |
-| `services secrets` / `set-access storage` | ✅ per-service secret names; bucket public-read ↔ private (gated `service.setAccess`) |
-| `compute start/stop/suspend/status` | ✅ persistent intent (docker start/stop/pause) + live runtime state |
-| `manifest` | ✅ per-branch postgres / storage / compute |
-| `policy` / `policy set` | ✅ |
-| `approvals list/approve/deny` (`--always`) | ✅ one-shot grants, same 202 flow |
-| `events` | ✅ resource + govern timeline, agent ingest with dedup |
-| `metrics` / `logs` | ✅ docker-backed (`docker stats` snapshot / `docker logs` tail, db logs included), cloud response shapes; targets `db\|compute\|redis\|mysql\|mongodb`; `logs --deploy` (deploy-event feed) → 501, use `insta events` |
-| `storage list/get/delete` (`insta storage list/get/delete`, plus the console file browser and MCP) | ✅ object listing (prefix + cursor paging), presigned GET download, single delete; served from Garage's host port (:3900), gated `storage.read`/`storage.delete`; presigned-POST upload + bulk delete serve the console's file browser |
-| `regions` | ✅ the single `local` region (this machine) |
-| `login/logout` | not needed: localhost trust, no accounts |
-| `services scale/upgrade` | 501: machine scaling / instance specs are cloud pricing concepts |
-| `compute limits/always-on` | 501: tier caps / scale-to-zero are cloud pricing concepts; local containers already stay up |
-| `usage` / `billing` | 501: billing metering is cloud-only by design; local visibility = `manifest` + docker-backed `metrics`/`logs` |
-| `org create` / `tokens` | 501: single-tenant |
+| `status` | server: the admin email; local: `user: local` |
+| `login` / `logout` | server: `insta login --api-key insta_... --api-url https://api.<domain>`, and `--email` with the admin password; bare `insta login`, `--device` and `--oauth` are `501` (browser and OAuth flows are cloud-only). local: not needed, the daemon trusts loopback |
+| `org list` | builtin single org (`local`) |
+| `project create/link/list/delete` | a new project provisions nothing and reports `resources: []`; add what you need with `services add`. `delete` is govern-gated and returns the cloud teardown summary (`destroyed` and `failed` counts) |
+| `services list` | rows carry `domain`, `endpoint`, `always_on`, `image`, `port` and a `runtime` of `online`, `asleep`, `suspended`, `stopped` or `none` |
+| `services add postgres\|storage\|redis\|mysql\|mongodb\|compute <name>` | several of each type per branch, up to `INSTA_OSS_MAX_SERVICES_PER_TYPE` (default 5). Every postgres gets its own container and data directory, every storage its own bucket. `add compute` takes `--always-on`, `--port`, `--image` and `--volume` |
+| `services remove` / `rename` | every type, including postgres and storage. `remove` returns the teardown summary counting containers, buckets and directories across branches |
+| `services secrets` / `set-access storage` | per-service secret names; bucket public-read or private (gated `service.setAccess`) |
+| `secrets` / `secrets list` / `secrets tree` | full bundle (gated) plus the names-only project, branch and service binding tree |
+| `secrets set/unset NAME [--branch] [--service]` | project-wide, branch override, or service-bound; reserved names rejected (gated `secrets.write`) |
+| `branch create/switch/delete/list` | `create` forks the disk: `CHECKPOINT` then a reflink copy of the Postgres data directory and of every compute volume, with `pg_basebackup` as the fallback on a filesystem without reflinks, plus an object copy of the bucket. Apps are redeployed asleep. `delete` returns the teardown summary |
+| `branch merge <source>` | structural and additive: compute groups missing on the target materialize against its own database and bucket; data never merges (gated `service.add`) |
+| `deploy` | image mode is gated and works from anywhere. Source mode (`insta deploy ./dir`) builds the image with the local Docker, so it needs the CLI on the box that has your code; from a laptop against a remote install use `--image` or a template |
+| `compute start/stop/suspend/status` | `stop` is a durable intent and traffic never wakes a stopped service; `start` clears it; `suspend` pauses. `status` distinguishes `running`, `suspended`, `asleep` and `stopped` |
+| `compute limits <group> --memory --cpu` | implemented, on the cloud grid and cap (8 vCPU, 8192 MiB) |
+| `compute always-on on\|off <group>` | implemented. Self-hosted compute defaults to scale-to-zero, the opposite of the cloud default, because idle services on one box should cost nothing |
+| `compute set-domain <host> [--group] [--branch]` | binds your own hostname and prints the DNS record to create (a `CNAME` to `api.<domain>`); the certificate is issued on the first request. Local mode routes the alias but issues nothing |
+| `compute check-domain <host>` | reports whether the record resolves and whether the host is being served. The envelope carries no `ssl` field in either mode |
+| `compute remove-domain <host>` | unbinds it |
+| `db url [--group] [--branch]` | server: the public DSN, `pg-<name>-<ref>.<domain>:5432` with `sslmode=require`, routed by SNI; local: `127.0.0.1:<port>`. A sleeping database wakes on connect. `--branch feat` returns feat's DSN |
+| `db connect` | opens `psql` against that DSN |
+| `db always-on on\|off` | implemented, per database service |
+| `template list` / `template info <code>` / `template deploy <code\|dir\|url>` | the bundled catalog is served through the cloud template routes, so it works with no internet access. Registry code, local directory and GitHub URL all deploy. Image services only, and the usage stats are this daemon only |
+| `manifest` | per-branch postgres, storage and compute |
+| `policy` / `policy set` | implemented |
+| `approvals list/approve/deny` (`--always`) | one-shot grants, same `202` flow |
+| `events` | resource and governance timeline, agent ingest with dedup; the newest 5000 rows are kept |
+| `metrics` / `logs` | docker-backed (`docker stats` snapshot, `docker logs` tail), cloud response shapes; targets `db`, `compute`, `redis`, `mysql`, `mongodb`, and `--group` selects among several databases. `logs --deploy` is `501`, use `insta events` |
+| `storage list/get/delete` | object listing (prefix and cursor paging), presigned GET download, single delete; gated `storage.read` and `storage.delete`. Presigned-POST upload and bulk delete serve the console file browser |
+| `regions` | the single `local` region (this machine) |
+| `services scale` / `services upgrade` | `501`: machine scaling and instance specs are cloud pricing concepts |
+| `usage` / `billing` | `501`: metering is cloud-only by design. Local visibility is `manifest` plus docker-backed `metrics` and `logs` |
+| `org create` | `501`: single-tenant |
+
+## API tokens
+
+Server mode mints bearer tokens for the CLI, MCP and agents. The CLI has no `tokens` command:
+create one in the dashboard, on the Account page, or with `POST /tokens` and a session cookie.
+`GET /tokens` lists them and `DELETE /tokens/:id` revokes one. In local mode those routes stay
+`501`, because there is nothing to authenticate.
+
+## Backups
+
+The backups API routes answer `501` with a hint that names the documented path, and there is
+no `insta backup` command yet. Until the backups milestone: `pg_dump "$(insta db url)"` per
+branch, a tar of `vol/` and the Garage directories under the data directory. See
+[upgrade and backups](https://docs.instacloud.com/self-hosting/upgrade).
 
 ## MCP tools
 
-The insta-mcp server (`insta_*` tools) is a thin client over the same endpoints; point it at
-the daemon (`PLATFORM_API_URL=http://127.0.0.1:8080`, any non-empty bearer) and it works:
+The insta-mcp server (`insta_*` tools) is a thin client over the same endpoints. Point it at the
+daemon (`PLATFORM_API_URL=https://api.<domain>` in server mode with an `insta_` bearer,
+`http://127.0.0.1:8080` and any non-empty bearer in local mode) and it works:
 
 | Tools | insta-oss behavior |
 | --- | --- |
-| `whoami · org_list · project_* · service_add/list/remove/access · deploy · compute_control/status · branch_* · storage_list/download_url/delete · manifest · secrets_* · metrics · logs · events · policy_get · approvals_*` | ✅ end-to-end, including the full governance flow (202 → `approvals_approve`/`deny`) |
-| `org_create · usage · billing_summary/checkout/portal · service_scale/upgrade · domain_* · deploy_events` | `not_supported`, carrying the daemon's 501 guidance verbatim |
+| `whoami · org_list · project_* · service_add/list/remove/access · deploy · compute_control/status · branch_* · storage_list/download_url/delete · manifest · secrets_* · metrics · logs · events · policy_get · approvals_*` | end to end, including the full governance flow (`202` then `approvals_approve` or `approvals_deny`) |
+| `domain_*` | supported: the same add, check and remove behavior as the CLI verbs |
+| `template_*` | supported where the MCP exposes them, over the same catalog routes |
+| `org_create · usage · billing_summary/checkout/portal · service_scale/upgrade · deploy_events` | `not_supported`, carrying the daemon `501` guidance verbatim |
 | `feedback` | bypasses the control plane entirely (posts to the hosted feedback service, tagged `target: oss`) |
 
 ## Branching vs merging
 
-`branch` = a disposable isolated environment (a clone). `insta branch merge` is **structural
-only**: it materializes missing services on the target; **data never merges back**. Schema
-moves at the git level: merge your code, run migration files against main, redeploy, delete
-the branch environment.
+`branch` = a disposable isolated environment (a fork of the disk). `insta branch merge` is
+**structural only**: it materializes missing services on the target; **data never merges back**.
+Schema moves through version control: merge your code, run migration files against main,
+redeploy, delete the branch environment.

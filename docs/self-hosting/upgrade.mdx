@@ -1,0 +1,85 @@
+---
+title: "Upgrade and backups"
+description: "Re-run the installer to upgrade, pin or roll back a version, and back up until the backups API ships."
+---
+
+## Upgrade
+
+Re-run the one-liner. The script sees the existing `/etc/instacloud/instad.env`, keeps every
+setting in it, and recreates only what changed:
+
+```bash
+curl -fsSL https://get.instacloud.com | sh
+```
+
+Pin a version, or go back to one:
+
+```bash
+curl -fsSL https://get.instacloud.com | sh -s -- --version v0.4.1
+```
+
+Branch containers are not part of the compose stack, so they are not recreated and keep running
+through the upgrade. The port check is skipped while the stack is up.
+
+## What a restart does to sleeping services
+
+Nothing. A sleeping service is a stopped container with its files on disk, and it stays that way
+until something asks for it. Two details:
+
+- the idle clock starts fresh, so nothing is swept for one full window after the restart
+- the create grace does not restart, because it counts from when the service row was created
+
+## Backups
+
+The backups API routes answer `501` today, with a hint that names this page, and there is no
+`insta backup` command. Until that milestone, back up the two things that hold state.
+
+The databases, one dump per branch:
+
+```bash
+pg_dump "$(insta db url)" > main.sql
+pg_dump "$(insta db url --branch feat)" > feat.sql
+```
+
+Everything else, from the box:
+
+```bash
+cd /etc/instacloud
+docker compose stop instad
+tar -C /var/lib/instacloud -czf instacloud-data.tgz state.json vol garage
+docker compose start instad
+```
+
+Stopping the daemon first is what makes `state.json` and the object store consistent with each
+other. `pg/` is in the tar only if you want the raw data directories as well as the dumps, and a
+running Postgres container makes those inconsistent, so prefer the dumps.
+
+Restore is the reverse: untar, then `psql` each dump into its branch.
+
+## Growing the data disk
+
+When the installer created a loop image and it is filling up:
+
+```bash
+truncate -s +20G /var/lib/instacloud.img
+losetup -c "$(findmnt -no SOURCE /var/lib/instacloud)"
+xfs_growfs /var/lib/instacloud
+```
+
+No downtime, and nothing to restart.
+
+## Local mode
+
+```bash
+git pull
+npm install
+npm run build:ui
+npm run dev
+```
+
+State stays in `~/.insta-oss`.
+
+## Events
+
+The daemon keeps the newest 5000 events and drops older ones, so treat `insta events` as a recent
+timeline rather than an archive. Anything you want to keep, export.

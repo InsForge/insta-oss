@@ -1,0 +1,140 @@
+---
+title: "Sleep and wake"
+description: "Idle services stop, traffic starts them again, and one box holds far more projects than it has memory for."
+---
+
+Every compute service and every database on a self-hosted box scales to zero by default. An idle
+service is stopped, not paused: it holds no memory and no CPU, its disk is untouched, and the next
+request starts it again in a second or two.
+
+That is what lets one machine hold dozens of branches. The disk is the only thing every branch
+keeps.
+
+## What counts as activity
+
+Only real traffic:
+
+- an HTTP request, stamped when it arrives and again every 5 seconds while it is still open, so a
+  long download or a websocket stays active for its whole life
+- any byte read on a database lane, in either direction
+- coming up after a deploy or a wake
+
+Nothing else. Health probes do not count, `insta metrics` and `insta logs` do not count, and the
+dashboard polling its own pages does not count. If it did, an open browser tab would keep an entire
+box awake.
+
+## When a service sleeps
+
+The sweeper looks at every service every 30 seconds and sleeps one when all of these hold:
+
+- the container is running
+- the service is not always-on
+- its desired state is running (something you stopped by hand stays stopped)
+- the last activity is at least the idle window ago, which is 5 minutes for compute and 10 minutes
+  for databases
+- the row was created at least the create grace ago, 10 minutes by default
+- no deploy, wake or other operation is in flight for it
+
+Because the sweep runs on a 30 second cadence, an idle app stops between 5 and 5.5 minutes after
+its last request. The create grace counts from when the service was created, not from the last
+daemon restart, so restarting the daemon does not hand every old service another 10 minutes of
+protection.
+
+## Memory pressure
+
+Sleeping on idle is not always fast enough, so the sweeper also watches free memory. While
+available memory is below 15 percent of the total, it sleeps the least recently active running
+service, one at a time, until it is back above the floor.
+
+Never evicted: an always-on service, a service that woke in the last minute, and a service
+answering a request right now.
+
+On macOS the reading Docker reports is not the host memory, so pressure eviction is off unless you
+set `INSTA_OSS_MEM_BUDGET_MB` to the budget you want the daemon to assume.
+
+## What sleep does to your process
+
+Sleep is `docker stop`, which sends the stop signal the image declares: `SIGTERM` for apps and for
+managed databases, `SIGINT` for the official Postgres image, which is its fast shutdown. Compute
+containers run with `--init`, so the signal reaches your process even when the entrypoint is a
+shell script.
+
+The daemon then waits 10 seconds, or 30 for a database, before `SIGKILL`. Handle the signal if you
+have work to flush.
+
+## What wakes it
+
+- **A request on any lane.** HTTP, Postgres, Redis, MongoDB or MySQL. The connection is held while
+  the container starts, for up to 60 seconds, plus up to 38 seconds of readiness retries after
+  that. You see a slow first request, not an error.
+- **`insta compute start`**, and any management call that needs the service up.
+- **A deploy**, which starts the replacement container.
+
+Wake takes 1 to 3 seconds for an app and a little longer for Postgres.
+
+`insta compute stop` is different: it is a durable intent, and traffic never wakes a service you
+stopped. Requests answer 503 until you run `insta compute start`.
+
+## Always-on
+
+For anything that has to keep running with no inbound traffic, a queue worker or a scheduler:
+
+```bash
+insta compute always-on on web
+insta services add compute worker --always-on
+insta db always-on on
+```
+
+Templates can declare it themselves, and the bundled hermes, n8n and openclaw manifests do.
+
+Memory limits work the same way, on the same grid the hosted platform uses:
+
+```bash
+insta compute limits web --memory 512mb
+```
+
+<Note>
+This is the one deliberate difference from the hosted platform. There, compute is always-on by
+default and scale-to-zero is opt-in. Here it is the other way round, because the whole point of one
+box is that idle things cost nothing.
+</Note>
+
+## Tuning
+
+Set these in `/etc/instacloud/instad.env`, then `cd /etc/instacloud && docker compose up -d`.
+
+| Variable | Default | What |
+| --- | --- | --- |
+| `INSTA_OSS_IDLE_COMPUTE_SEC` | 300 | idle window for compute |
+| `INSTA_OSS_IDLE_DB_SEC` | 600 | idle window for databases |
+| `INSTA_OSS_SWEEP_SEC` | 30 | how often the sweeper looks |
+| `INSTA_OSS_CREATE_GRACE_SEC` | 600 | protection for a newly created service |
+| `INSTA_OSS_STOP_GRACE_SEC` | 10 | seconds before SIGKILL for compute |
+| `INSTA_OSS_STOP_GRACE_DB_SEC` | 30 | seconds before SIGKILL for a database |
+| `INSTA_OSS_WAKE_TIMEOUT_SEC` | 60 | how long a request is held for a wake |
+| `INSTA_OSS_RAM_FLOOR_PCT` | 15 | free-memory floor for pressure eviction, 0 disables it |
+| `INSTA_OSS_MEM_BUDGET_MB` | unset | assumed total memory, needed for eviction on macOS |
+| `INSTA_OSS_ALWAYS_ON_DEFAULT` | false | make every new service always-on |
+| `INSTA_OSS_SCHEDULER` | 1 | set to 0 to turn sleeping off entirely |
+
+An idle window of 0 turns sleeping off for that kind of service without turning off the sweeper.
+
+## How it reads
+
+```bash
+insta services list          # runtime column shows asleep
+insta compute status web     # desired=running live=suspended
+insta events                 # service.sleep and service.wake entries
+```
+
+The dashboard shows the same thing as **Sleeping**, with a Wake button.
+
+## The edge to know about
+
+Activity means traffic. A container that is busy with a long computation and receives nothing from
+outside looks idle, and it will be stopped when its window runs out. Turn always-on on for that
+service:
+
+```bash
+insta compute always-on on batch
+```
