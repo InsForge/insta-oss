@@ -73,8 +73,8 @@ insta compute set-domain <your-domain> --group app
 
     **Two alternatives if you would rather not write one.**
 
-- **Connect the repo** — `insta compute connect-repo <owner/repo> app`. It attaches to the compute service you already made and builds server-side, detecting the runtime with nixpacks when there is no Dockerfile — the same job buildpacks were doing. `--public` skips the GitHub App installation; `--root-dir` picks a directory out of a monorepo. The [console](https://console.instacloud.com) offers the same lane, but creates its own service rather than attaching to yours.
-- **Deploy an image you already publish** — `insta deploy --image <registry/image> --port <n>`.
+    - **Connect the repo** — `insta compute connect-repo <owner/repo> app`. It attaches to the compute service you already made and builds server-side, detecting the runtime with nixpacks when there is no Dockerfile — the same job buildpacks were doing. `--public` skips the GitHub App installation; `--root-dir` picks a directory out of a monorepo. The [console](https://console.instacloud.com) offers the same lane, but creates its own service rather than attaching to yours.
+    - **Deploy an image you already publish** — `insta deploy --image <registry/image> --port <n>`.
 
     Do this before the config vars are in: the first deploy is what makes the binding live, and it gives you a URL to check.
 
