@@ -482,17 +482,25 @@ export class Engine {
     const key = this.serviceKey(b, `cp-${group}`)
     const hostPort = this.localHostPort(b, group, { hostPort: opts.hostPort, port })
     const started = standing !== 'stopped' && !opts.startAsleep
-    const { url: adapterUrl } = await this.compute.deploy(this.ref(project, b), {
-      image: opts.image, port, network: b.network, group,
-      hostPort,                                                    // WP2 (local mode only)
-      hostAliases: this.hostAliasesFor(project, b),                // WP2
-      volume: this.volumeMount(project, b, group),                 // WP4
-      limits: this.limitsFor(project, `cp-${group}`),              // WP3
-      // minted credentials (db + storage + managed databases) reach every compute deploy; user
-      // secrets are scoped (project-wide + branch-unbound + bound to THIS group)
-      envVars: this.containerize(this.envFor(project, b, group)), // WP5 envFor, WP2 containerize
-      start: started,
-    })
+    let adapterUrl: string
+    try {
+      ({ url: adapterUrl } = await this.compute.deploy(this.ref(project, b), {
+        image: opts.image, port, network: b.network, group,
+        hostPort,                                                    // WP2 (local mode only)
+        hostAliases: this.hostAliasesFor(project, b),                // WP2
+        volume: this.volumeMount(project, b, group),                 // WP4
+        limits: this.limitsFor(project, `cp-${group}`),              // WP3
+        // minted credentials (db + storage + managed databases) reach every compute deploy; user
+        // secrets are scoped (project-wide + branch-unbound + bound to THIS group)
+        envVars: this.containerize(this.envFor(project, b, group)), // WP5 envFor, WP2 containerize
+        start: started,
+      }))
+    } catch (e) {
+      // The row write below is what turns the reservation into ownership; a deploy that never gets
+      // there must give the port back instead of leaking one out of the lane range every time.
+      if (hostPort !== undefined && b.apps[group]?.hostPort !== hostPort) this.releaseHostPort(hostPort)
+      throw e
+    }
     // The recorded URL is the serviceUrl hook's (WP2: the router URL, deterministic before deploy);
     // the scaffold body reads the adapter's informational url off the row about to be written.
     const url = this.serviceUrl(project, { ...b, apps: { ...b.apps, [group]: { ...b.apps[group], image: opts.image, port, hostPort, url: adapterUrl } } }, group)
@@ -501,7 +509,11 @@ export class Engine {
     // the deploy's own state write — and `restart` makes that reachable from an operation that
     // checked the intent moments earlier. Matches the platform, whose desired_state survives a deploy.
     const host = this.mintedHost(project, b, group)                                                     // WP2
-    mutate((s) => { s.branches[b.id].apps[group] = { ...s.branches[b.id].apps[group], image: opts.image, port, hostPort, url, ...(host !== undefined ? { host } : {}), updatedAt: Date.now() } })
+    mutate((s) => {
+      s.branches[b.id].apps[group] = { ...s.branches[b.id].apps[group], image: opts.image, port, hostPort, url, ...(host !== undefined ? { host } : {}), updatedAt: Date.now() }
+      // The row now owns the port, exactly as `laneFor` retires a branch-create reservation.
+      if (hostPort !== undefined) delete s.laneReservations?.[String(hostPort)]
+    })
     // ...and the container has to HONOUR that intent, or preserving it just makes the row lie:
     // DockerCompute.deploy always `docker run`s the replacement, so a service the user stopped would
     // come back up while the row still read `stopped`. Re-assert on the container only — the state
@@ -2008,7 +2020,23 @@ export class Engine {
     // is one loopback port space with the database lanes.
     const pinned = opts.hostPort ?? prior?.hostPort ?? fromLegacyUrl
     if (pinned !== undefined) return pinned
-    return this.nextLanePort(this.takenLanePorts(loadState(), { branchId: branch.id, group }))
+    // RESERVE it in the same mutate that picks it. The pick is not written onto the app row until
+    // the container is up, and in between `deployLocked` builds the container's env, which reads
+    // DATABASE_URL, which allocates the database lane out of THIS port range. Unreserved, both
+    // allocators answered the lowest free port and `docker start` failed with "address already in
+    // use" on the first deploy of any project whose DSN had not been read yet.
+    return mutate((s) => {
+      const port = this.nextLanePort(this.takenLanePorts(s, { branchId: branch.id, group }))
+      s.laneReservations = s.laneReservations ?? {}
+      s.laneReservations[String(port)] = branch.id
+      return port
+    })
+  }
+
+  /** Drop the reservation `localHostPort` took, for a deploy that never reached the row write. */
+  private releaseHostPort(port: number | undefined): void {
+    if (port === undefined) return
+    mutate((s) => { delete s.laneReservations?.[String(port)] })
   }
 
   /** The services() row's network columns: `domain` is the bare hostname, `endpoint` is `host[:port]`

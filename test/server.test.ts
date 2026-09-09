@@ -1949,6 +1949,26 @@ test('two concurrent service adds on two projects both succeed', async () => {
   expect(new Set(lanes).size).toBe(2) // distinct lane ports, never the same one twice
 })
 
+// The app's published host port and the database lanes share ONE loopback port space. `deployLocked`
+// picks the host port, THEN builds the container env, and building DATABASE_URL is what allocates
+// the lane: with nothing reserving the pick, both allocators answered the lowest free port and
+// `docker start` died with "address already in use". Reachable on the first deploy of any project
+// whose DSN has not been read yet, which is the plain `services add` then `deploy` order.
+test('a first deploy never takes the port the database lane is about to be given', async () => {
+  const id = (await post('/orgs/local/projects', { name: 'ports' })).json().project.id
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'db' })
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'job' })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 80, group: 'job' })
+  const line = calls.find((c) => c.startsWith('deploy:ports-main:job:'))
+  expect(line).toBeDefined()
+  const hostPort = Number(line!.slice(line!.lastIndexOf('->') + 2))
+  expect(Number.isFinite(hostPort)).toBe(true)
+  const dsn = (await get(`/projects/${id}/services/pg-db/credentials`)).json().credentials.DATABASE_URL
+  const lanePort = Number(/@[^:@/]+:(\d+)\//.exec(dsn)?.[1])
+  expect(Number.isFinite(lanePort)).toBe(true)
+  expect(lanePort).not.toBe(hostPort)
+})
+
 // Stock dockerd hands out 31 user-defined networks and every branch is one, so this is the failure
 // a busy box hits first: the documented 507, not a bare 409.
 test('a docker network pool exhaustion is the documented 507', async () => {
