@@ -16,7 +16,7 @@ insta build . --port <listen-port>              # offline check: will this build
 insta deploy . --port <listen-port>             # needs a Dockerfile — alternatives below
 # copy variables (step 3), then the data (step 4)
 insta compute restart app
-insta compute set-domain app <your-domain>
+insta compute set-domain <your-domain> --group app
 ```
 
 <Steps>
@@ -64,7 +64,7 @@ insta compute set-domain app <your-domain>
     insta build . --port <listen-port>
     ```
 
-    Only a `deployable` verdict means `insta deploy .` will build it. A Railway app usually has no Dockerfile — Railpack did that job — so expect the Dockerfile check to come back `needs-attention` — the report prints the install and start commands it detected, and those are what you base one on. The `insta` skill carries per-framework Dockerfile templates.
+    Only a `deployable` verdict means `insta deploy .` will build it. A Railway app usually has no Dockerfile, since Railpack did that job, so expect the Dockerfile check to come back `needs-attention`. The report prints the install and start commands it detected; those are what you base one on. The `insta` skill carries per-framework Dockerfile templates.
 
     <Warning>
       Do **not** save the Dockerfile that `insta build --explain` prints as your `Dockerfile`. It is not standalone: it `COPY`s `.nixpacks/` support files your directory does not have.
@@ -76,7 +76,10 @@ insta compute set-domain app <your-domain>
     insta deploy . --port <listen-port>
     ```
 
-    **Two alternatives if you would rather not write one.** Connect the app's GitHub repo in the [console](https://console.instacloud.com) — that build runs server-side and detects the runtime for you, the same job buildpacks were doing, and a public repo needs no GitHub App installation. Since `insta` 0.0.64 this is a CLI lane too — `insta compute connect-repo <owner/repo> app` attaches the repo to the compute service you already made and builds its Dockerfile, or detects the runtime with nixpacks when there is none. Or `insta deploy --image <registry/image> --port <n>` if you already publish an image.
+    **Two alternatives if you would rather not write one.**
+
+- **Connect the repo** — `insta compute connect-repo <owner/repo> app`. It attaches to the compute service you already made and builds server-side, detecting the runtime with nixpacks when there is no Dockerfile — the same job buildpacks were doing. `--public` skips the GitHub App installation; `--root-dir` picks a directory out of a monorepo. The [console](https://console.instacloud.com) offers the same lane, but creates its own service rather than attaching to yours.
+- **Deploy an image you already publish** — `insta deploy --image <registry/image> --port <n>`.
 
     Deploy once before the rest of the variables are in: the first deploy is what makes the binding live. Then bring them over, one per call:
 
@@ -100,9 +103,16 @@ insta compute set-domain app <your-domain>
 
     ```bash
     set -o pipefail
-    pg_dump --no-owner --no-privileges "<railway-postgres-url>" \
-      | psql -v ON_ERROR_STOP=1 "$(insta db url)"
+    insta services list                       # read the Postgres major, e.g. postgres/db [pg16]
+
+    docker run --rm postgres:16 pg_dump --no-owner --no-privileges "<railway-postgres-url>" \
+      | psql -v ON_ERROR_STOP=1 "$(insta db url)" 2>&1 | tee restore.log
+    grep -c '^ERROR' restore.log              # must print 0
     ```
+
+    <Warning>
+      **Match your `pg_dump` major to InstaCloud's Postgres, not to your source.** `insta services list` prints the major (`postgres/db [pg16]`) for exactly this reason: a newer client emits statements an older server rejects, and a pg18 `pg_dump` fails on the very first one — `ERROR: unrecognized configuration parameter "transaction_timeout"`. The command above pins a matching client in a container so your local install does not matter.
+    </Warning>
 
     <Warning>
       Both flags are load-bearing. `psql` continues past errors by default, and a shell pipeline reports only its last command's status — without `ON_ERROR_STOP=1` and `pipefail`, a half-restored database exits `0` and looks like success.
@@ -141,8 +151,8 @@ insta compute set-domain app <your-domain>
 
   <Step title="Move the domain" titleSize="h2">
     ```bash
-    insta compute set-domain app <your-domain>
-    insta compute check-domain app
+    insta compute set-domain <your-domain> --group app
+    insta compute check-domain <your-domain> --group app
     ```
 
     Once traffic is served from InstaCloud and you have soaked for a while, delete the Railway project.
