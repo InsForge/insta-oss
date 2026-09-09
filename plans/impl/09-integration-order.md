@@ -15,7 +15,7 @@ One commit, no behaviour change, today's tests green.
 4. `test/fakes.ts` per contract section 6 (today's canned SQL answers keyed by container; recorders for `hostAliases`, `limits`, `graceSec`, `data.*` present but unused; `FakeRuntime`/`FakeUpstream` land with WP3); `test/server.test.ts` imports it and `app = buildServer(makeEngine())`; the 501 sweep array at line 218 split into `NOT_CLOUD_WP1`, `NOT_CLOUD_WP2`, `NOT_CLOUD_WP3`, `NOT_CLOUD_REST` concatenated; the only assertion edits (contract §6 lists each line, pre-scaffold numbering): 116 `db.provision:demo-main` -> `db.provision:io-demo-main-pg-db`, 117 `st.provision:demo-main` -> `st.provision:demo-main:store`, 126 `db.clone:demo-main->demo-feat` -> `db.fork:io-demo-main-pg-db->io-demo-feat-pg-db`, 127 `st.clone:demo-main->demo-feat` -> `st.clone:io-demo-main-store->io-demo-feat-store`, 688 `st.access:demo-main:true` -> `st.access:io-demo-main-store:true`, 959/1003 `md.provision:demo-main:redis:cache` -> `md.provision:io-demo-main-rd-cache` (and `demo-feat`), 1034-1035 `md.rename:...` -> `md.rename:io-demo-main-rd-cache->io-demo-main-rd-kv` (and feat), 1055-1056 `md.destroy:...` -> `md.destroy:io-demo-main-rd-kv` (and feat), 1272 `db.provision:demo-feat` -> `db.fork:io-demo-main-pg-db->io-demo-feat-pg-db` (the fake fork records no `db.provision`); 354 `io-demo-main-pg:5432` -> `io-demo-main-pg-db:5432` and 1214 mock row `io-demo-main-pg` -> `io-demo-main-pg-db` (container name); 145/1269 `pg://demo-main` -> `postgres://postgres:pw@io-demo-main-pg-db:5432/app`, 1240 `pg://demo-feat` -> `postgres://postgres:pw@io-demo-feat-pg-db:5432/app` (§6 DSN form); 146 `io-demo-main` -> `io-demo-main-store`, 129/342 `s3=io-demo-feat` -> `s3=io-demo-feat-store`, 466 `s3=io-demo-main` -> `s3=io-demo-main-store`, 1072/1098/1109 `io-demo-main` -> `io-demo-main-store`, 1086/1088 `io-demo-feat` -> `io-demo-feat-store` (fake BUCKET_NAME = bucket handle); 208 `/tokens` removed from the ad-hoc 501 loop and 224 `NOT_CLOUD_WP1` gains `['GET', '/tokens']`; `deploy.volume` strings unchanged.
 5. Region markers (contract 1.3) in `src/engine.ts`, `src/server.ts`, `src/types.ts`, `src/state.ts`, `src/main.ts`, `src/manageddb.ts`, `src/adapters/{compute,postgres,manageddb}.ts` (the `args` lines), `test/server.test.ts`, `test/fakes.ts`, `ui/src/api.ts`; `.github/workflows/ci.yml` ends with `# ---- WP4 ----` then `# ---- WP6 ----`.
 6. `vitest.config.ts`: exclude `test/**/*.int.test.ts` unless `RUN_DOCKER_TESTS`; `.github/workflows/ci.yml`: `RUN_DOCKER_TESTS=1 INSTA_OSS_SCHEDULER=0` on the `npm test` step.
-7. Verify: `npm run typecheck && npm run lint && npm test`; `RUN_DOCKER_TESTS=1 npx vitest run test/clone-isolation.int.test.ts` (the interim `fork` path), `test/storage.int.test.ts`, `test/restart.int.test.ts`; `npm run dev` prints today's three lines.
+7. Verify: `npm run typecheck && npm run lint && npm test`; `RUN_DOCKER_TESTS=1 npx vitest run test/clone-isolation.int.test.ts` (the interim `fork` path), `test/storage.int.test.ts`, `test/restart.int.test.ts`; `npm run dev` prints today's three lines, under WP4's data-dir capabilities line and above the one memory warning a box with no `/proc/meminfo` gets (four lines assembled).
 
 Then spawn the eight implementers from this commit. Each plan's "Done when" is the acceptance bar for its PR; the integrator additionally runs the checks below after each merge.
 
@@ -37,7 +37,7 @@ After merge verify: `npm test` (`fsclone`, `postgres-adapter`, `datadir-migrate`
 
 ## Merge 4: WP3 scheduler
 
-After merge verify: `npm test` (`scheduler`, `upstream`, `server.test.ts` region WP3, `restart-policy` additions); the 501 sweep lost exactly the limits and always-on rows; the ONLY existing assertion WP3 changed is lines 475-489 (`state: 'stopped'` after stop, decision 53); `ComputeAdapter.state` is gone from `src/types.ts`, the adapter and the fake; `GET /policy` lists `service.upgrade`. Docker: `test/sleep-wake.int.test.ts` (ticker on, `INSTA_OSS_RAM_FLOOR_PCT=0` outside the eviction case); then every other Docker suite with `INSTA_OSS_SCHEDULER=0` to prove on-demand wake/sleep work with the ticker off (the idle knobs alone would leave the pressure pass running on a low-RAM runner). Manual: local daemon with `INSTA_OSS_IDLE_COMPUTE_SEC=15 INSTA_OSS_SWEEP_SEC=2 INSTA_OSS_CREATE_GRACE_SEC=0`, deploy whoami, wait, `docker ps` shows exited (not paused), `insta compute start` wakes; `insta compute limits web --memory 512mb` lands in `HostConfig.Memory`.
+After merge verify: `npm test` (`scheduler`, `upstream`, `server.test.ts` region WP3, `restart-policy` additions); the 501 sweep lost exactly the limits and always-on rows; the existing assertions WP3 changed are lines 475-489 (`state: 'stopped'` after stop, decision 53) plus two more, both contract-backed and recorded in plan 03: the services row `db.runtime` `stopped` -> `online` (one FakeRuntime store, decision 53, contract:590) and `GET /projects/:id/database/instance` host `io-demo-main-pg` -> `127.0.0.1` with a lane port and a `routeKey` (contract:759, the `?group=analytics` variant too); `ComputeAdapter.state` is gone from `src/types.ts`, the adapter and the fake; `GET /policy` lists `service.upgrade`. Docker: `test/sleep-wake.int.test.ts` (ticker on, `INSTA_OSS_RAM_FLOOR_PCT=0` outside the eviction case); then every other Docker suite with `INSTA_OSS_SCHEDULER=0` to prove on-demand wake/sleep work with the ticker off (the idle knobs alone would leave the pressure pass running on a low-RAM runner). Manual: local daemon with `INSTA_OSS_IDLE_COMPUTE_SEC=15 INSTA_OSS_SWEEP_SEC=2 INSTA_OSS_CREATE_GRACE_SEC=0`, deploy whoami, wait, `docker ps` shows exited (not paused), `insta compute start` wakes; `insta compute limits web --memory 512mb` lands in `HostConfig.Memory`.
 
 ## Merge 5: WP2 router
 
@@ -54,6 +54,24 @@ After merge verify: `npm run build:ui`; `npm test` includes `ui/src/lib/*.test.t
 ## Merge 8: WP8 docs/e2e
 
 After merge verify: `npm test` includes `docs-lint`; `cd docs && npx mint dev` sidebar shows the seven pages; `.github/workflows/e2e.yml` both jobs green on the PR; README session copy-pasted against a fresh local daemon prints the claimed shapes; COMPATIBILITY rows match contract section 9.
+
+## Merge 9: gap fixes (integrator, on the assembled branch)
+
+The verification pass over the assembled branch (`plans/impl/gap-findings.json`: 2 blockers, 6
+majors, 15 minors) is worked in that order by the fixer, on this branch, with `npm run typecheck`,
+`npm run lint` and the full fake-adapter suite green at every commit. Two of its fixes move existing
+assertions, both contract-backed:
+
+- `INSTA_OSS_RAM_FLOOR_PCT` accepts 0 (`0..90`), `evictForRoom` returns on a floor of 0, and
+  `test/config.test.ts` asserts that instead of a `1..90` range message. Decision 12 and the shipped
+  docs both call 0 the off switch, and the scheduler Docker suite and both e2e scripts pass it, so
+  under the old bound none of the three could even start.
+- `GET /secrets` and the deploy env mint the host-facing lane DSN, as `credentials` already did
+  (contract section 10: `DATABASE_URL (secrets, credentials, env)`, one string everywhere). Every
+  assertion that pinned the container-host form (`server.test.ts` secrets, the managed bundles, the
+  branch and project rename cases, the legacy row, the two-postgres case, and the `templates.test.ts`
+  binding case) now pins the lane form, and where the hostname used to carry the service identity
+  the assertion compares against that service's own `credentials` answer instead.
 
 ## Docker test sequence (integrator, final pass on the assembled branch)
 

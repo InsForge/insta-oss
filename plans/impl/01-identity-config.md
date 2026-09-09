@@ -148,7 +148,7 @@ Refuse in local mode; `initStatePath`; `acquireLock(cfg.dataDir)` exactly like a
 - [ ] `npm test`, `npm run typecheck`, `npm run lint` green; `test/server.test.ts` passes with no assertion changed outside region WP1.
 - [ ] Server mode boots with `INSTA_OSS_MODE=server INSTA_OSS_DOMAIN=x.test INSTA_OSS_DATA_DIR=$tmp` (fake or real docker): `curl /healthz` 200, `curl /me` 401, sign-up via curl, `/me` with the cookie 200, a second daemon on the same data dir exits with the lock message.
 - [ ] `insta login --api-key <k> --api-url http://127.0.0.1:8080` succeeds against a server-mode daemon (CLI `applyApiKeyLogin` hits `/me`); `insta login --email` succeeds via `/auth/login`.
-- [ ] Local mode output of `npm run dev` is byte-identical to today's three lines.
+- [ ] Local mode output of `npm run dev` keeps today's three lines verbatim. WP4 adds a data-dir capabilities line ABOVE them (`data dir <path> reflink=<yes|no> engine=<...> mode=local`, plan 04) and on a box with no `/proc/meminfo` and no `INSTA_OSS_MEM_BUDGET_MB` the scheduler's boot reconcile adds one warning below them, so the assembled banner is four lines. Contract decision 12 pins auth, bind, port and the CLI flow for local mode, not the banner.
 - [ ] Docs facts handed to WP8 (below).
 
 ## Docs facts for WP8

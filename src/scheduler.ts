@@ -345,7 +345,9 @@ export class Scheduler {
         this.touch(t.key)
       }
     }
-    if (!this.runtime.memory() && !this.memoryWarned) {
+    // Not a warning when the floor is 0: eviction is off because the operator turned it off, and
+    // saying otherwise sends them looking for a missing /proc/meminfo they do not need.
+    if (this.cfg.sleep.ramFloorPct > 0 && !this.runtime.memory() && !this.memoryWarned) {
       this.memoryWarned = true
       console.warn('memory-pressure eviction disabled (no /proc/meminfo and no INSTA_OSS_MEM_BUDGET_MB)')
     }

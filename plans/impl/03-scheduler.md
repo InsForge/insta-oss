@@ -133,6 +133,15 @@ Implemented once in `rowRuntime(key)` / `liveState(key)` / `healthOverlay` per t
 - `db management routes (databases, extensions, password) wake an asleep pg first (runtime.start recorded before db.query); db metrics/activity/query-stats/insight on a sleeping pg -> 503 /sleeping/ and no db.query`
 - `PATCH database/settings {scaleToZero:false, idleTimeout:120} persisted and echoed by GET database/instance; cpu/memory quantities validated on the grid`
 - existing lifecycle tests (lines 475-662) green with exactly one allowed edit: lines 475-489 expect `state: 'stopped'` (not `'running'`) after `compute stop`, because `liveState` now reads the FakeRuntime store the fake `compute.stop` updates (decision 53)
+- two further existing-assertion edits WP3 made, recorded here because the tree carries them: the
+  services row `db.runtime` moves from `'stopped'` to `'online'` (both the routes and the scheduler
+  read ONE FakeRuntime store, decision 53, contract:590), and `GET /projects/:id/database/instance`
+  answers host `127.0.0.1` with a lane port and a `routeKey` instead of host `io-demo-main-pg`
+  (`dbInstance` reads `laneAddress`, contract:759 and :595), the `?group=analytics` variant included
+- the local-mode startup banner is FOUR lines, not three: WP4's data-dir capabilities line
+  (`data dir <path> reflink=... engine=... mode=local`) prints before the three CLI lines, and on a
+  box with no `/proc/meminfo` and no `INSTA_OSS_MEM_BUDGET_MB` the boot reconcile adds one warning
+  after them (suppressed when `INSTA_OSS_RAM_FLOOR_PCT=0`, where eviction is off by request)
 
 `test/restart-policy.test.ts`: `provision/deploy carry --cpus/--memory/--memory-swap when limits are given and none when absent; compute create carries --init; stop passes -t <grace>`.
 
