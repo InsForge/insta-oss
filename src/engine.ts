@@ -167,51 +167,80 @@ export class Engine {
    *  over registrations; the hooks it calls (contract 7.2) are already in place. */
   private async provisionBranch(project: Project, name: string, isDefault: boolean, source: Branch | null, branchId: string): Promise<Branch> {
     const network = this.net(project, name)
-    try { await docker(['network', 'create', network]) } catch { /* exists */ }
-    const ref = this.ref(project, name)
-    // WP2 hook: lane reservations, written before any await ({} until the router lands).
-    const lanes = this.allocLanes(project, branchId, ['pg-db', ...(project.managedServices ?? []).map((m) => m.id)])
-    const pg: PgTarget = { container: pgContainerName(ref, 'db'), network, dataDir: this.layout().pg(ref, 'db') }
-    const pgOpts = { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, 'pg-db') }
-    let url: string
-    try {
-      if (source) {
-        this.assertMigrated(source)                                                                       // WP4
-        const srcRef = this.ref(project, source)
-        const src = { container: this.pgContainer(project, source), network: source.network, dataDir: this.layout().pg(srcRef, source.databases?.['pg-db']?.dataId ?? 'db'), url: this.pgUrl(source) ?? '' }
-        // WP3 hook: a sleeping source is woken before a basebackup-style fork reads it.
-        const forked = await this.db.fork(src, pg, { ...pgOpts, ensureSourceRunning: () => this.wake(this.serviceKey(source, 'pg-db'), { door: 'api' }) })
-        url = forked.url
-        // WP4: the copy method and duration travel to the branch.created payload (decision 39).
-        this.forkResults.set(branchId, { method: forked.method, ms: forked.ms })
-      } else {
-        url = (await this.db.provision(pg, pgOpts)).url
+    try { await docker(['network', 'create', network]) } catch (e) {
+      // Stock dockerd hands out only 31 user-defined networks from its default pools and every
+      // branch is one, so this is the failure a busy box hits first. Anything else here is the
+      // network already existing (an interrupted create, or a re-provision).
+      const m = e instanceof Error ? e.message : String(e)
+      if (/non-overlapping IPv4 address pool/i.test(m)) {
+        throw new Error('docker has no free network subnets; see docs/self-hosting/install (default-address-pools)')
       }
-    } catch (e) {
-      // compensate: a fork that failed after provisioning its destination must not orphan it, and a
-      // half-written data directory must not survive to be cloned over (WP4)
-      await this.db.destroy(pg.container).catch(() => {})
-      await this.data.remove(pg.dataDir).catch(() => {})
-      await docker(['network', 'rm', network]).catch(() => {})
-      this.releaseLanes(branchId)
-      throw e
     }
-    let st: { bucket: string; env: Record<string, string> }
-    try { st = await this.storage.provision(ref, network, 'store') }
-    catch (e) {
-      // compensate: don't orphan the db container if storage fails
-      await this.db.destroy(pg.container).catch(() => {})
-      await this.data.remove(pg.dataDir).catch(() => {})                                                  // WP4
+    const ref = this.ref(project, name)
+    const dbs = this.dbList(project.id)
+    const stores = this.stList(project.id)
+    const managedRegs = this.managedList(project.id)
+    // Reserve every hostname this branch will mint and every lane port it needs BEFORE the first
+    // provisioning await, inside the engine-wide provision chain (decision 51).
+    mutate(() => {
+      for (const d of dbs) this.assertHostFree(this.labelFor('postgres', d.name, ref))
+      for (const m of managedRegs) this.assertHostFree(this.labelFor(m.type, m.name, ref))
+    })
+    const lanes = this.allocLanes(project, branchId, this.branchServiceIds(project))                      // WP2
+    // Every provider object this call created, so one compensation path can undo the whole stack.
+    const madeDbs: PgTarget[] = []
+    const madeBuckets: string[] = []
+    const madeManaged: string[] = []
+    const rollback = async (): Promise<void> => {
+      for (const c of madeManaged) await this.managedDb.destroy(c).catch(() => {})
+      for (const b of madeBuckets) await this.storage.destroy(b, network).catch(() => {})
+      for (const d of madeDbs) await this.db.destroy(d.container).catch(() => {})
+      // A half-written data directory must not survive to be cloned over (WP4).
+      for (const root of this.layout().branchRoots(ref)) await this.data.remove(root).catch(() => {})
       await docker(['network', 'rm', network]).catch(() => {})
-      this.releaseLanes(branchId)
-      throw e
+      this.releaseLanes(branchId)                                                                         // WP2
     }
-    // Managed databases: every branch gets a FRESH empty instance with a fresh password — no data
-    // clones from the parent (cloud parity: platform materialize() for managed Fly databases).
-    const managed: Record<string, { password: string }> = {}
-    const provisioned: string[] = []
+    const databases: NonNullable<Branch['databases']> = {}
+    const buckets: NonNullable<Branch['buckets']> = {}
+    const managed: NonNullable<Branch['managed']> = {}
     try {
-      for (const m of project.managedServices ?? []) {
+      // Postgres: one container per registered service, forked from the source's own file copy
+      // when this is a clone (adapter-level: reflink or a streamed basebackup).
+      for (const d of dbs) {
+        const dst: PgTarget = { container: pgContainerName(ref, d.name), network, dataDir: this.layout().pg(ref, d.dataId) }
+        const opts = { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, d.id) }
+        const src = source ? this.dbHandle(project, source, d.id) : undefined
+        let url: string
+        if (source && src) {
+          this.assertMigrated(source)                                                                     // WP4
+          const srcRef = this.ref(project, source)
+          const forked = await this.db.fork(
+            { container: src.container, network: source.network, dataDir: this.layout().pg(srcRef, src.dataId), url: src.url },
+            dst,
+            // WP3 hook: a sleeping source is woken before a basebackup-style fork reads it.
+            { ...opts, ensureSourceRunning: () => this.wake(this.serviceKey(source, d.id), { door: 'api' }) },
+          )
+          url = forked.url
+          // WP4: the copy method and duration travel to the branch.created payload (decision 39).
+          // The oldest service's fork is the one the event reports.
+          if (!this.forkResults.has(branchId)) this.forkResults.set(branchId, { method: forked.method, ms: forked.ms })
+        } else {
+          // A fresh branch, or a service the source branch never materialised: initdb.
+          url = (await this.db.provision(dst, opts)).url
+        }
+        madeDbs.push(dst)
+        databases[d.id] = { url, container: dst.container, dataId: d.dataId, host: this.hostFor('postgres', d.name, ref) }
+      }
+      // Storage: one bucket per registered service. The objects themselves copy in createBranch.
+      for (const s of stores) {
+        const out = await this.storage.provision(ref, network, s.name)
+        madeBuckets.push(out.bucket)
+        if (s.public === true && this.storage.setAccess) await this.storage.setAccess(out.bucket, network, true)
+        buckets[s.id] = { bucket: out.bucket, env: out.env, ...(s.public !== undefined ? { public: s.public } : {}) }
+      }
+      // Managed databases: every branch gets a FRESH empty instance with a fresh password — no data
+      // clones from the parent (cloud parity: platform materialize() for managed Fly databases).
+      for (const m of managedRegs) {
         const password = randomBytes(32).toString('base64url')
         const container = managedContainerName(ref, m.type, m.name)
         // WP4: `md/<ref>/<prefix>-<dataId>` plus one sub-directory per path the image writes, all
@@ -221,55 +250,65 @@ export class Engine {
           { container, network, type: m.type, name: m.name, password, dataDir },
           { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, m.id) },
         )
-        provisioned.push(container)
-        managed[m.id] = { password }
+        madeManaged.push(container)
+        managed[m.id] = { password, host: this.hostFor(m.type, m.name, ref) }
       }
     } catch (e) {
-      // compensate: tear down the whole half-provisioned branch stack
-      for (const c of provisioned) await this.managedDb.destroy(c).catch(() => {})
-      await this.storage.destroy(st.bucket, network).catch(() => {})
-      await this.db.destroy(pg.container).catch(() => {})
-      for (const root of this.layout().branchRoots(ref)) await this.data.remove(root).catch(() => {})      // WP4
-      await docker(['network', 'rm', network]).catch(() => {})
-      this.releaseLanes(branchId)
+      await rollback()
       throw e
     }
     const b: Branch = {
       id: branchId, projectId: project.id, name, isDefault, status: 'ready', ref,
-      network, dbUrl: url, bucket: st.bucket, s3: st.env, cloneOf: source?.name ?? null, createdAt: Date.now(), apps: {},
-      // the postgres handle is recorded at provision and READ afterwards (decision 17); `dbUrl`
-      // stays alongside until WP5's migrateState folds the legacy fields into `databases`
-      databases: { 'pg-db': { url, container: pg.container, dataId: 'db' } },
+      network, cloneOf: source?.name ?? null, createdAt: Date.now(), apps: {},
+      // Handles are recorded at provision and READ afterwards (decision 17). New branches carry no
+      // legacy dbUrl/bucket/s3 fields at all: migrateState derives those rows for OLD branches, and
+      // nothing reads them once a branch has its own.
+      databases, buckets,
       ...(Object.keys(managed).length ? { managed } : {}),
       ...(Object.keys(lanes).length ? { lanes } : {}),
       dataVersion: 1,                                                                                     // WP4
     }
-    mutate((s) => { s.branches[b.id] = b })
+    // The same mutate that writes the row drops the lane reservations it supersedes.
+    mutate((s) => {
+      s.branches[b.id] = b
+      for (const [port, owner] of Object.entries(s.laneReservations ?? {})) {
+        if (owner === branchId) delete s.laneReservations![port]
+      }
+    })
     // WP3 hook: the scheduler learns the branch's database keys (no-op stub until WP3).
-    this.scheduler.register(['pg-db', ...Object.keys(managed)].map((sid) => this.serviceKey(b, sid)))
+    this.scheduler.register([...Object.keys(databases), ...Object.keys(managed)].map((sid) => this.serviceKey(b, sid)))
     this.router.invalidate()
     return b
   }
 
+  /** Create a project and its default branch. EMPTY, like the cloud (`resources: []`): nothing is
+   *  registered, so `provisionBranch` provisions nothing and the caller adds services next. */
   async createProject(name: string): Promise<{ project: Project; defaultBranch: Branch }> {
-    if (this.listProjects().some((p) => p.name === name)) throw new Error(`project "${name}" already exists`)
-    // Slugs are frozen per project and outlive renames, so a NEW project must not reuse one —
-    // its containers would collide with resources a renamed project still owns.
-    const refSlug = slug(name)
-    if (this.listProjects().some((p) => this.projectSlug(p) === refSlug)) {
-      throw new Error(`project ref "${refSlug}" already exists (a renamed project still owns its original resource names)`)
-    }
-    const project: Project = { id: randomUUID(), name, status: 'ready', createdAt: Date.now(), refSlug }
-    mutate((s) => { s.projects[project.id] = project })
-    try {
-      const defaultBranch = await this.provisionBranch(project, DEFAULT_BRANCH, true, null, randomUUID())
-      this.emit(project.id, DEFAULT_BRANCH, 'resource', 'project.created', { name })
-      return { project, defaultBranch }
-    } catch (e) {
-      // compensate: never leave a half-provisioned project behind
-      mutate((s) => { delete s.projects[project.id] })
-      throw e
-    }
+    return this.serialize('provision', async () => {
+      const project: Project = { id: randomUUID(), name, status: 'ready', createdAt: Date.now(), refSlug: slug(name) }
+      // Both uniqueness checks and the insert in ONE synchronous mutate, inside the provision
+      // chain: two concurrent creates of the same name or slug cannot both pass the check
+      // (decision 51). Slugs are frozen per project and outlive renames, so a NEW project must not
+      // reuse one — its containers would collide with resources a renamed project still owns.
+      mutate((s) => {
+        for (const p of Object.values(s.projects)) {
+          if (p.name === name) throw new Error(`project "${name}" already exists`)
+          if (this.projectSlug(p) === project.refSlug) {
+            throw new Error(`project ref "${project.refSlug}" already exists (a renamed project still owns its original resource names)`)
+          }
+        }
+        s.projects[project.id] = project
+      })
+      try {
+        const defaultBranch = await this.provisionBranch(project, DEFAULT_BRANCH, true, null, randomUUID())
+        this.emit(project.id, DEFAULT_BRANCH, 'resource', 'project.created', { name })
+        return { project, defaultBranch }
+      } catch (e) {
+        // compensate: never leave a half-provisioned project behind
+        mutate((s) => { delete s.projects[project.id] })
+        throw e
+      }
+    })
   }
 
   async createBranch(projectId: string, name: string, from?: string): Promise<Branch> {
@@ -279,22 +318,46 @@ export class Engine {
     if (!source) throw new Error(`source branch "${from ?? DEFAULT_BRANCH}" not found`)
     if (this.getBranchByName(projectId, name)) throw new Error(`branch "${name}" already exists`)
 
-    // The database forks inside provisionBranch (db.fork); the bucket copies here; compute redeploys.
-    const b = await this.provisionBranch(project, name, false, source, randomUUID())
+    // The new branch's id is minted FIRST, so its ServiceKeys exist before any container op
+    // (decision 51). The lock covers the source's services (the fork reads them, and a sleeping one
+    // is woken) and the clone's databases (provision, then sleep). The clone's COMPUTE keys are
+    // deliberately not held here: the redeploy loop below acquires each one itself, and those
+    // containers do not exist yet, so there is nothing for this lock to exclude — while holding
+    // them would mean the nested deploy has to re-enter the same key.
+    const branchId = randomUUID()
+    const ids = this.branchServiceIds(project)
+    const keys = [
+      ...ids.map((sid) => `${source.id}:${sid}`),
+      ...Object.keys(source.apps).map((g) => `${source.id}:cp-${g}`),
+      ...ids.map((sid) => `${branchId}:${sid}`),
+    ]
+    return this.withOp(keys, () => this.createBranchLocked(project, name, source, branchId))
+  }
+
+  private async createBranchLocked(project: Project, name: string, source: Branch, branchId: string): Promise<Branch> {
+    const projectId = project.id
+    // Each database forks inside provisionBranch (db.fork); each bucket copies here; compute redeploys.
+    const b = await this.serialize('provision', () => this.provisionBranch(project, name, false, source, branchId))
     // WP4 hook: /data volumes fork BEFORE the redeploy loop, so each new container starts on its
     // own copy rather than sharing the source's bytes.
     const volumes = await this.forkVolumes(project, source, b)
-    await this.storage.cloneInto(this.bucketOf(project, source), this.bucketOf(project, b), b.network)
+    for (const s of this.stList(projectId)) {
+      const from = this.bucketHandle(project, source, s.id)
+      const to = this.bucketHandle(project, b, s.id)
+      if (from && to) await this.storage.cloneInto(from.bucket, to.bucket, b.network)
+    }
     // compute = redeploy: same image, SAME listen port, allocated host mapping.
     for (const [group, app] of Object.entries(source.apps)) {
       // WP3 hook: a clone of a non-always-on service starts asleep (false until the scheduler lands).
       await this.deployAllocatingPort(projectId, name, group, app, { startAsleep: this.startAsleepFor(project, b, group) })
     }
-    // platform parity: the parent branch's user-defined (branch-scoped) secrets clone onto the new branch
+    // platform parity: the parent branch's user-defined (branch-scoped) secrets clone onto the new
+    // branch, and so do its bindings (a template's platform credential renames must survive a fork).
     mutate((st) => {
       const list = st.userSecrets[projectId] ?? []
       const inherited = list.filter((u) => u.branch === source.name).map((u) => ({ ...u, branch: name }))
       st.userSecrets[projectId] = [...list, ...inherited]
+      if (source.bindings?.length) st.branches[b.id].bindings = source.bindings.map((x) => ({ ...x }))
       // the DB volume-size setting travels with the clone (it describes the copied database)
       if (source.dbVolumeGib !== undefined) st.branches[b.id].dbVolumeGib = source.dbVolumeGib
     })
