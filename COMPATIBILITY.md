@@ -39,8 +39,8 @@ domain. See [self-hosting](https://docs.instacloud.com/self-hosting/overview).
 | `db always-on on\|off` | implemented, per database service |
 | `template list` / `template info <code>` / `template deploy <code\|dir\|url>` | the bundled catalog is served through the cloud template routes, so it works with no internet access. Registry code, local directory and GitHub URL all deploy. Image services only, and the usage stats are this daemon only |
 | `manifest` | per-branch postgres, storage and compute |
-| `policy` / `policy set` | implemented |
-| `approvals list/approve/deny` (`--always`) | one-shot grants, same `202` flow |
+| policy get and set | implemented as routes (`GET /projects/:id/policy`, `PUT /projects/:id/policy/:action`) and in the dashboard. The CLI has no `policy` command of its own, on the cloud or here |
+| `approvals list/approve/deny` | one-shot grants, same `202` flow. `--always`, which flips the project policy to allow, is a field on the approve route (`{"always": true}`) and a control in the dashboard; the CLI does not expose a flag for it |
 | `events` | resource and governance timeline, agent ingest with dedup; the newest 5000 rows are kept |
 | `metrics` / `logs` | docker-backed (`docker stats` snapshot, `docker logs` tail), cloud response shapes; targets `db`, `compute`, `redis`, `mysql`, `mongodb`, and `--group` selects among several databases. `logs --deploy` is `501`, use `insta events` |
 | `storage list/get/delete` | object listing (prefix and cursor paging), presigned GET download, single delete; gated `storage.read` and `storage.delete`. Presigned-POST upload and bulk delete serve the console file browser |
@@ -82,7 +82,7 @@ daemon (`PLATFORM_API_URL=https://api.<domain>` in server mode with an `insta_` 
 | `whoami · org_list · project_* · service_add/list/remove/access · deploy · compute_control/status · branch_* · storage_list/download_url/delete · manifest · secrets_* · metrics · logs · events · policy_get · approvals_*` | end to end, including the full governance flow (`202` then `approvals_approve` or `approvals_deny`) |
 | `domain_*` | supported: the same add, check and remove behavior as the CLI verbs |
 | `template_*` | supported where the MCP exposes them, over the same catalog routes |
-| `org_create · usage · billing_summary/checkout/portal · service_scale/upgrade · deploy_events` | `not_supported`, carrying the daemon `501` guidance verbatim |
+| `org_create · usage · billing_summary/checkout/portal · service_scale/upgrade · deploy_events` | refused. The daemon answers `501` with its guidance, but insta-mcp maps every status at or above 500 to `platform_error` with the text `upstream error, retry`, so the sentence does not reach the agent and the refusal reads as transient. Ask the daemon directly, or the CLI, for the reason |
 | `feedback` | bypasses the control plane entirely (posts to the hosted feedback service, tagged `target: oss`) |
 
 ## Branching vs merging
