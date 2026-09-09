@@ -7,7 +7,7 @@
 // including the deprecated deployCount / activeDeployCount aliases the console still reads. The
 // numbers are per daemon: this box's own deployments, not a global gallery counter.
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { extname, join } from 'node:path'
+import { extname, join, resolve, sep } from 'node:path'
 import { loadState } from '../state'
 import type { TemplateDeploymentRecord } from '../types'
 import {
@@ -197,11 +197,17 @@ export class TemplateCatalog {
   private logo(base: string, declared: string | undefined): string | null {
     if (declared === LOGO_NONE) return null
     const candidates = declared ? [declared.replace(/^\.\//, '')] : LOGO_FALLBACKS
+    const root = resolve(base)
     for (const rel of candidates) {
       const mime = LOGO_MIME[extname(rel).toLowerCase()]
       if (!mime) continue
+      // `meta.logo` is authored data and `INSTA_OSS_TEMPLATES_DIR` is operator-settable, so the
+      // path has to stay inside the template's own directory: a public, unauthenticated route
+      // returns these bytes, and `../../..` would make it read anything the daemon can.
+      const path = resolve(root, rel)
+      if (path !== root && !path.startsWith(root + sep)) continue
       try {
-        const bytes = readFileSync(join(base, rel))
+        const bytes = readFileSync(path)
         return `data:${mime};base64,${bytes.toString('base64')}`
       } catch { /* declared but absent: fall through to null, the UI tolerates it */ }
     }
@@ -210,9 +216,10 @@ export class TemplateCatalog {
 
   // ---- deployment counters ---------------------------------------------------------------------
 
-  /** This daemon's deployment counters for one code. */
-  stats(code: string): CatalogStats {
-    const state = loadState()
+  /** This daemon's deployment counters for one code. `loadState` clones the whole state file, so a
+   *  caller that needs several codes reads it ONCE and passes it in: `GET /templates` is public and
+   *  unauthenticated, and one clone per template turned a listing into seven. */
+  stats(code: string, state = loadState()): CatalogStats {
     const rows = Object.values(state.templateDeployments ?? {}).filter((r) => r.templateCode === code)
     const live = rows.filter((r) => this.isLive(r, state.projects))
     const concluded = rows.filter((r) => (r.status === 'succeeded' || r.status === 'failed' || r.status === 'partial')
@@ -256,13 +263,14 @@ export class TemplateCatalog {
   listTemplates(q: { query?: string; category?: string } = {}): { templates: Array<Record<string, unknown>> } {
     const wanted = q.category?.toLowerCase()
     const needle = q.query?.toLowerCase()
+    const state = loadState()
     const templates = this.load()
       .filter((e) => !e.draft)
       .filter((e) => (wanted ? (e.manifest.meta?.category ?? '').toLowerCase() === wanted : true))
       .map((e) => {
         const meta = e.manifest.meta ?? {}
         const { required } = this.variableGroups(e.manifest)
-        const s = this.stats(e.manifest.code)
+        const s = this.stats(e.manifest.code, state)
         return {
           code: e.manifest.code,
           version: e.manifest.version,

@@ -150,6 +150,10 @@ test('manifest parity: the refusals the platform makes, one case each', () => {
   // Every meta link is rendered, so every one is held to absolute https.
   refuses({ ...base, meta: { links: { upstream: 'http://x.example' } } }, /absolute https URL/)
   refuses({ ...base, meta: { tags: 'automation' } }, /meta.tags must be an array/)
+  // The logo is read from the template's own directory and served on a PUBLIC route.
+  refuses({ ...base, meta: { logo: '../../../../etc/hosts.png' } }, /inside the template directory/)
+  refuses({ ...base, meta: { logo: '/etc/hosts.png' } }, /inside the template directory/)
+  expect(parse({ ...base, meta: { logo: './logo.svg' } }).meta?.logo).toBe('./logo.svg')
   // An authored size is refused; a STORED one is read leniently and dropped.
   refuses({ ...base, services: { web: { ...base.services.web, volume: { sizeGib: 20 } } } }, /the size is the daemon's to choose/, { rejectAuthoredSizing: true })
   expect(parse({ ...base, services: { web: { ...base.services.web, volume: { sizeGib: 20 } } } }).services.web.volume).toBe(true)

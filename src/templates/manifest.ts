@@ -408,6 +408,14 @@ export function parseTemplateManifest(input: unknown, opts?: { rejectAuthoredSiz
     for (const key of ['name', 'tagline', 'category', 'logo'] as const) {
       if (doc.meta[key] !== undefined) meta[key] = scalarString(doc.meta[key], `meta.${key}`)
     }
+    // A logo is read from the template's own directory and served on a PUBLIC route, so the path
+    // is a relative name inside it, never an absolute path or a walk out of it.
+    if (meta.logo !== undefined && meta.logo !== 'none') {
+      const rel = meta.logo.replace(/^\.\//, '')
+      if (/^([a-zA-Z]:)?[/\\]/.test(rel) || rel.split(/[/\\]/).includes('..')) {
+        return bad('meta.logo must be a path inside the template directory')
+      }
+    }
     if (doc.meta.tags !== undefined) {
       if (!Array.isArray(doc.meta.tags)) return bad('meta.tags must be an array of strings')
       meta.tags = doc.meta.tags.map((t, i) => scalarString(t, `meta.tags[${i}]`))

@@ -98,7 +98,7 @@ export class TemplateExecutor {
   /** At boot: a `running` record cannot have a live executor behind it any more. */
   abandonStale(): string[] {
     const stale = Object.values(loadState().templateDeployments ?? {}).filter((r) => r.status === 'running')
-    for (const r of stale) this.finish(r.id, 'failed', RESTART_ABANDONED, null)
+    for (const r of stale) this.finish(r.id, 'failed', RESTART_ABANDONED, null, r.claimToken)
     return stale.map((r) => r.id)
   }
 
@@ -455,7 +455,7 @@ export class TemplateExecutor {
         if (!verdict.ready) {
           entry.state = 'failed'
           save()
-          this.finish(id, 'failed', `${name}: ${verdict.reason}`, null)
+          this.finish(id, 'failed', `${name}: ${verdict.reason}`, null, record.claimToken)
           return
         }
         entry.state = 'healthy'
@@ -473,7 +473,7 @@ export class TemplateExecutor {
           const tail = await this.captureLogTail(projectId, branchName, entry.serviceName, writtenSecrets)
           save()
           const live = Object.values(spec).filter((x) => x.state === 'deployed' || x.state === 'healthy').length
-          this.finish(id, live > 0 ? 'partial' : 'failed', `${name}: ${reasonOf(e)}`, tail)
+          this.finish(id, live > 0 ? 'partial' : 'failed', `${name}: ${reasonOf(e)}`, tail, record.claimToken)
           return
         }
         save()
@@ -494,14 +494,14 @@ export class TemplateExecutor {
       save()
       if (failures.length) {
         const healthy = Object.values(spec).filter((x) => x.state === 'healthy').length
-        this.finish(id, healthy > 0 ? 'partial' : 'failed', failures.join('; '), logTail)
+        this.finish(id, healthy > 0 ? 'partial' : 'failed', failures.join('; '), logTail, record.claimToken)
         return
       }
-      this.finish(id, 'succeeded', null, null)
+      this.finish(id, 'succeeded', null, null, record.claimToken)
     } catch (e) {
       const deployed = Object.values(spec).filter((x) => x.state === 'deployed' || x.state === 'healthy').length
       try { save() } catch { /* best-effort */ }
-      this.finish(id, deployed > 0 ? 'partial' : 'failed', reasonOf(e), null)
+      this.finish(id, deployed > 0 ? 'partial' : 'failed', reasonOf(e), null, record.claimToken)
       throw e
     }
   }
@@ -546,11 +546,16 @@ export class TemplateExecutor {
     entry.env = newSpec
   }
 
-  private finish(id: string, status: 'succeeded' | 'failed' | 'partial', error: string | null, logTail: string | null): void {
+  /** `claimToken` is the run's claim on the row, exactly as `save()` uses it: a run stranded past
+   *  the lease must not mark a fresh re-run of the same deployment failed while it is still creating
+   *  services. `abandonStale` passes the row's own token, which is what makes it a takeover. */
+  private finish(id: string, status: 'succeeded' | 'failed' | 'partial', error: string | null, logTail: string | null, claimToken?: string): void {
     const row = this.record(id)
+    if (claimToken !== undefined && row?.claimToken !== claimToken) return
     mutate((s) => {
       const r = s.templateDeployments?.[id]
       if (!r) return
+      if (claimToken !== undefined && r.claimToken !== claimToken) return
       r.status = status
       if (error) r.error = error
       if (logTail !== null) r.logsTail = logTail
