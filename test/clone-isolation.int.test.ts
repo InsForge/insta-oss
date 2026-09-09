@@ -36,6 +36,14 @@ test('branch create copies data and is isolated', async () => {
   await pg.query(MAIN, "INSERT INTO notes(body) VALUES ('from-main');")
 
   await engine.createBranch(projectId, 'feat')
+  // Contract section 13: a new branch's postgres is provisioned, readied and THEN slept, so the
+  // fork is asleep from birth and its container is not running. Reaching it goes through a wake
+  // door, and for a database the `api` door is a management call (decision 48) — which is what a
+  // `psql` through the branch's lane would trigger for a developer.
+  const featDb = (await engine.services(projectId, 'feat')).find((s) => s.name === 'db')
+  expect(featDb).toMatchObject({ type: 'postgres', runtime: 'asleep' })
+  await engine.dbListDatabases(projectId, 'feat')
+
   expect(await pg.query(FEAT, "SELECT count(*) FROM notes WHERE body='from-main';")).toBe('1')
 
   await pg.query(FEAT, "INSERT INTO notes(body) VALUES ('from-feat');")
