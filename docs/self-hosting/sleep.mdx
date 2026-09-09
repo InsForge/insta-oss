@@ -49,6 +49,16 @@ service, one at a time, until it is back above the floor.
 Never evicted: an always-on service, a service that woke inside the wake-protection window (60
 seconds by default), and a service answering a request right now.
 
+Eviction is reactive, and that is its limit. The sweeper looks every 30 seconds, and a wake does
+not ask it for room first: traffic starts the container, and only the next sweep notices the box is
+over the floor. That is the right trade when one service is a small fraction of the box. It stops
+being one when a single image is a large fraction of it. On a 2 GiB box, waking two of the heavy
+agent templates at once put the machine into swap-free reclaim faster than a 30 second sweep could
+answer, and it stayed unreachable, accepting connections but finishing nothing, until it was
+rebooted out of band. Two rules keep you out of that: give a box enough memory that its largest
+image is a small share of the total, and keep the heavy always-on services on a box sized for all
+of them at once rather than relying on eviction to referee.
+
 On Linux the total is the machine's, read from `/proc/meminfo`, or the daemon's own cgroup ceiling
 when it runs in a container that has one, whichever is smaller. A ceiling matters because
 `/proc/meminfo` describes the machine even from inside a container, so a memory-limited daemon
