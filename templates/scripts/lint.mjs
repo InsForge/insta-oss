@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { FIXED_REF_RE, checkFixedRef } from "./manifest-refs.mjs";
 import { DEPLOY_BUTTON_ASSET, findDeployButtons } from "./publish-lib.mjs";
+import { ARCHITECTURES } from "./build-targets.mjs";
 
 // Template dirs live beside this script's parent (templates/<code>/): runs from any cwd.
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -33,6 +34,22 @@ for (const dir of dirs) {
   if (m?.version && !SEMVER_RE.test(String(m.version))) err(dir, `version '${m.version}' is not semver`);
   if (!m?.meta?.category) err(dir, "missing meta.category");
   if (!m?.upstream?.pinned) err(dir, "missing upstream.pinned");
+
+  // Which CPU architectures the deployable image is published for. Mandatory, drafts included:
+  // the image workflow derives its buildx `platforms` from this, the catalog serves it, and the
+  // deploy path refuses a template this box cannot run before it creates anything. A template
+  // without it would build for a guessed platform list and then tell users nothing, which is the
+  // state that made six templates undeployable on arm64 while the installer accepted aarch64.
+  const arches = m?.meta?.architectures;
+  if (arches === undefined) {
+    err(dir, `missing meta.architectures: declare the architectures the image is published for, `
+      + `e.g. [amd64, arm64]. Verify with 'docker buildx build --platform linux/arm64 templates/${dir}'`);
+  } else if (!Array.isArray(arches) || arches.length === 0) {
+    err(dir, "meta.architectures must be a non-empty array of architecture names");
+  } else {
+    for (const a of arches) if (!ARCHITECTURES.includes(a)) err(dir, `meta.architectures carries '${a}', not one of ${ARCHITECTURES.join(", ")}`);
+    if (new Set(arches).size !== arches.length) err(dir, "meta.architectures lists the same architecture twice");
+  }
   if (m?.code && m.code !== dir) err(dir, `code '${m.code}' != folder name`);
   if (m?.code) { if (codes.has(m.code)) err(dir, "duplicate code"); codes.add(m.code); }
 

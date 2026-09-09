@@ -2,7 +2,7 @@
 // the REAL `templates/` directory (contract 00 section 9 rows for GET /templates,
 // GET /templates/:code, POST /projects/:id/template-deployments, GET /template-deployments/:id).
 // Docker is mocked; the health probe is injected, and one case pins what the DEFAULT probe dials.
-import { test, expect, beforeEach, vi } from 'vitest'
+import { test, expect, afterEach, beforeEach, vi } from 'vitest'
 
 vi.mock('../src/docker', () => ({ docker: vi.fn(async () => Buffer.from('')) }))
 
@@ -13,6 +13,7 @@ import {
   collectVariables, generateValue, manifestDigest, parseTemplateManifest, resolveTemplateString,
 } from '../src/templates/manifest'
 import { loadState } from '../src/state'
+import { hostArch, initHostArch } from '../src/hostarch'
 import { calls, makeEngine, resetFakes, testConfig } from './fakes'
 
 // Every declared healthcheck answers 200 unless a case changes this.
@@ -42,8 +43,13 @@ beforeEach(() => {
   resetFakes()
   probeStatus = () => 200
   probed = []
+  // Pinned, not inherited: what a template may run on is the box's architecture, and a suite whose
+  // answers changed with the runner's CPU would assert nothing on one of them.
+  initHostArch('amd64')
   build()
 })
+
+afterEach(() => { initHostArch(null) })
 
 const post = (url: string, payload?: unknown) => app.inject({ method: 'POST', url, payload })
 const get = (url: string) => app.inject({ method: 'GET', url })
@@ -66,15 +72,20 @@ test('GET /templates lists the bundled non-draft codes with every list field typ
   const r = await get('/templates')
   expect(r.statusCode).toBe(200)
   expect(r.headers['cache-control']).toBe('public, max-age=300')
-  const { templates } = r.json()
+  const { templates, hostArchitecture } = r.json()
   // openclaw declares meta.draft, so it is not in the listing.
   expect(templates.map((t: { code: string }) => t.code)).toEqual(['9router', 'claude-code', 'codex', 'dsh', 'hermes', 'n8n', 'pi'])
   const n8n = templates.find((t: { code: string }) => t.code === 'n8n')
   expect(n8n).toMatchObject({
     version: '1.3.2', name: 'n8n', category: 'automation', tags: ['automation', 'ai'],
     requiredVarCount: 0, totalProjects: 0, activeProjects: 0, deploymentCount: 0, activeDeploymentCount: 0,
-    license: 'LicenseRef-n8n-Sustainable-Use-License',
+    license: 'LicenseRef-n8n-Sustainable-Use-License', architectures: ['amd64', 'arm64'],
   })
+  // The two halves of "can I run this here": the box on the envelope, the template on every row.
+  expect(hostArchitecture).toBe('amd64')
+  for (const entry of templates as Array<{ code: string; architectures: string[] }>) {
+    expect(entry.architectures, entry.code).toContain('amd64')
+  }
   // null, NOT 0, when nothing has concluded: no data is not a 0 percent success rate.
   expect(n8n.successRate).toBeNull()
   expect(n8n.logoUrl).toMatch(/^data:image\/svg\+xml;base64,/)
@@ -95,6 +106,8 @@ test('GET /templates/:code carries the detail fields; a draft and an unknown cod
   expect(r.statusCode).toBe(200)
   const t = r.json().template
   expect(t).toMatchObject({ code: 'n8n', version: '1.3.2', maintainer: 'official', source: 'official', documentationUrl: 'https://docs.n8n.io' })
+  expect(t.architectures).toEqual(['amd64', 'arm64'])
+  expect(r.json().hostArchitecture).toBe('amd64')
   expect(t.variables).toEqual({ required: [], optional: [] })
   // The five env groups are normalized onto every service, even the ones the author left out.
   expect(Object.keys(t.services.n8n.env).sort()).toEqual(['fixed', 'generated', 'optional', 'platform', 'required'])
@@ -278,6 +291,65 @@ test('a version mismatch, a draft code and an unrunnable manifest are refused be
   expect(r2.json().error).toMatch(/support web services only/)
   // A branch that does not exist is a 404, before any variable check.
   expect((await post(`/projects/${id}/template-deployments`, { templateCode: 'claude-code', branch: 'ghost' })).statusCode).toBe(404)
+})
+
+test('a template whose image this box cannot run is refused before any service exists', async () => {
+  const id = await project()
+  initHostArch('arm64')
+  const amd64Only = {
+    code: 'legacy', version: '1',
+    services: { web: { type: 'web', image: 'ghcr.io/x/legacy:1', healthcheck: '/', port: 8080 } },
+    meta: { architectures: ['amd64'] },
+  }
+  const r = await post(`/projects/${id}/template-deployments`, { manifest: amd64Only, branch: 'main' })
+  expect(r.statusCode).toBe(400)
+  // Both architectures named, and the way out named: the pull's own message says neither.
+  expect(r.json().error).toContain('legacy@1 publishes amd64 images only, and this machine is arm64')
+  expect(r.json().error).toContain('insta deploy --image')
+  // Nothing was created and nothing was recorded: refused before the 202, not during the run.
+  expect(Object.keys(loadState().templateDeployments ?? {})).toHaveLength(0)
+  expect((await get(`/projects/${id}/services`)).json().services).toEqual([])
+
+  // The same manifest on a box that CAN run it is accepted, so the refusal is about the pair and
+  // not about the field being present.
+  initHostArch('amd64')
+  expect((await post(`/projects/${id}/template-deployments`, { manifest: amd64Only, branch: 'main' })).statusCode).toBe(202)
+  await executor.idle()
+})
+
+test('a manifest that claims no architecture is deployed, not guessed at', async () => {
+  const id = await project()
+  initHostArch('arm64')
+  const silent = { code: 'silent', version: '1', services: { web: { type: 'web', image: 'ghcr.io/x/silent:1', healthcheck: '/', port: 8080 } } }
+  const r = await post(`/projects/${id}/template-deployments`, { manifest: silent, branch: 'main' })
+  expect(r.statusCode).toBe(202)
+  await executor.idle()
+  // An inline manifest a caller composed says nothing about a registry, so silence must not become
+  // "runs nowhere" (which is what refusing on an unstated field would amount to).
+  expect(parseTemplateManifest(silent).meta?.architectures).toBeUndefined()
+})
+
+test('the manifest parser refuses an architecture nothing could satisfy', () => {
+  const withArch = (architectures: unknown) => ({ ...base, meta: { architectures } })
+  expect(parseTemplateManifest(withArch(['amd64', 'arm64'])).meta?.architectures).toEqual(['amd64', 'arm64'])
+  refuses(withArch('amd64'), /meta\.architectures must be a non-empty array/)
+  refuses(withArch([]), /meta\.architectures must be a non-empty array/)
+  refuses(withArch(['riscv64']), /'riscv64' is not one of amd64, arm64/)
+  refuses(withArch(['arm64', 'arm64']), /lists the same architecture twice/)
+  // Stored exactly as authored, so manifestDigest still matches the platform's, which spreads meta
+  // verbatim and does not know this key.
+  const doc = { ...base, meta: { architectures: ['arm64', 'amd64'] } }
+  expect(manifestDigest(parseTemplateManifest(doc))).toBe(manifestDigest(parseTemplateManifest(JSON.parse(JSON.stringify(doc)))))
+  expect(manifestDigest(parseTemplateManifest(doc))).not.toBe(manifestDigest(parseTemplateManifest({ ...base, meta: { architectures: ['amd64'] } })))
+})
+
+test('hostArch falls back to this process and takes the probed value when there is one', () => {
+  initHostArch(null)
+  expect(hostArch()).toBe(process.arch === 'x64' ? 'amd64' : process.arch)
+  initHostArch('  arm64  ')
+  expect(hostArch()).toBe('arm64')
+  initHostArch('')
+  expect(hostArch()).toBe(process.arch === 'x64' ? 'amd64' : process.arch)
 })
 
 test('gating: service.add, secrets.write, deploy in order, then service.upgrade for a volume', async () => {
