@@ -18,8 +18,9 @@ branch  = a disposable, fully isolated clone of all three
 ## Install on a VPS
 
 Ubuntu 22.04+ or Debian 12+, 2 vCPU, 2 GiB RAM, 15 GiB free disk, and the ports 80, 443, 8080,
-8081, 5432, 6379 and 27017 free. The installer refuses to start when one of them is taken, and
-each refusal names the key that moves it. As root:
+8081, 5432, 6379 and 27017 free. The installer checks all of that before it changes anything: a
+busy port names the key that moves it, and a first install on a box under the memory or disk
+minimum stops there rather than failing later under load. As root:
 
 ```bash
 curl -fsSL https://get.instacloud.com | sh
@@ -170,8 +171,9 @@ Locally: `npm run build:ui` once, then open http://127.0.0.1:8080. UI developmen
 `insta project create` (or `link`) installs the insta agent skills into your project (gitignored;
 `.claude/skills/` for Claude Code, `.agents/skills/` for Codex), so a coding agent opened in the
 repo already knows the workflow: one task, one branch, deploy, verify, delete. You keep the
-approval power (`insta policy set <action> approve`) and the audit trail (`insta events`). The
-insta-mcp server is a thin client over the same endpoints; point it at the daemon with
+approval power, by setting an action to `approve` in the dashboard's policy matrix or through
+`PUT /projects/:id/policy/:action`, and the audit trail (`insta events`). The insta-mcp server is a
+thin client over the same endpoints; point it at the daemon with
 `PLATFORM_API_URL=https://api.<domain>` and an `insta_` token.
 
 ## Templates

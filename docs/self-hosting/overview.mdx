@@ -12,7 +12,8 @@ daemon that drives your Docker and answers the same API the hosted platform answ
 - One daemon (`instad`) over Docker: a Postgres container per branch, an S3-compatible bucket per
   storage service, your app containers, managed Redis, MySQL and MongoDB.
 - The cloud's API surface: `insta status`, `project`, `services`, `deploy`, `branch`, `secrets`,
-  `db`, `template`, `compute`, `metrics`, `logs`, `events`, `policy`, `approvals`.
+  `db`, `template`, `compute`, `metrics`, `logs`, `events`, `approvals`, plus the governance policy
+  routes the dashboard drives (the CLI has no `policy` command, here or on the cloud).
 - The cloud's URL shape: `https://<group>-<project>-<branch>.<your-domain>` for apps and
   `pg-<name>-<project>-<branch>.<your-domain>:5432` for databases.
 - Serverless behaviour on one box: idle services sleep, traffic wakes them. See [sleep and
