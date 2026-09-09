@@ -43,7 +43,14 @@ export class DockerCompute implements ComputeAdapter {
       // Every hostname the branch mints resolves to the box itself from inside the container, so an
       // app can reach its own router URL, the API and the object store (decision 5).
       ...(opts.hostAliases ?? []).flatMap((h) => ['--add-host', `${h}:host-gateway`]),
-      // ---- args WP3 ---- (`--init`; `--cpus` / `--memory` / `--memory-swap` when limits)
+      // ---- args WP3 ----
+      // `--init`: docker's tini becomes PID 1 and forwards SIGTERM to an app whose entrypoint is a
+      // shell (decision 60). Without it, sleep would end in SIGKILL after the whole grace for every
+      // `sh -c "npm start"` image, which is most of them.
+      '--init',
+      // The cgroup ceiling `insta compute limits` records. `--memory-swap` equal to `--memory` means
+      // no swap: the process is OOM-killed at its ceiling instead of thrashing the host's disk.
+      ...(opts.limits ? ['--cpus', String(opts.limits.cpu), '--memory', `${opts.limits.memoryMb}m`, '--memory-swap', `${opts.limits.memoryMb}m`] : []),
       // ---- args WP4 ---- (`--mount type=bind,src=<hostPath>,dst=/data`)
       ...volArgs,
       opts.image])
@@ -70,11 +77,12 @@ export class DockerCompute implements ComputeAdapter {
     await docker(['start', name])
   }
 
-  // `graceSec` is read by WP3 (`docker stop -t`); ignored in the scaffold.
-  async stop(ref: string, group: string, _opts: { graceSec?: number } = {}): Promise<void> {
+  // The grace is the app's window to finish in-flight work before SIGKILL (`INSTA_OSS_STOP_GRACE_SEC`,
+  // 10 s by default); a caller that passes none keeps docker's own 10 s default.
+  async stop(ref: string, group: string, opts: { graceSec?: number } = {}): Promise<void> {
     const name = appName(ref, group)
     await docker(['unpause', name]).catch(() => { /* not paused */ })
-    await docker(['stop', name])
+    await docker(opts.graceSec !== undefined ? ['stop', '-t', String(opts.graceSec), name] : ['stop', name])
   }
 
   async suspend(ref: string, group: string): Promise<void> {
@@ -85,14 +93,6 @@ export class DockerCompute implements ComputeAdapter {
     await docker(['rename', appName(ref, from), appName(ref, to)])
   }
 
-  // Scaffold interim only (decision 53): WP3 deletes it; liveState then reads scheduler.stateOf.
-  async state(ref: string, group: string): Promise<string> {
-    try {
-      const s = (await docker(['inspect', '-f', '{{.State.Status}}', appName(ref, group)])).toString().trim()
-      if (s === 'running') return 'running'
-      if (s === 'paused') return 'suspended'
-      if (s === 'exited' || s === 'created' || s === 'dead') return 'stopped'
-      return 'unknown'
-    } catch { return 'none' }
-  }
+  // No `state()` (decision 53): the scheduler's `Runtime.containers()` is the one docker read and
+  // `Engine.liveState` maps `scheduler.stateOf`, so there is no second opinion to disagree with.
 }

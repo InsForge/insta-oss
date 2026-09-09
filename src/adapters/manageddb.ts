@@ -20,6 +20,9 @@ export class LocalManagedDb implements ManagedDbAdapter {
       // Local mode only (same reason as postgres): an ephemeral loopback port for `docker port`.
       ...(opts.publishLoopback ? ['-p', `127.0.0.1::${cfg.port}`] : []),
       // ---- args WP3 ----
+      // The recorded cgroup ceiling, as on compute and postgres; no swap, so the container is
+      // OOM-killed at its own ceiling rather than thrashing the host.
+      ...(opts.limits ? ['--cpus', String(opts.limits.cpu), '--memory', `${opts.limits.memoryMb}m`, '--memory-swap', `${opts.limits.memoryMb}m`] : []),
       // ---- args WP4 ---- (one `--mount type=bind` per path the image writes, decision 56)
       ...(t.dataDir ? dataPaths(t.type).flatMap((p) => ['--mount', `type=bind,src=${join(t.dataDir, p.sub)},dst=${p.containerPath}`]) : []),
       cfg.image, ...(cfg.cmd ?? [])])

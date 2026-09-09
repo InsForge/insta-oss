@@ -133,8 +133,9 @@ export interface ComputeAdapter {
   start?(ref: string, group: string): Promise<void>
   stop?(ref: string, group: string, opts?: { graceSec?: number }): Promise<void>
   suspend?(ref: string, group: string): Promise<void>
-  // ---- region WP3 (scheduler): `state?` exists in the scaffold for today's liveState only; WP3 DELETES it (decision 53) and liveState reads scheduler.stateOf ----
-  state?(ref: string, group: string): Promise<string>
+  // ---- region WP3 (scheduler): there is no `state?` any more (decision 53). `Runtime.containers()`
+  // is the single docker read and `Engine.liveState` maps `scheduler.stateOf`, so an adapter can no
+  // longer answer with a second, disagreeing opinion of what is running. ----
   // ---- end region WP3 ----
   rename?(ref: string, from: string, to: string): Promise<void>
 }
