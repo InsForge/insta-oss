@@ -194,13 +194,13 @@ function clonePg(src, dst, reflink, engine) {
   fs.chmodSync(dst, fs.statSync(src).mode & 0o7777)
 }
 
-/** A whole tree (a compute /data volume). The cp-c engine takes ONE spawn for the lot. */
+/** A whole tree (a compute /data volume): the CONTENTS of src land directly under dst.
+ *
+ *  One spawn per top-level entry on the cp-c engine, not one for the lot: BSD cp has no
+ *  "copy the contents" form, and `cp -a src/. dst/` copied the source DIRECTORY into dst, so a
+ *  forked branch got `vol/<ref>/<id>/<id>/...` and its container mounted an empty /data. */
 function cloneWholeTree(src, dst, reflink, engine) {
   fs.mkdirSync(dst, { recursive: true })
-  if (engine === 'cp-c') {
-    cpClone(path.join(src, '.'), dst + path.sep, reflink)
-    return
-  }
   for (const name of fs.readdirSync(src)) cloneOne(path.join(src, name), path.join(dst, name), reflink, engine)
 }
 
