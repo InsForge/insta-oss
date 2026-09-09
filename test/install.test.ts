@@ -172,6 +172,47 @@ test('--print-caddyfile: ask on the internal port, on_demand, acme then internal
   expect(moved).toContain('reverse_proxy 127.0.0.1:9080')
 })
 
+test('curl and iproute2 are installed before anything is resolved, and the print modes skip that', () => {
+  // A stock Ubuntu or Debian image has neither. Resolving the release tag and the public address
+  // needs curl, and the offline address fallback and the port check need ip and ss, so a bootstrap
+  // that ran after the resolve block turned a missing tool into "could not detect a public IPv4
+  // address" on a box with perfectly good networking.
+  const preflight = script.indexOf('preflight() {')
+  expect(preflight).toBeGreaterThan(-1)
+  expect(preflight).toBeLessThan(script.indexOf('detect_ip() {'))
+  expect(preflight).toBeLessThan(script.indexOf('latest_release() {'))
+  expect(script).toContain('[ -n "$PRINT" ] || preflight')
+  expect(script).toContain('have curl || pkg_install curl || die')
+  expect(script).toContain('pkg_install iproute2')
+  // the print modes stay root-free: they must not go through preflight
+  expect(run(['--print-daemon-json'])).toContain('default-address-pools')
+})
+
+test('systemd is detected by whether it runs the box, not by systemctl being on PATH', () => {
+  // get.docker.com pulls systemd in as a dependency, so systemctl exists on hosts that boot
+  // something else, where every unit call fails with "System has not been booted with systemd".
+  expect(script).toContain('systemd_running() { have systemctl && [ -d /run/systemd/system ]; }')
+  expect(script).not.toMatch(/if have systemctl; then systemctl/)
+  expect(script).toContain('elif have service && [ -x /etc/init.d/docker ]; then service docker restart')
+  // an installed but stopped daemon is started before the stack is touched
+  expect(script).toContain('log "Docker is installed but not answering: starting it"')
+})
+
+test('.env is symlinked to instad.env so a plain docker compose in $CFG interpolates', () => {
+  // compose interpolates ${VAR} from the shell and from .env in the project directory, never from
+  // env_file, so without this every documented bare command there resolved the image to ':'.
+  expect(script).toContain('ln -sfn instad.env "$CFG/.env"')
+  const docs = readFileSync(join(ROOT, 'docs', 'self-hosting', 'install.mdx'), 'utf8')
+  expect(docs).toContain('`/etc/instacloud/.env`')
+  expect(docs).toContain('## Uninstall')
+})
+
+test('an auto domain that resolves somewhere other than this box says so', () => {
+  expect(script).toContain('ip_is_local() {')
+  expect(script).toContain('NAT_NOTE=')
+  expect(script).toContain('[ -z "$NAT_NOTE" ] || log "  Note:     $NAT_NOTE"')
+})
+
 test('the fstab line makes docker.service wait for the data mount (decision 56)', () => {
   expect(script).toContain('"$IMG $DATA xfs loop,nofail,x-systemd.required-by=docker.service,x-systemd.before=docker.service 0 0"')
   expect(script).toContain('mkfs.xfs -q -m reflink=1')
@@ -198,9 +239,23 @@ test('--print-firewall lists the docker0 and inbound rules; the script gates the
   expect(script).toMatch(/firewall-cmd --state/)
 })
 
-test('the run path: ports 80/443/5432 refused, 6379/3306/27017 warned, readiness on /healthz, the final lines', () => {
-  expect(script).toContain('for _p in 80 443 5432; do')
-  expect(script).toContain('for _p in 6379 3306 27017; do')
+test('the run path: every port the daemon binds is refused, readiness on /healthz, the final lines', () => {
+  // The router binds all three fixed lanes at startup and exits when one is taken, so a busy lane
+  // port is a refusal that names the key that moves it, never a warning followed by a healthz
+  // timeout. 3306 is not checked: server-mode MySQL takes a port out of the lane range.
+  expect(script).toContain('need_port 80 ')
+  expect(script).toContain('need_port 443 ')
+  expect(script).toContain('need_port "$PORT" ')
+  expect(script).toContain('need_port "$INTERNAL_PORT" ')
+  expect(script).toContain('need_port "$LANE_PG" ')
+  expect(script).toContain('need_port "$LANE_REDIS" ')
+  expect(script).toContain('need_port "$LANE_MONGO" ')
+  expect(script).toContain('INSTA_OSS_LANE_REDIS_PORT to another port')
+  expect(script).not.toContain('for _p in 6379 3306 27017; do')
+  expect(script).toContain('[ "$PORTS_BUSY" = 0 ] || die')
+  // the lanes are checked where they are configured, not where they default to
+  expect(script).toContain("LANE_PG=$(resolve INSTA_OSS_LANE_PG_PORT '' 5432)")
+  expect(script).toContain('emit INSTA_OSS_LANE_REDIS_PORT "$LANE_REDIS"')
   expect(script).toContain('curl -fsSL https://get.docker.com | sh')
   expect(script).toContain('docker compose version')
   expect(script).toContain('up -d --remove-orphans')
