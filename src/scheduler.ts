@@ -2,8 +2,8 @@
 // and 13, plan 03).
 //
 // Three jobs, one lock. It sleeps idle services (`docker stop` with a grace, never `docker pause`),
-// wakes them on the four doors (traffic, api, deploy, plus the branch-create path that starts a
-// clone asleep), and evicts the least recently active service when free RAM drops below the floor.
+// wakes them on the three doors (traffic, api, deploy), and evicts the least recently active
+// service when free RAM drops below the floor.
 // The lock is `withOp`: exclusive per ServiceKey, taken by EVERY container-mutating path in the
 // engine (deploy, restart, lifecycle, branch create, teardown, service add/remove/rename, limits),
 // re-entrant inside the acquiring async context, and visible to the sweep so a service with an
@@ -193,8 +193,13 @@ export class Scheduler {
     if (t) this.upstream.forget(t.container)
   }
 
+  /** One target by key. Indexed on the ARRAY the engine hands back, which it memoizes on the state
+   *  revision, so a proxied request costs a map lookup rather than a scan of every service. */
+  private index: { list: ServiceTarget[]; byKey: Map<ServiceKey, ServiceTarget> } | undefined
   targetOf(key: ServiceKey): ServiceTarget | undefined {
-    return this.targets().find((t) => t.key === key)
+    const list = this.targets()
+    if (this.index?.list !== list) this.index = { list, byKey: new Map(list.map((t) => [t.key, t])) }
+    return this.index.byKey.get(key)
   }
 
   // ---- router bookkeeping -----------------------------------------------------------------------
