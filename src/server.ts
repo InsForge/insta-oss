@@ -101,7 +101,11 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   // Everything is one region here: the machine the daemon runs on (CLI shape: {slug, label}).
   app.get('/regions', async () => ({ regions: [{ slug: 'local', label: 'Local (this machine)' }] }))
   // ---- observability (docker + SQL backed; same response shapes as the cloud) ----
-  const obsCode = (m: string): number => (m.includes('not found') ? 404 : 502)
+  // A project, branch or service that is not there, plus the one message that says so in the
+  // cloud's own words: `no postgres service in this project (add one with ...)` is a 404 on every
+  // route that resolves a database, not a 400 or a 502 (plan 05 section 6).
+  const notFoundish = (m: string): boolean => m.includes('not found') || m.startsWith('no postgres service in this project')
+  const obsCode = (m: string): number => (notFoundish(m) ? 404 : 502)
   // Each managed type is its own component, never folded into compute (cloud parity, platform
   // #243). Absent stays the historical compute default; junk is the cloud's 400.
   const COMPONENTS = ['db', 'compute', 'redis', 'mysql', 'mongodb'] as const
@@ -341,7 +345,7 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   // ---- service lifecycle + access (contract parity) ----
   // Ungated like the platform; ?branch= scopes the target (default branch otherwise) because
   // oss service ids are stable across branches rather than per-branch rows.
-  const errCode = (m: string): number => (m.includes('not found') ? 404 : 400)
+  const errCode = (m: string): number => (notFoundish(m) ? 404 : 400)
   for (const verb of ['start', 'stop', 'suspend'] as const) {
     app.post(`/projects/:id/services/:sid/${verb}`, async (req, reply) => {
       const { id, sid } = req.params as { id: string; sid: string }
@@ -468,7 +472,7 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   // database + extension management is ungated. SQL failures map: exists→409, missing→404.
   const dbErr = (reply: FastifyReply, e: unknown): FastifyReply => {
     const m = e instanceof Error ? e.message : String(e)
-    const code = m.includes('already exists') ? 409 : m.includes('does not exist') || m.includes('not found') ? 404 : 400
+    const code = m.includes('already exists') ? 409 : m.includes('does not exist') || notFoundish(m) ? 404 : 400
     return reply.code(code).send({ error: m })
   }
 

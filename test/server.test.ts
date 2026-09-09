@@ -13,7 +13,7 @@ import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
 import type { ComputeAdapter, StorageAdapter } from '../src/types'
 import { mutate } from '../src/state'
-import { calls, db, compute, storage, managed, makeEngine, resetFakes } from './fakes'
+import { calls, db, compute, storage, managed, makeEngine, resetFakes, testConfig } from './fakes'
 
 let app: ReturnType<typeof buildServer>
 beforeEach(() => {
@@ -1400,4 +1400,176 @@ test('dashboard serving: identity and gallery routes reach the SPA shell', async
 // ---- end region WP4 ----
 
 // ---- region WP5 (templates/parity) ----
+
+// Two postgres services, `db` (older) and `analytics`: the suffix-plus-alias rule of the platform's
+// secretNames, computed at READ time so removing the alias holder shifts it.
+test('two postgres services: DATABASE_URL aliases the oldest, both carry a suffixed name', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics' })
+  const secrets = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
+  expect(secrets.DATABASE_URL_DB).toBe('postgres://postgres:pw@io-demo-main-pg-db:5432/app')
+  expect(secrets.DATABASE_URL_ANALYTICS).toBe('postgres://postgres:pw@io-demo-main-pg-analytics:5432/app')
+  expect(secrets.DATABASE_URL).toBe(secrets.DATABASE_URL_DB)
+  // A deploy carries the identical set.
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  expect(calls.some((c) => c.startsWith('deploy:demo-main:default:app:1'))).toBe(true)
+  // The inventory lists both services, each under its own name.
+  const tree = (await get(`/projects/${id}/secrets/tree`)).json()
+  const pgServices = tree.branches[0].services.filter((x: { type: string }) => x.type === 'postgres')
+  expect(pgServices.map((x: { name: string }) => x.name).sort()).toEqual(['analytics', 'db'])
+  expect(pgServices.find((x: { name: string }) => x.name === 'analytics').secrets).toEqual(['DATABASE_URL_ANALYTICS'])
+
+  // Removing the alias holder shifts the canonical name onto the survivor.
+  await app.inject({ method: 'DELETE', url: `/projects/${id}/services/pg-db` })
+  const after = (await get(`/projects/${id}/secrets?branch=main`)).json().secrets
+  expect(after.DATABASE_URL).toBe(after.DATABASE_URL_ANALYTICS)
+  expect(after.DATABASE_URL_DB).toBeUndefined()
+})
+
+test('database routes over several postgres services: ?group=, the 400 and the 404 hint', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics' })
+  const ambiguous = await get(`/projects/${id}/database/instance`)
+  expect(ambiguous.statusCode).toBe(400)
+  expect(ambiguous.json().error).toBe('multiple postgres services - specify one: analytics, db')
+  expect((await get(`/projects/${id}/database/instance?group=analytics`)).json()).toMatchObject({ id: 'pg-analytics', name: 'analytics', host: 'io-demo-main-pg-analytics' })
+  expect((await get(`/projects/${id}/database/instance?group=nope`)).statusCode).toBe(404)
+  // runtime-health has one row per postgres service.
+  const health = (await get(`/projects/${id}/runtime-health`)).json().services
+  expect(health.filter((r: { serviceId: string }) => r.serviceId.startsWith('pg-')).map((r: { serviceId: string }) => r.serviceId).sort())
+    .toEqual(['pg-analytics', 'pg-db'])
+  // ...and with no postgres at all the error names the command that adds one.
+  await app.inject({ method: 'DELETE', url: `/projects/${id}/services/pg-db` })
+  await app.inject({ method: 'DELETE', url: `/projects/${id}/services/pg-analytics` })
+  const none = await get(`/projects/${id}/database/instance`)
+  expect(none.statusCode).toBe(404)
+  expect(none.json().error).toBe('no postgres service in this project (add one with `insta services add postgres <name>`)')
+})
+
+test('branch create forks every postgres and clones every bucket, and copies bindings', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics' })
+  await post(`/projects/${id}/services`, { type: 'storage', name: 'blobs' })
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'web' })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'web' })
+  calls.length = 0
+  expect((await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })).statusCode).toBe(201)
+  expect(calls).toContain('db.fork:io-demo-main-pg-db->io-demo-feat-pg-db')
+  expect(calls).toContain('db.fork:io-demo-main-pg-analytics->io-demo-feat-pg-analytics')
+  expect(calls).toContain('st.clone:io-demo-main-store->io-demo-feat-store')
+  expect(calls).toContain('st.clone:io-demo-main-blobs->io-demo-feat-blobs')
+})
+
+// Decision 49: the CLI reads an id off `?branch=<b>` and calls the follow-up route with NO branch,
+// so the id itself has to name the branch off the default one.
+test('branch-qualified service ids resolve their own branch on credentials, state and stop', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'web' })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'web' })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  const featId = (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === 'feat').id
+
+  const main = (await get(`/projects/${id}/services`)).json().services
+  expect(main.map((x: { id: string }) => x.id)).toEqual(expect.arrayContaining(['pg-db', 'cp-web']))
+  const feat = (await get(`/projects/${id}/services?branch=feat`)).json().services
+  expect(feat.map((x: { id: string }) => x.id)).toEqual(expect.arrayContaining([`${featId}:pg-db`, `${featId}:cp-web`]))
+  // ?branch=main is the default branch, so its ids stay bare (byte-identical to today).
+  expect((await get(`/projects/${id}/services?branch=main`)).json().services.map((x: { id: string }) => x.id))
+    .toEqual(expect.arrayContaining(['pg-db', 'cp-web']))
+
+  // Credentials with NO query answer for FEAT, not main.
+  const featDsn = (await get(`/projects/${id}/services/${featId}:pg-db/credentials`)).json().credentials.DATABASE_URL
+  const mainDsn = (await get(`/projects/${id}/services/pg-db/credentials`)).json().credentials.DATABASE_URL
+  expect(featDsn).not.toBe(mainDsn)
+  expect(featDsn).toContain('127.0.0.1:')
+
+  // ...and so do state and stop, leaving main's intent untouched.
+  expect((await get(`/projects/${id}/services/${featId}:cp-web/state`)).statusCode).toBe(200)
+  expect((await post(`/projects/${id}/services/${featId}:cp-web/stop`)).statusCode).toBe(200)
+  expect(calls).toContain('compute.stop:demo-feat:web')
+  const mainWeb = (await get(`/projects/${id}/services`)).json().services.find((x: { id: string }) => x.id === 'cp-web')
+  expect(mainWeb.desired_state).toBe('running')
+
+  // A qualifier naming a branch that is gone is a 404, never a silent fall-through to main.
+  await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${featId}` })
+  expect((await get(`/projects/${id}/services/${featId}:pg-db/credentials`)).statusCode).toBe(404)
+})
+
+test('credentials: the postgres DSN, the five storage keys, the managed bundle, nothing for compute', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'web' })
+
+  const pg = (await get(`/projects/${id}/services/pg-db/credentials`)).json().credentials
+  expect(Object.keys(pg)).toEqual(['DATABASE_URL'])
+  const st = (await get(`/projects/${id}/services/st-store/credentials`)).json().credentials
+  expect(Object.keys(st).sort()).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_ENDPOINT_URL_S3', 'AWS_REGION', 'AWS_SECRET_ACCESS_KEY', 'BUCKET_NAME'])
+  const rd = (await get(`/projects/${id}/services/rd-cache/credentials`)).json().credentials
+  expect(rd.REDIS_URL).toMatch(/^redis:\/\/default:.+@127\.0\.0\.1:2\d{4}\/0$/)
+  expect((await get(`/projects/${id}/services/cp-web/credentials`)).json().credentials).toEqual({})
+  expect((await get(`/projects/${id}/services/pg-nope/credentials`)).statusCode).toBe(404)
+
+  // Gated secrets.read, like every other credential read.
+  await put(`/projects/${id}/policy/secrets.read`, { decision: 'approve' })
+  expect((await get(`/projects/${id}/services/pg-db/credentials`)).statusCode).toBe(202)
+})
+
+test('the per-type cap is the cloud message with the env var named', async () => {
+  const two = buildServer(makeEngine(testConfig({ INSTA_OSS_MAX_SERVICES_PER_TYPE: '2' })))
+  const r = await two.inject({ method: 'POST', url: '/orgs/local/projects', payload: { name: 'demo' } })
+  const id = r.json().project.id
+  const add = (name: string) => two.inject({ method: 'POST', url: `/projects/${id}/services`, payload: { type: 'postgres', name } })
+  expect((await add('db')).statusCode).toBe(201)
+  expect((await add('analytics')).statusCode).toBe(201)
+  const third = await add('reports')
+  expect(third.statusCode).toBe(400)
+  expect(third.json().error).toBe("branch has reached this plan's limit of 2 postgres services (INSTA_OSS_MAX_SERVICES_PER_TYPE)")
+  await two.close()
+})
+
+// Decision 51: name and lane reservations happen in one synchronous mutate before provisioning
+// awaits, so two concurrent adds on two projects both succeed and neither sees the other's half.
+test('two concurrent service adds on two projects both succeed', async () => {
+  const a = await createProject('alpha')
+  const b = await createProject('beta')
+  const [ra, rb] = await Promise.all([
+    post(`/projects/${a}/services`, { type: 'postgres', name: 'shared' }),
+    post(`/projects/${b}/services`, { type: 'postgres', name: 'shared' }),
+  ])
+  expect([ra.statusCode, rb.statusCode]).toEqual([201, 201])
+  expect(calls).toContain('db.provision:io-alpha-main-pg-shared')
+  expect(calls).toContain('db.provision:io-beta-main-pg-shared')
+  const lanes = [
+    (await get(`/projects/${a}/services/pg-shared/credentials`)).json().credentials.DATABASE_URL,
+    (await get(`/projects/${b}/services/pg-shared/credentials`)).json().credentials.DATABASE_URL,
+  ]
+  expect(new Set(lanes).size).toBe(2) // distinct lane ports, never the same one twice
+})
+
+// Stock dockerd hands out 31 user-defined networks and every branch is one, so this is the failure
+// a busy box hits first: the documented 507, not a bare 409.
+test('a docker network pool exhaustion is the documented 507', async () => {
+  const id = await createProject()
+  vi.mocked(dockerFn).mockImplementationOnce(async () => {
+    throw new Error('Error response from daemon: could not find an available, non-overlapping IPv4 address pool among the defaults to assign to the network')
+  })
+  const r = await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  expect(r.statusCode).toBe(507)
+  expect(r.json().error).toBe('docker has no free network subnets; see docs/self-hosting/install (default-address-pools)')
+})
+
+test('storage rename re-keys the id only; the bucket handle is immutable', async () => {
+  const id = await createProject()
+  const r = await post(`/projects/${id}/services/st-store/rename`, { name: 'assets' })
+  expect(r.statusCode).toBe(200)
+  expect(r.json().service).toMatchObject({ id: 'st-assets', type: 'storage', name: 'assets' })
+  const row = (await get(`/projects/${id}/services`)).json().services.find((x: { type: string }) => x.type === 'storage')
+  expect(row.id).toBe('st-assets')
+  // The bucket keeps its original handle: it is baked into every object URL and into the key
+  // scoped to it, exactly like the cloud.
+  expect((await get(`/projects/${id}/services/st-assets/credentials`)).json().credentials.BUCKET_NAME).toBe('io-demo-main-store')
+  // ...and the minted env names follow the NEW name.
+  expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.BUCKET_NAME_ASSETS).toBe('io-demo-main-store')
+})
 // ---- end region WP5 ----
