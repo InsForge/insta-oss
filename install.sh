@@ -684,8 +684,30 @@ if ! wait_healthy; then
 fi
 # One HTTPS request to api.<domain> makes the edge issue its certificate now (the database lanes
 # use it as their default certificate). Pinned to loopback so a NAT'd box needs no hairpin route.
-if ! curl -sk --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 90 -o /dev/null "https://api.$DOMAIN/healthz"; then
-  warn "the edge has not issued a certificate for api.$DOMAIN yet; it retries on the first request"
+# A first ACME issuance is an order, an HTTP-01 challenge and a poll against a public CA, and on a
+# fresh public box that regularly outlasts a single request, so a healthy install used to end on a
+# warning saying its certificate was missing when it was merely late. What the lanes actually need
+# is the file, so the wait polls the store Caddy writes and the daemon reads:
+# <dataDir>/caddy/data/caddy/certificates/<issuer>/<host>/<host>.crt, whichever issuer wins (acme
+# first, the internal CA as the fallback the Caddyfile lists after it).
+CERT_DIR=$DATA/caddy/data/caddy/certificates
+cert_present() { [ -n "$(find "$CERT_DIR" -type f -name "api.$DOMAIN.crt" 2>/dev/null | head -n 1)" ]; }
+# The internal issuer is local and answers in seconds; ACME does not, and four minutes covers a
+# first issuance plus one retry. Past that the edge keeps trying on its own, so this is a warning.
+if [ "$TLS" = internal ]; then CERT_WAIT=60; else CERT_WAIT=240; fi
+_i=0
+while :; do
+  curl -sk --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 20 -o /dev/null "https://api.$DOMAIN/healthz" || true
+  if cert_present; then break; fi
+  _i=$((_i + 25))
+  if [ "$_i" -ge "$CERT_WAIT" ]; then break; fi
+  if [ "$_i" -eq 25 ]; then log "waiting for the edge to issue the certificate for api.$DOMAIN (up to ${CERT_WAIT}s)"; fi
+  sleep 5
+done
+if cert_present; then
+  log "certificate issued for api.$DOMAIN"
+else
+  warn "no certificate for api.$DOMAIN after ${CERT_WAIT}s: the edge keeps retrying, and the database lanes start presenting it the moment it lands"
 fi
 if [ "$TLS" = internal ]; then
   _root=$DATA/caddy/data/caddy/pki/authorities/local/root.crt
