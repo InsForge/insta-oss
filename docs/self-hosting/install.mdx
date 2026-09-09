@@ -10,7 +10,8 @@ Server mode wants a machine you can point DNS at:
 - Ubuntu 22.04+ or Debian 12+, `x86_64` or `aarch64`
 - root (the script uses `sudo` nothing: run it as root)
 - 2 vCPU, 2 GiB RAM, 15 GiB free disk
-- ports 80, 443 and 5432 free (the script refuses to start if they are bound and prints the holder)
+- ports 80, 443, 8080, 8081, 5432, 6379 and 27017 free (the script refuses to start if any is
+  bound, and prints the holder)
 - Docker, installed by the script when it is missing
 
 ## The one-liner
@@ -30,8 +31,11 @@ curl -fsSL https://raw.githubusercontent.com/InsForge/insta-oss/main/install.sh 
 1. Renders and exits for any `--print-*` flag, with no root and no side effects.
 2. Checks preconditions: root, Linux, a supported architecture, `curl`, `ss`. An existing
    `/etc/instacloud/instad.env` puts it in upgrade mode.
-3. Checks ports. It refuses when 80, 443 or 5432 are taken and warns about 6379, 3306 and 27017.
-   While the stack is already up this check is skipped.
+3. Checks ports and refuses when any of them is taken, naming the holder: 80 and 443 for the edge,
+   8080 and 8081 for the daemon, and 5432, 6379 and 27017 for the three database lanes. The daemon
+   binds all three lanes at startup and exits if one is busy, so a busy lane port is a refusal, not
+   a warning; the message names the `INSTA_OSS_LANE_*` key that moves that lane elsewhere. While
+   the stack is already up this check is skipped.
 4. Opens the firewall, but only when one is active. Under `ufw`: inbound 80, 443 and 5432, plus
    `docker0` to the host on 443, 5432, 6379, 27017 and 20000 to 20999. Under `firewalld`: the same
    ports in the `docker` zone. Both are idempotent and every rule is printed. `--print-firewall`
@@ -67,6 +71,7 @@ Open the setup URL to create the admin account. See [set up access](/self-hostin
 | `/etc/instacloud/instad.env` | every `INSTA_OSS_*` setting, mode 600 |
 | `/etc/instacloud/compose.yml` | the three services `io-instad`, `io-edge`, `io-garage` |
 | `/etc/instacloud/Caddyfile` | the edge configuration, including on-demand TLS |
+| `/etc/instacloud/.env` | a symlink to `instad.env`, so a plain `docker compose` in that directory interpolates the same values |
 | `/var/lib/instacloud` | all data: `state.json`, `pg/`, `vol/`, `md/`, `garage/`, `caddy/`, `edge/ca.pem` |
 | `/var/lib/instacloud.img` | the XFS loop image, only when one was needed |
 | `/etc/fstab` | `/var/lib/instacloud.img /var/lib/instacloud xfs loop,nofail,x-systemd.required-by=docker.service,x-systemd.before=docker.service 0 0` |

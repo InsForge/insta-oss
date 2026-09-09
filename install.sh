@@ -160,6 +160,10 @@ case $TLS in acme|internal) ;; *) die "--tls must be acme or internal (got '$TLS
 EMAIL=$(resolve INSTA_OSS_ACME_EMAIL "$F_EMAIL" '')
 PORT=$(resolve INSTA_OSS_PORT '' 8080)
 INTERNAL_PORT=$(resolve INSTA_OSS_INTERNAL_PORT '' 8081)
+# The database lanes the daemon binds on the host; the port check and instad.env share these.
+LANE_PG=$(resolve INSTA_OSS_LANE_PG_PORT '' 5432)
+LANE_REDIS=$(resolve INSTA_OSS_LANE_REDIS_PORT '' 6379)
+LANE_MONGO=$(resolve INSTA_OSS_LANE_MONGO_PORT '' 27017)
 
 # route_src: the address this box uses to reach the internet (its own, even behind NAT)
 route_src() {
@@ -254,9 +258,9 @@ EOF
   ek INSTA_OSS_SESSION_TTL_SEC 604800
   log '# --- router lanes ---'
   ek INSTA_OSS_LANE_BIND 0.0.0.0
-  ek INSTA_OSS_LANE_PG_PORT 5432
-  ek INSTA_OSS_LANE_REDIS_PORT 6379
-  ek INSTA_OSS_LANE_MONGO_PORT 27017
+  emit INSTA_OSS_LANE_PG_PORT "$LANE_PG"
+  emit INSTA_OSS_LANE_REDIS_PORT "$LANE_REDIS"
+  emit INSTA_OSS_LANE_MONGO_PORT "$LANE_MONGO"
   ek INSTA_OSS_LANE_PORT_RANGE 20000-20999
   ek INSTA_OSS_LANE_IDLE_SEC 900
   ek INSTA_OSS_PROBE_WINDOW_MS 8000
@@ -451,20 +455,30 @@ STACK_UP=0
 if have docker && [ -f "$CFG/compose.yml" ] && [ -n "$(compose ps -q 2>/dev/null || true)" ]; then STACK_UP=1; fi
 
 # ---- 3. ports (skipped while the stack itself holds them) ----
+# Every port here is fatal. The daemon binds all three database lanes at startup and exits when one
+# of them is taken (router: "a busy fixed port is fatal and names itself"), so warning about a busy
+# 6379 and continuing only moved the failure sixty seconds later, to a healthz timeout that says
+# nothing about ports. Each lane names the key that moves it instead. Nothing checks 3306: in server
+# mode MySQL takes a port out of INSTA_OSS_LANE_PORT_RANGE, not the well known one.
+port_busy() { [ -n "$(ss -Hltn "sport = :$1" 2>/dev/null)" ]; }
+port_holder() { ss -Hltnp "sport = :$1" 2>/dev/null | awk '{print $NF}' | head -n 1; }
+PORTS_BUSY=0
+need_port() {   # need_port PORT WHAT
+  port_busy "$1" || return 0
+  _h=$(port_holder "$1")
+  warn "port $1 is in use by ${_h:-an unknown process}: $2"
+  PORTS_BUSY=1
+}
 check_ports() {
-  if ! have ss; then pkg_install iproute2 >/dev/null 2>&1 || true; fi
   if ! have ss; then warn "ss (iproute2) not found; skipping the port check"; return; fi
-  for _p in 80 443 5432; do
-    if [ -n "$(ss -Hltn "sport = :$_p" 2>/dev/null)" ]; then
-      _holder=$(ss -Hltnp "sport = :$_p" 2>/dev/null | awk '{print $NF}' | head -n 1)
-      die "port $_p is in use (${_holder:-unknown holder}); the edge and the database lane need 80, 443 and 5432: stop it, then re-run"
-    fi
-  done
-  for _p in 6379 3306 27017; do
-    if [ -n "$(ss -Hltn "sport = :$_p" 2>/dev/null)" ]; then
-      warn "port $_p is in use: that database lane will not bind; managed databases of that type stay reachable in-network only"
-    fi
-  done
+  need_port 80 'the edge redirects HTTP here and answers the ACME challenge on it'
+  need_port 443 'the edge serves HTTPS on it'
+  need_port "$PORT" 'the daemon serves the API and the console on it; move it with INSTA_OSS_PORT'
+  need_port "$INTERNAL_PORT" 'the daemon answers the edge and healthz on it; move it with INSTA_OSS_INTERNAL_PORT'
+  need_port "$LANE_PG" 'the Postgres lane; free it or set INSTA_OSS_LANE_PG_PORT to another port'
+  need_port "$LANE_REDIS" 'the Redis lane; free it or set INSTA_OSS_LANE_REDIS_PORT to another port'
+  need_port "$LANE_MONGO" 'the MongoDB lane; free it or set INSTA_OSS_LANE_MONGO_PORT to another port'
+  [ "$PORTS_BUSY" = 0 ] || die "the daemon cannot start while those ports are taken: free them (or move the lanes with the keys named above), then re-run"
 }
 [ "$STACK_UP" = 1 ] || check_ports
 
