@@ -153,9 +153,9 @@ test('cloud-only surfaces (billing/usage/tokens) return 501 with a clear message
 const NOT_CLOUD_WP1: Array<[string, string]> = [
   ['GET', '/tokens'], ['POST', '/tokens'], ['DELETE', '/tokens/t1'],
 ]
-const NOT_CLOUD_WP2: Array<[string, string]> = [
-  ['POST', '/projects/x/compute/domain'], ['GET', '/projects/x/compute/domain'], ['DELETE', '/projects/x/compute/domain'],
-]
+// WP2: the four compute/domain routes are real now (contract 00 section 9), so this sub-array is
+// empty; the sweep still concatenates it so the shape of the test does not move.
+const NOT_CLOUD_WP2: Array<[string, string]> = []
 const NOT_CLOUD_WP3: Array<[string, string]> = [
   ['GET', '/projects/x/services/cp-x/limits'], ['PUT', '/projects/x/services/cp-x/limits'],
   ['PUT', '/projects/x/services/cp-x/always-on'],
@@ -295,15 +295,17 @@ test('services carry dashboard fields (runtime/endpoint/updated_at) and are bran
 
   const main = (await get(`/projects/${id}/services`)).json().services // defaults to the default branch
   const db = main.find((s: { id: string }) => s.id === 'pg-db')
-  expect(db.endpoint).toBe('io-demo-main-pg-db:5432')
+  expect(db.domain).toBe('pg-db-demo-main.localhost')
+  expect(db.endpoint).toMatch(/^127\.0\.0\.1:2\d{4}$/)
   expect(db.runtime).toBe('stopped') // fake docker ps lists nothing
   const cp = main.find((s: { id: string }) => s.id === 'cp-default')
-  expect(cp.endpoint).toBe('localhost:3000')
+  expect(cp.domain).toBe('default-demo-main.localhost')
+  expect(cp.endpoint).toBe('default-demo-main.localhost:8080')
   expect(cp.updated_at).toBeTruthy()
   expect(cp.status).toBe('ready') // CLI-printed field untouched
 
   const feat = (await get(`/projects/${id}/services?branch=feat`)).json().services
-  expect(feat.find((s: { id: string }) => s.id === 'cp-default').endpoint).toBe('localhost:4000')
+  expect(feat.find((s: { id: string }) => s.id === 'cp-default').endpoint).toBe('default-demo-feat.localhost:8080')
   expect((await get(`/projects/${id}/services?branch=nope`)).statusCode).toBe(404)
 })
 
@@ -904,7 +906,8 @@ test('managed db add: 201 row shape the CLI renders; per-branch container; still
 
   const services = (await get(`/projects/${id}/services`)).json().services
   const row = services.find((s: { id: string }) => s.id === 'rd-cache')
-  expect(row).toMatchObject({ type: 'redis', port: 6379, volume_gib: 1, endpoint: 'io-demo-main-rd-cache:6379' })
+  expect(row).toMatchObject({ type: 'redis', port: 6379, volume_gib: 1, domain: 'redis-cache-demo-main.localhost' })
+  expect(row.endpoint).toMatch(/^127\.0\.0\.1:2\d{4}$/)
 
   expect((await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })).statusCode).toBe(409)
   expect((await post(`/projects/${id}/services`, { type: 'kafka', name: 'x' })).statusCode).toBe(400)
@@ -1271,7 +1274,7 @@ test('a pre-scaffold branch row (no databases) keeps resolving its legacy io-<re
 
   expect((await get(`/projects/${id}/database/instance`)).json().host).toBe('io-demo-main-pg')
   const services = (await get(`/projects/${id}/services?branch=feat`)).json().services
-  expect(services.find((s: { id: string }) => s.id === 'pg-db').endpoint).toBe('io-demo-feat-pg:5432')
+  expect(services.find((s: { id: string }) => s.id === 'pg-db').endpoint).toMatch(/^127\.0\.0\.1:2\d{4}$/)
   // the legacy DSN still comes off `dbUrl`
   expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.DATABASE_URL).toBe('postgres://postgres:pw@io-demo-main-pg-db:5432/app')
 

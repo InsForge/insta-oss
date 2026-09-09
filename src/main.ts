@@ -17,6 +17,11 @@ import { acquireLock, initStatePath, loadState, releaseLock } from './state'
 // ---- region WP4 (data dir) ----
 import { capabilitiesLine, sharedDataDir } from './datadir'
 // ---- end region WP4 ----
+// ---- region WP2 (router) ----
+import { laneReallocator, Router } from './router'
+import { engineRouterDeps, routerUpstream } from './router/deps'
+import { buildTable } from './router/table'
+// ---- end region WP2 ----
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) })
 
@@ -90,14 +95,28 @@ async function main(): Promise<void> {
   // executor; abandonStale; migrateLegacyContainers
   // ---- end region WP5 (executor) ----
   // ---- region WP2 (router) ----
-  // new Router(...) (needs engine methods); engine.router = router; serverFactory
+  // The router owns the node:http server; Fastify receives it through `serverFactory` and hands its
+  // request handler back inside that call (`attach`), which is the only place Fastify exposes it.
+  // Dispatch is by Host: daemon names to the API, minted names and custom domains to the HTTP lane
+  // (decision 4). `engine.router = router` closes the loop, so every mutate that changes a hostname
+  // or a lane rebuilds the table and reconciles the listeners.
+  const router = new Router({
+    cfg,
+    table: () => buildTable(loadState(), cfg),
+    upstream: routerUpstream(engine, cfg),
+    reallocLane: laneReallocator(cfg, () => engine.allocLanePort()),
+    ...engineRouterDeps(engine),
+  })
+  engine.router = router
   // ---- end region WP2 (router) ----
 
-  const app = buildServer(engine, cfg)
+  const app = buildServer(engine, cfg, { serverFactory: (handler) => { router.attach(handler); return router.httpServer } })
   await app.listen({ host: cfg.listenHost, port: cfg.port })
 
   // ---- region WP2 (start) ----
-  // await router.start()
+  // Extra listeners come up only after the primary one is bound: a lane that answers before the API
+  // does would hold a wake against a daemon that cannot serve it.
+  await router.start()
   // ---- end region WP2 (start) ----
   // ---- region WP3 (start) ----
   // engine.scheduler.start()
@@ -124,7 +143,9 @@ async function main(): Promise<void> {
     if (stopping) return
     stopping = true
     // ---- region WP2 (stop) ----
-    // await router.stop()
+    // The lanes stop accepting first: a lane socket spliced to a container would otherwise outlive
+    // the bounded app.close() below.
+    await router.stop()
     // ---- end region WP2 (stop) ----
     // ---- region WP3 (stop) ----
     // await engine.scheduler.stop()

@@ -12,6 +12,12 @@ import { MANAGED_DB, CANONICAL_MANAGED_KEYS, suffixBundle, managedServiceId, man
 import * as observe from './observe'
 import { loadState, mutate } from './state'
 import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret, DataDirOps, PgTarget, ServiceKey, ServiceLimits } from './types'
+// ---- region WP2 (router): the router's pure modules feed the seams at the end of this class ----
+import { findCertFiles } from './router/certs'
+import { checkDns, domainResult, DomainError, normalizeHostname, notAdded, type ComputeDomainResult } from './router/domains'
+import { assertHostLabel, bucketsOf, buildTable, databasesOf, hostFor as fqdnFor, hostOnly, labelFor, RESERVED_LABELS, type HostKind } from './router/table'
+import type { State } from './state'
+// ---- end region WP2 ----
 
 const DEFAULT_BRANCH = 'main'
 const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
@@ -1471,58 +1477,341 @@ export class Engine {
   // ---- end region WP1 ----
 
   // ---- region WP2 (router) ----
-  /** filled by WP2: lane ports reserved in ONE synchronous mutate before provisioning awaits
-   *  (decision 51). Scaffold: no lanes, so `{}`. */
-  allocLanes(_project: Project, _branchId: string, _serviceIds: string[]): Record<string, number> { return {} }
-  /** filled by WP2: drop the branch's laneReservations on compensation. Scaffold: no-op. */
-  releaseLanes(_branchId: string): void { /* no lane reservations until WP2 */ }
-  /** filled by WP2: 409 on a minted-hostname collision. Scaffold: no minted hosts, so no-op. */
-  assertHostFree(_label: string): void { /* no minted hostnames until WP2 */ }
-  /** filled by WP2: the lane a client dials for a database service. Scaffold: the stored container
-   *  host and port with `tls: false`, so DSNs stay in today's container-host form. */
+  /** The FQDN a service answers on: the bounded label (decision 55) plus the run mode's domain. Minted
+   *  ONCE and recorded on the row (`apps[g].host`, `databases[id].host`, `managed[id].host`); every
+   *  later read takes the row's value, so a rename or a config change never moves a live hostname. */
+  hostFor(kind: HostKind, name: string, ref: string): string { return fqdnFor(kind, name, ref, this.cfg.domain) }
+  /** The bare label only: what `assertHostFree` compares and what the 63-char bound applies to. */
+  labelFor(kind: HostKind, name: string, ref: string): string { return labelFor(kind, name, ref) }
+  /** Operator-supplied custom-domain hostnames only (400); minted labels are bounded, never rejected. */
+  assertHostLabel(hostname: string): void { assertHostLabel(hostname) }
+
+  /** Lane ports a bind probe refused. The router reports them here when a listener could not open, so
+   *  the next allocation skips the port instead of handing it out again. `allocLanes` runs inside one
+   *  synchronous `mutate` (decision 51) and a bind probe cannot be synchronous, hence this ledger
+   *  rather than a probe at allocation time. */
+  private readonly laneBusy = new Set<number>()
+  markLaneBusy(port: number): void { this.laneBusy.add(port) }
+
+  /** Which of a branch's services need a host listen port: local mode every database (postgres and
+   *  managed), server mode MySQL only (redis and mongo share the SNI lanes, decision 38). */
+  private laneServiceIds(project: Project, serviceIds: string[]): string[] {
+    const managed = new Map(this.managedList(project.id).map((m) => [m.id, m.type]))
+    return serviceIds.filter((id) => {
+      const type = managed.get(id)
+      if (this.cfg.mode === 'local') return id.startsWith('pg-') || type !== undefined
+      return type === 'mysql'
+    })
+  }
+
+  private nextLanePort(taken: Set<number>): number {
+    const [lo, hi] = this.cfg.lanes.portRange
+    for (let p = lo; p <= hi; p++) if (!taken.has(p) && !this.laneBusy.has(p)) return p
+    throw new Error(`no free lane port left in ${lo}-${hi} (INSTA_OSS_LANE_PORT_RANGE)`)
+  }
+
+  private takenLanePorts(s: State): Set<number> {
+    const taken = new Set<number>()
+    for (const b of Object.values(s.branches)) for (const p of Object.values(b.lanes ?? {})) taken.add(p)
+    for (const p of Object.keys(s.laneReservations ?? {})) taken.add(Number(p))
+    return taken
+  }
+
+  /** The lowest free port in the configured range (contract 7.1). Used by the router when something
+   *  else already holds a service's lane port. */
+  allocLanePort(): number { return this.nextLanePort(this.takenLanePorts(loadState())) }
+  /** The host listen port of one database service on one branch. `provisionBranch` reserves the lanes
+   *  a branch needs at create time; a service ADDED later (a redis on an existing branch) has none, so
+   *  the first read allocates one and records it, which is also what makes the router open its
+   *  listener on the next invalidate. Idempotent and once per service. */
+  private laneFor(branch: Branch, serviceId: string, fallback: number): number {
+    const known = branch.lanes?.[serviceId]
+    if (known !== undefined) return known
+    if (!this.laneNeeded(branch, serviceId)) return fallback
+    const port = this.allocLanePort()
+    mutate((s) => {
+      const row = s.branches[branch.id]
+      if (!row) return
+      row.lanes = { ...(row.lanes ?? {}), [serviceId]: port }
+      delete s.laneReservations?.[String(port)]
+    })
+    branch.lanes = { ...(branch.lanes ?? {}), [serviceId]: port }
+    this.router.invalidate()
+    return port
+  }
+
+  /** Local mode gives every database service a port; server mode only MySQL (decision 38). */
+  private laneNeeded(branch: Branch, serviceId: string): boolean {
+    if (!branch.id || !loadState().branches[branch.id]) return false
+    if (this.cfg.mode === 'local') return true
+    return serviceId.startsWith(MANAGED_DB.mysql.idPrefix + '-')
+  }
+
+  /** Reserve every lane port a new branch needs in ONE synchronous mutate before provisioning awaits,
+   *  so two concurrent `branch create` calls on two projects can never share a port (decision 51). */
+  allocLanes(project: Project, branchId: string, serviceIds: string[]): Record<string, number> {
+    const ids = this.laneServiceIds(project, serviceIds)
+    if (!ids.length) return {}
+    return mutate((s) => {
+      const taken = this.takenLanePorts(s)
+      const out: Record<string, number> = {}
+      s.laneReservations = s.laneReservations ?? {}
+      for (const id of ids) {
+        const port = this.nextLanePort(taken)
+        taken.add(port)
+        out[id] = port
+        s.laneReservations[String(port)] = branchId
+      }
+      return out
+    })
+  }
+
+  /** Compensation path: drop the reservations a failed provision took. On success the branch row's
+   *  `lanes` supersedes them and `provisionBranch` clears them in the same mutate that writes the row. */
+  releaseLanes(branchId: string): void {
+    mutate((s) => {
+      for (const [port, owner] of Object.entries(s.laneReservations ?? {})) {
+        if (owner === branchId) delete s.laneReservations![port]
+      }
+    })
+  }
+
+  /** 409 when a label is reserved or already minted. Runs inside the reservation mutate, under the
+   *  engine-wide provision chain, so check-then-act cannot interleave (decision 51). */
+  assertHostFree(label: string): void {
+    const host = `${label}.${this.cfg.domain}`
+    if (RESERVED_LABELS.has(label)) throw new Error(`hostname ${host} is reserved by the daemon`)
+    if (buildTable(loadState(), this.cfg, () => { /* quiet: this is a check, not a rebuild */ }).hosts().has(host)) {
+      throw new Error(`hostname ${host} already exists on this daemon`)
+    }
+  }
+
+  /** Where a client dials one database service. Server mode: the minted hostname on the shared lane
+   *  with TLS (SNI routes it); MySQL keeps a plaintext per-service port. Local mode: loopback plus the
+   *  branch's lane port. */
   laneAddress(project: Project, branch: Branch, serviceId: string): { host: string; port: number; tls: boolean } {
     const ref = this.ref(project, branch)
-    if (serviceId.startsWith('pg-')) return { host: branch.databases?.[serviceId]?.container ?? this.pgContainer(project, branch), port: 5432, tls: false }
+    const server = this.cfg.mode === 'server'
+    if (serviceId.startsWith('pg-')) {
+      const host = branch.databases?.[serviceId]?.host ?? this.hostFor('postgres', serviceId.slice(3), ref)
+      return server ? { host, port: this.cfg.lanes.pgPort, tls: true } : { host: '127.0.0.1', port: this.laneFor(branch, serviceId, 5432), tls: false }
+    }
     const m = this.managedList(project.id).find((x) => x.id === serviceId)
-    if (m) return { host: managedContainerName(ref, m.type, m.name), port: MANAGED_DB[m.type].port, tls: false }
+    if (m) {
+      const host = branch.managed?.[serviceId]?.host ?? this.hostFor(m.type, m.name, ref)
+      if (!server) return { host: '127.0.0.1', port: this.laneFor(branch, serviceId, MANAGED_DB[m.type].port), tls: false }
+      if (m.type === 'redis') return { host, port: this.cfg.lanes.redisPort, tls: true }
+      if (m.type === 'mongodb') return { host, port: this.cfg.lanes.mongoPort, tls: true }
+      return { host, port: this.laneFor(branch, serviceId, MANAGED_DB.mysql.port), tls: false }
+    }
     const group = serviceId.replace(/^cp-/, '')
-    return { host: appContainerName(ref, group), port: branch.apps[group]?.port ?? 8080, tls: false }
+    const host = branch.apps[group]?.host ?? this.hostFor('compute', group, ref)
+    return server ? { host, port: 443, tls: true } : { host, port: this.cfg.port, tls: false }
   }
-  /** filled by WP2: `https://<host>` | `http://<host>:<port>`, deterministic before deploy. Scaffold:
-   *  today's `http://localhost:<hostPort>`, the adapter's informational url recorded on the row. */
-  serviceUrl(_project: Project, branch: Branch, group: string): string {
-    const app = branch.apps[group]
-    return app?.url ?? `http://localhost:${app?.hostPort ?? app?.port ?? 8080}`
+
+  /** The app's URL, deterministic before the container exists (the deploy records it on the row). */
+  serviceUrl(project: Project, branch: Branch, group: string): string {
+    const host = branch.apps[group]?.host ?? this.hostFor('compute', group, this.ref(project, branch))
+    return this.cfg.mode === 'server' ? `https://${host}` : `http://${host}:${this.cfg.port}`
   }
-  /** filled by WP2: the bare minted hostname recorded on `apps[g].host` at deploy (`labelFor(...) +
-   *  '.' + cfg.domain`, decision 55). Scaffold: undefined, so today's row shape is unchanged. */
-  mintedHost(_project: Project, _branch: Branch, _group: string): string | undefined { return undefined }
-  /** filled by WP2: local mode rewrites 127.0.0.1 to host.docker.internal in DSN/endpoint values.
-   *  Scaffold: identity (today's env reaches the container unchanged). */
-  containerize(env: Record<string, string>): Record<string, string> { return env }
-  /** filled by WP2: every hostname a container must resolve to the box (`--add-host`). Scaffold: none. */
-  hostAliasesFor(_project: Project, _branch: Branch): string[] { return [] }
-  /** filled by WP2: local mode publishes a loopback host port; server mode publishes nothing.
-   *  Scaffold: today's allocator. A redeploy keeps the app's existing host address; only brand-new
-   *  apps default to the listen port. Older records lack hostPort, so it is recovered from the URL. */
+
+  /** The bare hostname `deployLocked` records on `apps[g].host`: minted once, then read back. */
+  mintedHost(project: Project, branch: Branch, group: string): string | undefined {
+    return branch.apps[group]?.host ?? this.hostFor('compute', group, this.ref(project, branch))
+  }
+
+  /** Local mode: a container cannot reach the host's loopback by that name, so every 127.0.0.1 in a
+   *  URL-shaped or `*_HOST` value becomes `host.docker.internal` (pinned to host-gateway by the deploy
+   *  aliases). Server mode: the same string works on the host and inside a container. */
+  containerize(env: Record<string, string>): Record<string, string> {
+    if (this.cfg.mode === 'server') return env
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(env)) {
+      const urlish = /^[a-z][a-z0-9+.-]*:\/\//i.test(v)
+      out[k] = urlish || k.endsWith('_HOST') ? v.replace(/127\.0\.0\.1/g, 'host.docker.internal') : v
+    }
+    return out
+  }
+
+  /** Every name a container on this branch must resolve to the box itself (decision 5): the branch's
+   *  minted hostnames, the daemon and object-store names its env points at, its bucket vhosts, its
+   *  custom domains, and `host.docker.internal`. Public DNS cannot be trusted to send these to the box
+   *  (sslip.io, NAT, private addresses), so each becomes `--add-host <name>:host-gateway`. */
+  hostAliasesFor(project: Project, branch: Branch): string[] {
+    const ref = this.ref(project, branch)
+    const out = new Set<string>()
+    for (const [g, app] of Object.entries(branch.apps ?? {})) out.add(app.host ?? this.hostFor('compute', g, ref))
+    for (const [id, db] of Object.entries(databasesOf(branch, ref))) out.add(db.host ?? this.hostFor('postgres', id.replace(/^pg-/, ''), ref))
+    for (const m of this.managedList(project.id)) {
+      const row = branch.managed?.[m.id]
+      if (row) out.add(row.host ?? this.hostFor(m.type, m.name, ref))
+    }
+    if (this.cfg.mode === 'server') {
+      out.add(`api.${this.cfg.domain}`)
+      out.add(`s3.${this.cfg.domain}`)
+      for (const bucket of bucketsOf(branch)) out.add(`${bucket}.s3.${this.cfg.domain}`)
+      for (const cd of Object.values(loadState().customDomains ?? {})) if (cd.branchId === branch.id) out.add(cd.hostname)
+    }
+    out.add('host.docker.internal')
+    return [...out]
+  }
+
+  /** Local mode publishes the app on a loopback host port (macOS cannot route to container IPs);
+   *  server mode publishes nothing and the router dials the container. A redeploy keeps the port the
+   *  row already has; a legacy row without `host` still carries it in its `http://localhost:<port>` url. */
   localHostPort(branch: Branch, group: string, opts: { hostPort?: number; port: number }): number | undefined {
+    if (this.cfg.mode === 'server') return undefined
     const prior = branch.apps[group]
-    const priorHost = prior?.hostPort ?? (prior?.url ? Number(new URL(prior.url).port) || undefined : undefined)
-    return opts.hostPort ?? priorHost ?? opts.port
+    const fromLegacyUrl = prior && !prior.host && prior.url ? Number(new URL(prior.url).port) || undefined : undefined
+    return opts.hostPort ?? prior?.hostPort ?? fromLegacyUrl ?? opts.port
   }
-  /** filled by WP2: the services() row's `domain`/`endpoint`. Scaffold: today's values (everything is
-   *  local: container:port, or the app's host url). */
+
+  /** The services() row's network columns: `domain` is the bare hostname, `endpoint` is `host[:port]`
+   *  (a script may read it, so it stays a host and port, never a URL; decision 40). */
   rowNetwork(project: Project, branch: Branch | undefined, row: { id: string; type: string; name: string }): { domain?: string; endpoint?: string } {
     if (!branch) return {}
     const ref = this.ref(project, branch)
-    if (row.type === 'postgres') return { endpoint: `${branch.databases?.[row.id]?.container ?? this.pgContainer(project, branch)}:5432` }
-    if (row.type === 'storage') return { endpoint: `${this.s3Host(branch) ?? 'storage'}/${this.bucketOf(project, branch)}` }
-    if (isManagedDbType(row.type)) return { endpoint: `${managedContainerName(ref, row.type, row.name)}:${MANAGED_DB[row.type].port}` }
-    const app = branch.apps[row.name]
-    return app ? { domain: app.url, endpoint: app.url.replace(/^https?:\/\//, '') } : {}
+    if (row.type === 'compute') {
+      const app = branch.apps[row.name]
+      if (!app) return {}
+      const host = app.host ?? this.hostFor('compute', row.name, ref)
+      return { domain: host, endpoint: this.cfg.mode === 'server' ? host : `${host}:${this.cfg.port}` }
+    }
+    if (row.type === 'postgres' || isManagedDbType(row.type)) {
+      const minted = row.type === 'postgres'
+        ? (branch.databases?.[row.id]?.host ?? this.hostFor('postgres', row.name, ref))
+        : (branch.managed?.[row.id]?.host ?? this.hostFor(row.type as ManagedDbType, row.name, ref))
+      const lane = this.laneAddress(project, branch, row.id)
+      return { domain: minted, endpoint: `${lane.host}:${lane.port}` }
+    }
+    if (row.type === 'storage') {
+      const bucket = this.bucketOf(project, branch)
+      if (this.cfg.mode === 'server') return { domain: `${bucket}.s3.${this.cfg.domain}`, endpoint: `s3.${this.cfg.domain}/${bucket}` }
+      return { endpoint: `${this.s3Host(branch) ?? 'storage'}/${bucket}` }
+    }
+    return {}
   }
-  /** filled by WP2: drop the custom domains of a project / branch / group. Scaffold: no-op. */
-  releaseDomainsFor(_projectId: string, _branchId?: string, _group?: string): void { /* no custom domains until WP2 */ }
+
+  // ---- custom domains (the four hidden cloud routes, decision 25) ------------------------------
+
+  /** The compute group a domain call means: the body's, or the branch's sole group. */
+  private domainTarget(projectId: string, opts: { branch?: string; group?: string }): { project: Project; branch: Branch; group: string } {
+    const project = this.getProject(projectId)
+    if (!project) throw new DomainError(404, 'project not found')
+    const branch = opts.branch ? this.getBranchByName(projectId, opts.branch) : this.listBranches(projectId).find((b) => b.isDefault)
+    if (!branch) throw new DomainError(404, `branch not found: ${opts.branch ?? 'default'}`)
+    const groups = Object.keys(branch.apps ?? {})
+    const group = opts.group ?? (groups.length === 1 ? groups[0] : undefined)
+    if (!group) throw new DomainError(400, groups.length ? `group required: ${groups.join(', ')}` : 'group required')
+    return { project, branch, group }
+  }
+
+  private domainCertOk(hostname: string): boolean {
+    if (this.cfg.mode !== 'server' || !this.cfg.tls.certDir) return true
+    return findCertFiles(this.cfg.tls.certDir, hostname) !== null
+  }
+
+  private async domainEnvelope(project: Project, branch: Branch, group: string, hostname: string): Promise<ComputeDomainResult> {
+    const dns = await checkDns(hostname, this.cfg)
+    return domainResult({
+      hostname, flyApp: appContainerName(this.ref(project, branch), group), service: group,
+      dns, certOk: this.domainCertOk(hostname),
+    })
+  }
+
+  /** Attach a hostname to one compute group on one branch (idempotent on the same target). */
+  async setComputeDomain(projectId: string, opts: { hostname?: unknown; branch?: string; group?: string }): Promise<ComputeDomainResult> {
+    const { project, branch, group } = this.domainTarget(projectId, opts)
+    const hostname = normalizeHostname(opts.hostname, this.cfg)
+    if (!branch.apps?.[group]) throw new DomainError(404, `no compute deployed for group ${group} on branch ${branch.name}`)
+    const existing = loadState().customDomains?.[hostname]
+    if (existing && (existing.branchId !== branch.id || existing.group !== group)) {
+      throw new DomainError(409, `${hostname} is already attached to ${existing.group}; remove it there first`)
+    }
+    if (!existing) {
+      mutate((s) => {
+        s.customDomains = s.customDomains ?? {}
+        s.customDomains[hostname] = { hostname, projectId, branchId: branch.id, group, createdAt: Date.now() }
+      })
+      this.router.invalidate()
+      this.emit(projectId, branch.name, 'resource', 'compute.domain.set', { hostname, group })
+    }
+    return await this.domainEnvelope(project, branch, group, hostname)
+  }
+
+  /** The check-domain answer, bound or not. */
+  async computeDomainStatus(projectId: string, opts: { hostname?: unknown; branch?: string; group?: string }): Promise<ComputeDomainResult> {
+    const project = this.getProject(projectId)
+    if (!project) throw new DomainError(404, 'project not found')
+    const hostname = normalizeHostname(opts.hostname, this.cfg)
+    const entry = loadState().customDomains?.[hostname]
+    if (!entry || entry.projectId !== projectId) {
+      const { branch, group } = this.domainTarget(projectId, opts)
+      return notAdded(hostname, appContainerName(this.ref(project, branch), group), group)
+    }
+    const branch = loadState().branches[entry.branchId]
+    if (!branch) return notAdded(hostname, '', entry.group)
+    return await this.domainEnvelope(project, branch, entry.group, hostname)
+  }
+
+  /** Every domain of a project, optionally narrowed to one branch or group. */
+  async listComputeDomains(projectId: string, opts: { branch?: string; group?: string } = {}): Promise<ComputeDomainResult[]> {
+    const project = this.getProject(projectId)
+    if (!project) throw new DomainError(404, 'project not found')
+    const s = loadState()
+    const branchId = opts.branch ? this.getBranchByName(projectId, opts.branch)?.id : undefined
+    const rows = Object.values(s.customDomains ?? {}).filter((cd) =>
+      cd.projectId === projectId && (!branchId || cd.branchId === branchId) && (!opts.group || cd.group === opts.group))
+    return await Promise.all(rows.map(async (cd) => {
+      const branch = s.branches[cd.branchId]
+      if (!branch) return notAdded(cd.hostname, '', cd.group)
+      return await this.domainEnvelope(project, branch, cd.group, cd.hostname)
+    }))
+  }
+
+  /** Detach a hostname. 404 when it was never attached to this project. */
+  removeComputeDomain(projectId: string, opts: { hostname?: unknown }): { hostname: string; flyApp: string; service: string; region: string } {
+    const project = this.getProject(projectId)
+    if (!project) throw new DomainError(404, 'project not found')
+    const hostname = normalizeHostname(opts.hostname, this.cfg)
+    const entry = loadState().customDomains?.[hostname]
+    if (!entry || entry.projectId !== projectId) throw new DomainError(404, `domain not found: ${hostname}`)
+    const branch = loadState().branches[entry.branchId]
+    mutate((s) => { delete s.customDomains?.[hostname] })
+    this.router.invalidate()
+    this.emit(projectId, branch?.name ?? null, 'resource', 'compute.domain.remove', { hostname, group: entry.group })
+    return {
+      hostname,
+      flyApp: branch ? appContainerName(this.ref(project, branch), entry.group) : '',
+      service: entry.group,
+      region: 'local',
+    }
+  }
+
+  /** Called from teardown paths so a deleted branch, project or compute group takes its domains with
+   *  it; a rename moves them to the new group. */
+  releaseDomainsFor(projectId: string, branchId?: string, group?: string, moveTo?: string): void {
+    let changed = false
+    mutate((s) => {
+      for (const [h, cd] of Object.entries(s.customDomains ?? {})) {
+        if (cd.projectId !== projectId) continue
+        if (branchId && cd.branchId !== branchId) continue
+        if (group && cd.group !== group) continue
+        changed = true
+        if (moveTo) s.customDomains[h] = { ...cd, group: moveTo }
+        else delete s.customDomains[h]
+      }
+    })
+    if (changed) this.router.invalidate()
+  }
+
+  /** The ask endpoint's answer: every hostname this daemon serves (service names, api/console, the
+   *  object store and its existing bucket vhosts, attached custom domains). */
+  ownsHostname(host: string): boolean {
+    const h = hostOnly(host)
+    if (!h) return false
+    return buildTable(loadState(), this.cfg, () => { /* quiet */ }).hosts().has(h)
+  }
   // ---- end region WP2 ----
 
   // ---- region WP3 (scheduler) ----

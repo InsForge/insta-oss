@@ -11,12 +11,14 @@ import type { ManagedDbAdapter, ManagedDbTarget, ServiceLimits } from '../types'
 // the boot migration) keeps the data in the container's own layer.
 // `publishLoopback`/`limits` are read by WP2/WP3 at the marked lines.
 export class LocalManagedDb implements ManagedDbAdapter {
-  async provision(t: ManagedDbTarget, _opts: { publishLoopback?: boolean; limits?: ServiceLimits } = {}): Promise<void> {
+  async provision(t: ManagedDbTarget, opts: { publishLoopback?: boolean; limits?: ServiceLimits } = {}): Promise<void> {
     const cfg = MANAGED_DB[t.type]
     const envArgs = Object.entries(cfg.env(t.password)).flatMap(([k, v]) => ['-e', `${k}=${v}`])
     await docker(['run', '-d', '--restart', 'unless-stopped', '--name', t.container,
       '--network', t.network, ...envArgs,
       // ---- args WP2 ----
+      // Local mode only (same reason as postgres): an ephemeral loopback port for `docker port`.
+      ...(opts.publishLoopback ? ['-p', `127.0.0.1::${cfg.port}`] : []),
       // ---- args WP3 ----
       // ---- args WP4 ---- (one `--mount type=bind` per path the image writes, decision 56)
       ...(t.dataDir ? dataPaths(t.type).flatMap((p) => ['--mount', `type=bind,src=${join(t.dataDir, p.sub)},dst=${p.containerPath}`]) : []),

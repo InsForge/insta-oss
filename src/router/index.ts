@@ -1,0 +1,382 @@
+// The router (contract 00 section 8.2; 02 sections 0 and 2). It owns every listener the daemon
+// exposes: the primary HTTP server Fastify is handed through `serverFactory`, the optional bridge
+// gateway copy of it in local mode, the database lanes, and the loopback listener the edge asks
+// before issuing a certificate. Everything else in here is bookkeeping around one idea: a request
+// for a sleeping service must wait for that service instead of failing, and the waiting itself is
+// what keeps the service awake.
+import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import type { Socket } from 'node:net'
+import type { Duplex } from 'node:stream'
+import type { SecureContext } from 'node:tls'
+import { isDaemonHost, type Config } from '../config'
+import { loadState, mutate, onSave, stateRev } from '../state'
+import type { ManagedDbType, ServiceKey } from '../types'
+import { Certs, triggerIssuance } from './certs'
+import type { ServiceState, UpstreamLike } from './deps'
+import { HttpLane, sendJson } from './http'
+import { createInternalServer } from './internal'
+import { createPgLane } from './pg'
+import { createPortLane } from './port'
+import { buildTable, hostOnly, type Route, type RouteTable } from './table'
+import { createSniLane } from './tls'
+
+export type { Lane, Route, RouteKind, RouteTable } from './table'
+export { buildTable, hostFor, hostOnly, labelFor } from './table'
+
+export interface RouterDeps {
+  cfg: Config
+  /** Build a fresh table. The Router memoizes the result on `stateRev()`, so the request path never
+   *  parses or clones state (decision 54). */
+  table?(): RouteTable
+  stateOf(route: Route): ServiceState
+  /** `engine.wake(key, { door: 'traffic' })`: already singleflight per key and bounded by
+   *  wakeTimeoutSec, so the router keeps no second map and no second timer (decision 52). */
+  wake(route: Route): Promise<void>
+  touch(key: ServiceKey): void
+  beginHold(key: ServiceKey): void
+  endHold(key: ServiceKey): void
+  upstream: UpstreamLike
+  /** Fastify's handler; in production it arrives later through `attach()`. */
+  apiHandler?(req: IncomingMessage, res: ServerResponse): void
+  /** The ask endpoint's answer; defaults to table membership. */
+  ownsHostname?(host: string): boolean
+  /** Reallocate one service's lane port when something else already holds it (02 section 0). */
+  reallocLane?(route: Route): number | undefined
+  certs?: Certs
+  log?(msg: string): void
+}
+
+/** What the Router needs of a lane listener; `net.Server`, `tls.Server` and `http.Server` all match. */
+interface LaneServer {
+  listen(port: number, host: string, cb: () => void): unknown
+  once(ev: 'error', cb: (e: Error) => void): unknown
+  on(ev: 'connection', cb: (c: Socket) => void): unknown
+  close(cb?: () => void): unknown
+}
+
+interface LaneEntry {
+  id: string
+  port: number
+  close(): void
+}
+
+const isAddrInUse = (e: unknown): boolean => (e as { code?: string }).code === 'EADDRINUSE'
+
+export class Router {
+  readonly httpServer: Server
+  private readonly cfg: Config
+  private readonly log: (msg: string) => void
+  private readonly certs: Certs
+  private readonly abort = new AbortController()
+  private readonly http: HttpLane
+  private apiHandler?: (req: IncomingMessage, res: ServerResponse) => void
+
+  private cached: { rev: number; table: RouteTable } | null = null
+  private readonly extraHttp: Server[] = []
+  private readonly lanes = new Map<string, LaneEntry>()
+  private internal: Server | null = null
+  private defaultContext: SecureContext | null = null
+  private readonly sockets = new Set<Duplex>()
+  /** Per-key in-flight counts: one shared ticker stamps every key with a count above zero, so a
+   *  thousand streaming clients cost one timer instead of a thousand (02 section 3.3). */
+  private readonly held = new Map<ServiceKey, number>()
+  private ticker: NodeJS.Timeout | null = null
+  private stopped = false
+
+  constructor(private readonly deps: RouterDeps) {
+    this.cfg = deps.cfg
+    this.log = deps.log ?? ((m) => console.warn(m))
+    this.apiHandler = deps.apiHandler
+    this.certs = deps.certs ?? new Certs({ certDir: this.cfg.tls.certDir, issue: triggerIssuance(this.cfg), log: this.log })
+    this.http = new HttpLane({
+      cfg: this.cfg, upstream: deps.upstream, stateOf: deps.stateOf, wake: deps.wake,
+      touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
+      signal: this.abort.signal, log: this.log,
+    })
+    this.httpServer = this.newHttpServer()
+    // A routing-class save from anywhere (another code path, a future writer) rebuilds the table as
+    // a belt; the engine's explicit `invalidate()` is the braces.
+    onSave((_s, kind) => { if (kind === 'routing' && !this.stopped) this.cached = null })
+  }
+
+  // ---- the table -------------------------------------------------------------------------------
+
+  /** The current table, memoized on the state revision. */
+  table(): RouteTable {
+    const rev = stateRev()
+    if (this.cached && this.cached.rev === rev) return this.cached.table
+    const t = this.deps.table ? this.deps.table() : buildTable(loadState(), this.cfg, this.log)
+    this.cached = { rev, table: t }
+    return t
+  }
+
+  /** Rebuild NOW and reconcile the lane listeners, so a service added through the API is listening
+   *  before the next request arrives. */
+  invalidate(): void {
+    if (this.stopped) return
+    this.cached = null
+    this.table()
+    void this.reconcile().catch((e) => this.log(`router: lane reconcile failed: ${e instanceof Error ? e.message : String(e)}`))
+  }
+
+  // ---- holds -----------------------------------------------------------------------------------
+
+  private hold(key: ServiceKey): void {
+    this.held.set(key, (this.held.get(key) ?? 0) + 1)
+    this.deps.beginHold(key)
+    if (!this.ticker) {
+      this.ticker = setInterval(() => {
+        for (const [k, n] of this.held) if (n > 0) this.deps.touch(k)
+      }, this.cfg.lanes.touchDebounceMs)
+      this.ticker.unref()
+    }
+  }
+
+  private release(key: ServiceKey): void {
+    const n = (this.held.get(key) ?? 0) - 1
+    if (n <= 0) this.held.delete(key)
+    else this.held.set(key, n)
+    this.deps.endHold(key)
+  }
+
+  /** Test seam: in-flight requests and splices the router is holding for a key. */
+  holds(key: ServiceKey): number { return this.held.get(key) ?? 0 }
+
+  // ---- HTTP dispatch ---------------------------------------------------------------------------
+
+  attach(handler: (req: IncomingMessage, res: ServerResponse) => void): void { this.apiHandler = handler }
+
+  private newHttpServer(): Server {
+    const s = createHttpServer((req, res) => this.dispatch(req, res))
+    s.on('upgrade', (req, socket, head) => this.dispatchUpgrade(req, socket, head))
+    s.on('connection', (c: Socket) => this.track(c))
+    s.on('clientError', (_e, socket) => { if (!socket.destroyed) socket.destroy() })
+    return s
+  }
+
+  private dispatch(req: IncomingMessage, res: ServerResponse): void {
+    if (this.stopped) { sendJson(res, 503, { error: 'daemon shutting down' }); return }
+    const raw = req.headers.host
+    if (isDaemonHost(this.cfg, raw)) { this.toApi(req, res); return }
+    const route = this.table().byHost(hostOnly(raw))
+    if (route) {
+      if (route.kind === 'api') { this.toApi(req, res); return }
+      void this.http.handle(route, req, res)
+      return
+    }
+    // Local mode keeps today's behaviour: any other Host on the daemon's own port is the API, so a
+    // LAN name or `host.docker.internal:8080` from a container still works (decision 4).
+    if (this.cfg.mode === 'local') { this.toApi(req, res); return }
+    sendJson(res, 404, { error: 'unknown route' })
+  }
+
+  private dispatchUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    this.track(socket)
+    if (this.stopped) { socket.destroy(); return }
+    const route = isDaemonHost(this.cfg, req.headers.host) ? undefined : this.table().byHost(hostOnly(req.headers.host))
+    if (!route || route.kind !== 'compute') { socket.destroy(); return }
+    void this.http.upgrade(route, req, socket, head)
+  }
+
+  private toApi(req: IncomingMessage, res: ServerResponse): void {
+    if (!this.apiHandler) { sendJson(res, 503, { error: 'daemon not ready' }); return }
+    this.apiHandler(req, res)
+  }
+
+  private track(s: Duplex): void {
+    this.sockets.add(s)
+    s.once('close', () => this.sockets.delete(s))
+  }
+
+  // ---- start / stop ----------------------------------------------------------------------------
+
+  async start(): Promise<void> {
+    const server = this.cfg.mode === 'server'
+    if (server) {
+      // Present since install time (the installer's first `curl https://api.<domain>/healthz`), so a
+      // client that sends no SNI completes the handshake and can be told what is wrong.
+      this.defaultContext = await this.certs.certFor(`api.${this.cfg.domain}`)
+      if (!this.defaultContext) this.log(`router: no certificate for api.${this.cfg.domain} yet; TLS lanes will refuse clients that send no SNI`)
+    }
+
+    // The local Linux bridge gateway: containers reach the API and the HTTP lane through it.
+    for (const host of this.cfg.extraListenHosts) {
+      const extra = this.newHttpServer()
+      await this.listen(extra, host, this.cfg.port, `extra HTTP listener ${host}:${this.cfg.port}`)
+      this.extraHttp.push(extra)
+    }
+
+    if (server) {
+      await this.fixedLane('pg', this.cfg.lanes.pgPort)
+      await this.fixedLane('redis', this.cfg.lanes.redisPort)
+      await this.fixedLane('mongodb', this.cfg.lanes.mongoPort)
+      this.internal = createInternalServer({ ownsHostname: (h) => this.ownsHostname(h), log: this.log })
+      this.internal.on('connection', (c: Socket) => this.track(c))
+      await this.listen(this.internal, '127.0.0.1', this.cfg.internalPort, `internal listener 127.0.0.1:${this.cfg.internalPort}`)
+    }
+    await this.reconcile()
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true
+    // Held requests and splices give up here rather than making app.close() wait out a 60 s wake.
+    this.abort.abort()
+    if (this.ticker) { clearInterval(this.ticker); this.ticker = null }
+    for (const lane of this.lanes.values()) lane.close()
+    this.lanes.clear()
+    if (this.internal) { this.internal.close(); this.internal = null }
+    for (const s of this.extraHttp) s.close()
+    this.extraHttp.length = 0
+    for (const s of this.sockets) s.destroy()
+    this.sockets.clear()
+    this.http.close()
+    // The primary server belongs to Fastify: `app.close()` closes it.
+  }
+
+  private listen(s: LaneServer, host: string, port: number, what: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const onError = (e: Error): void => reject(isAddrInUse(e) ? new Error(`${what} is already in use; free the port or set the matching INSTA_OSS_LANE_* key`) : e)
+      s.once('error', onError)
+      s.listen(port, host, () => resolve())
+    })
+  }
+
+  // ---- lanes -----------------------------------------------------------------------------------
+
+  private laneBinds(): string[] {
+    // Server mode publishes the lanes (the edge is not in the path for raw TCP); local mode keeps
+    // them on loopback plus the bridge gateway so containers can reach them too.
+    return this.cfg.mode === 'server' ? [this.cfg.lanes.bind] : [this.cfg.lanes.bind, ...this.cfg.extraListenHosts]
+  }
+
+  /** The three shared server-mode lanes. A busy fixed port is fatal and names itself. */
+  private async fixedLane(kind: 'pg' | ManagedDbType, port: number): Promise<void> {
+    const id = `fixed:${kind}:${port}`
+    const servers: LaneServer[] = []
+    for (const bind of this.laneBinds()) {
+      const s = kind === 'pg' ? this.pgServer(port) : this.sniServer(kind, bind, port)
+      await this.listen(s, bind, port, `${kind} lane ${bind}:${port}`)
+      servers.push(s)
+    }
+    this.lanes.set(id, { id, port, close: () => { for (const s of servers) s.close() } })
+  }
+
+  private pgServer(port: number): LaneServer {
+    const s = createPgLane({
+      cfg: this.cfg, upstream: this.deps.upstream, stateOf: this.deps.stateOf, wake: this.deps.wake,
+      table: () => this.table(), touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
+      signal: this.abort.signal, secureContext: this.defaultContext, sniCallback: this.certs.sniCallback(this.defaultContext), log: this.log,
+    }, this.cfg.lanes.bind, port)
+    s.on('connection', (c: Socket) => this.track(c))
+    return s
+  }
+
+  private sniServer(kind: ManagedDbType, bind: string, port: number): LaneServer {
+    const s = createSniLane({
+      cfg: this.cfg, upstream: this.deps.upstream, stateOf: this.deps.stateOf, wake: this.deps.wake,
+      table: () => this.table(), touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
+      signal: this.abort.signal, secureContext: this.defaultContext, sniCallback: this.certs.sniCallback(this.defaultContext), log: this.log,
+    }, kind, bind, port)
+    s.on('connection', (c: Socket) => this.track(c))
+    return s
+  }
+
+  /** Per-service lanes: local mode every database, server mode MySQL only. */
+  private wantedPerService(): Map<string, { route: Route; port: number }> {
+    const out = new Map<string, { route: Route; port: number }>()
+    const server = this.cfg.mode === 'server'
+    for (const route of this.table().routes()) {
+      if (route.listenPort === undefined) continue
+      if (server && route.lane !== 'port') continue        // pg/redis/mongo share the fixed lanes
+      if (!server && route.lane === 'sni') continue        // no TLS lanes in local mode
+      if (route.lane !== 'pg' && route.lane !== 'port') continue
+      out.set(`svc:${route.key}`, { route, port: route.listenPort })
+    }
+    return out
+  }
+
+  private async reconcile(): Promise<void> {
+    if (this.stopped) return
+    const wanted = this.wantedPerService()
+    for (const [id, lane] of this.lanes) {
+      if (!id.startsWith('svc:')) continue
+      const want = wanted.get(id)
+      if (!want || want.port !== lane.port) { lane.close(); this.lanes.delete(id) }
+    }
+    for (const [id, want] of wanted) {
+      if (this.lanes.has(id)) continue
+      await this.openPerService(id, want.route)
+    }
+  }
+
+  /** Open one per-service lane; a port something else already holds is reallocated (a laptop hands
+   *  20000-20999 out to anyone) instead of stopping the daemon. */
+  private async openPerService(id: string, route: Route): Promise<void> {
+    let current = route
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const port = current.listenPort
+      if (port === undefined) return
+      const servers: LaneServer[] = []
+      try {
+        for (const bind of this.laneBinds()) {
+          const s = current.lane === 'pg' ? this.pgServer(port) : this.portServer(current, bind, port)
+          await this.listen(s, bind, port, `${current.serviceId ?? current.kind} lane ${bind}:${port}`)
+          servers.push(s)
+        }
+        this.lanes.set(id, { id, port, close: () => { for (const s of servers) s.close() } })
+        return
+      } catch (e) {
+        for (const s of servers) s.close()
+        if (!/already in use/.test(e instanceof Error ? e.message : '')) throw e
+        const next = this.deps.reallocLane?.(current)
+        if (next === undefined) {
+          this.log(`router: lane port ${port} for ${current.serviceId ?? current.key} is in use and no replacement is available; that service has no lane`)
+          return
+        }
+        this.log(`router: lane port ${port} for ${current.serviceId ?? current.key} was in use; moved to ${next}`)
+        this.cached = null
+        current = this.table().routes().find((r) => r.key === current.key) ?? { ...current, listenPort: next }
+      }
+    }
+    throw new Error(`router: could not find a free lane port in ${this.cfg.lanes.portRange[0]}-${this.cfg.lanes.portRange[1]}`)
+  }
+
+  private portServer(route: Route, bind: string, port: number): LaneServer {
+    const key = route.key
+    const s = createPortLane({
+      cfg: this.cfg, upstream: this.deps.upstream, stateOf: this.deps.stateOf, wake: this.deps.wake,
+      touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
+      signal: this.abort.signal, log: this.log,
+    }, () => this.table().routes().find((r) => r.key === key), bind, port)
+    s.on('connection', (c: Socket) => this.track(c))
+    return s
+  }
+
+  // ---- the ask endpoint's answer ---------------------------------------------------------------
+
+  /** Every hostname this box serves: the table's own names plus the bucket vhosts it builds. */
+  ownsHostname(host: string): boolean {
+    if (this.deps.ownsHostname) return this.deps.ownsHostname(host)
+    const h = hostOnly(host)
+    if (this.table().hosts().has(h)) return true
+    return this.table().byHost(h) !== undefined
+  }
+}
+
+/** The lane-port allocator the engine and the router share (contract 7.1 `allocLanePort`): the lowest
+ *  port in the configured range that no branch and no reservation holds and that a bind probe accepts.
+ *  Exported here because the router reallocates a busy per-service lane at start (02 section 0). */
+export function laneReallocator(cfg: Config, alloc: () => number): (route: Route) => number | undefined {
+  return (route) => {
+    if (!route.branchId || !route.serviceId) return undefined
+    const port = alloc()
+    const { branchId, serviceId } = route
+    mutate((s) => {
+      const b = s.branches[branchId]
+      if (!b) return
+      b.lanes = { ...(b.lanes ?? {}), [serviceId]: port }
+      if (s.laneReservations) delete s.laneReservations[String(route.listenPort ?? '')]
+    })
+    return port
+  }
+}

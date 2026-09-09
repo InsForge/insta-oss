@@ -687,10 +687,46 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   // ---- end region A ----
 
   // ---- region B (WP2 router) ----
-  // Custom domains need real DNS + certs (the router's edge, WP2).
-  app.post('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
-  app.get('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
-  app.delete('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
+  // Custom domains: the cloud's four hidden routes (platform server.ts:2740-2766), rendered by
+  // `insta compute set-domain | check-domain | remove-domain`. The envelope carries NO `ssl`,
+  // `origin` or `originStatus` key: the CLI reads an `ssl` field as a cloud-plane answer, then
+  // demands an ownership TXT record and prints UNCONFIRMED (decision 25).
+  const domainQuery = (req: { query: unknown; body: unknown }): { hostname?: unknown; branch?: string; group?: string } => {
+    const q = (req.query ?? {}) as { hostname?: string; branch?: string; group?: string }
+    const b = (req.body ?? {}) as { hostname?: unknown; branch?: string; group?: string }
+    return { hostname: b.hostname ?? q.hostname, branch: b.branch ?? q.branch, group: b.group ?? q.group }
+  }
+  // The engine throws with a `status`, so one mapper serves all four routes.
+  const domainFail = (e: unknown, reply: FastifyReply) => {
+    const status = (e as { status?: number }).status
+    const message = e instanceof Error ? e.message : String(e)
+    return reply.code(typeof status === 'number' ? status : 400).send({ error: message })
+  }
+
+  app.post('/projects/:id/compute/domain', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'deploy', reply)) return reply
+    try { return await engine.setComputeDomain(id, domainQuery(req)) } catch (e) { return domainFail(e, reply) }
+  })
+
+  app.get('/projects/:id/compute/domain', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    try { return await engine.computeDomainStatus(id, domainQuery(req)) } catch (e) { return domainFail(e, reply) }
+  })
+
+  app.get('/projects/:id/compute/domains', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const q = (req.query ?? {}) as { branch?: string; group?: string }
+    try { return { items: await engine.listComputeDomains(id, q) } } catch (e) { return domainFail(e, reply) }
+  })
+
+  app.delete('/projects/:id/compute/domain', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'deploy', reply)) return reply
+    try { return engine.removeComputeDomain(id, domainQuery(req)) } catch (e) { return domainFail(e, reply) }
+  })
   // ---- end region B ----
 
   // ---- region C (WP3 scheduler) ----
