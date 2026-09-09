@@ -313,10 +313,25 @@ test('a second copy into the same branch mints n8n-2 beside the first', async ()
 
 test('with no branch named, the fresh-branch default mints n8n then n8n-2', async () => {
   const id = await project()
-  await deploy(id, { templateCode: 'n8n' })
-  await deploy(id, { templateCode: 'n8n' })
+  const first = await deploy(id, { templateCode: 'n8n' })
+  const second = await deploy(id, { templateCode: 'n8n' })
   const branches = (await get(`/projects/${id}/branches`)).json().branches.map((b: { name: string }) => b.name).sort()
   expect(branches).toEqual(['main', 'n8n', 'n8n-2'])
+  // A fresh branch is NOT the default one, so its services() rows are branch-qualified. The
+  // deployment record still carries the BARE id, which is what every later step addresses.
+  const ids = []
+  for (const r of [first, second]) {
+    const view = (await get(`/template-deployments/${r.json().deploymentId}`)).json()
+    expect(view.status).toBe('succeeded')
+    ids.push(view.services[0].serviceId)
+  }
+  // The second copy is `n8n-2` even though its branch is brand new: an oss compute service is a
+  // PROJECT-level registration materialised on every branch (the same deviation `services add`
+  // already documents), so the first copy's name is taken project-wide and the ladder steps past
+  // it. Each branch still runs its own container.
+  expect(ids).toEqual(['cp-n8n', 'cp-n8n-2'])
+  expect(calls.filter((c) => c.startsWith('deploy:demo-n8n:n8n:')).length).toBe(1)
+  expect(calls.filter((c) => c.startsWith('deploy:demo-n8n-2:n8n-2:')).length).toBe(1)
 })
 
 test('a health failure fails the run, names the last status and redacts the log tail', async () => {
