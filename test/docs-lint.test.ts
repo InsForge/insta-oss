@@ -4,6 +4,7 @@ import { test, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync, statSync, accessSync, constants } from 'node:fs'
 import { join, relative, sep } from 'node:path'
+import { dataLayout } from '../src/datadir'
 
 const root = join(__dirname, '..')
 const EM_DASH = '—'
@@ -159,4 +160,39 @@ test('COMPATIBILITY names every new route by its real verb', () => {
   expect(INVENTED.filter((v) => text.includes(v))).toEqual([])
   // `insta backup` does not exist, so the only allowed mention is the one that says so.
   expect(text).toMatch(/no `insta backup` command/)
+})
+
+// The backup page is the ONLY documented recovery path (the backups API answers 501), so what it
+// tells the operator to archive is derived from the code rather than trusted: `md/` was missing
+// from it, which loses every managed database from a backup that appears to succeed.
+test('the backup procedure covers every data root the code writes, and stops the writers first', () => {
+  const page = readFileSync(join(root, 'docs/self-hosting/upgrade.mdx'), 'utf8')
+  const tarLine = page.split('\n').find((l) => l.startsWith('tar -C /var/lib/instacloud -czf'))
+  expect(tarLine, 'the page must carry one tar line').toBeDefined()
+
+  // Every branch data root `dataLayout` mints, taken FROM the layout: the next person who adds
+  // one finds out here when this page stops covering it.
+  const roots = dataLayout('/var/lib/instacloud').branchRoots('ref').map((p) => p.split('/')[4])
+  expect(roots).toContain('md')                       // the one that was missing
+  for (const root_ of roots) expect(tarLine, root_).toMatch(new RegExp(`\\s${root_}(\\s|$)`))
+  // ...plus the state file and the two stores that are not per branch.
+  for (const extra of ['state.json', 'garage', 'edge', 'caddy']) {
+    expect(tarLine, extra).toMatch(new RegExp(`\\s${extra.replace('.', '\\.')}(\\s|$)`))
+  }
+
+  // The stop ORDER: the compose stack and then the branch containers, both BEFORE the tar. The
+  // branch containers are not part of the stack, so `docker compose stop` does not touch them,
+  // and an archive taken while they write is torn for those services.
+  const compose = page.indexOf('docker compose stop')
+  const branches = page.indexOf("docker ps -q --filter 'name=^io-'")
+  const tar = page.indexOf('tar -C /var/lib/instacloud -czf')
+  expect(compose).toBeGreaterThan(0)
+  expect(branches).toBeGreaterThan(compose)
+  expect(tar).toBeGreaterThan(branches)
+
+  // And the restore side, which the page did not have at all.
+  expect(page).toContain('Restore, on a clean machine')
+  expect(page).toContain('tar -C /var/lib/instacloud -xzf')
+  // It says what the archive is NOT consistent for, rather than overclaiming.
+  expect(page).toMatch(/NOT for a service that was running/)
 })
