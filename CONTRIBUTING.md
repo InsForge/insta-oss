@@ -80,9 +80,11 @@ test/                             no Docker unless the row says so
 ├── internal.test.ts              the loopback tls/ask endpoint
 ├── scheduler.test.ts             sleep, wake, idle sweep, memory pressure (fake timers)
 ├── upstream.test.ts              dialing and readiness (docker mocked)
-├── postgres-adapter.test.ts      the postgres adapter (docker mocked)
+├── postgres-adapter.test.ts      the postgres adapter: fork order, readiness, hba (docker mocked)
 ├── fsclone.test.ts               the reflink copy against a temp dir
-├── datadir-migrate.test.ts       the volume to bind-mount migration (docker mocked)
+├── cgroup-memory.test.ts         the memory ceiling this process reads for itself
+├── docker.test.ts                the docker seam: argv redaction and the output cap
+├── domains.test.ts               the custom-domain routes over the API (fake resolver)
 ├── templates.test.ts             manifest parsing, variables, the bundled catalog
 ├── install.test.ts               install.sh: sh -n and every --print-* rendering
 ├── docs-lint.test.ts             docs copy rules, the docs.json nav, the e2e scripts
