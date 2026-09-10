@@ -139,3 +139,12 @@ test('the session knobs and the cookie name follow the console scheme (WP1)', ()
 test('extraListenHosts is filled by main.ts, never by loadConfig (WP1)', () => {
   expect(loadConfig({ INSTA_OSS_DATA_DIR: tmp() }, []).extraListenHosts).toEqual([])
 })
+
+// The vitest config's own invariant, because it is the only thing standing between CI and two
+// Docker suites racing over `io-garage`, dockerd's address pool and the default state file. It
+// reads `RUN_DOCKER_TESTS` at module load, so this assertion holds in BOTH runs: parallel files
+// for the fake-adapter suites, one file at a time as soon as containers are in play.
+test('RUN_DOCKER_TESTS turns file parallelism off, so the container suites run one at a time', async () => {
+  const cfg = (await import('../vitest.config')).default as { test?: { fileParallelism?: boolean } }
+  expect(cfg.test?.fileParallelism).toBe(!process.env.RUN_DOCKER_TESTS)
+})

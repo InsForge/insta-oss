@@ -130,7 +130,10 @@ container. The engine never talks to Docker for resources except through the ada
 - **Docs copy uses no em dashes.** Commas, colons and periods instead. Enforced by
   `test/docs-lint.test.ts` for the README, COMPATIBILITY, CONTRIBUTING, `docs/` and `e2e/`.
 - **One Docker suite at a time.** The Docker tests and the e2e scripts share container names
-  (`io-<ref>-*` and `io-garage`), so running two at once makes both flaky.
+  (`io-<ref>-*` and `io-garage`), dockerd's address pool and the default state file, so running two
+  at once makes both flaky. `vitest.config.ts` enforces it for `RUN_DOCKER_TESTS=1` runs by turning
+  `fileParallelism` off, so `RUN_DOCKER_TESTS=1 npm test` is safe; an e2e script running beside one
+  is still on you.
 - Match the existing style: small focused modules, comments only for non-obvious constraints.
 
 ## Reporting issues
