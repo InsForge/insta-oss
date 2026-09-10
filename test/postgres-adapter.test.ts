@@ -399,22 +399,32 @@ test('a sleeping source is cloned as it lies: no CHECKPOINT, and the copy still 
   expect(ops).toEqual(['clone:/data/pg/demo-main-db->/data/pg/demo-feat-db'])
 })
 
-test('an unreadable probe never deletes a data directory it cannot prove is an orphan', async () => {
+test('an unreadable probe stops the fork instead of clearing or cloning into the destination', async () => {
   // `clearOrphan` removes a container AND recursively deletes a Postgres data directory. The
   // only evidence it has is docker's answer about that container, and `referenced` is absent on
   // every path where the caller believes it is creating the service. So a probe that could not
   // answer must stop the sweep before both, not after the container half.
+  // The SOURCE is at rest and readable, so `auto` would take the reflink path; only the
+  // DESTINATION's probe cannot answer.
   const { calls, exec } = stubDocker({
-    on: (args) => (args[0] === 'inspect' ? new Error('Cannot connect to the Docker daemon at unix:///var/run/docker.sock') : undefined),
+    stopped: ['io-demo-main-pg-db'],
+    on: (args) => (args[0] === 'inspect' && args[args.length - 1] === 'io-demo-feat-pg-db'
+      ? new Error('Cannot connect to the Docker daemon at unix:///var/run/docker.sock')
+      : undefined),
   })
   const { ops, data } = stubData({ isEmptyOrMissing: async () => false })
-  const pg = new LocalPostgres({ cfg: cfgWith('basebackup'), data, docker: exec })
+  const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
 
-  await expect(pg.fork(src(), dst())).rejects.toThrow()
+  await expect(pg.fork(src(), dst())).rejects.toThrow(/cannot tell whether io-demo-feat-pg-db is an orphan/)
 
-  // Nothing of the destination was destroyed on an unanswered question.
+  // Nothing of the destination was touched on an unanswered question: not the container, not the
+  // bytes, and not by a clone into it either.
   expect(ops.filter((o) => o.startsWith('remove:'))).toEqual([])
   expect(calls.filter((a) => a[0] === 'rm')).toEqual([])
+  expect(ops.filter((o) => o.startsWith('clone:'))).toEqual([])
+  // ...and the failure is NOT swallowed into "try the other copy method": a destination that
+  // could not be cleared is not a reason to stream into it.
+  expect(indexOfMatch(calls, 'pg_basebackup')).toBe(-1)
 })
 
 test('a probe that cannot answer is not evidence the source is at rest', async () => {
@@ -424,8 +434,12 @@ test('a probe that cannot answer is not evidence the source is at rest', async (
   // The explicit no-such-object answer still means "no writer" and still clones, which the
   // sleeping-source case above pins.
   const { ops, data } = stubData()
+  // Only the SOURCE's probe fails: the destination answers, so this is about the source's state
+  // and not about the orphan sweep (the case below).
   const { exec } = stubDocker({
-    on: (args) => (args[0] === 'inspect' ? new Error('Cannot connect to the Docker daemon at unix:///var/run/docker.sock') : undefined),
+    on: (args) => (args[0] === 'inspect' && args[args.length - 1] === 'io-demo-main-pg-db'
+      ? new Error('Cannot connect to the Docker daemon at unix:///var/run/docker.sock')
+      : undefined),
   })
   const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
 

@@ -115,6 +115,9 @@ export class LocalPostgres implements DatabaseAdapter {
         const ms = await this.forkByReflink(src, dst, opts, false)
         return { url: swapHost(src.url, dst.container), method: 'reflink', ms }
       } catch (e) {
+        // Only these three fall back to the stream. Anything else -- an `UnreadableProbeError`
+        // from the orphan sweep above all, since it means the destination could not be cleared --
+        // fails the fork here rather than trying the other copy method against it.
         if (!(e instanceof NoReflinkError) && !(e instanceof TornCopyError) && !(e instanceof RunningSourceError)) throw e
         // `INSTA_OSS_FORK=reflink` is the operator asking to FAIL rather than copy, which is how
         // main.ts already reads it at boot when the probe says this data dir cannot clone. The
@@ -178,8 +181,14 @@ export class LocalPostgres implements DatabaseAdapter {
     // database because docker hiccuped is neither.
     const status = await containerStatus(t.container, this.exec)
     if (status === UNREADABLE) {
-      console.warn(`cannot tell whether ${t.container} is an orphan: docker could not report its state; leaving it and ${t.dataDir ?? 'its data directory'} untouched`)
-      return
+      // THROWS, rather than returning. A return reads as "the sweep is done, carry on", and the
+      // callers act on that: `forkByReflink` would clone into a destination nobody cleared,
+      // which can merge a fresh copy into an interrupted attempt's bytes, and
+      // `forkByBasebackup` would go on to remove that destination if the stream failed. The
+      // operation has to stop instead, and the error is its OWN class so the fork's
+      // fallback-to-stream catch rethrows it: an unanswered probe must never become "try the
+      // other copy method".
+      throw new UnreadableProbeError(`cannot tell whether ${t.container} is an orphan of an interrupted attempt: docker could not report its state, so ${t.dataDir ?? 'the destination'} is left untouched and this operation stops`)
     }
     if (status !== null) {
       console.warn(`removing orphan from an interrupted fork: container ${t.container}`)
@@ -311,6 +320,11 @@ class TornCopyError extends Error {}
 /** Raised when the source is live: a file-level copy of it cannot be crash-consistent, so the fork
  *  streams instead (and `INSTA_OSS_FORK=reflink` refuses rather than producing a torn copy). */
 class RunningSourceError extends Error {}
+
+/** Raised when docker could not report the DESTINATION's state, so the orphan sweep could not
+ *  run. Deliberately not one of the three the fork's fallback catches: there is no other copy
+ *  method to try against a destination nobody could clear, so this fails the operation. */
+class UnreadableProbeError extends Error {}
 
 const sourceIsLive = (container: string, state: string): string =>
   `${container} is ${state}: a file-level clone of a live Postgres data directory is not crash-consistent`
