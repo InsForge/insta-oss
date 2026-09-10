@@ -689,6 +689,38 @@ test('compute restart REDEPLOYS the recorded image (fresh env), and refuses a st
 // puts `exited`/`paused` into the snapshot the idle sweep and the eviction pass reason from: not
 // a missing error but a fabricated runtime fact, on a box that rations RAM by that snapshot.
 
+test('a start that outruns its bound tells the operator the wake is still running', async () => {
+  // `insta compute start` goes through the api door, and that door is bounded like any other
+  // caller now: the wake keeps the operation lock and carries on, so an operator can see a
+  // timeout and then find the service running a moment later. Those two only look like a
+  // contradiction if nothing says so, and the daemon-side warning is not something the person
+  // at the CLI reads. The route puts the engine's message in `error`, which is the field every
+  // other refusal on these routes uses and the one the CLI prints, so this asserts the sentence
+  // survives the whole way out rather than trusting that it does.
+  const cfg = testConfig({ INSTA_OSS_WAKE_TIMEOUT_SEC: '1' })
+  const quick = makeEngine(cfg)
+  const quickApp = buildServer(quick, cfg)
+  const { project } = await quick.createProject('demo')
+  await quick.deploy(project.id, 'main', { image: 'app:1', port: 3000, group: 'web' })
+  await quick.lifecycle(project.id, 'cp-web', 'stop')
+
+  // The adapter's start is a hint that does nothing here, and the scheduler's own start never
+  // returns: the wake is stuck before readiness, which is the window the bound exists for.
+  const adapterStart = vi.spyOn(compute, 'start').mockResolvedValue(undefined)
+  const runtimeStart = vi.spyOn(runtime, 'start').mockImplementation(() => new Promise<void>(() => { /* never */ }))
+  try {
+    const r = await quickApp.inject({ method: 'POST', url: `/projects/${project.id}/services/cp-web/start` })
+    expect(r.statusCode).toBe(400)
+    const { error } = r.json() as { error: string }
+    expect(error).toContain('this request stopped waiting')
+    expect(error).toContain('The wake is still running')
+    expect(error).toContain('insta compute status')
+  } finally {
+    runtimeStart.mockRestore()
+    adapterStart.mockRestore()
+  }
+})
+
 test('a stop the runtime refuses is not reported as a stop', async () => {
   const id = await createProject()
   await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })

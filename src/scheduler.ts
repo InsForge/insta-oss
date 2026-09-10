@@ -61,9 +61,23 @@ export interface Runtime {
 
 /** Traffic asked for a service the developer stopped: the lanes answer 503 and never wake it. */
 export class ServiceStoppedError extends Error { constructor() { super('service is stopped') } }
-/** The container started but never became ready inside `INSTA_OSS_WAKE_TIMEOUT_SEC`. */
+/** The wake ran out of `INSTA_OSS_WAKE_TIMEOUT_SEC`. Two situations, one class, because the
+ *  lanes classify it by class and both are the same answer to a request: `readiness` is the
+ *  container started and never became ready, and `waiting` is this CALLER's budget running out
+ *  while the wake carries on under the operation lock.
+ *
+ *  The second one has to SAY that. `insta compute start` goes through the api door and is bound
+ *  like any other caller now, so an operator can see a timeout and then find the service up a
+ *  moment later; without the sentence those two look like a contradiction, and the fact that the
+ *  wake continues was only ever in a daemon-side warning nobody running the CLI reads. Both
+ *  keep the words `did not become ready`, which is `classifyWakeError`'s fallback when it gets a
+ *  message rather than the error object. */
 export class WakeTimeoutError extends Error {
-  constructor(sec: number) { super(`service did not become ready within ${sec} s`) }
+  constructor(sec: number, phase: 'readiness' | 'waiting' = 'readiness') {
+    super(phase === 'waiting'
+      ? `service did not become ready within ${sec} s, so this request stopped waiting. The wake is still running: the service may come up shortly, so check \`insta compute status\` before retrying`
+      : `service did not become ready within ${sec} s`)
+  }
 }
 /** The lock was taken and the container is not there: a deploy is between `rm -f` and `create`, or
  *  the service is gone. Never `docker start` on a name that does not exist. */
@@ -744,7 +758,7 @@ export class Scheduler {
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         console.warn(`wake ${key} passed its ${sec}s bound; the caller is released and the wake continues under the lock`)
-        reject(new WakeTimeoutError(sec))
+        reject(new WakeTimeoutError(sec, 'waiting'))
       }, sec * 1000)
       timer.unref?.()
       work.then(() => { clearTimeout(timer); resolve() }, (e: unknown) => { clearTimeout(timer); reject(e) })
