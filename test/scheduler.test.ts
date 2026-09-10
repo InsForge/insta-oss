@@ -394,6 +394,27 @@ test('a wake needing room evicts BEFORE it starts: the victim is down before the
     .toBeLessThan(calls.indexOf(`runtime.start:${waking.container}`))
 })
 
+test('a wake with NO victim available still starts: no room found is not a failure', async () => {
+  // The whole fail-closed change above rests on this distinction. `evictForRoom` warns and
+  // returns when it can find nothing to evict, and only THROWS when making room actually broke.
+  // If "no victim" threw, every wake on a box under the floor with one always-on service would
+  // fail instead of running slightly over it, which is the opposite of what the floor is for.
+  const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '50' })
+  const waking = h.add(K)
+  h.runtime.put(waking.container, 'exited')
+  // The only other service is always-on, so it is never a candidate: the pool is empty.
+  const pinned = h.add(K2, { alwaysOn: true })
+  h.runtime.mem = { totalBytes: 1000 * MiB, availableBytes: 100 * MiB }
+  await h.sched.sweep()
+  calls.length = 0
+  vi.advanceTimersByTime(20_000)
+
+  await h.sched.wake(K, { door: 'traffic' })
+
+  expect(calls).toContain(`runtime.start:${waking.container}`)
+  expect(calls.some((c) => c.startsWith(`runtime.stop:${pinned.container}`))).toBe(false)
+})
+
 test('a wake whose eviction FAILS does not start the container anyway', async () => {
   const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '50' })
   const victim = h.add(K2)
