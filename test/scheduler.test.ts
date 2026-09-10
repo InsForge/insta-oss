@@ -381,18 +381,53 @@ test('a sweep whose docker read FAILS stops nothing on the snapshot it already h
   const fresh = harness()
   const t2 = fresh.add(K)
   await fresh.sched.sweep()                                    // seed: running, and stamped now
-  let reads = 0
-  fresh.runtime.containers = async () => { reads++; throw new Error('Cannot connect to the Docker daemon') }
+  fresh.runtime.containers = async () => { throw new Error('Cannot connect to the Docker daemon') }
+  const said: string[] = []
+  const warn = vi.spyOn(console, 'warn').mockImplementation((m: unknown) => { said.push(String(m)) })
   calls.length = 0
   vi.advanceTimersByTime(301_000)                              // idle, and the snapshot is old
-  await fresh.sched.sweep()
+  try {
+    await fresh.sched.sweep()
+  } finally {
+    warn.mockRestore()
+  }
 
-  // ONE read: the refresh. A second one means the pass took the stale `running` as a candidate
-  // and went into `sleep()`, whose own re-read under the lock is what caught it there -- a
-  // backstop, not a decision. The decision is not taken on a fact this daemon cannot vouch for.
-  expect(reads).toBe(1)
+  // The pass never entered `sleep()`: that would have re-read under the lock, failed, and said
+  // so. Its re-read is a backstop, not a decision, and the decision is not taken on a fact this
+  // daemon cannot vouch for. (The read failure itself IS reported, once.)
+  expect(said.filter((m) => m.startsWith('warn: sleep '))).toEqual([])
+  expect(said.some((m) => m.includes('could not read container states'))).toBe(true)
   expect(calls.filter((c) => c.startsWith('runtime.stop:'))).toEqual([])
   expect(t2.sleptAt ?? null).toBeNull()
+})
+
+test('the pressure pass evicts after a REALISTIC sleep phase, not only against a fresh snapshot', async () => {
+  // Every other eviction case here runs the pressure pass moments after the sweep's own read,
+  // which is why a freshness gate that can never pass in production still looked fine. In a
+  // real sweep the sleep phase comes first and AWAITS a stop per candidate, each able to burn
+  // its whole grace (10 s compute, 30 s databases), so the pass is reached minutes after that
+  // read. Gating `isVictim` on evidence that is stale by construction at the point of use
+  // turned memory-pressure eviction off entirely, with docker answering every call.
+  const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '50' })
+  for (let i = 0; i < 12; i++) h.add(`${'2'.repeat(8)}-2222-2222-2222-${'2'.repeat(12)}:cp-idle${i}`)
+  // Not an idle candidate (touched inside its idle window) and still a victim (no traffic right
+  // now): what the pressure pass exists to reach once the idle ones are already asleep.
+  const busy = h.add(K)
+  h.runtime.mem = { totalBytes: 1000 * MiB, availableBytes: 100 * MiB }
+  vi.advanceTimersByTime(301_000)
+  h.sched.touch(busy.key)
+  vi.advanceTimersByTime(20_000)
+
+  // Each stop burns its grace, which is what makes the snapshot old by the time the pass runs.
+  const realStop = h.runtime.stop.bind(h.runtime)
+  h.runtime.stop = async (container, grace) => { vi.advanceTimersByTime(10_000); return realStop(container, grace) }
+  calls.length = 0
+  await h.sched.sweep()
+
+  // The twelve idle ones slept, and the pass that follows them still evicted.
+  expect(calls.filter((c) => c.startsWith('runtime.stop:')).length).toBe(13)
+  expect(calls).toContain(`runtime.stop:${busy.container}:10`)
+  expect(h.slept.map(([key]) => key)).toContain(busy.key)
 })
 
 test('nothing can START while the floor cannot be enforced, so skipping the pass is bounded', async () => {
@@ -471,6 +506,36 @@ test('eviction keeps going past 32 victims: the old cap gave up with the floor u
   expect(calls).toContain(`runtime.start:${waking.container}`)
   // ...and it stopped when the floor was met rather than emptying the pool.
   expect(stopped).toBeLessThan(45)
+})
+
+test('a long eviction pass re-dates its evidence as it goes, instead of going blind mid-loop', async () => {
+  // The other half of the same defect, and the half a single read before the pass does not
+  // cover: each turn AWAITS a stop, so a pass that needs forty of them takes minutes of clock.
+  // The freshness gate is re-evaluated every turn, so evidence dated once at the top goes stale
+  // around turn six and the pool empties with the floor unmet -- which reads as "no service can
+  // be evicted" while a dozen are running. Every full `containers()` read re-dates the whole
+  // snapshot, and `sleep()` makes one per turn, so the pass stays sighted for its whole length.
+  const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '50' })
+  const waking = h.add(K)
+  h.runtime.put(waking.container, 'exited')
+  h.runtime.rss.set(waking.container, 5 * MiB)
+  for (let i = 0; i < 45; i++) {
+    const v = h.add(`22222222-2222-2222-2222-222222222222:cp-v${i}`)
+    h.runtime.rss.set(v.container, 10 * MiB)
+  }
+  await h.sched.sweep()                                       // seeds lastRssBytes; memory() is null, so no pressure pass
+  h.runtime.mem = { totalBytes: 1000 * MiB, availableBytes: 100 * MiB }
+  const realStop = h.runtime.stop.bind(h.runtime)
+  h.runtime.stop = async (container, grace) => { vi.advanceTimersByTime(10_000); return realStop(container, grace) }
+  calls.length = 0
+  vi.advanceTimersByTime(20_000)                              // past the no-recent-traffic guard
+
+  await h.sched.wake(K, { door: 'traffic' })
+
+  // The same 41 the fixed ceiling case needs, over a pass that now spans seven minutes.
+  const stopped = calls.filter((c) => c.startsWith('runtime.stop:')).length
+  expect(stopped).toBeGreaterThanOrEqual(41)
+  expect(calls).toContain(`runtime.start:${waking.container}`)
 })
 
 test('eviction does not give up when the target set grows under it', async () => {

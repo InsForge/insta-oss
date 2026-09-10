@@ -269,7 +269,7 @@ export class Scheduler {
    *  each call is a full `docker ps -a`. */
   async containerSnapshot(): Promise<Set<string> | null> {
     try {
-      return new Set((await this.runtime.containers()).keys())
+      return new Set(this.absorb(await this.runtime.containers()).keys())
     } catch {
       return null
     }
@@ -277,10 +277,22 @@ export class Scheduler {
 
   async containerPresence(container: string): Promise<'present' | 'gone' | 'unknown'> {
     try {
-      return (await this.runtime.containers()).has(container) ? 'present' : 'gone'
+      return this.absorb(await this.runtime.containers()).has(container) ? 'present' : 'gone'
     } catch {
       return 'unknown'
     }
+  }
+
+  /** Take a FULL `docker ps -a` listing as the snapshot, dated now, and hand it back to the
+   *  caller. Every full read goes through here, whoever made it and whatever they wanted from
+   *  it: a read that proves what is running re-dates everything it saw, not just the one entry
+   *  its caller asked about. That is what keeps the freshness gate below from being evaluated
+   *  against a read that a docker recovery, a stop grace or an eviction turn has since made old.
+   *  Containers absent from a full listing are gone, so they leave the snapshot with it. */
+  private absorb(containers: Map<string, { state: ContainerState; id: string }>): Map<string, { state: ContainerState; id: string; at: number }> {
+    const at = Date.now()
+    this.stateCache = new Map([...containers].map(([name, c]) => [name, { ...c, at }]))
+    return this.stateCache
   }
 
   /** True while any operation holds or waits on the key (the sweep's in-flight test). */
@@ -362,8 +374,7 @@ export class Scheduler {
       return
     }
     this.statesReadable = true
-    const at = Date.now()
-    this.stateCache = new Map([...containers].map(([name, c]) => [name, { ...c, at }]))
+    this.absorb(containers)
     for (const [name, { id }] of containers) if (id) this.upstream.forgetIfChanged(name, id)
   }
 
@@ -485,6 +496,16 @@ export class Scheduler {
         }
       }
     }
+    // Re-read BEFORE the pressure pass, not once for the whole sweep. The sleep phase above
+    // awaits a stop per candidate and each can burn its grace (10 s compute, 30 s databases), so
+    // with a dozen candidates this line is reached minutes after the sweep's own read -- past
+    // the freshness bound `isVictim` applies, every time, on a box where nothing at all went
+    // wrong. Gating eviction on evidence that is stale BY CONSTRUCTION at the point of use
+    // turned the memory floor off. The gate is right and the reading was in the wrong place.
+    // One extra `docker ps -a` per sweep tick, next to a phase that just spent seconds stopping
+    // containers; if it fails, the pass finds no dateable victim and says so, which is the
+    // intended behaviour rather than a new one.
+    await this.refreshStates()
     await this.evictForRoom(0, new Set())
   }
 
@@ -515,12 +536,13 @@ export class Scheduler {
       // container that is shutting down.
       this.sleeping.add(key)
       try {
-        const entry = (await this.runtime.containers()).get(t.container)
-        const live = entry?.state
-        // The re-read under the lock is also the freshest truth there is: keep the snapshot in step,
-        // so a container that has gone away is not reported running until the next sweep.
-        if (entry) this.stateCache.set(t.container, { ...entry, at: Date.now() })
-        else this.stateCache.delete(t.container)
+        // The re-read under the lock is also the freshest truth there is, and it is a FULL
+        // listing, so the whole snapshot is taken from it: a container that has gone away is not
+        // reported running until the next sweep, and every stop in a sleep phase or an eviction
+        // loop re-dates the pass that follows it. That last part is load-bearing -- each stop
+        // can burn its whole grace, so a pass that dated its evidence once at the top would be
+        // judging the last of its candidates against a read a minute old.
+        const live = this.absorb(await this.runtime.containers()).get(t.container)?.state
         if (live === 'paused') return false
         if (live === undefined) return false
         if (live !== 'running') {
@@ -666,9 +688,12 @@ export class Scheduler {
     const t = this.targetOf(key)
     if (!t) throw new NoTargetError()
     if (this.refuses(t, door)) throw new ServiceStoppedError()
-    const live = (await this.runtime.containers()).get(t.container)
+    // A full listing, so it re-dates the whole snapshot rather than the one container this wake
+    // wanted: after a docker outage this read is the very evidence that the daemon is answering
+    // again, and keeping only one entry left the eviction pool undateable and the floor
+    // unenforced for the wake that needed it most.
+    const live = this.absorb(await this.runtime.containers()).get(t.container)
     if (!live) throw new NoContainerError()
-    this.stateCache.set(t.container, { ...live, at: Date.now() })
     if (live.state === 'running') {
       // A deploy that ended in `onUp` makes this wake a no-op: stamp and go.
       if (await this.runtime.probe(t)) {
