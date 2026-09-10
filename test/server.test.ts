@@ -2147,6 +2147,53 @@ test('a create whose CLEANUP fails keeps a row naming the resources, and the del
   await assertRetryWorks(id)
 })
 
+test('a network that refuses to go is a FAILED teardown, so the row is kept rather than dropped', async () => {
+  const id = await sourceWithEveryStep()
+  const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
+  // Every container, bucket and directory goes; only the NETWORK refuses, the way dockerd refuses
+  // one that still has an endpoint attached. That used to be swallowed whole -- the counter never
+  // saw it, `unwindBranch` read `failed: 0`, and the row was deleted over a network that is still
+  // standing and that nothing will ever come back for.
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) => {
+    if (args[0] === 'network' && args[1] === 'rm') throw new Error('network io-demo-feat has active endpoints')
+    return Buffer.from('')   // `network inspect` succeeds: the network is still there
+  })
+
+  const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
+  expect(bad.statusCode).toBeGreaterThanOrEqual(400)
+  cloneInto.mockRestore()
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+
+  // The row stays, marked, so the leftover network has something naming it and `branch delete`
+  // can retry the demolition.
+  const row = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')
+  expect(row?.status).toBe('cleanup-failed')
+  expect(bad.json().error).toContain('cleanup-failed')
+  const ev = loadState().events.filter((e) => e.kind === 'branch.cleanupFailed')
+  expect(ev).toHaveLength(1)
+  expect((ev[0].payload as { teardown: { failed: number } }).teardown.failed).toBe(1)
+})
+
+test('a network that was already gone is not counted as a failure', async () => {
+  const id = await sourceWithEveryStep()
+  // `network rm` fails because there is nothing to remove, which is the ordinary outcome of a
+  // retried teardown. Counting that would report a clean delete as failed for ever after.
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) => {
+    if (args[0] === 'network' && (args[1] === 'rm' || args[1] === 'inspect')) throw new Error('Error: No such network')
+    return Buffer.from('')
+  })
+  const bid = await branchOf(id, 'main')
+  await post(`/projects/${id}/branches`, { name: 'feat' })
+  const featId = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')!.id
+  expect(featId).not.toBe(bid)
+
+  const del = await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${featId}` })
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  expect(del.statusCode).toBe(200)
+  expect(del.json().teardown.failed).toBe(0)
+  expect(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual(['main'])
+})
+
 /** Let queued microtasks and timers run, so anything that COULD proceed already has. */
 const settle = async (): Promise<void> => { for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0)) }
 

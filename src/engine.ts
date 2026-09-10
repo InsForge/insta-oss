@@ -80,6 +80,39 @@ const newTeardown = (): Teardown => ({ destroyed: 0, failed: 0 })
 async function count(t: Teardown, fn: () => Promise<unknown>): Promise<void> {
   try { await fn(); t.destroyed++ } catch { t.failed++ }
 }
+/** `docker network rm`, where ALREADY GONE is the ordinary outcome and not a failure: a create
+ *  that never got as far as making one, a delete retried after a partial teardown, a network an
+ *  operator removed by hand. A network that is STILL THERE after the attempt is the failure that
+ *  matters -- dockerd refuses while a container is attached -- and that is the one the caller has
+ *  to count, so the two are told apart by asking dockerd rather than by matching its wording. */
+async function removeNetwork(network: string): Promise<void> {
+  try {
+    await docker(['network', 'rm', network])
+  } catch (e) {
+    if (await networkExists(network)) throw e
+  }
+}
+
+async function networkExists(network: string): Promise<boolean> {
+  try {
+    await docker(['network', 'inspect', '-f', '{{.Id}}', network])
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** A teardown step whose SUCCESS is not a provider object the summary counts -- decision 50 counts
+ *  containers, buckets and directories, and neither the branch network nor the object store's
+ *  detach from it is one of those -- but whose FAILURE still means the branch is not gone.
+ *  `unwindBranch` reads `t.failed` to decide whether the row may be dropped, so a step that
+ *  swallows its own failure is a row deleted over a network that is still standing. */
+async function countFailure(t: Teardown, what: string, fn: () => Promise<unknown>): Promise<void> {
+  try { await fn() } catch (e) {
+    t.failed++
+    console.warn(`could not ${what}: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
 // ---- end region WP5 ----
 
 /** The registration surface the engine drives on every provision, teardown and rename. WP3 replaced
@@ -2110,10 +2143,13 @@ export class Engine {
     // The object store is ONE container for the whole box, attached to this branch's network: it is
     // detached once, after every bucket on the network is gone (a per-bucket detach would strand the
     // purge of the next one), and before `network rm`, which refuses while anything is attached.
-    if (this.storage.detachFrom) await this.storage.detachFrom(b.network).catch(() => {})
+    // Counted, not swallowed: a detach that failed leaves the store attached and the `network rm`
+    // below refuses while anything is, so both of these decide whether this branch is actually
+    // gone -- which is what `unwindBranch` reads the counter for.
+    if (this.storage.detachFrom) await countFailure(t, `detach the object store from ${b.network}`, () => this.storage.detachFrom!(b.network))
     const managed = this.managedList(project.id).filter((m) => this.carries(project, b, m, 'managed'))
     for (const m of managed) await count(t, () => this.managedDb.destroy(managedContainerName(ref, m.type, m.name)))
-    try { await docker(['network', 'rm', b.network]) } catch { /* gone */ }
+    await countFailure(t, `remove network ${b.network}`, () => removeNetwork(b.network))
     // WP4: the branch's bytes, after every container that held them. A remove failure is counted and
     // never fails the delete (an unreadable directory must not wedge `insta branch delete`).
     for (const root of this.layout().branchRoots(ref)) {
