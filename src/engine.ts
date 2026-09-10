@@ -1826,11 +1826,18 @@ export class Engine {
       }
       const owner = `${projectId}:cp-${oldName}->cp-${newName}`
       this.reserveHosts([...minted.values()].map((m) => m.newLabel), owner)
+      const done: Array<{ label: string; back: () => Promise<void> }> = []
       try {
-        for (const b of deployed) await this.compute.rename!(this.ref(project, b), oldName, newName)
+        for (const b of deployed) {
+          const ref = this.ref(project, b)
+          if (!(await this.renameNeeded(appContainerName(ref, oldName), appContainerName(ref, newName)))) continue
+          await this.compute.rename!(ref, oldName, newName)
+          done.push({ label: `${appContainerName(ref, newName)} (branch ${b.name})`, back: () => this.compute.rename!(ref, newName, oldName) })
+        }
       } catch (e) {
+        const stuck = await this.undoRenames(done)
         this.releaseHosts(owner)
-        throw e
+        throw this.renameFailure(e, stuck, `\`insta services rename cp-${oldName} ${newName}\``)
       }
       mutate((st) => {
         const pr = st.projects[projectId]
@@ -2122,15 +2129,20 @@ export class Engine {
     const owner = `${projectId}:${serviceId}->${newId}`
     const newLabel = new Map(carriers.map((b) => [b.id, this.labelFor(m.type, newName, this.ref(project, b))]))
     this.reserveHosts([...newLabel.values()], owner)
+    const done: Array<{ label: string; back: () => Promise<void> }> = []
     try {
       for (const b of carriers) {
         const ref = this.ref(project, b)
-        await this.managedDb.rename(managedContainerName(ref, m.type, m.name), managedContainerName(ref, m.type, newName))
-        this.scheduler.rekey(this.serviceKey(b, serviceId), this.serviceKey(b, newId)) // WP3
+        const from = managedContainerName(ref, m.type, m.name)
+        const to = managedContainerName(ref, m.type, newName)
+        if (!(await this.renameNeeded(from, to))) continue
+        await this.managedDb.rename(from, to)
+        done.push({ label: `${to} (branch ${b.name})`, back: () => this.managedDb.rename(to, from) })
       }
     } catch (e) {
+      const stuck = await this.undoRenames(done)
       this.releaseHosts(owner)
-      throw e
+      throw this.renameFailure(e, stuck, `\`insta services rename ${serviceId} ${newName}\``)
     }
     mutate((st) => {
       const pr = st.projects[projectId]
@@ -2146,6 +2158,10 @@ export class Engine {
         if (u.service === `${m.type}/${m.name}`) u.service = `${m.type}/${newName}`
       }
     })
+    // AFTER the records, like the compute path: the ledger key embeds the service id, and moving
+    // it while the rows still name the old id left the scheduler keyed to something no reader
+    // resolved for the length of the write, and keyed to it for good if the write never came.
+    for (const b of carriers) this.scheduler.rekey(this.serviceKey(b, serviceId), this.serviceKey(b, newId)) // WP3
     this.emit(projectId, null, 'resource', 'service.rename', { type: m.type, from: m.name, to: newName })
     return this.managedRow({ id: newId, type: m.type, name: newName })
   }
@@ -3497,6 +3513,60 @@ export class Engine {
       ? 'Re-run `insta project delete` to retry the teardown'
       : `Run \`insta branch delete ${branch.name}\` to retry the teardown`
     throw new Error(`branch "${branch.name}" is ${CLEANUP_FAILED}: its teardown did not finish, so it cannot be ${what}. ${retry}`)
+  }
+
+  /** Does this branch's container still need renaming? Decided on EVIDENCE, three ways, like
+   *  every other probe here: dockerd saying the OLD name is there means yes; saying it is not,
+   *  with the new name present (or with neither present, a row naming a container that is
+   *  already gone), means this branch is done; a probe that cannot answer stops the operation
+   *  rather than guessing, because both guesses are wrong -- renaming again fails, and skipping
+   *  leaves a container behind under the old name with the row saying otherwise.
+   *
+   *  This is what makes a multi-branch rename RESUMABLE: the containers are the record, so a
+   *  retry of the same command finishes a rename that stopped partway, whatever happened to the
+   *  compensation below. */
+  private async renameNeeded(from: string, to: string): Promise<boolean> {
+    const before = await this.scheduler.containerPresence(from)
+    if (before === 'present') return true
+    if (before === 'unknown') throw new Error(`docker could not report whether ${from} is still there, so this rename stopped rather than guessing`)
+    const after = await this.scheduler.containerPresence(to)
+    if (after === 'unknown') throw new Error(`docker could not report whether ${to} exists, so this rename stopped rather than guessing`)
+    return false
+  }
+
+  /** Undo the container renames a failed multi-branch rename had already made, newest first.
+   *
+   *  The lock makes a rename EXCLUSIVE; it does not make a sequence of docker calls atomic, and
+   *  that is the whole of this. The state write happens only after every branch's container has
+   *  moved, so a failure partway used to leave state naming the old container on every branch
+   *  while some containers already carried the new one: routing and lifecycle then addressed a
+   *  container that does not exist, a teardown proved the old name gone and dropped the row
+   *  over a live container under the new one, and the retry could not win either way.
+   *
+   *  Compensating is chosen over persisting a rename-in-flight record because the alternative
+   *  means a new state shape that every reader of a service name would have to understand, at
+   *  the end of this branch, on the path a late structural change has already cost us once. The
+   *  compensation can itself fail -- docker is misbehaving, that is why we are here -- so it
+   *  NEVER replaces the original error: what it could not undo is named alongside it, and the
+   *  forward pass is resumable, so re-running the same rename finishes the job from wherever it
+   *  actually stands. */
+  private async undoRenames(done: Array<{ label: string; back: () => Promise<void> }>): Promise<string[]> {
+    const stuck: string[] = []
+    for (const step of [...done].reverse()) {
+      try {
+        await step.back()
+      } catch (e) {
+        stuck.push(`${step.label} (${e instanceof Error ? e.message : String(e)})`)
+      }
+    }
+    return stuck
+  }
+
+  /** The error a partial rename answers with: the reason it stopped, plus what is still moved. */
+  private renameFailure(e: unknown, stuck: string[], retry: string): Error {
+    const why = e instanceof Error ? e.message : String(e)
+    if (!stuck.length) return new Error(`${why}. Nothing was renamed: every container this call had already moved was moved back`)
+    return new Error(`${why}. These containers could NOT be moved back and still carry the new name: ${stuck.join('; ')}. Nothing in the project's records changed, and re-running ${retry} finishes the rename from where it stands`)
   }
 
   /** What a service RENAME holds: every branch's branch key and its key for this service.

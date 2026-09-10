@@ -689,6 +689,138 @@ test('compute restart REDEPLOYS the recorded image (fresh env), and refuses a st
 // puts `exited`/`paused` into the snapshot the idle sweep and the eviction pass reason from: not
 // a missing error but a fabricated runtime fact, on a box that rations RAM by that snapshot.
 
+// A multi-branch rename is a SEQUENCE of docker calls under one lock. The lock makes it
+// exclusive; it does not make it atomic, and the records were written only after every branch's
+// container had moved. A failure partway therefore left state naming the old container on every
+// branch while some containers already carried the new one: routing and lifecycle addressed a
+// container that does not exist, a teardown proved the old name gone and dropped the row over a
+// live container under the new one, and the retry could not win either way.
+
+test('a MANAGED rename that fails on the second branch moves its containers back too', async () => {
+  // The managed path has the same shape and the same fix, and it had one more problem of its
+  // own: it moved the scheduler's ledger key inside the loop, before any record was written, so
+  // a failure left the ledger keyed to a service id nothing resolved. The rekey now happens
+  // after the records, as the compute path already did it.
+  const id = await createProject()
+  expect((await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })).statusCode).toBe(201)
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  calls.length = 0
+
+  const real = managed.rename!.bind(managed)
+  const rename = vi.spyOn(managed, 'rename').mockImplementation(async (container: string, to: string) => {
+    if (container.includes('demo-feat')) throw new Error('docker refused the rename')
+    return real(container, to)
+  })
+  let r
+  try {
+    r = await post(`/projects/${id}/services/rd-cache/rename`, { name: 'kv' })
+  } finally {
+    rename.mockRestore()
+  }
+  expect(r.statusCode).toBeGreaterThanOrEqual(400)
+  expect(r.json().error).toContain('docker refused the rename')
+  expect(r.json().error).toContain('Nothing was renamed')
+
+  for (const ref of ['demo-main', 'demo-feat']) {
+    expect(runtime.stateOfContainer(`io-${ref}-rd-cache`), ref).toBeDefined()
+    expect(runtime.stateOfContainer(`io-${ref}-rd-kv`), ref).toBeUndefined()
+  }
+  // The records never moved either, so the service is still addressable by the id it had.
+  expect((await get(`/projects/${id}/services`)).json().services.some((x: { id: string }) => x.id === 'rd-cache')).toBe(true)
+  expect((await post(`/projects/${id}/services/rd-cache/rename`, { name: 'kv' })).statusCode).toBe(200)
+})
+
+test('a rename that fails on the SECOND branch moves every container back', async () => {
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  calls.length = 0
+
+  const real = compute.rename!.bind(compute)
+  const rename = vi.spyOn(compute, 'rename').mockImplementation(async (ref: string, from: string, to: string) => {
+    if (ref.includes('feat') && to === 'api') throw new Error('docker refused the rename')
+    return real(ref, from, to)
+  })
+  let r
+  try {
+    r = await post(`/projects/${id}/services/cp-web/rename`, { name: 'api' })
+  } finally {
+    rename.mockRestore()
+  }
+  expect(r.statusCode).toBeGreaterThanOrEqual(400)
+  expect(r.json().error).toContain('docker refused the rename')
+  expect(r.json().error).toContain('Nothing was renamed')
+
+  // Every branch is internally consistent again: the row and the container agree, on the OLD
+  // name, everywhere.
+  for (const ref of ['demo-main', 'demo-feat']) {
+    expect(runtime.stateOfContainer(`io-${ref}-app-web`), ref).toBeDefined()
+    expect(runtime.stateOfContainer(`io-${ref}-app-api`), ref).toBeUndefined()
+  }
+  // The clone's copy is asleep from birth, so what matters is that the row is still the OLD
+  // name and still has a container behind it, not which of the two live states it is in.
+  const rows = (await get(`/projects/${id}/services?branch=feat`)).json().services as Array<{ name: string; runtime?: string }>
+  expect(rows.find((x) => x.name === 'web')?.runtime).not.toBe('none')
+  expect(rows.some((x) => x.name === 'api')).toBe(false)
+
+  // Routing still resolves, cleanup still finds the container it names...
+  const feat = await branchOf(id, 'feat')
+  const del = await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${feat}` })
+  expect(del.statusCode).toBe(200)
+  expect(del.json().teardown.failed).toBe(0)
+  expect(runtime.stateOfContainer('io-demo-feat-app-web')).toBeUndefined()
+
+  // ...and the same rename, run again, works.
+  expect((await post(`/projects/${id}/services/cp-web/rename`, { name: 'api' })).statusCode).toBe(200)
+  expect(runtime.stateOfContainer('io-demo-main-app-api')).toBeDefined()
+})
+
+test('a rename whose UNDO also fails names what is stuck, and the retry finishes it', async () => {
+  // The compensation can fail too: docker is misbehaving, that is why we are here. It must not
+  // replace the original error, and what it could not move back has to be named -- and the
+  // forward pass reads the CONTAINERS rather than assuming, so re-running the same command
+  // renames only the branches that still need it.
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  calls.length = 0
+
+  const real = compute.rename!.bind(compute)
+  const rename = vi.spyOn(compute, 'rename').mockImplementation(async (ref: string, from: string, to: string) => {
+    if (ref.includes('feat') && to === 'api') throw new Error('docker refused the rename')
+    if (to === 'web') throw new Error('and refused to move it back')      // the undo
+    return real(ref, from, to)
+  })
+  let r
+  try {
+    r = await post(`/projects/${id}/services/cp-web/rename`, { name: 'api' })
+  } finally {
+    rename.mockRestore()
+  }
+  expect(r.statusCode).toBeGreaterThanOrEqual(400)
+  const { error } = r.json() as { error: string }
+  expect(error).toContain('docker refused the rename')            // the original, first
+  expect(error).toContain('and refused to move it back')          // ...and what is stuck
+  expect(error).toContain('io-demo-main-app-api (branch main)')
+  expect(error).toContain('re-running')
+
+  // main is left carrying the new container name with the records unchanged, which is exactly
+  // the state the retry is built to read.
+  expect(runtime.stateOfContainer('io-demo-main-app-api')).toBeDefined()
+  expect(runtime.stateOfContainer('io-demo-feat-app-web')).toBeDefined()
+
+  calls.length = 0
+  const again = await post(`/projects/${id}/services/cp-web/rename`, { name: 'api' })
+  expect(again.statusCode).toBe(200)
+  // main was already renamed and is NOT renamed twice; feat is the only one that moves.
+  expect(calls.filter((c) => c.startsWith('compute.rename:demo-main:'))).toEqual([])
+  expect(calls).toContain('compute.rename:demo-feat:web->api')
+  for (const ref of ['demo-main', 'demo-feat']) {
+    expect(runtime.stateOfContainer(`io-${ref}-app-api`), ref).toBeDefined()
+    expect(runtime.stateOfContainer(`io-${ref}-app-web`), ref).toBeUndefined()
+  }
+  const rows = (await get(`/projects/${id}/services?branch=feat`)).json().services as Array<{ name: string; runtime?: string }>
+  expect(rows.find((x) => x.name === 'api')?.runtime).not.toBe('none')
+})
+
 test('a volume delete on a SUSPENDED service succeeds, and leaves it suspended', async () => {
   // `removeServiceVolumeLocked` redeployed each branch without the mount and then re-asserted
   // the recorded intent itself -- but `deploy()` already re-asserts it, with the exact verb, on
