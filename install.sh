@@ -346,8 +346,10 @@ if [ "$TLS" = custom ]; then
       die "'$TLS_KEY' is not a PEM private key openssl can read"
     _cpub=$(openssl x509 -in "$TLS_CERT" -noout -pubkey 2>/dev/null)
     _kpub=$(openssl pkey -in "$TLS_KEY" -pubout 2>/dev/null)
-    [ -n "$_cpub" ] && [ "$_cpub" = "$_kpub" ] ||
+    # An explicit `if`: `A && B || C` reads as if-then-else and is not one (shellcheck SC2015).
+    if [ -z "$_cpub" ] || [ "$_cpub" != "$_kpub" ]; then
       die "'$TLS_KEY' is not the key for '$TLS_CERT' (their public keys differ): the edge would fail to load the pair and crash-loop"
+    fi
     openssl x509 -in "$TLS_CERT" -noout -checkend 0 >/dev/null 2>&1 ||
       die "'$TLS_CERT' has already expired ($(openssl x509 -in "$TLS_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)); replace it before installing"
     # Every name this install will actually serve. A wildcard covers all three; a certificate for

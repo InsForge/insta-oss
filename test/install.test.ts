@@ -252,15 +252,17 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
   const wild = join(dir, 'wild.crt')
   const apex = join(dir, 'apex.crt')
   const wrong = join(dir, 'wrong.crt')
-  const expired = join(dir, 'expired.crt')
+  // Committed rather than minted: OpenSSL only grew `req -not_before/-not_after` in 3.5, and the
+  // CI runner's 3.0 cannot mint an expired certificate at all. The fixture is the portable way
+  // to exercise the installer's refusal, and it is a self-signed pair for a test domain.
+  const expired = join(ROOT, 'test', 'fixtures', 'tls', 'expired.crt')
+  const expiredKey = join(ROOT, 'test', 'fixtures', 'tls', 'expired.key')
   const mismatched = join(dir, 'mismatched.crt')
   const junk = join(dir, 'junk.crt')
   try {
     openssl(`openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${key} -out ${wild} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:example.test' 2>/dev/null`)
     openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${apex} -subj '/CN=example.test' -addext 'subjectAltName=DNS:example.test' 2>/dev/null`)
     openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${wrong} -subj '/CN=*.elsewhere.test' -addext 'subjectAltName=DNS:*.elsewhere.test' 2>/dev/null`)
-    // `-days 1` with a start date in the past is the portable way to get an expired one.
-    openssl(`openssl req -x509 -key ${key} -sha256 -not_before 20200101000000Z -not_after 20200102000000Z -out ${expired} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`)
     openssl(`openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${other} -out ${mismatched} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`)
     writeFileSync(junk, 'this is not a certificate\n')
 
@@ -268,7 +270,7 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
       [junk, key, 'not a PEM certificate'],
       [wild, junk, 'not a PEM private key'],
       [mismatched, key, 'is not the key for'],
-      [expired, key, 'has already expired'],
+      [expired, expiredKey, 'has already expired'],
       [apex, key, 'does not cover api.example.test'],
       [wrong, key, 'does not cover api.example.test'],
     ]
