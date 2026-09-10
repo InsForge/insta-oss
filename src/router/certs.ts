@@ -66,7 +66,7 @@ export const WARN_EVERY_MS = 6 * 60 * 60 * 1000
 export function warnExpiring(cert: SuppliedCert | null, log: (m: string) => void = (m) => console.warn(m)): boolean {
   if (!cert) return false
   if (cert.secondsLeft <= 0) {
-    log(`the TLS certificate ${cert.path} EXPIRED on ${cert.notAfter}: every browser and psql client is now refusing this box. Replace both files and restart the edge (docker compose -f /etc/instacloud/compose.yml restart edge)`)
+    log(`the TLS certificate ${cert.path} EXPIRED on ${cert.notAfter}: every browser and psql client is now refusing this box. Replace both files and restart the edge (cd /etc/instacloud && docker compose --env-file instad.env restart edge)`)
     return true
   }
   if (cert.daysLeft <= CERT_WARN_DAYS) {

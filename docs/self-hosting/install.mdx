@@ -334,9 +334,9 @@ What you take on:
   is what renewal tooling does:
 
   ```bash
-  # your tool writes wild.crt.new / wild.key.new into /etc/instacloud/tls, then:
-  mv -f /etc/instacloud/tls/wild.crt.new /etc/instacloud/tls/wild.crt
-  mv -f /etc/instacloud/tls/wild.key.new /etc/instacloud/tls/wild.key
+  # your tool writes wildcard.crt.new / wildcard.key.new into /etc/instacloud/tls, then:
+  mv -f /etc/instacloud/tls/wildcard.crt.new /etc/instacloud/tls/wildcard.crt
+  mv -f /etc/instacloud/tls/wildcard.key.new /etc/instacloud/tls/wildcard.key
   cd /etc/instacloud && docker compose --env-file instad.env restart edge
   ```
 
