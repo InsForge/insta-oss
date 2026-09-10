@@ -446,8 +446,15 @@ export class Engine {
   /** Create a project and its default branch. EMPTY, like the cloud (`resources: []`): nothing is
    *  registered, so `provisionBranch` provisions nothing and the caller adds services next. */
   async createProject(name: string): Promise<{ project: Project; defaultBranch: Branch }> {
-    return this.serialize('provision', async () => {
-      const project: Project = { id: randomUUID(), name, status: 'ready', createdAt: Date.now(), refSlug: slug(name) }
+    // The project id is minted here so its `projectOp` key exists before the row does, for the
+    // same reason `createBranch` mints the branch id first: the default branch is a branch being
+    // created, and a delete of this project must not run between the project row appearing and
+    // that branch's row being committed. The key is taken OUTSIDE the provision chain, which is
+    // the order every other taker uses (`withOp` outer, `serialize` inner), so the two can never
+    // be acquired in opposite orders.
+    const id = randomUUID()
+    return this.withOp([this.projectOp(id)], () => this.serialize('provision', async () => {
+      const project: Project = { id, name, status: 'ready', createdAt: Date.now(), refSlug: slug(name) }
       // Both uniqueness checks and the insert in ONE synchronous mutate, inside the provision
       // chain: two concurrent creates of the same name or slug cannot both pass the check
       // (decision 51). Slugs are frozen per project and outlive renames, so a NEW project must not
@@ -470,7 +477,7 @@ export class Engine {
         mutate((s) => { delete s.projects[project.id] })
         throw e
       }
-    })
+    }))
   }
 
   async createBranch(projectId: string, name: string, from?: string): Promise<Branch> {
@@ -497,6 +504,9 @@ export class Engine {
     const ids = this.carriedServiceIds(project, source)
     const groups = Object.keys(source.apps)
     const keys = [
+      // The project key too: until the row is committed there is no branch key a project delete
+      // could collide with, so this is what keeps the clone out of the gap in its branch list.
+      this.projectOp(project),
       this.branchOp(source),
       ...ids.map((sid) => `${source.id}:${sid}`),
       ...groups.map((g) => `${source.id}:cp-${g}`),
@@ -509,6 +519,13 @@ export class Engine {
 
   private async createBranchLocked(project: Project, name: string, source: Branch, branchId: string): Promise<Branch> {
     const projectId = project.id
+    // Everything above was read BEFORE the lock. A project delete holding the same project key
+    // may have run in between and taken this project, this source branch or both with it, so the
+    // create re-reads them here rather than provisioning a stack onto rows that no longer exist:
+    // the containers, buckets and bytes it would build have nothing left that names them.
+    if (!this.getProject(projectId)) throw new Error('project not found')
+    if (!loadState().branches[source.id]) throw new Error(`source branch "${source.name}" not found`)
+    if (this.getBranchByName(projectId, name)) throw new Error(`branch "${name}" already exists`)
     // Each database forks inside provisionBranch (db.fork); each bucket copies here; compute redeploys.
     const b = await this.serialize('provision', () => this.provisionBranch(project, name, false, source, branchId))
     // `provisionBranch` COMMITS the branch row, and every step below it -- the volume forks, the
@@ -2133,11 +2150,20 @@ export class Engine {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     const branches = this.listBranches(projectId)
-    // Every branch's keys, in one sorted acquisition (never one branch at a time: that is the
-    // ordering a concurrent multi-branch operation can deadlock against).
-    return this.withOp(branches.flatMap((b) => this.branchKeys(project, b)), async () => {
+    // The PROJECT key plus every branch's keys, in one sorted acquisition (never one branch at a
+    // time: that is the ordering a concurrent multi-branch operation can deadlock against). The
+    // project key is what makes the list below complete: a branch create that has not committed
+    // its row yet is in no branch list, so its keys cannot be acquired here, and without a key
+    // covering the project the delete would queue on the SOURCE branch, wait for the create, and
+    // then remove the project while the clone it never saw kept its containers, its network and
+    // its bytes. `createProject` and `createBranch` hold the same key, so no branch of this
+    // project can come into existence while this runs.
+    return this.withOp([this.projectOp(project), ...branches.flatMap((b) => this.branchKeys(project, b))], async () => {
       const t = newTeardown()
-      for (const b of branches) {
+      // Re-read under the lock rather than trusting the pre-lock snapshot: the rows may have
+      // moved (a rename, a create that finished just before we got in, a branch delete that beat
+      // us to one), and what must not survive this call is every branch the state has NOW.
+      for (const b of this.listBranches(projectId)) {
         await this.teardownBranch(project, b, t)
         mutate((s) => { delete s.branches[b.id] })
       }
@@ -2802,6 +2828,27 @@ export class Engine {
    *  a second acquisition. `*branch` cannot collide with a service id (`cp-`, `pg-`, `st-`,
    *  `rd-`, `my-`, `mo-`) and names no `ServiceTarget`, so the sweep never sees it. */
   branchOp(branch: Branch | string): ServiceKey { return `${typeof branch === 'string' ? branch : branch.id}:*branch` }
+
+  /** The same lock, one level up again: a key that names the PROJECT.
+   *
+   *  `branchOp` makes a branch private while it is being built, but a branch that does not exist
+   *  yet has no key anyone can hold. A project delete lists the branches it will demolish, and a
+   *  create that has not committed its row is not in that list; the delete then takes the keys of
+   *  the branches it saw, queues behind the create on the SOURCE branch's keys, and afterwards
+   *  removes the project while the clone's containers, buckets, network and bytes stay behind
+   *  with a row pointing at a project that is gone. Nothing will ever come back for them.
+   *
+   *  So every operation that can bring a branch into existence (`createProject` for the default
+   *  branch, `createBranch` for a clone) holds this key, and `destroyProject` holds it too: the
+   *  two cannot overlap at all, and the delete's list is therefore complete.
+   *
+   *  Deadlock freedom is the same argument as `branchOp` and rests on the same two rules. Each of
+   *  the three operations takes this key IN THE SAME sorted acquisition as its branch and service
+   *  keys, never one after another, and nothing takes it while already holding a key (the nested
+   *  `deploy`, `wake` and `sleep` of a create re-enter keys the create already owns). `*project`
+   *  cannot collide with a service id or with `*branch`, and names no `ServiceTarget`, so the
+   *  sweep never sees it. */
+  projectOp(project: Project | string): ServiceKey { return `${typeof project === 'string' ? project : project.id}:*project` }
 
   /** What a WHOLE-branch operation holds: the branch key plus every service key on the branch. */
   private branchKeys(project: Project, b: Branch): ServiceKey[] {

@@ -2237,6 +2237,89 @@ test('a concurrent deploy is not torn down by the compensation of the create it 
   await assertRetryWorks(id)
 })
 
+/** A create paused INSIDE `provisionBranch`, before the branch row is committed. That is a
+ *  different window from `pauseInPostCommit`: here the branch exists NOWHERE in state, so a
+ *  project delete listing this project's branches cannot see it and cannot take its keys. */
+function pauseBeforeCommit(): { entered: Promise<void>; release(): void; restore(): void } {
+  let enter!: () => void
+  let go!: () => void
+  const entered = new Promise<void>((r) => { enter = r })
+  const gate = new Promise<void>((r) => { go = r })
+  const real = db.fork
+  const spy = vi.spyOn(db, 'fork').mockImplementationOnce(async (src, dst, opts) => {
+    enter()
+    await gate
+    return real(src, dst, opts)
+  })
+  return { entered, release: () => { go() }, restore: () => { spy.mockRestore() } }
+}
+
+test('a project delete that overlaps a branch create still takes the clone with it', async () => {
+  const id = await sourceWithEveryStep()
+  const paused = pauseBeforeCommit()
+
+  const create = post(`/projects/${id}/branches`, { name: 'feat' })
+  await paused.entered
+  // The window: the clone's row is not committed, so every branch list of this project says
+  // `main` and nothing else. A delete's key set is built from exactly that list.
+  expect(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual(['main'])
+
+  // Driven on the engine: `DELETE /projects/:id` is govern-gated to `approve` by default, and
+  // this is a test about the lock, not about the gate.
+  let done = false
+  const del = engine.destroyProject(id).then((t) => { done = true; return t })
+  await settle()
+  // It queues: on the source branch's keys before, on the project key now.
+  expect(done).toBe(false)
+
+  paused.release()
+  expect((await create).statusCode).toBe(201)
+  expect(await del).toMatchObject({ failed: 0 })
+  paused.restore()
+
+  // Nothing of either branch survives, and the clone's resources were DESTROYED rather than
+  // abandoned: without a key covering the whole project, the delete ran on its stale list and
+  // left feat's container, bucket, network and bytes behind under a row whose project was gone.
+  const st = loadState()
+  expect(Object.values(st.branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual([])
+  expect(st.projects[id]).toBeUndefined()
+  expect(calls).toContain('db.destroy:io-demo-feat-pg-db')
+  expect(calls).toContain('st.destroy:io-demo-feat-store')
+  expect(calls).toContain('compute.destroy:demo-feat')
+  expect(calls.some((c) => c.startsWith('data.remove:') && c.includes('demo-feat'))).toBe(true)
+})
+
+test('...and the other order: a create that queued behind a project delete builds nothing', async () => {
+  const id = await sourceWithEveryStep()
+  // The delete is held mid-demolition, so the create arrives while the project row still exists
+  // and is refused only when it reaches the front of the queue.
+  let enter!: () => void
+  let go!: () => void
+  const entered = new Promise<void>((r) => { enter = r })
+  const gate = new Promise<void>((r) => { go = r })
+  const real = db.destroy
+  const spy = vi.spyOn(db, 'destroy').mockImplementationOnce(async (c) => { enter(); await gate; return real(c) })
+
+  const del = engine.destroyProject(id)
+  await entered
+  let done = false
+  const create = post(`/projects/${id}/branches`, { name: 'feat' }).then((r) => { done = true; return r })
+  await settle()
+  expect(done).toBe(false)
+
+  go()
+  expect(await del).toMatchObject({ failed: 0 })
+  const answer = await create
+  spy.mockRestore()
+
+  // The create read its project and its source branch before the lock; both are gone by the time
+  // it runs, so it re-reads and refuses instead of provisioning a stack nothing names.
+  expect(answer.statusCode).toBeGreaterThanOrEqual(400)
+  expect(answer.json().error).toContain('project not found')
+  expect(calls.filter((c) => c.includes('demo-feat'))).toEqual([])
+  expect(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual([])
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
