@@ -236,7 +236,16 @@ test('--print-firewall lists the docker0 and inbound rules; the script gates the
   const out = run(['--print-firewall'])
   expect(out).toContain('ufw allow in on docker0 to any port 443,5432,6379,27017 proto tcp')
   expect(out).toContain('ufw allow in on docker0 to any port 20000:20999 proto tcp')
+  // 80, 443 and 5432 are the ONLY public ports, on purpose. The redis and mongodb lanes exist
+  // and route by SNI, but they are opened to docker0 and the address pools only: an
+  // internet-facing Redis or MongoDB on every self-hosted install is a default this project will
+  // not ship, so a public lane for them is a rule the operator adds deliberately. The docs say
+  // the same (docs/self-hosting/domains.mdx). If that ever changes it is an opt-in flag, and
+  // this assertion is where it has to be changed on purpose.
   expect(out).toContain('ufw allow 80,443,5432/tcp')
+  // The docker0 and address-pool rules DO carry 6379 and 27017; the public ones must not.
+  expect(out).not.toMatch(/ufw allow [0-9,]*(?:6379|27017)/)
+  expect(out).not.toMatch(/--zone=public[^\n]*(?:6379|27017)/)
   // branch networks are user-defined bridges, not docker0: the pool itself is allowed too
   expect(out).toContain('ufw allow from 10.100.0.0/14 to any port 443,5432,6379,27017 proto tcp')
   expect(out).toContain('firewall-cmd --permanent --zone=docker --add-port=443/tcp --add-port=5432/tcp --add-port=6379/tcp --add-port=27017/tcp --add-port=20000-20999/tcp')
