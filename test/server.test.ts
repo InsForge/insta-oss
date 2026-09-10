@@ -986,6 +986,19 @@ test('volume delete (cloud 2026-08-08 contract): eager rebuild without the mount
   await post(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 5 })
   await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
   calls.length = 0
+  // A volume is a project-level setting, so detaching it takes EVERY branch's bytes. The sibling
+  // delete routes are branch-scoped, so naming a branch here reads as a scoping request this route
+  // cannot honour, and silently widening it is how the compute-remove data loss happened. Refused,
+  // with nothing destroyed, rather than obeyed for one branch and applied to all.
+  const scopedByQuery = await del_(`/projects/${id}/services/cp-api/volume?branch=main`)
+  expect(scopedByQuery.statusCode).toBe(400)
+  expect(scopedByQuery.json().error).toContain('project-level setting')
+  const branchId = (await get(`/projects/${id}/branches`)).json().branches[0].id as string
+  const scopedById = await del_(`/projects/${id}/services/${branchId}:cp-api/volume`)
+  expect(scopedById.statusCode).toBe(400)
+  expect(calls.some((c) => c.startsWith('deploy:'))).toBe(false)
+  expect((await get(`/projects/${id}/services/cp-api/volume`)).json().volume).not.toBeNull()
+
   const del = await del_(`/projects/${id}/services/cp-api/volume`)
   expect(del.statusCode).toBe(200)
   expect(del.json()).toMatchObject({ removed: true, volume: null, service: { volume_gib: null } })

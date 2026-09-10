@@ -460,6 +460,18 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     const { id, sid } = req.params as { id: string; sid: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     if (!gated(id, 'service.remove', reply)) return reply
+    // The volume RECORD is a project-level service setting (decision 49, the same shelf as limits
+    // and always-on), so detaching it drops the mount on every branch and takes every branch's
+    // bytes with it. The caller must not be able to name one branch and silently lose another's:
+    // the sibling delete routes are branch-scoped, so a qualified id or ?branch here reads as a
+    // scoping request this route cannot honour. Refuse it and say why rather than widening it.
+    const scoped = parseServiceId(sid)?.branchId !== undefined || (req.query as { branch?: string }).branch !== undefined
+    if (scoped) {
+      return reply.code(400).send({
+        error: 'a volume is a project-level setting: detaching it removes the disk on every branch. '
+          + 'Re-send without a branch to confirm, or remove the service on this branch instead.',
+      })
+    }
     try { return await engine.removeServiceVolume(id, sid) }
     catch (e) {
       const m = e instanceof Error ? e.message : String(e)
