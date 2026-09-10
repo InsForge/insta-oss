@@ -78,13 +78,27 @@ script. The build needs about 1 GiB of free memory and a minute on a 2 vCPU box.
    **The installer never adds, edits or removes an SSH rule.** It opens the ports for the
    services it installs and nothing else: your SSH policy is yours, and a script that edits it
    either skips a rule your box needed or widens one you narrowed on purpose. What it does do is
-   tell you, when it finds no active firewall, exactly which ports to allow before you enable
-   one, reading them from `sshd -T` and falling back to what is listening in `ss -tlnp`.
+   tell you, when it finds no active firewall, which ports to allow before you enable one. It
+   reads three sources and takes the UNION of them, because they answer different questions and
+   none is authoritative: `sshd -T` (the effective sshd config), `systemctl show ssh.socket
+   sshd.socket -p Listen` (socket activation, which is the Ubuntu 24.04 default) and `ss -tlnpH`
+   (what is listening now). Allow EVERY port any of them names.
 
    Take that seriously if you enable `ufw` yourself: Ubuntu's `ufw` defaults its input policy to
    `DROP`, so enabling it without a rule for every port `sshd` listens on cuts you off. Quietly,
    too, because established connections keep working and the lockout only shows on the next
-   reconnect or reboot. `sshd -T | grep '^port '` is the check.
+   reconnect or reboot.
+
+   `sshd -T | grep '^port '` on its own is NOT the check, and this is the trap the union exists
+   for: the documented way to move SSH on Ubuntu 24.04 is `systemctl edit ssh.socket` with
+   `ListenStream=2222`, which leaves `sshd_config` at `#Port 22`, so `sshd -T` answers 22 on the
+   box that moved it. Ask all three, and allow all three answers:
+
+   ```bash
+   sshd -T | awk '/^port /{print $2}'
+   systemctl show ssh.socket sshd.socket --value -p Listen
+   ss -tlnpH | grep -i ssh
+   ```
 6. Installs Docker when missing, enables it, requires `docker compose version`, and starts the
    daemon when it is installed but not answering.
 7. Writes `/etc/docker/daemon.json` with `default-address-pools` and restarts Docker, on a fresh

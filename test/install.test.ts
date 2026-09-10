@@ -267,6 +267,78 @@ test('--print-firewall lists the docker0 and inbound rules; the script gates the
   expect(out).not.toMatch(/OpenSSH|allow 22\b/)
 })
 
+/** A directory of fake `sshd`, `systemctl` and `ss` at the front of PATH, so the detector's real
+ *  parse runs. Every advisory case used to inject `IO_SSH_PORTS`, which returns BEFORE the
+ *  detector, so those cases exercised the formatter and never the union: the three
+ *  `expect(script).toMatch(/systemctl show/)` lines were source greps, and a fallback chain
+ *  restored underneath them passed all of it. */
+function fakePath(bin: Record<'sshd' | 'systemctl' | 'ss', string>): { PATH: string; dir: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'io-sshbin-'))
+  for (const [name, body] of Object.entries(bin)) {
+    const f = join(dir, name)
+    writeFileSync(f, `#!/bin/sh
+${body}
+`, { mode: 0o755 })
+  }
+  return { PATH: `${dir}:${process.env.PATH ?? '/usr/bin:/bin'}`, dir }
+}
+
+test('ssh detection: socket activation, where the config and the socket DISAGREE', () => {
+  // Ubuntu 24.04's default. `systemctl edit ssh.socket` with ListenStream=2222 leaves
+  // sshd_config at `#Port 22`, so the config source answers 22 for a box reachable on 2222.
+  // A chain that stops at the first answer prints the lockout advice here.
+  const { PATH, dir } = fakePath({
+    sshd: "echo 'port 22'",
+    systemctl: "echo '[::]:2222 (Stream)'",
+    ss: 'exit 0',
+  })
+  try {
+    const out = run(['--print-ssh-advice'], { PATH })
+    expect(out).toContain('ufw allow 22/tcp')
+    expect(out).toContain('ufw allow 2222/tcp')
+    expect(out).toMatch(/sshd config and the socket unit report DIFFERENT ports/)
+    expect(out.indexOf('2222/tcp')).toBeLessThan(out.indexOf('ufw enable'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('ssh detection: the config alone, the listener alone, and nothing at all', () => {
+  // One source answering is not a disagreement.
+  const only = fakePath({ sshd: "echo 'port 2200'", systemctl: 'exit 1', ss: 'exit 0' })
+  try {
+    const out = run(['--print-ssh-advice'], { PATH: only.PATH })
+    expect(out).toContain('ufw allow 2200/tcp')
+    expect(out).not.toMatch(/DIFFERENT ports/)
+  } finally {
+    rmSync(only.dir, { recursive: true, force: true })
+  }
+
+  // sshd answers with no port line at all (and so cannot be the source), systemd is not running
+  // it, but something IS listening: the third source is the only one that knows.
+  const listening = fakePath({
+    sshd: "echo 'addressfamily any'",
+    systemctl: 'exit 1',
+    ss: `echo 'LISTEN 0 128 0.0.0.0:2022 0.0.0.0:* users:(("sshd",pid=1,fd=3))'`,
+  })
+  try {
+    const out = run(['--print-ssh-advice'], { PATH: listening.PATH })
+    expect(out).toContain('ufw allow 2022/tcp')
+  } finally {
+    rmSync(listening.dir, { recursive: true, force: true })
+  }
+
+  // Nothing can be established: nothing is asserted, and the substitution is spelled out.
+  const silent = fakePath({ sshd: "echo 'addressfamily any'", systemctl: 'exit 1', ss: 'exit 0' })
+  try {
+    const out = run(['--print-ssh-advice'], { PATH: silent.PATH })
+    expect(out).toMatch(/ufw allow OpenSSH\s+# or your own SSH port/)
+    expect(out).not.toMatch(/ufw allow [0-9]+\/tcp/)
+  } finally {
+    rmSync(silent.dir, { recursive: true, force: true })
+  }
+})
+
 test('the firewall rules follow the RESOLVED lane ports, and never the displaced defaults', () => {
   // The rules were written with 5432, 6379, 27017 and 20000-20999 hardcoded while the lanes
   // themselves are configurable. A moved lane was unreachable behind an active firewall, and

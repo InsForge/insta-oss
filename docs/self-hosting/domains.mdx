@@ -148,10 +148,21 @@ ufw allow 80,443,5432/tcp
 ufw enable
 ```
 
-Allow SSH before you enable it, every time, and allow the port sshd is ACTUALLY on: `sshd -T |
-grep '^port '` tells you, and a box with SSH moved to 2222 is locked out by an `enable` that only
-names 22. An enable without the right port looks fine from the session that ran it, because
-established connections survive, and locks you out on the next reconnect.
+Allow SSH before you enable it, every time, and allow every port ssh may be reachable on. Asking
+`sshd -T` alone is the trap, not the check: on Ubuntu 24.04 SSH is socket-activated and the
+documented way to move it is `systemctl edit ssh.socket` with `ListenStream=2222`, which leaves
+`sshd_config` at `#Port 22`. So on the box that moved SSH to 2222, `sshd -T` still answers 22 and
+an `enable` that trusts it locks you out. Ask all three sources and allow every port any of them
+names:
+
+```bash
+sshd -T | awk '/^port /{print $2}'                      # the effective sshd config
+systemctl show ssh.socket sshd.socket --value -p Listen  # socket activation
+ss -tlnpH | grep -i ssh                                  # what is listening now
+```
+
+An enable without the right port looks fine from the session that ran it, because established
+connections survive, and locks you out on the next reconnect.
 
 The installer never touches SSH rules, in either direction: your access is yours to preserve. It
 prints this recipe with your detected ports filled in when it finds no active firewall, and the

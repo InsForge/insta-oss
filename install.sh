@@ -452,9 +452,9 @@ render_daemon_json() { printf '%s\n' "$POOL_JSON"; }
 
 # Apps reach the router at the host through --add-host ...:host-gateway; that traffic arrives on the
 # branch bridge and traverses the host INPUT chain, which a default-deny firewall drops silently.
-# The port(s) sshd actually listens on, empty when nothing could be established. `sshd -T` prints
-# the EFFECTIVE configuration (defaults included) and is authoritative where it runs; `ss` is the
-# fallback for a box where sshd is not on this PATH. Never guesses: a guess is what put a
+# Every port ssh may be reachable on, empty when nothing could be established. No source here is
+# authoritative and none is a fallback for another: they answer different questions, and on a
+# socket-activated box they DISAGREE (see the union below). Never guesses: a guess is what put a
 # hardcoded 22 in advice aimed at hardened boxes, which are exactly the ones that moved it.
 # IO_SSH_PORTS is a test hook, never set in production.
 ssh_ports() {
@@ -495,7 +495,7 @@ ssh_advice() {
       printf '    # sshd config and the socket unit report DIFFERENT ports. Allow every one you use:\n'
     fi
     for _a in $_adv; do
-      printf '    ufw allow %s/tcp          # ssh listens on %s: allow it BEFORE the enable\n' "$_a" "$_a"
+      printf '    ufw allow %s/tcp          # ssh candidate %s: allow it BEFORE the enable\n' "$_a" "$_a"
     done
   fi
   printf '    ufw allow 80,443,5432/tcp   # the edge and the postgres lane\n'
