@@ -1280,6 +1280,54 @@ test('the beat PARSES only when the file moved: an unchanged certificate costs a
   }
 })
 
+test('a MALFORMED file is parsed once, and replacing it with a good one is still noticed', () => {
+  // The negative result has to be cached too. Without that, the one case where an operator has
+  // a broken file -- the wrong file copied in, a truncated write, a key pasted over a
+  // certificate -- was the case that did the most work: a full read and a failed parse on every
+  // beat, forever, because only a SUCCESSFUL parse counted as cached.
+  //
+  // And the edge that matters more than the saving: the file they then fix has to be picked up.
+  // That is the sequence an operator actually performs once they realise, so it is the sequence
+  // asserted here rather than reasoned about.
+  const dir = mkdtempSync(join(tmpdir(), 'io-malformed-'))
+  try {
+    const live = join(dir, 'live.crt')
+    const good = join(dir, 'good.crt')
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 60 -keyout ${join(dir, 'k.pem')} -out ${good} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+
+    // Readable, and not a certificate.
+    writeFileSync(live, '-----BEGIN CERTIFICATE-----\nnot base64 at all\n-----END CERTIFICATE-----\n')
+    let parses = 0
+    const watch = new SuppliedCertWatch(live, { read: (path, now) => { parses++; return suppliedCert(path, now) } })
+    expect(watch.current()).toBeNull()
+    expect(parses).toBe(1)
+
+    // A day of sweeps: asked once, not 2880 times.
+    for (let i = 0; i < 2880; i++) watch.refresh()
+    expect(parses).toBe(1)
+    expect(watch.current()).toBeNull()
+
+    // ...and the fix lands. The stamp moves, so the beat looks again, and the field appears.
+    renameSync(good, live)
+    watch.refresh()
+    expect(parses).toBe(2)
+    expect(watch.current()!.daysLeft).toBeGreaterThanOrEqual(59)
+
+    // Back to broken, in place: still noticed, and still asked only once.
+    writeFileSync(live, 'not even a PEM header\n')
+    watch.refresh()
+    expect(watch.current()).toBeNull()
+    expect(parses).toBe(3)
+    for (let i = 0; i < 100; i++) watch.refresh()
+    expect(parses).toBe(3)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a RENAMED certificate is picked up by the beat, and the request path reads nothing', () => {
   // The way a renewal actually happens, and the way it was measured on a live box: write the new
   // pair alongside, rename over the live names. The file check lives on the daemon's beat, not

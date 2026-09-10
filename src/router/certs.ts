@@ -136,9 +136,11 @@ export class SuppliedCertWatch {
   }
 
   /** One `stat` per call. The PEM is parsed again only when the file behind the path has
-   *  changed, so an unchanged certificate costs a stat and nothing else however long the daemon
-   *  runs. A path that cannot be stat'd drops the cached value along with the stamp, so the next
-   *  readable file is parsed even if it arrives with the same mtime, size and inode. */
+   *  changed, so an unchanged file costs a stat and nothing else however long the daemon runs
+   *  -- and that holds whether the parse produced a certificate or nothing, since a file that
+   *  is readable but malformed does not become well formed by being read again. A path that
+   *  cannot be stat'd drops the cached value along with the stamp, so the next readable file is
+   *  parsed even if it arrives with the same mtime, size and inode. */
   private sync(now: number): void {
     if (!this.certFile) { this.cached = null; this.stamp = null; return }
     let stamp: string | null = null
@@ -157,7 +159,14 @@ export class SuppliedCertWatch {
       this.stamp = null
       return
     }
-    if (stamp === this.stamp && this.cached) return
+    // The stamp caches the ANSWER, not just a certificate. `&& this.cached` here meant a
+    // readable file that does not parse -- the wrong file copied in, a truncated write, a PEM
+    // with the key pasted over it -- was re-read and re-parsed on every single beat, forever:
+    // the one case where an operator has a broken file was the case that cost the most work.
+    // Only `statSync` failing clears the stamp, and that is the distinction that keeps "absent
+    // when it cannot be read" true: a file that goes away is re-examined the moment it comes
+    // back, while a file that is simply not a certificate is asked about once per change.
+    if (stamp === this.stamp) return
     this.stamp = stamp
     const cert = this.read(this.certFile, now)
     this.cached = cert ? { path: cert.path, notAfterMs: Date.parse(cert.notAfter) } : null
