@@ -159,7 +159,7 @@ Postgres containers against empty directories.
 | Flag | Env | What |
 | --- | --- | --- |
 | `--domain <host>` | `INSTA_OSS_DOMAIN` | your own apex, instead of the automatic sslip.io name |
-| `--email <addr>` | `INSTA_OSS_ACME_EMAIL` | the ACME account address (`--tls acme` only; nothing is ordered in the other two modes) |
+| `--email <addr>` | `INSTA_OSS_ACME_EMAIL` | the ACME account address. Written into the Caddyfile under `acme` and `internal`, and omitted under `custom`, which contacts no issuer |
 | `--version <vX.Y.Z>` | `INSTA_OSS_VERSION` | pin the image; omit for the newest release |
 | | `INSTA_OSS_IMAGE` | the daemon image, `name` or `name:tag`; a tag here is the version. Use it to run an image you built yourself |
 | `--tls acme\|internal\|custom` | `INSTA_OSS_TLS` | public certificates, an internal issuer for a private box, or one wildcard you supply. See [TLS and what your domain costs you](#tls-and-what-your-domain-costs-you) |

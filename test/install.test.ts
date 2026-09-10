@@ -10,6 +10,19 @@ import { join } from 'node:path'
 import { X509Certificate } from 'node:crypto'
 import { CONFIG_KEYS } from '../src/config'
 
+/** The certificate tests mint their fixtures with the `openssl` CLI. Node cannot do it: the
+ *  runtime parses X.509 (`crypto.X509Certificate`) and has no API for ISSUING one, so a
+ *  self-signed pair with the SANs and the validity windows these cases need would take a new
+ *  dependency, and this project takes none. Committed fixtures are not an answer either, since
+ *  what is under test is a certificate 30 days out, one 90 days out and one already expired,
+ *  and two of those stop being true with time.
+ *
+ *  So the requirement is declared rather than assumed: `openssl` is needed for these cases,
+ *  the README says so, and where it is absent they are SKIPPED by name instead of failing at
+ *  the first spawn. CI has it, and so does every box this installs on -- the installer
+ *  requires it too. */
+const hasOpenssl = spawnSync('sh', ['-c', 'command -v openssl'], { encoding: 'utf8' }).status === 0
+
 const ROOT = join(__dirname, '..')
 const SCRIPT = join(ROOT, 'install.sh')
 const script = readFileSync(SCRIPT, 'utf8')
@@ -250,7 +263,7 @@ test('--tls custom refuses a half-configured pair, and the paths it cannot mount
   }
 })
 
-test('--tls custom checks the pair can actually serve, before anything starts', () => {
+test.skipIf(!hasOpenssl)('--tls custom checks the pair can actually serve, before anything starts', () => {
   // Readable and syntactically safe is not the same as able to serve. A mismatched key, a
   // malformed PEM, an expired certificate or a perfectly good certificate for another domain all
   // used to pass, leaving Caddy crash-looping while the install exited 0 saying it was serving
@@ -374,7 +387,7 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
   }
 })
 
-test('a symlinked certificate mounts the directory it RESOLVES to as well', () => {
+test.skipIf(!hasOpenssl)('a symlinked certificate mounts the directory it RESOLVES to as well', () => {
   // certbot's `live/<domain>/fullchain.pem` is a relative link into `../../archive/<domain>/`,
   // which is the commonest real source of these files. Mounting only the link's own directory
   // puts a dangling link inside both containers: valid on the host, unreadable where it is

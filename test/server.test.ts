@@ -873,7 +873,12 @@ test('healthz carries what a supplied certificate has left, and nothing when the
   expect(reads).toBe(1)
 })
 
-test('healthz follows a RENEWED certificate, the way a renewal actually happens', async () => {
+/** These cases mint a certificate with the `openssl` CLI: Node parses X.509 but cannot issue
+ *  it, and a fixture cannot be "30 days from now" a year after it was committed. Declared and
+ *  skipped by name where openssl is absent (see the README), rather than failing at the spawn. */
+const hasOpenssl = spawnSync('sh', ['-c', 'command -v openssl'], { encoding: 'utf8' }).status === 0
+
+test.skipIf(!hasOpenssl)('healthz follows a RENEWED certificate, the way a renewal actually happens', async () => {
   // Measured on a live box: after writing the new pair alongside and renaming it over the live
   // names, `/healthz` kept reporting the OLD certificate -- same notAfter, same daysLeft, only
   // secondsLeft ticking down. A cache invalidated by time reports the certificate it read at

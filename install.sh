@@ -1211,7 +1211,13 @@ if [ "$TLS" = custom ]; then
   # pair the edge could not load left Caddy crash-looping while this script exited 0 saying it
   # worked. Two things have to hold: the edge answers, and what it answers with is the
   # certificate this install was given.
-  _ours=$(openssl x509 -in "$TLS_CERT" -noout -serial 2>/dev/null | cut -d= -f2)
+  # The FINGERPRINT, not the serial. A serial is unique only within one issuer, issuers reuse
+  # them, and nothing stops an unrelated certificate carrying the same number -- so comparing
+  # serials would let a stale or foreign certificate satisfy the check that exists to establish
+  # that the edge is serving THIS file. A SHA-256 digest of the DER is the certificate's
+  # identity, and this probe is the one place in the script whose whole job is not to report
+  # success it has not established.
+  _ours=$(openssl x509 -in "$TLS_CERT" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
   _served=''
   _t=0
   while [ "$_t" -lt 60 ]; do
@@ -1220,7 +1226,7 @@ if [ "$TLS" = custom ]; then
     # verifying the PROXY's certificate instead of the one being checked.
     if curl -sk --noproxy '*' --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 10 -o /dev/null "https://api.$DOMAIN/healthz"; then
       _served=$(printf '' | openssl s_client -connect 127.0.0.1:443 -servername "api.$DOMAIN" 2>/dev/null |
-        openssl x509 -noout -serial 2>/dev/null | cut -d= -f2)
+        openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
       [ -n "$_served" ] && break
     fi
     _t=$((_t + 5))
@@ -1232,9 +1238,9 @@ if [ "$TLS" = custom ]; then
   fi
   if [ "$_served" != "$_ours" ]; then
     compose logs --tail=30 edge 2>&1 || true
-    die "the edge is serving certificate serial $_served, not the $_ours in $TLS_CERT (see the log above)"
+    die "the edge is serving a different certificate (SHA-256 $_served) from the one in $TLS_CERT (SHA-256 $_ours) (see the log above)"
   fi
-  # `-k` proved it is OUR certificate (the serial above) and nothing about whether a client will
+  # `-k` proved it is OUR certificate (the fingerprint above) and nothing about whether a client will
   # accept it. Two of the three cases can be checked from here and are: a certificate that is its
   # own trust anchor (self-signed, what an internal box usually has) verifies against itself, and
   # a publicly-issued one verifies against the system store -- either way including the HOSTNAME,

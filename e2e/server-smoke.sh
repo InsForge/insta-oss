@@ -373,14 +373,18 @@ openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
   -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:*.s3.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
   || FAIL "could not mint a wildcard certificate for *.$DOMAIN"
 chmod 600 "$E2E_TLS_DIR/wild.key"
-OURS=$(openssl x509 -in "$E2E_TLS_DIR/wild.crt" -noout -serial | cut -d= -f2)
+OURS=$(file_fp "$E2E_TLS_DIR/wild.crt")
 BEFORE=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
 
 curl_k_ok() { curl -sS -k -o /dev/null -f "$1"; }
-served_serial() {
+# The certificate's IDENTITY is a digest of it, not its serial: serials are unique only within
+# one issuer and are reused, so two different certificates can carry the same number and a
+# serial comparison would pass on one of them.
+served_fp() {
   openssl s_client -connect "127.0.0.1:443" -servername "$1" </dev/null 2>/dev/null \
-    | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2
+    | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2
 }
+file_fp() { openssl x509 -in "$1" -noout -fingerprint -sha256 | cut -d= -f2; }
 # `healthz` carries the supplied certificate's own notAfter, so this asks the daemon WHICH file
 # it is reading rather than trusting a log line. The renewal below has a different validity, so
 # the two dates distinguish the old certificate from the new one.
@@ -429,12 +433,12 @@ OK "the stack came up serving the supplied certificate"
 
 # The two names an operator is handed, and a service hostname, all answer with OUR certificate.
 for host in "api.$DOMAIN" "console.$DOMAIN" "$(url_host "$URL")"; do
-  [ "$(served_serial "$host")" = "$OURS" ] || FAIL "$host is not served the supplied certificate"
+  [ "$(served_fp "$host")" = "$OURS" ] || FAIL "$host is not served the supplied certificate"
 done
 # ...and a hostname that has NEVER existed on this box: served the same certificate, and the
 # store Caddy writes issued certificates into gains nothing. That is the whole property.
 NEVER="zz-never-$RUN.$DOMAIN"
-[ "$(served_serial "$NEVER")" = "$OURS" ] || FAIL "$NEVER is not served the supplied certificate"
+[ "$(served_fp "$NEVER")" = "$OURS" ] || FAIL "$NEVER is not served the supplied certificate"
 sleep 5
 AFTER=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
 [ "$AFTER" = "$BEFORE" ] || FAIL "the certificate store grew from $BEFORE to $AFTER: something was issued"
@@ -450,7 +454,7 @@ OK "a never-seen hostname is served without issuing anything"
 BUCKET=$(printf '%s\n' "$SECRETS" | sed -n 's/^BUCKET_NAME="\(.*\)"$/\1/p')
 [ -n "$BUCKET" ] || FAIL "no BUCKET_NAME in the printed secrets"
 VHOST=$BUCKET.s3.$DOMAIN
-[ "$(served_serial "$VHOST")" = "$OURS" ] || FAIL "$VHOST is not served the supplied certificate"
+[ "$(served_fp "$VHOST")" = "$OURS" ] || FAIL "$VHOST is not served the supplied certificate"
 curl -sS -o /dev/null --cacert "$E2E_TLS_DIR/wild.crt" --resolve "$VHOST:443:127.0.0.1" "https://$VHOST/" \
   || FAIL "$VHOST does not VERIFY against the supplied certificate: a bucket URL fails hostname verification"
 OK "the bucket vhost $VHOST verifies against the supplied certificate"
@@ -463,10 +467,10 @@ PGHOST_NAME=pg-db-$SLUG-main.$DOMAIN
 # OpenSSL 1.1.1 or newer; where it is missing the check is SKIPPED loudly rather than passing
 # quietly, because a silent skip of exactly this check is how the leak would come back.
 if openssl s_client -help 2>&1 | grep -q 'starttls'; then
-  LANE_SERIAL=$(openssl s_client -connect "127.0.0.1:5432" -starttls postgres -servername "$PGHOST_NAME" </dev/null 2>/dev/null \
-    | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2)
-  [ -n "$LANE_SERIAL" ] || FAIL "the pg lane did not complete a TLS handshake for $PGHOST_NAME"
-  [ "$LANE_SERIAL" = "$OURS" ] || FAIL "the pg lane presented '$LANE_SERIAL', not the supplied certificate '$OURS'"
+  LANE_FP=$(openssl s_client -connect "127.0.0.1:5432" -starttls postgres -servername "$PGHOST_NAME" </dev/null 2>/dev/null \
+    | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+  [ -n "$LANE_FP" ] || FAIL "the pg lane did not complete a TLS handshake for $PGHOST_NAME"
+  [ "$LANE_FP" = "$OURS" ] || FAIL "the pg lane presented SHA-256 '$LANE_FP', not the supplied certificate '$OURS'"
   AFTER=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
   [ "$AFTER" = "$BEFORE" ] || FAIL "the pg lane handshake made something issue a certificate"
   OK "the database lane presents the supplied certificate and issues nothing"
@@ -483,13 +487,13 @@ openssl req -x509 -newkey rsa:2048 -sha256 -days 3 -nodes \
   -keyout "$E2E_TLS_DIR/next.key" -out "$E2E_TLS_DIR/next.crt" \
   -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:*.s3.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
   || FAIL "could not mint the renewal certificate"
-NEXT=$(openssl x509 -in "$E2E_TLS_DIR/next.crt" -noout -serial | cut -d= -f2)
+NEXT=$(file_fp "$E2E_TLS_DIR/next.crt")
 # What `healthz` says BEFORE the rename, so the assertion after it is that the number MOVED. A
 # check that only reads it once passes against a cache that never invalidates, which is exactly
 # what a live-box renewal caught: same notAfter, same daysLeft, only secondsLeft ticking.
 HEALTHZ_BEFORE=$(healthz_notafter)
 [ -n "$HEALTHZ_BEFORE" ] || FAIL "healthz is not reporting a certificate before the renewal"
-[ "$NEXT" != "$OURS" ] || FAIL "the renewal certificate has the same serial as the first one"
+[ "$NEXT" != "$OURS" ] || FAIL "the renewal certificate is byte-identical to the first one"
 chmod 600 "$E2E_TLS_DIR/next.key"
 # ...and with the OLD timestamps put back on the new files. A rename changes the inode and need
 # not change the mtime, and renewal and configuration tools routinely preserve timestamps, so a
@@ -506,7 +510,7 @@ mv -f "$E2E_TLS_DIR/next.key" "$E2E_TLS_DIR/wild.key"
 LANE_AFTER=""
 if openssl s_client -help 2>&1 | grep -q 'starttls'; then
   LANE_AFTER=$(openssl s_client -connect "127.0.0.1:5432" -starttls postgres -servername "$PGHOST_NAME" </dev/null 2>/dev/null \
-    | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2)
+    | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
   [ "$LANE_AFTER" = "$NEXT" ] || FAIL "after the rename the pg lane still presents '$LANE_AFTER', not the renewed '$NEXT'"
 fi
 wait_for 90 healthz_moved_from "$HEALTHZ_BEFORE" || FAIL "healthz still reports the certificate it read before the rename"
@@ -526,7 +530,7 @@ OK "the daemon and its lanes pick up a renamed certificate with no restart"
 ( cd /etc/instacloud && docker compose --env-file instad.env restart edge ) >/dev/null 2>&1 \
   || FAIL "could not restart the edge"
 wait_for 90 curl_k_ok "https://api.$DOMAIN/healthz" || FAIL "the edge did not come back after the restart"
-[ "$(served_serial "api.$DOMAIN")" = "$NEXT" ] \
+[ "$(served_fp "api.$DOMAIN")" = "$NEXT" ] \
   || FAIL "after a restart the edge still serves the old certificate: the documented renewal does not work"
 AFTER=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
 [ "$AFTER" = "$BEFORE" ] || FAIL "the renewal made something issue a certificate"
