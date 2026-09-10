@@ -6,14 +6,25 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-vi.mock('../src/docker', () => ({ docker: vi.fn(async () => Buffer.from('')) }))
+vi.mock('../src/docker', () => ({ docker: vi.fn((args: string[] = []) => fakeDocker(args)) }))
+
+/** The docker seam these tests run on. It answers nothing for almost everything, with ONE
+ *  fidelity the fakes need: a `docker rm` really removes the container from `FakeRuntime`, which
+ *  is the single fake container store (decision 53). The engine removes a compute container by
+ *  shelling docker directly, and every teardown now PROVES a container is gone by reading
+ *  `docker ps -a` afterwards, so a mock that does not mirror the removal would report a
+ *  container that is still there and fail a teardown that in fact succeeded. */
+function fakeDocker(args: string[] = []): Promise<Buffer> {
+  if (args[0] === 'rm') for (const a of args.slice(1)) if (!a.startsWith('-')) runtime.drop(a)
+  return Promise.resolve(Buffer.from(''))
+}
 
 import { docker as dockerFn } from '../src/docker'
 import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
 import type { ComputeAdapter, StorageAdapter } from '../src/types'
 import { mutate } from '../src/state'
-import { calls, data, db, compute, storage, managed, makeEngine, resetFakes, serverConfig, testConfig } from './fakes'
+import { calls, data, db, compute, storage, managed, makeEngine, resetFakes, runtime, serverConfig, testConfig } from './fakes'
 
 let app: ReturnType<typeof buildServer>
 /** The engine `app` is built on: tests that spy on an engine method need THIS instance. */
@@ -31,7 +42,7 @@ beforeEach(() => {
 // paused gate into every later test in this file the first time one of them fired.
 afterEach(() => {
   vi.restoreAllMocks()
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
 })
 
 const post = (url: string, payload?: unknown) => app.inject({ method: 'POST', url, payload })
@@ -858,7 +869,7 @@ test('logs endpoint tails containers with the cloud LogsResult shape (db works l
   expect(r.lines.find((l: { ts: string }) => !l.ts)).toMatchObject({ message: 'no-timestamp-line' })
   const dbLogs = (await get(`/projects/${id}/logs?component=db`)).json()
   expect(dbLogs.lines.length).toBeGreaterThan(0) // the cloud returns a provider note for db; locally it is a real container
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
 })
 
 test('metrics endpoint returns docker-stats series (cpu %, memory bytes)', async () => {
@@ -870,7 +881,7 @@ test('metrics endpoint returns docker-stats series (cpu %, memory bytes)', async
   expect(r.source).toBe('docker-stats')
   expect(r.series.find((s: { name: string }) => s.name === 'cpu').points[0][1]).toBe(1.25)
   expect(r.series.find((s: { name: string }) => s.name === 'memory').points[0][1]).toBe(12 * 1024 * 1024)
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
 })
 
 test('operations lists the resource timeline newest-first (control-plane shape)', async () => {
@@ -1442,7 +1453,7 @@ test('runtime-health: one docker read maps pg + managed + compute to the cloud v
   expect(byId['rd-cache']).toMatchObject({ status: 'standby', machines: 1, failing: 0 })     // paused = suspend intent
   expect(byId['cp-web']).toMatchObject({ status: 'crashed', machines: 1, failing: 1 })       // exited against running intent
   expect(byId['cp-idle']).toMatchObject({ status: 'none', machines: 0, failing: 0 })         // never deployed
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
 })
 
 test('branch rename: metadata-only — resources keep their frozen ref; guards default/conflict', async () => {
@@ -1531,7 +1542,7 @@ test('metrics/logs target managed-db containers per type; junk components 400', 
   // group resolves INSIDE the type — a redis named like a compute group must not leak across
   await get(`/projects/${id}/metrics?component=redis&group=nope`)
   expect((await get(`/projects/${id}/metrics?component=redis&group=nope`)).json().series).toEqual([])
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
 
   const bad = await get(`/projects/${id}/metrics?component=kafka`)
   expect(bad.statusCode).toBe(400)
@@ -2197,7 +2208,7 @@ test('a network that refuses to go is a FAILED teardown, so the row is kept rath
   const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
   expect(bad.statusCode).toBeGreaterThanOrEqual(400)
   cloneInto.mockRestore()
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
 
   // The row stays, marked, so the leftover network has something naming it and `branch delete`
   // can retry the demolition.
@@ -2225,7 +2236,7 @@ test('a probe that cannot answer is not evidence the network is gone', async () 
 
   const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
   cloneInto.mockRestore()
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
 
   expect(bad.statusCode).toBeGreaterThanOrEqual(400)
   const row = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')
@@ -2246,7 +2257,7 @@ test('a network that was already gone is not counted as a failure', async () => 
   expect(featId).not.toBe(bid)
 
   const del = await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${featId}` })
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
   expect(del.statusCode).toBe(200)
   expect(del.json().teardown.failed).toBe(0)
   expect(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual(['main'])
@@ -2429,7 +2440,7 @@ test('a project delete that overlaps the CREATE OF THE PROJECT takes its default
   go()
   await create
   await del
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
 
   // No branch row may outlive the project it points at.
   expect(loadState().projects[pid]).toBeUndefined()
@@ -2764,7 +2775,9 @@ test('a branch delete whose container refuses to go keeps its data and its row',
     destroy.mockRestore()
   }
 
-  expect(del.statusCode).toBe(200)
+  // 409, not 200: the branch is still there, and a client that reads 200 as "gone" would show
+  // it vanishing and reappearing on the next refresh.
+  expect(del.statusCode).toBe(409)
   expect(del.json().teardown.failed).toBeGreaterThan(0)
   // The bytes stay: something is still mounting them.
   expect(calls.filter((c) => c.startsWith('data.remove:'))).toEqual([])
@@ -2847,7 +2860,7 @@ test('a network create that failed for any other reason fails the branch, it is 
   try {
     bad = await post(`/projects/${id}/branches`, { name: 'feat' })
   } finally {
-    vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+    vi.mocked(dockerFn).mockImplementation(fakeDocker)
   }
 
   expect(bad.statusCode).toBeGreaterThanOrEqual(400)
@@ -2870,7 +2883,7 @@ test('...and a network that dockerd CONFIRMS is already there is still reused', 
   try {
     ok = await post(`/projects/${id}/branches`, { name: 'feat' })
   } finally {
-    vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+    vi.mocked(dockerFn).mockImplementation(fakeDocker)
   }
 
   expect(ok.statusCode).toBe(201)
@@ -2984,6 +2997,140 @@ test('an attach cannot land inside a volume removal, so the restore cannot lose 
     goRemove()
     remove.mockRestore()
   }
+})
+
+// ---- direct service removal is fail-closed too, and holds its key --------------------------------
+//
+// The branch and project teardowns prove a container is gone before deleting the bytes it
+// mounted and the row that names it. The four DIRECT removals did not: they recorded a failed
+// `docker rm` and carried on, so a bind-mounted directory was erased from beneath a container
+// that is still running and the row that could have retried it was dropped. One failure case per
+// type, and one lock case per type whose key was added last round and bound by nothing.
+
+/** Something holds a service's operation key: in practice a rename, a deploy or a lifecycle op. */
+function holdKey(key: string): { held: Promise<unknown>; release(): void } {
+  let release!: () => void
+  const gate = new Promise<void>((r) => { release = () => { r() } })
+  const held = engine.withOp([key], () => gate)
+  return { held, release }
+}
+
+test('a compute removal whose container refuses to go keeps its volume bytes and its row', async () => {
+  const id = await sourceWithEveryStep()
+  const bid = await branchOf(id, 'main')
+  calls.length = 0
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) => {
+    if (args[0] === 'rm' && args.includes('io-demo-main-app-web')) throw new Error('container is in use')
+    return Buffer.from('')     // ...and `docker ps -a` still lists it, so it is NOT proven gone
+  })
+  let res
+  try {
+    res = await del_(`/projects/${id}/services/cp-web`)
+  } finally {
+    vi.mocked(dockerFn).mockImplementation(fakeDocker)
+  }
+
+  expect(res.statusCode).toBe(409)          // the service is still there
+  expect(res.json().teardown.failed).toBeGreaterThan(0)
+  expect(calls.filter((c) => c.startsWith('data.remove:'))).toEqual([])
+  expect(loadState().branches[bid].apps.web).toBeDefined()
+})
+
+test('a postgres removal whose container refuses to go keeps its data directory and its row', async () => {
+  const id = await sourceWithEveryStep()
+  const bid = await branchOf(id, 'main')
+  calls.length = 0
+  const destroy = vi.spyOn(db, 'destroy').mockRejectedValueOnce(new Error('container is in use'))
+  let res
+  try {
+    res = await del_(`/projects/${id}/services/pg-db`)
+  } finally {
+    destroy.mockRestore()
+  }
+
+  expect(res.json().teardown.failed).toBeGreaterThan(0)
+  expect(calls.filter((c) => c.startsWith('data.remove:'))).toEqual([])
+  expect(loadState().branches[bid].databases?.['pg-db']).toBeDefined()
+})
+
+test('a managed removal whose container refuses to go keeps its data directory and its row', async () => {
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })).statusCode).toBe(201)
+  const bid = await branchOf(id, 'main')
+  calls.length = 0
+  const destroy = vi.spyOn(managed, 'destroy').mockRejectedValueOnce(new Error('container is in use'))
+  let res
+  try {
+    res = await del_(`/projects/${id}/services/rd-cache`)
+  } finally {
+    destroy.mockRestore()
+  }
+
+  expect(res.json().teardown.failed).toBeGreaterThan(0)
+  expect(calls.filter((c) => c.startsWith('data.remove:'))).toEqual([])
+  expect(loadState().branches[bid].managed?.['rd-cache']).toBeDefined()
+})
+
+test('a storage removal whose bucket refuses to go keeps its row', async () => {
+  const id = await sourceWithEveryStep()
+  const bid = await branchOf(id, 'main')
+  const destroy = vi.spyOn(storage, 'destroy').mockRejectedValueOnce(new Error('could not delete bucket io-demo-main-store'))
+  let res
+  try {
+    res = await del_(`/projects/${id}/services/st-store`)
+  } finally {
+    destroy.mockRestore()
+  }
+
+  expect(res.json().teardown.failed).toBeGreaterThan(0)
+  // Unregistering over a bucket that is still there leaves objects and keys nobody can reach.
+  expect(loadState().branches[bid].buckets?.['st-store']).toBeDefined()
+})
+
+test('the compute, managed and storage removals hold their service key', async () => {
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })).statusCode).toBe(201)
+  const bid = await branchOf(id, 'main')
+
+  for (const sid of ['cp-web', 'rd-cache', 'st-store']) {
+    const holder = holdKey(`${bid}:${sid}`)
+    let done = false
+    const removal = del_(`/projects/${id}/services/${sid}`).then((r) => { done = true; return r })
+    await settle()
+    // Each of these took no key at all until last round, and nothing bound the ones that were
+    // added: dropping the `withOp` again leaves the suite green without this.
+    expect(done, sid).toBe(false)
+    holder.release()
+    await holder.held
+    expect((await within(10_000, removal, `the ${sid} removal`)).statusCode).toBe(200)
+  }
+})
+
+test('a cleanup-failed branch is refused as a fork source and as a deploy target', async () => {
+  // Keeping the row is right, and it is now the NORMAL outcome of a failed teardown, so these
+  // rows are common. A half-demolished branch is not a branch to build on: some of its
+  // containers and bytes are gone and which is which is exactly what nobody knows, so forking
+  // one copies whatever survived into a branch that looks healthy.
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  const feat = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')!
+  const destroy = vi.spyOn(db, 'destroy').mockRejectedValueOnce(new Error('container is in use'))
+  try {
+    expect((await del_(`/projects/${id}/branches/${feat.id}`)).statusCode).toBe(409)
+  } finally {
+    destroy.mockRestore()
+  }
+  expect(loadState().branches[feat.id].status).toBe('cleanup-failed')
+
+  const forked = await post(`/projects/${id}/branches`, { name: 'feat2', from: 'feat' })
+  expect(forked.statusCode).toBeGreaterThanOrEqual(400)
+  expect(forked.json().error).toContain('cannot be forked')
+  const deployed = await post(`/projects/${id}/deploy`, { image: 'app:9', port: 3000, group: 'web', branch: 'feat' })
+  expect(deployed.statusCode).toBeGreaterThanOrEqual(400)
+  expect(deployed.json().error).toContain('cannot be deployed to')
+  // ...and the way out is the one the message names: the delete retries the demolition.
+  expect((await del_(`/projects/${id}/branches/${feat.id}`)).statusCode).toBe(200)
+  expect(loadState().branches[feat.id]).toBeUndefined()
 })
 
 test('a create that fails post-commit emits no branch.created event', async () => {
@@ -3159,7 +3306,7 @@ test('after a sleep: state suspended against a running intent, runtime asleep, h
     args[0] === 'ps' && args[1] === '-a' ? Buffer.from('io-demo-main-app-default\texited\n') : Buffer.from(''))
   const health = (await get(`/projects/${id}/runtime-health`)).json().services
   expect(health.find((r: { serviceId: string }) => r.serviceId === 'cp-default')).toMatchObject({ status: 'standby', failing: 0 })
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
 })
 
 test('a user stop reads stopped, and an exit with no sleep mark reads crashed', async () => {
@@ -3176,7 +3323,7 @@ test('a user stop reads stopped, and an exit with no sleep mark reads crashed', 
     args[0] === 'ps' && args[1] === '-a' ? Buffer.from('io-demo-main-app-default\texited\n') : Buffer.from(''))
   const health = (await get(`/projects/${id}/runtime-health`)).json().services
   expect(health.find((r: { serviceId: string }) => r.serviceId === 'cp-default')).toMatchObject({ status: 'crashed', failing: 1 })
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
 })
 
 test('the start verb wakes an asleep service: docker start, then readiness, then runtime online', async () => {

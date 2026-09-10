@@ -30,8 +30,20 @@ export class LocalManagedDb implements ManagedDbAdapter {
 
   async destroy(container: string): Promise<void> {
     // `-v` drops the image's own anonymous volumes with the container; the engine removes the data
-    // directory (a branch delete must not leave `md/<ref>/` behind).
-    try { await docker(['rm', '-f', '-v', container]) } catch { /* already gone */ }
+    // directory (a branch delete must not leave `md/<ref>/` behind) -- and it does that AFTER
+    // this returns, so a failure swallowed here becomes a directory deleted under a container
+    // that is still running. Only dockerd's own not-found is absence; anything else is reported.
+    try {
+      await docker(['rm', '-f', '-v', container])
+    } catch (e) {
+      if (/no such (?:object|container)/i.test(e instanceof Error ? e.message : String(e))) return
+      try {
+        await docker(['inspect', '-f', '{{.State.Status}}', container])
+      } catch (probe) {
+        if (/no such (?:object|container)/i.test(probe instanceof Error ? probe.message : String(probe))) return
+      }
+      throw e
+    }
   }
 
   async rename(container: string, to: string): Promise<void> {

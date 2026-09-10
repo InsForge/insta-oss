@@ -151,9 +151,22 @@ export class LocalPostgres implements DatabaseAdapter {
     }
   }
 
-  /** Container only, with its anonymous volumes (`-v`): the engine removes the data directory. */
+  /** Container only, with its anonymous volumes (`-v`): the engine removes the data directory.
+   *
+   *  A removal that FAILED is not the same as one that had nothing to remove, and swallowing
+   *  both destroys the evidence the caller needs: the engine deletes a bind-mounted PGDATA
+   *  after this returns, and doing that under a container docker refused to remove erases the
+   *  files a live Postgres is still writing. Absence is therefore established the same three
+   *  ways as everywhere else in this adapter: dockerd saying there is no such container is
+   *  absence, anything else is not, and the caller is told. */
   async destroy(container: string): Promise<void> {
-    try { await this.exec(['rm', '-f', '-v', container]) } catch { /* already gone */ }
+    try {
+      await this.exec(['rm', '-f', '-v', container])
+    } catch (e) {
+      if (NO_SUCH_CONTAINER.test(e instanceof Error ? e.message : String(e))) return
+      if ((await containerStatus(container, this.exec)) === null) return
+      throw e
+    }
   }
 
   async rename(container: string, to: string): Promise<void> {

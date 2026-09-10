@@ -75,13 +75,13 @@ export interface Teardown { destroyed: number; failed: number }
 /** The status of a branch whose teardown did not finish: the row is kept so the resources it names
  *  can be found and the demolition retried (`unwindBranch`). */
 export const CLEANUP_FAILED = 'cleanup-failed'
-/** How many times a branch create may re-drive its acquisition over a grown key set before it
- *  gives up. Two is the converging case (the first round takes `branchOp(source)`, which every
- *  service add now needs); the third is slack for an add that lands between two rounds. */
 /** The refusal a queued operation owes when the service it resolved has moved under it. */
 const movedUnderUs = (sid: string, what: string): Error =>
   new Error(`service "${sid}" changed while this ${what} was queued (renamed, moved to another branch, or already removed); nothing was destroyed, list the services and retry with the current id`)
 
+/** How many times an operation may re-drive its acquisition over a grown key set before it gives
+ *  up. Two is the converging case (the first round takes `branchOp(source)`, which every service
+ *  add now needs); the third is slack for an add that lands between two rounds. */
 const CREATE_LOCK_ROUNDS = 3
 const newTeardown = (): Teardown => ({ destroyed: 0, failed: 0 })
 /** Run one teardown step and count it. */
@@ -662,6 +662,7 @@ export class Engine {
     if (!project) throw new Error('project not found')
     const source = loadState().branches[sourceAtCall.id]
     if (!source) throw new Error(`source branch "${sourceAtCall.name}" not found`)
+    this.assertUsable(source, 'forked')
     if (this.getBranchByName(projectId, name)) throw new Error(`branch "${name}" already exists`)
     // Each database forks inside provisionBranch (db.fork); each bucket copies here; compute redeploys.
     const b = await this.serialize('provision', () => this.provisionBranch(project, name, false, source, branchId))
@@ -909,6 +910,7 @@ export class Engine {
     const project = this.getProject(projectId)!
     const b = loadState().branches[branchId]
     if (!b) throw new Error('branch not found')
+    this.assertUsable(b, 'deployed to')
     const port = opts.port ?? 8080
     // The group's /data volume, if one was attached at service creation. Named per-branch (each
     // branch is isolated; a clone starts with an EMPTY volume — compute state lives in db/storage)
@@ -1801,14 +1803,25 @@ export class Engine {
     // `runtime` of `none` until a deploy puts a container there (the divergence COMPATIBILITY
     // records), so removing it from such a branch has to be accepted and count nothing.
     if (branch.apps[name]) {
-      await count(t, () => docker(['rm', '-f', '-v', `io-${this.ref(project, branch)}-app-${name}`]))
-      // WP4: the /data bytes are a directory under the data dir; remove it AFTER the container.
-      if (vol) await count(t, () => this.data.remove(this.layout().vol(this.ref(project, branch), vol.id)))
-      mutate((st) => {
-        delete st.branches[branch.id].apps[name]
-        st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.target !== `compute/${name}`)
-      })
-      this.scheduler.forget([this.serviceKey(branch, sid)])                                          // WP3
+      // Fail-closed, exactly as the branch and project teardowns are: the container has to be
+      // PROVEN gone before its bind-mounted /data is deleted and before the row that names both
+      // is dropped. A failed `docker rm` followed by a directory removal erases the files a
+      // still-running container is writing, and dropping the row then leaves it with nothing
+      // naming it. The row that stays is what `insta services remove` retries through.
+      const container = `io-${this.ref(project, branch)}-app-${name}`
+      if (await removeContainer(this.scheduler, t, container, () => docker(['rm', '-f', '-v', container]))) {
+        // WP4: the /data bytes are a directory under the data dir; remove it AFTER the container.
+        if (vol) await count(t, () => this.data.remove(this.layout().vol(this.ref(project, branch), vol.id)))
+        mutate((st) => {
+          delete st.branches[branch.id].apps[name]
+          st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.target !== `compute/${name}`)
+        })
+        this.scheduler.forget([this.serviceKey(branch, sid)])                                        // WP3
+      } else {
+        // Nothing else may run: the domains, the secrets and the registration all still describe
+        // a service that is still there.
+        return t
+      }
     }
     // The custom domains bound to the group ON THIS BRANCH answered through the container that
     // just went; another branch's stay, because its container still serves them.
@@ -1949,7 +1962,9 @@ export class Engine {
     const projectId = project.id
     const t = newTeardown()
     const ref = this.ref(project, branch)
-    await count(t, () => this.managedDb.destroy(managedContainerName(ref, m.type, m.name)))
+    const container = managedContainerName(ref, m.type, m.name)
+    // Proven gone before the bytes and the row, like every other teardown here.
+    if (!(await removeContainer(this.scheduler, t, container, () => this.managedDb.destroy(container)))) return t
     // WP4: the data goes with the container (same irreversibility class as the compute service).
     await count(t, () => this.data.remove(this.layout().md(ref, m.type, m.dataId ?? m.name)))
     mutate((st) => {
@@ -3253,6 +3268,21 @@ export class Engine {
     return { project, branch }
   }
 
+  /** A branch whose teardown did not finish is a HALF-DEMOLISHED branch: some of its containers
+   *  or bytes are gone and some are not, and which is which is exactly what nobody knows. It
+   *  keeps its row so those resources stay reachable and `insta branch delete` can retry, but it
+   *  is not a branch to build on, and forking one copies whatever survived into a new branch
+   *  that looks healthy.
+   *
+   *  This was declined at round ten as a behaviour change on hot paths, and that reasoning is
+   *  dead: since 4b489f6 keeping the row is the NORMAL outcome of a failed teardown rather than
+   *  an exotic one, so these rows are common now, and a forkable half-demolished branch is a
+   *  data-integrity hazard this delta itself created. */
+  private assertUsable(branch: Branch, what: string): void {
+    if (branch.status !== CLEANUP_FAILED) return
+    throw new Error(`branch "${branch.name}" is ${CLEANUP_FAILED}: its teardown did not finish, so it cannot be ${what}. Run \`insta branch delete ${branch.name}\` to retry the teardown`)
+  }
+
   /** What a service RENAME holds: every branch's branch key and its key for this service.
    *
    *  Decision 52 names rename among the takers and all four rename paths took nothing, or only
@@ -4124,7 +4154,12 @@ export class Engine {
       if (!reg || !this.carries(project, branch, reg, 'postgres')) throw movedUnderUs(sid, 'removal')
       const t = newTeardown()
       const row = this.dbHandle(project, branch, sid)
-      if (row) await count(t, () => this.db.destroy(row.container))
+      // Same rule as the branch teardown: the bytes and the row go only for a container that is
+      // proven gone. This one is a bind-mounted PGDATA, so a directory removal under a
+      // surviving Postgres is the worst version of it.
+      if (row && !(await removeContainer(this.scheduler, t, row.container, () => this.db.destroy(row.container)))) {
+        return t
+      }
       await count(t, () => this.data.remove(this.layout().pg(this.ref(project, branch), reg.dataId)))
       mutate((st) => {
         delete st.branches[branch.id].databases?.[sid]
@@ -4258,7 +4293,13 @@ export class Engine {
     const projectId = project.id
     const t = newTeardown()
     const row = this.bucketHandle(project, branch, sid)
-    if (row) await count(t, () => this.storage.destroy(row.bucket, branch.network))
+    // The adapter now raises when it cannot prove the bucket is gone, and unregistering over a
+    // bucket that is still there leaves objects and keys nobody can reach: the row stays.
+    if (row) {
+      const before = t.failed
+      await count(t, () => this.storage.destroy(row.bucket, branch.network))
+      if (t.failed !== before) return t
+    }
     mutate((st) => {
       delete st.branches[branch.id].buckets?.[sid]
       st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.source !== `storage/${reg.name}`)

@@ -212,11 +212,39 @@ export class LocalGarage implements StorageAdapter {
     await this.garage(['bucket', 'website', isPublic ? '--allow' : '--deny', bucket])
   }
 
+  /** Purge the objects, delete the bucket, drop its keys.
+   *
+   *  A failure here used to be indistinguishable from an empty bucket, and the caller unregisters
+   *  the service on the strength of this returning: a bucket that is still there then has no row
+   *  naming it and nobody will ever come back for it. So absence is ESTABLISHED before this
+   *  reports success -- garage's own bucket list is asked afterwards, and a bucket still in it
+   *  raises. The object purge stays best effort on its own (an empty or already-gone bucket makes
+   *  rclone complain and that is not a failure), because the bucket delete below is the step that
+   *  actually decides, and garage refuses to delete a bucket that still holds objects. */
   async destroy(bucket: string, network: string): Promise<void> {
     try { await this.rclone(network, await this.admin(), ['purge', `g:${bucket}`]) } catch { /* empty / gone */ }
-    await this.garage(['bucket', 'delete', '--yes', bucket]).catch(() => { /* gone */ })
+    let failure: string | undefined
+    try {
+      await this.garage(['bucket', 'delete', '--yes', bucket])
+    } catch (e) {
+      failure = e instanceof Error ? e.message : String(e)
+    }
+    if (failure !== undefined && await this.bucketExists(bucket)) {
+      throw new Error(`could not delete bucket ${bucket}: ${failure}`)
+    }
     for (const id of await this.keyIds(bucket).catch(() => [] as string[])) {
       await this.garage(['key', 'delete', '--yes', id]).catch(() => { /* gone */ })
+    }
+  }
+
+  /** Is the bucket still there? A LIST that cannot answer is not evidence of absence, so it
+   *  answers "still there" and the caller keeps its row. */
+  private async bucketExists(bucket: string): Promise<boolean> {
+    try {
+      const out = (await this.garage(['bucket', 'list'])).toString()
+      return out.split('\n').some((l) => l.split(/\s+/).includes(bucket))
+    } catch {
+      return true
     }
   }
 
