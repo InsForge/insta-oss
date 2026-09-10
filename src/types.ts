@@ -112,7 +112,7 @@ export interface PgTarget { container: string; network: string; dataDir: string 
 export interface DatabaseAdapter {
   /** Fresh instance (initdb) on an EMPTY dataDir; returns the container-host URL with a freshly minted password. */
   provision(t: PgTarget, opts?: { publishLoopback?: boolean; limits?: ServiceLimits }): Promise<{ url: string }>
-  /** File-level fork: CHECKPOINT (when running) + reflink copy, or pg_basebackup fallback (wakes the source through ensureSourceRunning). Returns the clone's URL (source password preserved). */
+  /** File-level fork: a reflink copy of a source AT REST, else pg_basebackup (a running source, or no reflinks; it wakes a sleeping source through ensureSourceRunning). Returns the clone's URL (source password preserved). */
   fork(src: PgTarget & { url: string }, dst: PgTarget, opts?: { publishLoopback?: boolean; limits?: ServiceLimits; ensureSourceRunning?: () => Promise<void> }): Promise<{ url: string; method: 'reflink' | 'basebackup'; ms: number }>
   query(container: string, sql: string): Promise<string>
   /** Container only (rm -f -v); the engine removes the directory. */

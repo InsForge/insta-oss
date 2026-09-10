@@ -4,8 +4,10 @@
 // postmaster can answer the four things this file exists for:
 //
 //   1. the method the adapter RECORDS is the method it used: `INSTA_OSS_FORK=auto` takes the
-//      reflink path exactly when the boot probe says this data dir can clone, and
-//      `INSTA_OSS_FORK=basebackup` streams even where it could have cloned;
+//      reflink path exactly when the boot probe says this data dir can clone AND the source is at
+//      rest, streams a RUNNING source even on a box that could clone (a file-by-file walk of a live
+//      data directory is not a crash-consistent copy), and `INSTA_OSS_FORK=basebackup` streams
+//      everywhere;
 //   2. the clone carries the source's bytes, its password among them (a file-level fork inherits
 //      the source's roles, decision 18), on both paths;
 //   3. the two are separate databases from the first write onwards: a write on the fork never
@@ -33,7 +35,7 @@ import { join } from 'node:path'
 import { loadConfig, type Config } from '../src/config'
 import { docker } from '../src/docker'
 import { dataLayout, forkMethod, sharedDataDir } from '../src/datadir'
-import { LocalPostgres } from '../src/adapters/postgres'
+import { LocalPostgres, pgWaitReady } from '../src/adapters/postgres'
 import { NoReflinkError, type DataDirOps, type PgTarget } from '../src/types'
 
 /** The data dir is REALPATH'd: docker resolves a bind source itself, and on macOS `/var` is a
@@ -55,7 +57,8 @@ const cfgFor = (fork: 'auto' | 'reflink' | 'basebackup'): Config => loadConfig({
  *  which is that singleton, so a privately constructed DataDir would leave `auto` believing this
  *  box cannot clone. */
 const data = sharedDataDir(cfgFor('auto'))
-/** What `INSTA_OSS_FORK=auto` must resolve to ON THIS BOX, from the real probe. */
+/** What `INSTA_OSS_FORK=auto` must resolve to ON THIS BOX for a source AT REST, from the real
+ *  probe. A running source streams whatever the probe says. */
 let expectedAuto: 'reflink' | 'basebackup' = 'basebackup'
 /** The image every helper-container read and write in this file runs in (`node:22-alpine`). */
 const HELPER_IMAGE = cfgFor('auto').data.helperImage
@@ -104,6 +107,15 @@ async function seedParent(ref: string, fork: 'auto' | 'basebackup', over: { data
   return { pg, src: { ...t, url } }
 }
 
+/** Put the parent to sleep, which is what a branch's parent normally is here: databases scale to
+ *  zero, and a stopped data directory is the only one a file-level clone may copy. */
+const sleepSource = (container: string): Promise<unknown> => docker(['stop', container])
+/** ...and back, so the isolation assertions can query it. */
+async function wakeSource(container: string): Promise<void> {
+  await docker(['start', container])
+  await pgWaitReady(container)
+}
+
 /** The four assertions every fork owes, whichever path it took. */
 async function assertForkedAndIsolated(pg: LocalPostgres, src: PgTarget, dst: PgTarget): Promise<void> {
   // 2. the seeded rows travelled
@@ -126,11 +138,15 @@ async function assertForkedAndIsolated(pg: LocalPostgres, src: PgTarget, dst: Pg
 test('INSTA_OSS_FORK=auto records the method the probe chose, and the clone is a separate database', async () => {
   const { pg, src } = await seedParent('forktest-main', 'auto')
   const dst = target('forktest-feat')
+  // Asleep, the ordinary state of a branch's parent here, and the only state a reflink clone is
+  // allowed to copy: a live postmaster keeps writing all the way through the walk.
+  await sleepSource(src.container)
 
   const out = await pg.fork(src, dst)
 
   // 1. the recorded method IS the mode's method on this box
   expect(out.method).toBe(expectedAuto)
+  await wakeSource(src.container)
   expect(out.ms).toBeGreaterThanOrEqual(0)
   // A file-level fork inherits the source's password: only the host moves (decision 18).
   expect(out.url).toBe(src.url.replace(src.container, dst.container))
@@ -140,6 +156,49 @@ test('INSTA_OSS_FORK=auto records the method the probe chose, and the clone is a
   expect(await data.hasPgData(dst.dataDir)).toBe(true)
 
   await assertForkedAndIsolated(pg, src, dst)
+}, 300_000)
+
+test('a RUNNING source streams even where the box could have cloned, and the clone is consistent', async () => {
+  // The reflink walk copies pg_control first and pg_wal last, file by file. A live server writes
+  // through all of it (its own checkpoints, heap and index writes, files created and unlinked, WAL
+  // recycled), so the destination would be assembled out of several different filesystem moments.
+  // `auto` therefore streams a running source whatever the probe said about reflinks.
+  const { pg, src } = await seedParent('forktest-live', 'auto')
+  const dst = target('forktest-livefeat')
+
+  // A writer that keeps committing rows for the whole fork, ids strictly increasing and one row
+  // per transaction: a consistent copy holds SOME prefix of them, a torn one holds gaps (or does
+  // not recover at all).
+  let writing = true
+  let written = 0
+  const writer = (async () => {
+    while (writing) {
+      await pg.query(src.container, `insert into notes values (${100000 + written}, 'live-${written}')`)
+      written++
+    }
+  })()
+
+  const out = await pg.fork(src, dst)
+  writing = false
+  await writer
+
+  expect(out.method).toBe('basebackup')
+  expect(written).toBeGreaterThan(0)
+  expect(await docker(['inspect', '-f', '{{.State.Status}}', dst.container]).then((b) => b.toString().trim())).toBe('running')
+  // Consistency: whatever the clone caught of the concurrent writer is a contiguous prefix of it,
+  // with no hole in the middle, and the seeded rows are all there.
+  expect(await pg.query(dst.container, 'select count(*) from notes where id < 100000')).toBe('20000')
+  const caught = Number(await pg.query(dst.container, 'select count(*) from notes where id >= 100000'))
+  const highest = await pg.query(dst.container, 'select coalesce(max(id) - 100000 + 1, 0) from notes where id >= 100000')
+  expect(caught).toBe(Number(highest))
+  expect(caught).toBeLessThanOrEqual(written)
+
+  // Separate databases from the first write onwards. The total-count assertions of
+  // `assertForkedAndIsolated` cannot be reused here: the concurrent writer moved both totals.
+  await pg.query(dst.container, "insert into notes values (900001, 'from-fork')")
+  expect(await pg.query(src.container, "select count(*) from notes where body = 'from-fork'")).toBe('0')
+  await pg.query(src.container, "insert into notes values (900002, 'from-parent')")
+  expect(await pg.query(dst.container, "select count(*) from notes where body = 'from-parent'")).toBe('0')
 }, 300_000)
 
 test('INSTA_OSS_FORK=basebackup streams even where the box could have cloned, with the same guarantees', async () => {
@@ -190,6 +249,8 @@ function noReflinkData(): { data: DataDirOps; restore(): void } {
 test('INSTA_OSS_FORK=reflink refuses a fork it cannot reflink; auto streams one instead', async () => {
   const { pg: parent, src } = await seedParent('forktest-strict', 'auto')
   const strict = noReflinkData()
+  // At rest, so what the strict setting refuses is the missing REFLINK and not the live source.
+  await sleepSource(src.container)
   try {
     // Strict: the operator asked for reflinks and only reflinks. A stream here would be the silent
     // copy the setting exists to forbid, so the fork fails and says which setting refused it.
@@ -201,6 +262,9 @@ test('INSTA_OSS_FORK=reflink refuses a fork it cannot reflink; auto streams one 
 
     // Same box, same failure, permissive setting: THIS one is allowed to stream, and it produces a
     // working fork. The contrast is the assertion: the fallback is a choice, not an accident.
+    // The stream reads the source over the network, so it needs it up; the engine hands the
+    // adapter a wake door for exactly this, and here the test opens it.
+    await wakeSource(src.container)
     const permissive = new LocalPostgres({ cfg: cfgFor('auto'), data: strict.data })
     const streamed = target('forktest-strictok')
     const out = await permissive.fork(src, streamed)

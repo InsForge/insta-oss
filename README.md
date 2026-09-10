@@ -121,10 +121,12 @@ $ insta branch delete feat          # done with the task: throw the clone away
 
 ## What makes it different
 
-**A branch is a fork of the disk.** `insta branch create` checkpoints Postgres, reflink-copies its
-data directory and every compute volume, copies the bucket, and redeploys the apps on their own
-URLs. It returns in about a second whether the database is 100 MB or 100 GB, and the source is
-never touched. One task, one branch, many in parallel.
+**A branch is a fork of the disk.** `insta branch create` reflink-copies the Postgres data
+directory and every compute volume, copies the bucket, and redeploys the apps on their own URLs.
+A sleeping database, which is what a branch's parent usually is, forks in about a second whether
+it holds 100 MB or 100 GB; one that is awake is streamed with `pg_basebackup` instead, which is
+correct but takes time proportional to its size. The source is never touched either way. One task,
+one branch, many in parallel.
 
 **Serverless on one node.** Idle apps and databases are stopped, not billed to your RAM, and the
 next request starts them again in a second or two. That is what lets one box hold dozens of

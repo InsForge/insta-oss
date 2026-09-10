@@ -157,8 +157,9 @@ script prints the block for you to merge by hand when the file carries other key
 ## Reflinks
 
 Branch creation copies the Postgres data directory and every volume with a reflink copy: the kernel
-shares the blocks and only writes diverge, so a fork of a 50 GiB database is a sub-second metadata
-operation. XFS with `reflink=1` and Btrfs support it. ext4 does not.
+shares the blocks and only writes diverge, so a fork of a 50 GiB database that is asleep is a
+sub-second metadata operation. A database that is awake streams `pg_basebackup` instead, in time
+proportional to its size. XFS with `reflink=1` and Btrfs support reflinks. ext4 does not.
 
 The script probes with `cp --reflink=always` on two temporary files inside the data directory:
 

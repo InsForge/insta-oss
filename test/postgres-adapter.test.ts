@@ -3,7 +3,18 @@
 // ORDER of the calls a fork makes, the readiness predicate and the replication line are all
 // assertable in milliseconds. The Docker suites (fork.int, clone-isolation.int) prove the same
 // paths against a real server; this file is what fails fast when the sequence changes.
-import { test, expect } from 'vitest'
+import { test, expect, vi } from 'vitest'
+
+// `forkMethod` reads the BOOT PROBE through `probedCapabilities()`, a process-wide singleton no
+// unit test should have to run for real (it spawns `fsclone.cjs` against a real filesystem, and
+// its answer differs between an APFS laptop and an ext4 runner). Pinning it to "this data dir can
+// reflink" is what lets `INSTA_OSS_FORK=auto` be tested here at all: without it every `auto` fork
+// resolves to the stream and the choice this file is about never happens.
+vi.mock('../src/datadir', async (orig) => ({
+  ...(await orig<typeof import('../src/datadir')>()),
+  probedCapabilities: () => ({ dataDir: '/tmp/fake', reflink: true, engine: 'inprocess' as const }),
+}))
+
 import { LocalPostgres, pgWaitReady, type DockerExec } from '../src/adapters/postgres'
 import type { Config } from '../src/config'
 import { NoReflinkError, type DataDirOps, type PgTarget } from '../src/types'
@@ -12,18 +23,22 @@ import { testConfig } from './fakes'
 const HBA = 'insta-oss basebackup'
 
 /** A docker stub that records every argv. Containers in `running` answer `docker inspect` with
- *  their status and every other name is absent (which is what a destination looks like before a
- *  fork); `selectOne` answers the readiness statement; `on` overrides any single call. */
-function stubDocker(opts: { running?: string[]; status?: string; selectOne?: string; on?: (args: string[]) => string | Error | undefined } = {}): { calls: string[][]; exec: DockerExec } {
+ *  their status, those in `stopped` answer `exited` (a database asleep, which is what a branch's
+ *  parent normally is), and every other name is absent (which is what a destination looks like
+ *  before a fork); `selectOne` answers the readiness statement; `on` overrides any single call. */
+function stubDocker(opts: { running?: string[]; stopped?: string[]; status?: string; selectOne?: string; on?: (args: string[]) => string | Error | undefined } = {}): { calls: string[][]; exec: DockerExec } {
   const calls: string[][] = []
   const live = new Set(opts.running ?? [])
+  const down = new Set(opts.stopped ?? [])
   const exec: DockerExec = async (args) => {
     calls.push([...args])
     const custom = opts.on?.(args)
     if (custom instanceof Error) throw custom
     if (typeof custom === 'string') return Buffer.from(custom)
     if (args[0] === 'inspect') {
-      if (!live.has(args[args.length - 1])) throw new Error('Error: No such object')
+      const name = args[args.length - 1]
+      if (down.has(name)) return Buffer.from('exited\n')
+      if (!live.has(name)) throw new Error('Error: No such object')
       return Buffer.from(`${opts.status ?? 'running'}\n`)
     }
     if (args.includes('select 1')) return Buffer.from(`${opts.selectOne ?? '1'}\n`)
@@ -112,7 +127,7 @@ test('a basebackup fork appends the replication line to the SOURCE only, before 
 })
 
 test('a reflink fork writes no replication line at all: nothing streams', async () => {
-  const { calls, exec } = stubDocker({ running: ['io-demo-main-pg-db'] })
+  const { calls, exec } = stubDocker({ stopped: ['io-demo-main-pg-db'] })
   const { data } = stubData()
   const pg = new LocalPostgres({ cfg: cfgWith('reflink'), data, docker: exec })
 
@@ -184,24 +199,88 @@ test('a source that already carries the line is not asked twice in one fork', as
 
 // ---- fork ordering -----------------------------------------------------------------------------
 
-test('a reflink fork checkpoints the source, then clones, then starts the copy and waits for it', async () => {
-  const { calls, exec } = stubDocker({ running: ['io-demo-main-pg-db'] })
+test('a reflink fork clones a source at rest, then starts the copy and waits for it', async () => {
+  // The source is STOPPED, which is what a branch's parent normally is here: databases sleep, and
+  // a stopped data directory is the one a file-level clone can copy safely. The fixture used to
+  // run this against a live source and assert a CHECKPOINT before the walk; a CHECKPOINT freezes
+  // nothing, so that arrangement is not one this adapter may clone at all any more.
+  const { calls, exec } = stubDocker({ stopped: ['io-demo-main-pg-db'] })
   const { ops, data } = stubData()
   const pg = new LocalPostgres({ cfg: cfgWith('reflink'), data, docker: exec })
 
   const out = await pg.fork(src(), dst())
   expect(out.method).toBe('reflink')
   expect(ops).toEqual(['clone:/data/pg/demo-main-db->/data/pg/demo-feat-db'])
-  // The CHECKPOINT flushes the source's dirty buffers so the copy needs the least redo, and it has
-  // to happen BEFORE the clone or the copy is of the unflushed state.
-  const checkpoint = indexOfMatch(calls, 'CHECKPOINT')
-  expect(checkpoint).toBeGreaterThanOrEqual(0)
-  expect(calls[checkpoint]).toContain('io-demo-main-pg-db')
-  // Then the destination container starts on the copy and crash recovery is waited out.
+  // Nothing is asked of the source: it has no writer to flush, and a query would have to start it.
+  expect(indexOfMatch(calls, 'CHECKPOINT')).toBe(-1)
+  // The destination container starts on the copy and crash recovery is waited out.
   const started = indexOfMatch(calls, 'run -d --restart unless-stopped --name io-demo-feat-pg-db')
   const ready = line(calls).findIndex((l) => l.includes('pg_isready') && l.includes('io-demo-feat-pg-db'))
-  expect(started).toBeGreaterThan(checkpoint)
+  expect(started).toBeGreaterThanOrEqual(0)
   expect(ready).toBeGreaterThan(started)
+  expect(indexOfMatch(calls, 'pg_basebackup')).toBe(-1)
+})
+
+// ---- the source has to be at rest (a live PGDATA cannot be copied file by file) ----------------
+
+test('a fork of a RUNNING source streams instead of walking its data directory', async () => {
+  // `auto` on a box whose probe says it can reflink. The source is live, so the walk would assemble
+  // the destination out of several moments of a data directory that is still being written:
+  // concurrent writes, the server's own checkpoints, files created and unlinked, WAL recycled.
+  // That is a torn copy, and it is decided here, before anything is created.
+  const { calls, exec } = stubDocker({ running: ['io-demo-main-pg-db'] })
+  const { ops, data } = stubData()
+  const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
+
+  const out = await pg.fork(src(), dst())
+  expect(out.method).toBe('basebackup')
+  expect(ops.filter((o) => o.startsWith('clone:'))).toEqual([])
+  expect(indexOfMatch(calls, 'pg_basebackup')).toBeGreaterThanOrEqual(0)
+  // ...and nothing of the destination was touched before the decision.
+  expect(ops.filter((o) => o.startsWith('remove:'))).toEqual([])
+})
+
+test('INSTA_OSS_FORK=reflink refuses a running source instead of making a torn copy', async () => {
+  const { calls, exec } = stubDocker({ running: ['io-demo-main-pg-db'] })
+  const { ops, data } = stubData()
+  const pg = new LocalPostgres({ cfg: cfgWith('reflink'), data, docker: exec })
+
+  // The strict setting means "fail rather than stream"; it is not a licence to copy a live server.
+  await expect(pg.fork(src(), dst())).rejects.toThrow(/is running: a file-level clone/)
+  await expect(pg.fork(src(), dst())).rejects.toThrow(/refusing to fall back to pg_basebackup/)
+  expect(ops.filter((o) => o.startsWith('clone:'))).toEqual([])
+  expect(indexOfMatch(calls, 'pg_basebackup')).toBe(-1)
+})
+
+test('a source that starts DURING the walk throws the copy away and streams', async () => {
+  // Nothing in this daemon can start the source while a fork holds its ServiceKey (decision 52),
+  // but a `docker start` from outside is under no lock of ours, so the walk is re-checked after it.
+  const live = new Set<string>()
+  const calls: string[][] = []
+  const exec: DockerExec = async (args) => {
+    calls.push([...args])
+    if (args[0] === 'inspect') {
+      const name = args[args.length - 1]
+      if (name === 'io-demo-main-pg-db') return Buffer.from(live.has(name) ? 'running\n' : 'exited\n')
+      throw new Error('Error: No such object')
+    }
+    if (args.includes('select 1')) return Buffer.from('1\n')
+    return Buffer.from('')
+  }
+  const { ops, data } = stubData({
+    clonePostgres: async (s, d) => { ops.push(`clone:${s}->${d}`); live.add('io-demo-main-pg-db'); return { method: 'reflink', ms: 1 } },
+  })
+  const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
+
+  const out = await pg.fork(src(), dst())
+  expect(out.method).toBe('basebackup')
+  // The clone happened and was then discarded, rather than being started and trusted.
+  expect(ops).toContain('clone:/data/pg/demo-main-db->/data/pg/demo-feat-db')
+  expect(ops).toContain('remove:/data/pg/demo-feat-db')
+  expect(calls.findIndex((a) => a.includes('pg_basebackup'))).toBeGreaterThanOrEqual(0)
+  // The half-copy never became a container.
+  const startedCopy = calls.findIndex((a) => a.join(' ').includes('--name io-demo-feat-pg-db'))
+  expect(startedCopy).toBeGreaterThan(calls.findIndex((a) => a.includes('pg_basebackup')))
 })
 
 test('a sleeping source is cloned as it lies: no CHECKPOINT, and the copy still starts', async () => {
@@ -218,11 +297,12 @@ test('a sleeping source is cloned as it lies: no CHECKPOINT, and the copy still 
 })
 
 test('a clone that comes out unrecoverable is retried exactly once, cleaning up each time', async () => {
-  // A copy that caught the source mid-write says so in the container's own log, and the adapter
-  // reads that rather than guessing. `INSTA_OSS_FORK=reflink` is the operator asking to FAIL
-  // instead of streaming, so the second torn copy surfaces as a refusal.
+  // The source is at rest, so this is a copy the adapter is allowed to make and it still did not
+  // recover: a source damaged before the fork (an interrupted earlier copy) is what is left once
+  // the live-source case streams. `INSTA_OSS_FORK=reflink` is the operator asking to FAIL instead
+  // of streaming, so the second unrecoverable copy surfaces as a refusal.
   const { calls, exec } = stubDocker({
-    running: ['io-demo-main-pg-db'],
+    stopped: ['io-demo-main-pg-db'],
     on: (args) => {
       if (args[0] === 'exec' && args[1] === 'io-demo-feat-pg-db') return new Error('pg_isready: no response')
       if (args[0] === 'logs') return 'PANIC: could not locate a valid checkpoint record'
@@ -244,7 +324,7 @@ test('a clone that comes out unrecoverable is retried exactly once, cleaning up 
 })
 
 test('INSTA_OSS_FORK=reflink on a filesystem that cannot clone fails instead of streaming', async () => {
-  const { calls, exec } = stubDocker({ running: ['io-demo-main-pg-db'] })
+  const { calls, exec } = stubDocker({ stopped: ['io-demo-main-pg-db'] })
   const { data } = stubData({ clonePostgres: async () => { throw new NoReflinkError('this filesystem cannot clone') } })
   const pg = new LocalPostgres({ cfg: cfgWith('reflink'), data, docker: exec })
 
@@ -275,7 +355,7 @@ test('a basebackup fork wakes the source first, and streams straight into the de
 })
 
 test('an interrupted earlier attempt is cleared, and anything a live row still references is not', async () => {
-  const { calls, exec } = stubDocker({ running: ['io-demo-main-pg-db', 'io-demo-feat-pg-db'] })
+  const { calls, exec } = stubDocker({ stopped: ['io-demo-main-pg-db'], running: ['io-demo-feat-pg-db'] })
   const { ops, data } = stubData({ isEmptyOrMissing: async () => false })
   const pg = new LocalPostgres({ cfg: cfgWith('reflink'), data, docker: exec })
 
@@ -284,7 +364,7 @@ test('an interrupted earlier attempt is cleared, and anything a live row still r
   expect(ops[0]).toBe('remove:/data/pg/demo-feat-db')
 
   // A destination a live branch row still owns is never touched: the caller says so.
-  const second = stubDocker({ running: ['io-demo-main-pg-db', 'io-demo-feat-pg-db'] })
+  const second = stubDocker({ stopped: ['io-demo-main-pg-db'], running: ['io-demo-feat-pg-db'] })
   const kept = stubData({ isEmptyOrMissing: async () => false })
   const pg2 = new LocalPostgres({ cfg: cfgWith('reflink'), data: kept.data, docker: second.exec })
   await pg2.fork(src(), dst(), { referenced: () => true })

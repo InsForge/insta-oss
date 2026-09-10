@@ -3,10 +3,13 @@
 // decision 17) and are never derived here.
 //
 // Three things this file exists to get right:
-//   - a branch fork is a FILE-LEVEL clone: CHECKPOINT the source, reflink its directory (sub-second
-//     at any size), start a container on the copy and let crash recovery finish the job; a
-//     filesystem without reflinks streams `pg_basebackup` over the branch network instead, and the
-//     daemon never buffers a byte either way (04 section D);
+//   - a branch fork is a FILE-LEVEL clone of a source NOTHING IS WRITING: reflink the stopped
+//     source's directory (sub-second at any size), start a container on the copy and let crash
+//     recovery finish the job. A RUNNING source is streamed with `pg_basebackup` instead, because a
+//     file-by-file walk of a live data directory assembles the destination out of several different
+//     filesystem moments and is not crash-consistent (see `forkByReflink`). A filesystem without
+//     reflinks streams the same way, and the daemon never buffers a byte on either path
+//     (04 section D);
 //   - readiness is TCP, not the socket: the image's init-time temporary server listens on the unix
 //     socket only, so a socket-only probe answers "ready" mid-initdb and the next statement dies
 //     with `server closed the connection unexpectedly` (#34, decision 34);
@@ -34,7 +37,11 @@ const CONNECT_PHASE = [
   'the database system is starting up',
   'is not currently accepting connections',
 ]
-/** `docker logs` lines that mean a reflink copy caught the source mid-write: retry, then fall back. */
+/** `docker logs` lines that mean the copy did not come out recoverable: retry, then fall back. The
+ *  running-source rule below is the actual defence; this is the last net under it, for a source that
+ *  was already damaged (an interrupted earlier copy, a half-written directory). It cannot be the
+ *  first one: it catches only the copies that fail LOUDLY, and a torn copy that boots anyway is the
+ *  worse outcome. */
 const TORN_COPY = /could not locate a valid checkpoint record|invalid checkpoint record|requested WAL segment .* has already been removed|database files are incompatible/
 
 type ProvisionOpts = {
@@ -79,9 +86,24 @@ export class LocalPostgres implements DatabaseAdapter {
     return { url: `postgres://postgres:${password}@${t.container}:5432/${DB}` }
   }
 
-  /** Fork = reflink clone of the source's PGDATA, or `pg_basebackup` when the filesystem cannot
-   *  clone (or `INSTA_OSS_FORK` says so). The clone inherits the source's files and therefore its
-   *  password, so the returned DSN is the source's with the host swapped (decision 18). */
+  /** Fork = reflink clone of a source that is NOT RUNNING, else `pg_basebackup`. The clone inherits
+   *  the source's files and therefore its password, so the returned DSN is the source's with the
+   *  host swapped (decision 18).
+   *
+   *  Why the running source streams: `clonePostgres` walks the data directory file by file, and a
+   *  live postmaster keeps writing all the way through it (its own checkpoints, heap and index
+   *  writes, relation files created and unlinked, WAL segments recycled). The destination is then
+   *  assembled from several different moments of the source's filesystem, which is a torn copy, not
+   *  a crash-consistent one, and Postgres's own filesystem-backup rules say as much: a file-level
+   *  copy is valid only against a stopped server, a genuinely atomic filesystem snapshot, or
+   *  `pg_backup_start`/`pg_backup_stop` with every WAL segment retained. `CHECKPOINT` freezes
+   *  nothing, and a copy that boots anyway is the dangerous outcome, so this decides BEFORE the
+   *  walk and not from the destination's logs afterwards.
+   *
+   *  This costs the fast path almost nothing: databases here sleep (decision 12 and the whole
+   *  scheduler), so the parent of a branch is stopped most of the time, and a stopped or paused
+   *  container has no writer at all. Its directory is exactly the `kill -9` state Postgres recovers
+   *  from through WAL, and because nothing changes during the walk the copy is one moment of it. */
   async fork(src: PgTarget & { url: string }, dst: PgTarget, opts: ForkOpts = {}): Promise<{ url: string; method: 'reflink' | 'basebackup'; ms: number }> {
     const t0 = Date.now()
     const method = forkMethod(this.cfg, probedCapabilities())
@@ -90,7 +112,7 @@ export class LocalPostgres implements DatabaseAdapter {
         const ms = await this.forkByReflink(src, dst, opts, false)
         return { url: swapHost(src.url, dst.container), method: 'reflink', ms }
       } catch (e) {
-        if (!(e instanceof NoReflinkError) && !(e instanceof TornCopyError)) throw e
+        if (!(e instanceof NoReflinkError) && !(e instanceof TornCopyError) && !(e instanceof RunningSourceError)) throw e
         // `INSTA_OSS_FORK=reflink` is the operator asking to FAIL rather than copy, which is how
         // main.ts already reads it at boot when the probe says this data dir cannot clone. The
         // probe is not the last word, though: a clone can still turn out impossible (a dst on
@@ -99,8 +121,9 @@ export class LocalPostgres implements DatabaseAdapter {
         if (this.cfg.data.fork === 'reflink') {
           throw new NoReflinkError(`INSTA_OSS_FORK=reflink: cannot clone ${src.container} into ${dst.dataDir} by reflink (${firstLine(e)}); refusing to fall back to pg_basebackup`)
         }
-        // NoReflinkError: this filesystem cannot clone after all. TornCopyError: the copy caught the
-        // source mid-write twice. Both fall through to the stream.
+        // NoReflinkError: this filesystem cannot clone after all. RunningSourceError: the source is
+        // live, so a file-level copy of it would not be crash-consistent. TornCopyError: the copy
+        // did not recover twice. All three fall through to the stream.
       }
     }
     await this.forkByBasebackup(src, dst, opts)
@@ -151,17 +174,25 @@ export class LocalPostgres implements DatabaseAdapter {
     }
   }
 
-  /** The reflink path. Throws NoReflinkError when the filesystem cannot clone and TornCopyError when
-   *  even a retried clone came out unrecoverable; the caller then streams a basebackup. */
+  /** The reflink path, for a source with no writer. Throws RunningSourceError when the source is
+   *  live, NoReflinkError when the filesystem cannot clone, and TornCopyError when even a retried
+   *  clone came out unrecoverable; the caller streams a basebackup for all three. */
   private async forkByReflink(src: PgTarget & { url: string }, dst: PgTarget, opts: ForkOpts, isRetry: boolean): Promise<number> {
+    // Decided BEFORE anything is created or removed, so a source that turns out to be live costs
+    // the destination nothing.
+    if (await isRunning(src.container, this.exec)) throw new RunningSourceError(sourceIsLive(src.container))
     await this.clearOrphan(dst, opts)
-    // A CHECKPOINT flushes the source's dirty buffers so the copy needs the least redo. A source
-    // that is asleep (or stops between the check and the call) is already at rest.
-    if (await isRunning(src.container, this.exec)) {
-      await this.query(src.container, 'CHECKPOINT').catch(() => { /* stopped underneath us: at rest */ })
-    }
     const t0 = Date.now()
     await this.data.clonePostgres(src.dataDir, dst.dataDir)
+    // The belt for the gap between the two: nothing in this daemon can start the source while a
+    // fork holds its ServiceKey (decision 52 -- a traffic wake, a lifecycle start and a management
+    // query all take that lock and queue behind this operation), but a `docker start` from outside
+    // is not covered by any lock we hold. A source that came up during the walk means the copy
+    // spans a write, so it is thrown away here rather than started and trusted.
+    if (await isRunning(src.container, this.exec)) {
+      await this.data.remove(dst.dataDir).catch(() => {})
+      throw new RunningSourceError(`${src.container} started while its data directory was being cloned; the copy spans a write`)
+    }
     await this.run(dst, opts, [])
     try {
       await this.waitReady(dst.container)
@@ -228,6 +259,13 @@ export class LocalPostgres implements DatabaseAdapter {
 
 /** Raised when a reflink clone came out unrecoverable twice; the caller streams instead. */
 class TornCopyError extends Error {}
+
+/** Raised when the source is live: a file-level copy of it cannot be crash-consistent, so the fork
+ *  streams instead (and `INSTA_OSS_FORK=reflink` refuses rather than producing a torn copy). */
+class RunningSourceError extends Error {}
+
+const sourceIsLive = (container: string): string =>
+  `${container} is running: a file-level clone of a live Postgres data directory is not crash-consistent`
 
 /** `docker run` for a provision, a clone start, or the boot migration's re-create under the new
  *  container name. `--mount type=bind`, never `-v` (decision 56): with `-v` dockerd CREATES a

@@ -122,8 +122,8 @@ CI (`.github/workflows/ci.yml`): a step before `npm test` creating a 4 GiB XFS `
 ## Docs facts for WP8
 
 - Data lives under the data dir: `pg/<ref>/<id>` (Postgres), `vol/<ref>/<id>` (compute `/data`), `md/<ref>/...` (managed databases), `garage/` (objects), all bind mounts.
-- Clone = `CHECKPOINT` on the source, reflink copy of the directory (sub-second at any size: XFS `reflink=1` and btrfs on Linux, APFS clonefile through `cp -c` on macOS), start the container, crash-consistent recovery in 1 to 3 s.
-- Sleep stops Postgres with the image's own stop signal (SIGINT, a fast shutdown), apps and managed databases with SIGTERM; the daemon never overrides `STOPSIGNAL`. A sleeping source needs no wake. Fallback `pg_basebackup` streamed over the branch network when the filesystem has no reflinks (`INSTA_OSS_FORK`). `insta events` shows `branch.created` with `db.method` and `volumes[]`.
+- Clone = reflink copy of the directory of a source AT REST (sub-second at any size: XFS `reflink=1` and btrfs on Linux, APFS clonefile through `cp -c` on macOS), start the container, crash-consistent recovery in 1 to 3 s. A RUNNING source streams `pg_basebackup` instead: the walk of a live data directory is not crash-consistent and `CHECKPOINT` does not make it one.
+- Sleep stops Postgres with the image's own stop signal (SIGINT, a fast shutdown), apps and managed databases with SIGTERM; the daemon never overrides `STOPSIGNAL`. A sleeping source needs no wake. `pg_basebackup` streamed over the branch network whenever the source is running or the filesystem has no reflinks (`INSTA_OSS_FORK`). `insta events` shows `branch.created` with `db.method` and `volumes[]`.
 - Compute `/data` volumes fork on self-host (the cloud gives a branch an empty volume): docs state the difference explicitly.
 - Managed databases start fresh and empty on both targets.
 - First boot after upgrading migrates legacy docker volumes into the data dir (one stop/recreate per container); `INSTA_OSS_DATA_MIGRATE=0` skips it.

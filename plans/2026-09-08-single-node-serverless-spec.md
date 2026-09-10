@@ -182,7 +182,7 @@ Today a branch clone is `pg_dump` into the daemon's memory then `psql` (`src/ada
 Target: **container-per-branch, data directory forked.**
 
 1. Postgres data lives at `/var/lib/instacloud/pg/<ref>` (bind mount) on the reflink filesystem the installer guarantees.
-2. Clone: `CHECKPOINT` on the source, `cp --reflink=always -a` of the directory, start the new container on it. Postgres treats it as a crash-consistent restart. Sub-second at any size. A sleeping source needs no wake: its files are at rest.
+2. Clone: only from a source AT REST (stopped, which is what a sleeping database is), `cp --reflink=always -a` of the directory, start the new container on it. Postgres treats it as a crash-consistent restart. Sub-second at any size. Nothing is woken to be cloned. A RUNNING source takes the `pg_basebackup` path below instead: a file-by-file walk of a live data directory copies several different moments of it, which `CHECKPOINT` does not prevent, so it is not a valid backup (Postgres allows a file-level copy only against a stopped server, an atomic snapshot, or `pg_backup_start`/`pg_backup_stop` with full WAL retention).
 3. Fallback without reflinks: `pg_basebackup` streaming over the branch network. Never a buffer in the daemon.
 4. Compute volumes: `/var/lib/instacloud/vol/<ref>/<group>`, forked the same way. Today a branch gets an empty volume, which is wrong for agent templates whose whole state is on `/data`.
 5. Buckets: `rclone sync` between Garage buckets stays in v1 (`src/adapters/garage.ts:140-146`).

@@ -51,5 +51,5 @@ There is no promote button, by design: data promotion is a migration, not a copy
 - `insta branch create` does not switch you. `insta branch switch <name>` relinks the directory, then rerun `insta secrets` to refresh `.env`.
 
 <Note>
-On self-hosted insta-oss, a branch is a fork on disk: the Postgres data directory and every compute volume are reflink-copied, so `branch create` returns in about a second whatever the database weighs, and the bucket objects are synced. A filesystem without reflink support streams `pg_basebackup` instead, which is correct but proportional to size. The command-by-command list is in [COMPATIBILITY.md](https://github.com/InsForge/insta-oss/blob/main/COMPATIBILITY.md).
+On self-hosted insta-oss, a branch is a fork on disk: the Postgres data directory and every compute volume are reflink-copied, so `branch create` returns in about a second whatever a sleeping database weighs, and the bucket objects are synced. A source that is awake, or a filesystem without reflink support, streams `pg_basebackup` instead, which is correct but proportional to size. The command-by-command list is in [COMPATIBILITY.md](https://github.com/InsForge/insta-oss/blob/main/COMPATIBILITY.md).
 </Note>

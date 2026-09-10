@@ -26,18 +26,23 @@ Directories are keyed by immutable ids, never by the name you can rename.
 
 `insta branch create feat --from main` does this to the Postgres service:
 
-1. Ask the source for a `CHECKPOINT`, so the data files on disk are current.
+1. Check that the source is at rest. A database here sleeps when nothing is using it, so the
+   parent of a branch is normally stopped, and a stopped data directory is one nothing is writing.
 2. Copy the data directory with a reflink copy. The filesystem shares the blocks and only
    divergent writes allocate anything, so this is a metadata operation: sub-second whether the
    database is 100 MB or 100 GB.
 3. Start the new container on the copy. Postgres runs its normal crash recovery, which is what it
-   does after any unclean stop, and comes up with the data as of the checkpoint.
+   does after any unclean stop, and comes up with the data as of the moment the source stopped.
 
-A sleeping source needs no wake: the files are on disk either way, and step 1 is skipped.
+Nothing is woken to be cloned: the files are on disk either way.
 
-When the filesystem has no reflink support, the fork streams `pg_basebackup` instead. Same result,
-but the time is proportional to the size of the database. The [install](/self-hosting/install#reflinks)
-page has the reflink check and how to get one.
+A RUNNING source is streamed with `pg_basebackup` instead, and so is any source on a filesystem
+without reflink support. Same result, but the time is proportional to the size of the database.
+Copying a live data directory file by file is not safe at any speed: the server keeps writing
+through the copy, so the result would be assembled out of several different moments and might not
+recover at all. Postgres allows a file-level copy only against a stopped server, an atomic
+filesystem snapshot, or its own backup protocol, so an always-on database always streams. The
+[install](/self-hosting/install#reflinks) page has the reflink check and how to get one.
 
 Either way, `insta events` records what happened:
 
@@ -52,7 +57,8 @@ actually working on your box.
 `INSTA_OSS_FORK` decides which of the two is allowed: `auto` (the default) reflinks when it can and
 streams when it cannot, `reflink` refuses the fork rather than falling back, and `basebackup`
 always streams. Set it to `reflink` on a box where a silent fall back to a copy proportional to the
-database would be worse than an error.
+database would be worse than an error. `reflink` refuses a fork of a running database too: the
+safety rule is not something a setting turns off, so stop the source or let it sleep first.
 
 ## Volumes fork too
 
