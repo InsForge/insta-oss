@@ -566,14 +566,21 @@ export class Engine {
     return this.withOp(keys, () => this.createBranchLocked(project, name, source, branchId))
   }
 
-  private async createBranchLocked(project: Project, name: string, source: Branch, branchId: string): Promise<Branch> {
-    const projectId = project.id
-    // Everything above was read BEFORE the lock. A project delete holding the same project key
-    // may have run in between and taken this project, this source branch or both with it, so the
-    // create re-reads them here rather than provisioning a stack onto rows that no longer exist:
-    // the containers, buckets and bytes it would build have nothing left that names them.
-    if (!this.getProject(projectId)) throw new Error('project not found')
-    if (!loadState().branches[source.id]) throw new Error(`source branch "${source.name}" not found`)
+  private async createBranchLocked(projectAtCall: Project, name: string, sourceAtCall: Branch, branchId: string): Promise<Branch> {
+    const projectId = projectAtCall.id
+    // Everything above was read BEFORE the lock, and the rows can have moved while this waited.
+    // A project delete holding the same project key may have taken the project, the source
+    // branch or both, so provisioning against those snapshots would build containers, buckets
+    // and bytes that nothing names. And `renameBranch` takes NO operation lock (it moves no
+    // container), so the source can also have been renamed under us -- `unwindBranch` carries
+    // two names for exactly that reason. Both rows are therefore RE-READ, not merely asserted to
+    // exist: the clone inherits its parent's branch-scoped secrets BY NAME and records the
+    // parent's name in the `branch.created` payload, and a stale name inherits nothing and
+    // reports a branch that no longer answers to it.
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const source = loadState().branches[sourceAtCall.id]
+    if (!source) throw new Error(`source branch "${sourceAtCall.name}" not found`)
     if (this.getBranchByName(projectId, name)) throw new Error(`branch "${name}" already exists`)
     // Each database forks inside provisionBranch (db.fork); each bucket copies here; compute redeploys.
     const b = await this.serialize('provision', () => this.provisionBranch(project, name, false, source, branchId))

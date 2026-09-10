@@ -2415,6 +2415,39 @@ test('...and the other order: a create that queued behind a project delete build
   expect(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual([])
 })
 
+test('a source renamed while the create waited is read again, not remembered by its old name', async () => {
+  const id = await sourceWithEveryStep()
+  // A source branch that is not `main`, because only a non-default branch can be renamed.
+  expect((await post(`/projects/${id}/branches`, { name: 'alpha' })).statusCode).toBe(201)
+  const alpha = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'alpha')!
+  expect((await get(`/projects/${id}/secrets?branch=alpha`)).json().secrets.API_KEY).toBe('from-main')
+
+  // Hold alpha's branch key, so a create from it queues instead of running. `renameBranch` takes
+  // no operation lock at all (it moves no container), so it lands inside that window: this is
+  // the interleaving, not a contrivance.
+  let release!: () => void
+  const held = new Promise<void>((r) => { release = () => { r() } })
+  const holder = engine.withOp([engine.branchOp(alpha)], () => held)
+
+  let done = false
+  const create = post(`/projects/${id}/branches`, { name: 'feat', from: 'alpha' }).then((r) => { done = true; return r })
+  await settle()
+  expect(done).toBe(false)
+  expect((await app.inject({ method: 'PATCH', url: `/projects/${id}/branches/${alpha.id}`, payload: { name: 'beta' } })).statusCode).toBe(200)
+  release()
+  await holder
+
+  expect((await create).statusCode).toBe(201)
+  // The clone inherits its parent's branch-scoped secrets BY NAME: read from the snapshot, the
+  // create looks for rows on `alpha`, the rename moved them to `beta`, and the clone inherits
+  // nothing.
+  expect((await get(`/projects/${id}/secrets?branch=feat`)).json().secrets.API_KEY).toBe('from-main')
+  // ...and the event names the branch it actually forked, which is the one that answers today.
+  const ev = loadState().events.filter((e) => e.kind === 'branch.created' && e.branch === 'feat')
+  expect(ev).toHaveLength(1)
+  expect((ev[0].payload as { from: string }).from).toBe('beta')
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
