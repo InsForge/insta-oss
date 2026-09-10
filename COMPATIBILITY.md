@@ -41,7 +41,7 @@ domain. See [self-hosting](https://docs.instacloud.com/self-hosting/overview).
 | `manifest` | per-branch postgres, storage and compute |
 | policy get and set | implemented as routes (`GET /projects/:id/policy`, `PUT /projects/:id/policy/:action`) and in the dashboard. The CLI has no `policy` command of its own, on the cloud or here |
 | `approvals list/approve/deny` | one-shot grants, same `202` flow. `--always`, which flips the project policy to allow, is a field on the approve route (`{"always": true}`) and a control in the dashboard; the CLI does not expose a flag for it |
-| `events` | resource and governance timeline, agent ingest with dedup; the newest 5000 rows are kept |
+| `events` | resource and governance timeline, agent ingest with dedup; the newest 5000 rows are kept. `limit` defaults to 50, clamps at 1000, and anything that is not an integer of 1 or more is a `400` |
 | `metrics` / `logs` | docker-backed (`docker stats` snapshot, `docker logs` tail), cloud response shapes; targets `db`, `compute`, `redis`, `mysql`, `mongodb`, and `--group` selects among several databases. `logs --deploy` is `501`, use `insta events` |
 | `storage list/get/delete` | object listing (prefix and cursor paging), presigned GET download, single delete; gated `storage.read` and `storage.delete`. Presigned-POST upload and bulk delete serve the console file browser |
 | `regions` | the single `local` region (this machine) |

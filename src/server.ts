@@ -735,12 +735,24 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     return { ok: true }
   })
 
-  app.get('/projects/:id/events', async (req) => {
+  // `limit` is a page size, and `slice(-limit)` reads every other number as "all of it":
+  // `limit=0`, `limit=abc` and `limit=-5` each handed back the whole retained set, up to EVENTS_CAP
+  // rows, to a poller expecting a page. Junk is the 400 the other query parameters answer with
+  // (`component must be ...`), and a large number clamps rather than fails.
+  const EVENTS_LIMIT_MAX = 1000
+  const eventsLimit = (raw: string | undefined): number | null => {
+    if (raw === undefined || raw === '') return 50
+    const n = Number(raw)
+    return Number.isInteger(n) && n >= 1 ? Math.min(n, EVENTS_LIMIT_MAX) : null
+  }
+
+  app.get('/projects/:id/events', async (req, reply) => {
     const { id } = req.params as { id: string }
     const q = req.query as { branch?: string; limit?: string }
+    const limit = eventsLimit(q.limit)
+    if (limit === null) return reply.code(400).send({ error: `limit must be an integer from 1 to ${EVENTS_LIMIT_MAX}` })
     let events = engine.listEvents(id)
     if (q.branch) events = events.filter((e) => e.branch === q.branch)
-    const limit = q.limit ? Number(q.limit) : 50
     return { events: events.slice(-limit).map(eventOut) }
   })
 

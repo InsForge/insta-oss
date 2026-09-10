@@ -149,6 +149,25 @@ test('events: resource timeline + agent ingest with dedup', async () => {
   expect(events[0]).toHaveProperty('created_at') // CLI prints e.created_at
 })
 
+test('events: limit is a bounded page, and junk is a 400 rather than the whole retained set', async () => {
+  const id = await createProject()
+  for (let i = 0; i < 5; i++) await post(`/projects/${id}/events`, { kind: `k${i}`, source: 'agent' })
+  const total = (await get(`/projects/${id}/events`)).json().events.length
+  expect(total).toBeGreaterThan(2)
+
+  // A page is a page.
+  expect((await get(`/projects/${id}/events?limit=2`)).json().events).toHaveLength(2)
+  // ...and each of these used to fall through `slice(-limit)` as "give me everything".
+  for (const bad of ['0', '-5', 'abc', '1.5', 'Infinity']) {
+    const r = await get(`/projects/${id}/events?limit=${bad}`)
+    expect([bad, r.statusCode]).toEqual([bad, 400])
+    expect(r.json().error).toContain('limit must be an integer')
+  }
+  // An oversized page clamps instead of failing, and absent or empty keeps the default.
+  expect((await get(`/projects/${id}/events?limit=999999`)).json().events).toHaveLength(total)
+  expect((await get(`/projects/${id}/events?limit=`)).json().events).toHaveLength(total)
+})
+
 test('manifest detail: project/branches/resources with ref.url', async () => {
   const id = await createProject()
   await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'backend' })
