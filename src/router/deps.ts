@@ -44,7 +44,13 @@ export interface EngineRouterDeps {
 
 export function engineRouterDeps(engine: RouterEngine): EngineRouterDeps {
   return {
-    stateOf: (route) => engine.stateOf?.(route.key) ?? 'running',
+    // `none`, not `running`. The seam is optional (the scaffold engine predates WP3), and the
+    // one consumer reads `!== 'running'` as "take the wake path", so a fallback of `running` made
+    // an engine that cannot report state say the service is up: with a cached upstream address
+    // the lane then dials straight past the wake. The fallback has to be a value that cannot
+    // skip the wake, and the wake is the cheap side of the trade (it takes the operation lock,
+    // re-reads the live container and no-ops when there is nothing to do).
+    stateOf: (route) => engine.stateOf?.(route.key) ?? 'none',
     wake: (route) => engine.wake(route.key, { door: 'traffic' }),
     touch: (key) => engine.touch?.(key),
     beginHold: (key) => engine.beginHold?.(key),

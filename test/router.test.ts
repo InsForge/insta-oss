@@ -14,7 +14,8 @@ import { Certs, findCertFiles } from '../src/router/certs'
 import { createPgLane, errorResponse, PG_ERRORS } from '../src/router/pg'
 import { createSniLane } from '../src/router/tls'
 import { buildTable, type Route } from '../src/router/table'
-import { SSL_REQUEST, startupMessage } from '../src/router/wake'
+import { resolveOrWake, SSL_REQUEST, startupMessage } from '../src/router/wake'
+import { engineRouterDeps } from '../src/router/deps'
 import type { ServiceState, UpstreamAddr, UpstreamLike } from '../src/router/deps'
 import type { Config } from '../src/config'
 import type { State } from '../src/state'
@@ -943,4 +944,29 @@ test('an audit event does not rebuild the route table; a real service change doe
   } finally {
     await router.stop()
   }
+})
+
+
+// ---- probes that cannot answer -----------------------------------------------------------------
+
+test('an engine that cannot report state is not read as "running": the lane still wakes', async () => {
+  // `stateOf` is an optional seam and its fallback was `'running'`, which is the one value that
+  // SKIPS the wake. An engine that cannot answer therefore had its cached upstream address
+  // dialled straight, past the wake that would have started the container.
+  let woke = 0
+  const deps = engineRouterDeps({ wake: async () => { woke++ }, ownsHostname: () => true })
+  const route = { key: 'b1:cp-web', container: 'io-x', network: 'io-n', port: 8080 } as unknown as Route
+  expect(deps.stateOf(route)).not.toBe('running')
+
+  // ...and that is what the lane acts on: a cached address, and a wake all the same.
+  const addr: UpstreamAddr = { host: '127.0.0.1', port: 1, containerId: 'c1', startedAt: '' }
+  const upstream: UpstreamLike = {
+    resolve: async () => addr,
+    forget: () => {},
+    forgetIfChanged: () => {},
+    dial: async () => true,
+  }
+  const out = await resolveOrWake({ upstream, stateOf: deps.stateOf, wake: deps.wake }, route, { probe: async () => true })
+  expect(woke).toBe(1)
+  expect(out.woke).toBe(true)
 })
