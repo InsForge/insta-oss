@@ -2714,6 +2714,58 @@ test('a service rename that lands while a create is queued cannot give the clone
   }
 })
 
+test('a rename granted after a create commits still holds the NEW branch: the key set re-drives', async () => {
+  // `renameKeys` is a SNAPSHOT taken before the acquisition. The reachable ordering is this one:
+  // a create is in flight and has not committed its row, so the rename's set names `main` and
+  // nothing else; the create then commits `feat` and finishes; the rename is granted next and
+  // renames feat's container and row while holding no key of feat's at all. Anything else on
+  // feat -- a deploy, a create forking it, a delete -- then runs straight through the rename.
+  const id = await sourceWithEveryStep()
+  const paused = pauseBeforeCommit()
+  const create = post(`/projects/${id}/branches`, { name: 'feat' })
+  await paused.entered
+  // The window: every branch list of this project says `main`, which is what the rename keys on.
+  expect(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual(['main'])
+
+  let enterRename!: () => void
+  let goRename!: () => void
+  const inRename = new Promise<void>((r) => { enterRename = r })
+  const renameGate = new Promise<void>((r) => { goRename = r })
+  const realRename = db.rename!.bind(db)
+  const renameSpy = vi.spyOn(db, 'rename').mockImplementation(async (container, to) => {
+    enterRename()
+    await renameGate
+    return realRename(container, to)
+  })
+
+  try {
+    // Queued behind the create on main's branch key, with a key set that predates `feat`.
+    const renaming = post(`/projects/${id}/services/pg-db/rename`, { name: 'db2' })
+    await settle()
+    paused.release()
+    expect((await within(10_000, create, 'the branch create')).statusCode).toBe(201)
+    await within(10_000, inRename, 'the rename reaching its adapter')
+
+    // The rename is now inside its body, renaming a service that `feat` carries too. A deploy to
+    // feat must therefore QUEUE. It takes no provision-chain slot, so the only thing that can
+    // hold it is the operation key -- which the rename only holds because it re-drove its set.
+    let deployed = false
+    const deploy = post(`/projects/${id}/deploy`, { image: 'app:2', port: 3000, group: 'web', branch: 'feat' }).then((r) => { deployed = true; return r })
+    await settle()
+    expect(deployed).toBe(false)
+
+    goRename()
+    expect((await within(10_000, renaming, 'the rename')).statusCode).toBe(200)
+    expect((await within(10_000, deploy, 'the deploy')).statusCode).toBe(200)
+    // ...and the rename did reach feat, which is what made feat's keys affected keys.
+    expect(calls).toContain('db.rename:io-demo-feat-pg-db->io-demo-feat-pg-db2')
+    expect(Object.keys(loadState().branches[await branchOf(id, 'feat')].databases ?? {})).toEqual(['pg-db2'])
+  } finally {
+    renameSpy.mockRestore()
+    paused.restore()
+  }
+})
+
 test('a removal queued behind a rename refuses instead of destroying the renamed service', async () => {
   // Third instance of one shape: an operation that resolves a service identity BEFORE its lock
   // and acts on it afterwards. The removal waits behind the rename (they share the key now),

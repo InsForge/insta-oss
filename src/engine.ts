@@ -1745,7 +1745,7 @@ export class Engine {
    *  deriving one) while `<new-group>-<ref>` resolved nowhere, and the services list kept
    *  advertising the stale domain and endpoint. */
   async renameComputeService(projectId: string, oldName: string, newName: string): Promise<ServiceRow | undefined> {
-    return this.withOp(this.renameKeys(projectId, `cp-${oldName}`), () => this.renameComputeServiceLocked(projectId, oldName, newName))
+    return this.withRenameKeys(projectId, `cp-${oldName}`, () => this.renameComputeServiceLocked(projectId, oldName, newName))
   }
 
   private async renameComputeServiceLocked(projectId: string, oldName: string, newName: string): Promise<ServiceRow | undefined> {
@@ -2061,7 +2061,7 @@ export class Engine {
    *  user secrets. Deployed compute containers keep the OLD host in their env until their next
    *  deploy — same as the cloud, where a rename re-keys stored names but never hot-patches env. */
   async renameManagedService(projectId: string, serviceId: string, newName: string): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
-    return this.withOp(this.renameKeys(projectId, serviceId), () => this.renameManagedServiceLocked(projectId, serviceId, newName))
+    return this.withRenameKeys(projectId, serviceId, () => this.renameManagedServiceLocked(projectId, serviceId, newName))
   }
 
   private async renameManagedServiceLocked(projectId: string, serviceId: string, newName: string): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
@@ -2563,8 +2563,6 @@ export class Engine {
     const ids = [...dbs.map((d) => d.id), ...managed.map((m) => m.id), ...Object.keys(b.apps).map((g) => `cp-${g}`)]
     this.scheduler.forget(ids.map((sid) => this.serviceKey(b, sid)))                                          // WP3
     this.releaseDomainsFor(project.id, b.id)                                                                  // WP2
-  }
-
   /** Delete one branch. Answers the cloud's teardown summary (decision 50): how many provider
    *  objects went and how many refused to, counted across containers, buckets and directories. */
   async destroyBranch(projectId: string, branchId: string): Promise<Teardown> {
@@ -3444,28 +3442,43 @@ export class Engine {
    *  the order every other taker uses, so the engine-wide invariant holds: keys are acquired
    *  before the provision chain, never after it, and no path can close a cycle between them.
    *
-   *  KNOWN GAP, stated rather than claimed away: this list is itself a SNAPSHOT, taken before
-   *  the acquisition, while `rename*Locked` re-reads the branches under the lock. A branch born
-   *  in that window is therefore renamed with none of ITS keys held. The reachable ordering is a
-   *  branch create that commits its row while a rename queues; the rename then renames that
-   *  branch's container and updates its row, and a fork still in flight for it finds the
-   *  container gone under the name it was using. That fails LOUDLY (`No such container`) and
-   *  the create unwinds itself, which is why this is left rather than closed: the alternative is
-   *  the union re-drive `createBranch` runs, and adding a second re-driving acquisition to a
-   *  path that also holds the provision chain is a change to make deliberately, not at the end
-   *  of a round. (`destroyProject` had the same shape and no longer does: it re-drives its
-   *  acquisition over the union, which is the remedy this one is declining for now.)
-   *
-   *  The branch born in that window is most often a branch create's own DESTINATION, which
-   *  `provisionBranch` commits before its post-commit steps finish. That case is closed at the
-   *  consequence rather than at the lock: every name-keyed write the create makes afterwards
-   *  reads the row's CURRENT name inside the same synchronous mutate that uses it, so a rename
-   *  landing anywhere in that window changes what the create writes rather than stranding it.
-   *  What remains is the redeploy loop, which resolves the clone by name: a rename landing
-   *  exactly there fails the create LOUDLY (`branch "x" not found`) and unwinds it, rather than
-   *  writing anything under the wrong name. */
+   *  The list is a SNAPSHOT, so `withRenameKeys` re-drives it: a branch born between the snapshot
+   *  and the acquisition would otherwise be renamed with none of ITS keys held. This was left open
+   *  twice on the grounds that the outcome is loud rather than silent (a fork still in flight for
+   *  the new branch finds its container gone under the old name, fails with `No such container`
+   *  and unwinds the create). Loud is not the standard: the contract says every rename holds all
+   *  affected operation keys before entering the provision chain, and that is false while the set
+   *  is a pre-lock snapshot, so an otherwise valid branch create fails for a promise the code did
+   *  not keep. The remedy is the same bounded union re-drive `createBranch`, `destroyProject`,
+   *  `removeServiceVolume` and `destroyBranch` run. */
   private renameKeys(projectId: string, serviceId: string): ServiceKey[] {
     return this.listBranches(projectId).flatMap((b) => [this.branchOp(b), this.serviceKey(b, serviceId)])
+  }
+
+  /** Acquire a rename's keys over the branch set as it is UNDER THE LOCK, not as it was when the
+   *  set was computed. The fifth use of the pattern and identical to the other four: recompute
+   *  the carrier set inside the acquisition, and if it is not a subset of what was acquired,
+   *  release everything and re-drive over the union before the body runs. A round that is
+   *  abandoned has mutated nothing (the body is the whole rename, and it has not started), so a
+   *  re-drive costs a re-queue and nothing else, and it converges because the union only grows.
+   *
+   *  `serviceId` is stable across the wait: only this operation changes it, and it does so inside
+   *  the body with every carrier's keys held. */
+  private async withRenameKeys<T>(projectId: string, serviceId: string, fn: () => Promise<T>): Promise<T> {
+    let keys = this.renameKeys(projectId, serviceId)
+    for (let round = 1; ; round++) {
+      const settled = new Set(keys)
+      const out = await this.withOp([...settled], async (): Promise<{ done: T } | { union: ServiceKey[] }> => {
+        const needed = this.renameKeys(projectId, serviceId)
+        if (!needed.every((k) => settled.has(k))) return { union: [...new Set([...settled, ...needed])] }
+        return { done: await fn() }
+      })
+      if ('done' in out) return out.done
+      if (round >= CREATE_LOCK_ROUNDS) {
+        throw new Error(`rename could not settle its lock set after ${CREATE_LOCK_ROUNDS} rounds: branches are being created concurrently, retry the rename`)
+      }
+      keys = out.union
+    }
   }
 
   /** What a WHOLE-branch operation holds: the branch key plus every service key on the branch. */
@@ -4337,7 +4350,7 @@ export class Engine {
    *  branch's container and minted hostname, bindings and service-bound user secrets. The data
    *  directory keeps its immutable `dataId` (decision 16). */
   async renameDbService(projectId: string, serviceId: string, newName: string): Promise<ServiceRow> {
-    return this.withOp(this.renameKeys(projectId, serviceId), () => this.renameDbServiceLocked(projectId, serviceId, newName))
+    return this.withRenameKeys(projectId, serviceId, () => this.renameDbServiceLocked(projectId, serviceId, newName))
   }
 
   private async renameDbServiceLocked(projectId: string, serviceId: string, newName: string): Promise<ServiceRow> {
@@ -4475,7 +4488,7 @@ export class Engine {
   /** Rename a storage service: a re-key only. The bucket handle is immutable (its name is baked
    *  into every object URL and into the access key scoped to it), exactly like the cloud. */
   async renameStorageService(projectId: string, serviceId: string, newName: string): Promise<ServiceRow> {
-    return this.withOp(this.renameKeys(projectId, serviceId), () => this.renameStorageServiceLocked(projectId, serviceId, newName))
+    return this.withRenameKeys(projectId, serviceId, () => this.renameStorageServiceLocked(projectId, serviceId, newName))
   }
 
   private async renameStorageServiceLocked(projectId: string, serviceId: string, newName: string): Promise<ServiceRow> {
