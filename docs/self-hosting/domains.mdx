@@ -10,9 +10,9 @@ In server mode every service gets a name under your domain, minted when the serv
 | Service | Hostname | Port |
 | --- | --- | --- |
 | compute group `web` | `web-shop-main.<domain>` | 443 |
-| postgres `db` | `pg-db-shop-main.<domain>` | 5432 |
-| redis `cache` | `redis-cache-shop-main.<domain>` | 6379, in-network only |
-| mongodb `docs` | `mongodb-docs-shop-main.<domain>` | 27017, in-network only |
+| postgres `db` | `pg-db-shop-main.<domain>` | 5432 by default (`INSTA_OSS_LANE_PG_PORT`) |
+| redis `cache` | `redis-cache-shop-main.<domain>` | 6379 by default (`INSTA_OSS_LANE_REDIS_PORT`), in-network only |
+| mongodb `docs` | `mongodb-docs-shop-main.<domain>` | 27017 by default (`INSTA_OSS_LANE_MONGO_PORT`), in-network only |
 | mysql `app` | `mysql-app-shop-main.<domain>` | its own port, in-network only |
 | the API | `api.<domain>` | 443 |
 | the dashboard | `console.<domain>` | 443 |
@@ -139,12 +139,17 @@ reach them by hostname from the branch network. Two things decide the rest:
 
 So do one of these before you put anything in them: restrict the two ports at your cloud security
 group, which is how most of these boxes are protected, or enable `ufw` yourself and then re-run
-the installer, which allows 80, 443 and 5432 publicly and the database lanes to Docker's address
-pools only:
+the installer, which allows 80, 443 and the Postgres lane publicly and the database lanes to
+Docker's address pools only.
+
+Every port below is the DEFAULT. If you moved a lane with `INSTA_OSS_LANE_PG_PORT` and the two
+keys beside it, allow the port you moved it to, or `ufw enable` closes the lane your clients are
+actually using. `sh install.sh --print-ssh-advice` prints this recipe with your own values
+already filled in, which is the copy to use:
 
 ```bash
 ufw allow OpenSSH           # or `ufw allow <your-ssh-port>/tcp` if sshd is not on 22
-ufw allow 80,443,5432/tcp
+ufw allow 80,443,5432/tcp   # 5432 is the DEFAULT Postgres lane: use yours if you moved it
 ufw enable
 ```
 
@@ -165,8 +170,9 @@ An enable without the right port looks fine from the session that ran it, becaus
 connections survive, and locks you out on the next reconnect.
 
 The installer never touches SSH rules, in either direction: your access is yours to preserve. It
-prints this recipe with your detected ports filled in when it finds no active firewall, and the
-rules it adds itself are only for the ports insta-oss serves. The
+prints this recipe with your detected SSH ports AND your resolved lane ports filled in when it
+finds no active firewall, and the rules it adds itself are only for the ports insta-oss serves,
+at the values it resolved rather than at the defaults. The
 tighter option, and the one to ask for if you want it, is binding the redis and mongodb lanes to
 the docker bridge instead of `0.0.0.0`; today `INSTA_OSS_LANE_BIND` moves all the lanes together,
 Postgres included, so it is not a per-lane switch yet.

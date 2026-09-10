@@ -513,7 +513,12 @@ ssh_advice() {
       printf '    ufw allow %s/tcp          # ssh candidate %s: allow it BEFORE the enable\n' "$_a" "$_a"
     done
   fi
-  printf '    ufw allow 80,443,5432/tcp   # the edge and the postgres lane\n'
+  # The RESOLVED postgres lane, not the default. This advisory is what the no-active-firewall
+  # arm prints, which is the majority case, so a hardcoded 5432 here means an operator on a
+  # moved lane follows our own recipe, `ufw enable` applies DEFAULT_INPUT_POLICY=DROP, and the
+  # real lane is closed -- silently, because established connections survive, which is the same
+  # delayed failure as the SSH lockout.
+  printf '    ufw allow 80,443,%s/tcp   # the edge and the postgres lane\n' "$LANE_PG"
   printf '    ufw enable\n'
 }
 # The rules for the services THIS script installs, and nothing else. There is deliberately no SSH
@@ -757,11 +762,12 @@ elif have firewall-cmd && [ "$(firewall-cmd --state 2>/dev/null || true)" = runn
   apply_rules fw_firewalld
 else
   # No host firewall to restrict anything, and the lanes bind 0.0.0.0 in server mode
-  # (INSTA_OSS_LANE_BIND above), so 6379 and 27017 are reachable from wherever this box is
-  # reachable. A warning and not a refusal: most of these boxes are protected by a cloud
-  # security group instead, and refusing would break every one of those installs.
+  # (INSTA_OSS_LANE_BIND above), so the redis and mongodb lanes are reachable from wherever this
+  # box is. A warning and not a refusal: most of these boxes are protected by a cloud security
+  # group instead, and refusing would break every one of those installs. The PORTS come from the
+  # resolved values, like every other line that names one.
   warn "no active ufw or firewalld found, so nothing here restricts the database lanes"
-  warn "  the redis (6379) and mongodb (27017) lanes listen on all interfaces and are NOT meant to be public"
+  warn "  the redis ($LANE_REDIS) and mongodb ($LANE_MONGO) lanes listen on all interfaces and are NOT meant to be public"
   warn "  restrict them at your cloud security group, or enable ufw yourself. Your SSH access is"
   warn "  yours to preserve: this script adds no SSH rule, and ufw defaults to DROP, so allow"
   warn "  every port sshd listens on BEFORE you enable it:"

@@ -16,7 +16,9 @@ Server mode wants a machine you can point DNS at:
   minimum and says which one; an upgrade of a box that is already installed warns and continues.
   One vCPU is a warning either way: it runs, and every deploy and fork is slow
 - ports 80, 443, 8080, 8081, 5432, 6379 and 27017 free (the script refuses to start if any is
-  bound, and prints the holder)
+  bound, and prints the holder). Those are the defaults; the refusal names the
+  `INSTA_OSS_LANE_*` key that moves each lane, and everything the installer then checks, opens,
+  writes and prints follows the value you set
 - Docker, installed by the script when it is missing
 
 ## The one-liner
@@ -69,8 +71,11 @@ script. The build needs about 1 GiB of free memory and a minute on a 2 vCPU box.
    hold the data directory. See [Requirements](#requirements) for what is fatal and what is a
    warning.
 5. Opens the firewall, but only when one is active, and only for its own services (see below:
-   never for SSH). Under `ufw`: inbound 80, 443 and 5432, plus 443, 5432, 6379, 27017 and 20000
-   to 20999 from `docker0` and from every Docker address pool.
+   never for SSH). Under `ufw`: inbound 80, 443 and the Postgres lane, plus 443, the three
+   database lanes and the per-service lane range from `docker0` and from every Docker address
+   pool. The ports come from the values it resolved, so a lane you moved is the lane it opens;
+   the numbers below are what those resolve to on a default install (5432, 6379, 27017 and
+   20000 to 20999).
    Under `firewalld`: the same container ports in the `docker` zone and 80, 443 and 5432 in the
    `public` one. Both are idempotent and every rule is printed. `--print-firewall` shows the list
    without touching anything.

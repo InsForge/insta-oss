@@ -258,7 +258,7 @@ test('--print-firewall lists the docker0 and inbound rules; the script gates the
   // 27017 are then only as private as the box's own security group. A warning, not a refusal:
   // most of these boxes are protected that way and refusing would break every such install.
   expect(script).toMatch(/no active ufw or firewalld found/)
-  expect(script).toMatch(/redis \(6379\) and mongodb \(27017\)[^\n]*NOT meant to be public/)
+  expect(script).toMatch(/redis \(\$LANE_REDIS\) and mongodb \(\$LANE_MONGO\)[^\n]*NOT meant to be public/)
   // ...and the applied rule set contains NO SSH rule at all. SSH policy belongs to the
   // operator: an installer that edits it either skips a rule the box needed or widens one that
   // was narrowed on purpose, and both have now happened here. This asserts the absence so the
@@ -337,6 +337,37 @@ test('ssh detection: the config alone, the listener alone, and nothing at all', 
   } finally {
     rmSync(silent.dir, { recursive: true, force: true })
   }
+})
+
+test('every surface that prints a lane port prints the RESOLVED one', () => {
+  // The lane-port fix reached the two renderers and not the advisory, which still printed a
+  // hardcoded 5432 -- and the advisory is what the no-active-firewall arm prints, the majority
+  // case. An operator on a moved lane following our own recipe would `ufw enable` with
+  // DEFAULT_INPUT_POLICY=DROP and close the real Postgres lane, silently, because established
+  // connections survive. Every surface is asserted together so the next one added is caught.
+  const env = { INSTA_OSS_LANE_PG_PORT: '5433', INSTA_OSS_LANE_REDIS_PORT: '6380', INSTA_OSS_LANE_MONGO_PORT: '27018', INSTA_OSS_DOMAIN: 'example.test' }
+  const advice = run(['--print-ssh-advice'], env)
+  const rules = run(['--print-firewall'], env)
+  const envFile = parseEnv(run(['--print-env'], env))
+
+  expect(advice).toContain('ufw allow 80,443,5433/tcp')
+  expect(rules).toContain('ufw allow 80,443,5433/tcp')
+  expect(rules).toContain('443,5433,6380,27018')
+  expect(envFile.INSTA_OSS_LANE_PG_PORT).toBe('5433')
+  expect(envFile.INSTA_OSS_LANE_REDIS_PORT).toBe('6380')
+  expect(envFile.INSTA_OSS_LANE_MONGO_PORT).toBe('27018')
+  // ...and none of them names a displaced default.
+  for (const out of [advice, rules]) {
+    for (const displaced of ['5432', '6379', '27017']) {
+      expect(out, displaced).not.toMatch(new RegExp(`(^|[^0-9])${displaced}([^0-9]|$)`, 'm'))
+    }
+  }
+  // The port preflight and the warning that names the two in-network lanes read the same
+  // variables rather than literals.
+  expect(script).toContain('need_port "$LANE_PG" ')
+  expect(script).toContain('need_port "$LANE_REDIS" ')
+  expect(script).toContain('need_port "$LANE_MONGO" ')
+  expect(script).toContain('the redis ($LANE_REDIS) and mongodb ($LANE_MONGO) lanes')
 })
 
 test('the firewall rules follow the RESOLVED lane ports, and never the displaced defaults', () => {
