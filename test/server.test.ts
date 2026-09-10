@@ -3532,6 +3532,46 @@ test('a SUCCESSFUL create whose destination is renamed mid-flight does not leak 
   expect((await get(`/projects/${id}/secrets?branch=feat`)).json().secrets.API_KEY).toBe('from-main')
 })
 
+test('a successful branch delete takes the branch-scoped secrets with it', async () => {
+  // A user secret is keyed by branch NAME and a create inherits by name, so rows a delete left
+  // behind are resurrected by the next branch of that name -- shadowing the project-wide value,
+  // and handing back a credential the delete may have been retiring.
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  const fid = await branchOf(id, 'feat')
+  // A value only `feat` ever held: `main` cannot be the source of what the new branch reads.
+  expect((await put(`/projects/${id}/secrets/FEAT_ONLY`, { value: 'feat-secret', branch: 'feat' })).statusCode).toBe(200)
+
+  const del = await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${fid}` })
+  expect(del.statusCode).toBe(200)
+  expect(del.json().teardown.failed).toBe(0)
+  expect((loadState().userSecrets[id] ?? []).filter((u) => u.branch === 'feat')).toEqual([])
+
+  // ...so a new branch of the same name, forked from a parent that never held it, does not read it.
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  expect((await get(`/projects/${id}/secrets?branch=feat`)).json().secrets.FEAT_ONLY).toBeUndefined()
+})
+
+test('a branch delete that FAILED keeps the secrets its retry still needs', async () => {
+  // The other arm, on the same gate as the row: a kept `cleanup-failed` row is a branch that
+  // still exists, and the retry deploys and reads with those secrets.
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  const fid = await branchOf(id, 'feat')
+  expect((await put(`/projects/${id}/secrets/FEAT_ONLY`, { value: 'feat-secret', branch: 'feat' })).statusCode).toBe(200)
+
+  const destroy = vi.spyOn(db, 'destroy').mockRejectedValueOnce(new Error('container is in use'))
+  try {
+    const del = await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${fid}` })
+    expect(del.statusCode).toBe(409)
+  } finally {
+    destroy.mockRestore()
+  }
+  expect(loadState().branches[fid]?.status).toBe('cleanup-failed')
+  expect((loadState().userSecrets[id] ?? []).filter((u) => u.branch === 'feat').map((u) => u.name).sort())
+    .toEqual(['API_KEY', 'FEAT_ONLY'])
+})
+
 test('a project delete with MIXED results releases each branch by its own outcome', async () => {
   // `destroyProject` shares ONE `Teardown` across every branch and decides each row by the
   // per-branch DELTA. A cumulative `t.failed > 0` guard on the keys and domains therefore

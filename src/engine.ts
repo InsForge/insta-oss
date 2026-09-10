@@ -2563,6 +2563,26 @@ export class Engine {
     const ids = [...dbs.map((d) => d.id), ...managed.map((m) => m.id), ...Object.keys(b.apps).map((g) => `cp-${g}`)]
     this.scheduler.forget(ids.map((sid) => this.serviceKey(b, sid)))                                          // WP3
     this.releaseDomainsFor(project.id, b.id)                                                                  // WP2
+    // ...and the branch's own secret rows, for the same reason and on the same gate. A user
+    // secret is keyed by branch NAME (`{name, value, branch, service}`, which is what
+    // `userSecretsFor`, `--branch` and `renameBranch` all read), and a create inherits its
+    // source's rows BY NAME, so rows left behind by a delete are resurrected by the next branch
+    // of that name -- including one forked from a parent that never held the value, where they
+    // also SHADOW the project-wide secret of the same name. A branch deleted to retire a
+    // compromised credential brought it back. `unwindBranch` has swept them since round nine;
+    // the two deliberate teardowns owed the same sweep and did not do it.
+    //
+    // Only on a clean demolition, which is what the gate above means here: a kept
+    // `cleanup-failed` row is a branch that still exists and whose retry still needs its
+    // secrets. And the name is read INSIDE the mutate, not from the row this call captured,
+    // because `renameBranch` takes no operation lock and carries the secret rows with it.
+    mutate((st) => {
+      const name = st.branches[b.id]?.name ?? b.name
+      const list = st.userSecrets[project.id]
+      if (list) st.userSecrets[project.id] = list.filter((u) => u.branch !== name)
+    })
+  }
+
   /** Delete one branch. Answers the cloud's teardown summary (decision 50): how many provider
    *  objects went and how many refused to, counted across containers, buckets and directories. */
   async destroyBranch(projectId: string, branchId: string): Promise<Teardown> {
