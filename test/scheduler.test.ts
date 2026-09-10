@@ -7,10 +7,27 @@ import {
   EVICTION_CEILING, NoContainerError, Scheduler, ServiceStoppedError, WakeTimeoutError,
   type ServiceTarget, type SleepReason, type WakeDoor,
 } from '../src/scheduler'
+
 import type { ServiceKey } from '../src/types'
 import { calls, FakeRuntime, FakeUpstream, fakeTarget, testConfig } from './fakes'
 
 const MiB = 1024 * 1024
+
+/** Wait for a wake's WORK, not just for one caller's budget. Past `wakeTimeoutSec` the caller is
+ *  released with `WakeTimeoutError` while the wake keeps the operation lock and runs on, so a
+ *  test that wants the finished state asks for the key afterwards: that queues behind the wake
+ *  and is granted when it lets go. Returns what the caller saw. */
+async function wakeFully(h: Harness, key: ServiceKey): Promise<'ready' | 'released'> {
+  const seen = await h.sched.wake(key, { door: 'traffic' }).then(
+    () => 'ready' as const,
+    (e: unknown) => {
+      if (!(e instanceof WakeTimeoutError)) throw e
+      return 'released' as const
+    },
+  )
+  await h.sched.withOp([key], async () => { /* granted only once the wake has let the key go */ })
+  return seen
+}
 
 interface Harness {
   sched: Scheduler
@@ -530,7 +547,9 @@ test('a long eviction pass re-dates its evidence as it goes, instead of going bl
   calls.length = 0
   vi.advanceTimersByTime(20_000)                              // past the no-recent-traffic guard
 
-  await h.sched.wake(K, { door: 'traffic' })
+  // Seven minutes of pass against a 60 s caller budget: the caller is released long before it
+  // ends, and the pass finishes under the lock.
+  expect(await wakeFully(h, K)).toBe('released')
 
   // The same 41 the fixed ceiling case needs, over a pass that now spans seven minutes.
   const stopped = calls.filter((c) => c.startsWith('runtime.stop:')).length
@@ -568,7 +587,7 @@ test('eviction does not give up when the target set grows under it', async () =>
     return realStop(container, grace)
   }
 
-  await h.sched.wake(K, { door: 'traffic' })
+  await wakeFully(h, K)
 
   // 100 MiB free against a 10,000 MiB floor, freeing the 256 MiB default per victim: about 40
   // evictions, which a bound frozen at 22 cannot reach.
@@ -608,13 +627,50 @@ test('the eviction guard is a CONSTANT: a pool that grows every turn still termi
     return realStop(container, grace)
   }
 
-  await h.sched.wake(K, { door: 'traffic' })
+  await wakeFully(h, K)
 
   // It stopped, and it stopped AT the ceiling: neither of the two earlier forms could.
   const stopped = calls.filter((c) => c.startsWith('runtime.stop:')).length
   expect(stopped).toBe(EVICTION_CEILING)
   expect(calls).toContain(`runtime.start:${waking.container}`)
 }, 120_000)
+
+test('a wake releases its caller at the BOUND, not when a long eviction finishes', async () => {
+  // `wakeTimeoutSec` is the bound on a HELD connection (spec :144, contract :179-188) and it
+  // used to start at the readiness wait -- the last of three phases. Eviction runs before it,
+  // sequentially, a stop grace per turn, so exactly under the memory pressure that makes the
+  // bound matter a socket could stay open for minutes and then still be granted a full
+  // readiness budget on top.
+  const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '50' })
+  const waking = h.add(K)
+  h.runtime.put(waking.container, 'exited')
+  h.runtime.rss.set(waking.container, 5 * MiB)
+  for (let i = 0; i < 45; i++) {
+    const v = h.add(`55555555-5555-5555-5555-555555555555:cp-v${i}`)
+    h.runtime.rss.set(v.container, 10 * MiB)
+  }
+  await h.sched.sweep()
+  h.runtime.mem = { totalBytes: 1000 * MiB, availableBytes: 100 * MiB }
+  const realStop = h.runtime.stop.bind(h.runtime)
+  h.runtime.stop = async (container, grace) => { vi.advanceTimersByTime(10_000); return realStop(container, grace) }
+  calls.length = 0
+  vi.advanceTimersByTime(20_000)
+
+  // 41 victims at a 10 s grace each is nearly seven minutes of eviction. The caller waits 60.
+  const t0 = Date.now()
+  await expect(h.sched.wake(K, { door: 'traffic' })).rejects.toBeInstanceOf(WakeTimeoutError)
+  const heldMs = Date.now() - t0
+  const stoppedWhenReleased = calls.filter((c) => c.startsWith('runtime.stop:')).length
+  expect(heldMs).toBeLessThanOrEqual(60_000)
+  expect(stoppedWhenReleased).toBeLessThan(41)                 // released mid-eviction...
+  expect(calls).not.toContain(`runtime.start:${waking.container}`)
+
+  // ...and the wake was NOT cancelled with it: it keeps the operation lock and runs to the end,
+  // because a half-done eviction is a worse thing to leave behind than a wake nobody awaits.
+  await h.sched.withOp([K], async () => { /* granted only once the wake has let go */ })
+  expect(calls.filter((c) => c.startsWith('runtime.stop:')).length).toBeGreaterThanOrEqual(41)
+  expect(calls).toContain(`runtime.start:${waking.container}`)
+})
 
 test('a wake with NO victim available still starts: no room found is not a failure', async () => {
   // The whole fail-closed change above rests on this distinction. `evictForRoom` warns and

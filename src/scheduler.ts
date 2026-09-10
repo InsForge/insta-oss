@@ -277,7 +277,7 @@ export class Scheduler {
    *  each call is a full `docker ps -a`. */
   async containerSnapshot(): Promise<Set<string> | null> {
     try {
-      return new Set(this.absorb(await this.runtime.containers()).keys())
+      return new Set((await this.readContainers()).keys())
     } catch {
       return null
     }
@@ -285,7 +285,7 @@ export class Scheduler {
 
   async containerPresence(container: string): Promise<'present' | 'gone' | 'unknown'> {
     try {
-      return this.absorb(await this.runtime.containers()).has(container) ? 'present' : 'gone'
+      return (await this.readContainers()).has(container) ? 'present' : 'gone'
     } catch {
       return 'unknown'
     }
@@ -294,10 +294,9 @@ export class Scheduler {
   /** Take a FULL `docker ps -a` listing as the snapshot, dated now, and hand it back to the
    *  caller. Every full read goes through here, whoever made it and whatever they wanted from
    *  it: a read that proves what is running re-dates everything it saw, not just the one entry
-   *  its caller asked about. That is what keeps the freshness gate below from being evaluated
-   *  against a read that a docker recovery, a stop grace or an eviction turn has since made old.
-   *  Containers absent from a full listing are gone, so they leave the snapshot with it. */
-  private absorb(containers: Map<string, { state: ContainerState; id: string }>): Map<string, { state: ContainerState; id: string; at: number }> {
+   *  its caller asked about. */
+  private async readContainers(): Promise<Map<string, { state: ContainerState; id: string; at: number }>> {
+    const containers = await this.runtime.containers()
     const at = Date.now()
     this.stateCache = new Map([...containers].map(([name, c]) => [name, { ...c, at }]))
     return this.stateCache
@@ -371,9 +370,9 @@ export class Scheduler {
    *  exactly when a docker read fails. Nothing is discarded here (a fact does not become false
    *  because it could not be re-read); it stops being ACTED on, in `observedRunning`. */
   async refreshStates(): Promise<void> {
-    let containers: Map<string, { state: ContainerState; id: string }>
+    let containers: Map<string, { state: ContainerState; id: string; at: number }>
     try {
-      containers = await this.runtime.containers()
+      containers = await this.readContainers()
     } catch (e) {
       if (this.statesReadable) {
         this.statesReadable = false
@@ -382,7 +381,6 @@ export class Scheduler {
       return
     }
     this.statesReadable = true
-    this.absorb(containers)
     for (const [name, { id }] of containers) if (id) this.upstream.forgetIfChanged(name, id)
   }
 
@@ -550,7 +548,7 @@ export class Scheduler {
         // loop re-dates the pass that follows it. That last part is load-bearing -- each stop
         // can burn its whole grace, so a pass that dated its evidence once at the top would be
         // judging the last of its candidates against a read a minute old.
-        const live = this.absorb(await this.runtime.containers()).get(t.container)?.state
+        const live = (await this.readContainers()).get(t.container)?.state
         if (live === 'paused') return false
         if (live === undefined) return false
         if (live !== 'running') {
@@ -672,17 +670,55 @@ export class Scheduler {
   /** Start a sleeping service and wait until it accepts connections. Singleflight per key: 25
    *  concurrent requests share ONE `docker start` and one readiness wait. The lock is taken
    *  BLOCKING, so a deploy, a lifecycle op or a stop in flight on the same container finishes
-   *  first and the target is re-read afterwards. */
+   *  first and the target is re-read afterwards.
+   *
+   *  EVERY CALLER IS BOUNDED, from the moment it starts waiting. `wakeTimeoutSec` is defined by
+   *  contract (`00-contract.md:179-188`) as both the router's hold and the readiness bound, and
+   *  the spec (`2026-09-08...:144`) says every held HTTP or database connection is bounded at
+   *  it. The code applied it to readiness ALONE, and readiness is the last of three phases: the
+   *  wait for this key's lock, then eviction, then the start. Eviction is sequential, each turn
+   *  carrying a stop grace (10 s compute, 30 s databases) and a docker timeout, so under the
+   *  memory pressure where a bound matters most a held socket could stay open for minutes and
+   *  then still be granted a full readiness budget. The deadline is absolute and it starts here,
+   *  which is what the contract already says it is.
+   *
+   *  Deliberately: the WORK is not cancelled when a caller's budget runs out. It keeps the
+   *  operation lock and runs to completion, because a half-done eviction (victims stopped, the
+   *  container never started, the floor still unmet) is a worse thing to leave behind than a
+   *  wake nobody is waiting for, and because the next request through this lane joins that same
+   *  singleflight instead of starting the eviction again. Its own phases are each finite:
+   *  `EVICTION_CEILING` turns, `DOCKER_TIMEOUT_MS` per docker call, `wakeTimeoutSec` on
+   *  readiness. What ends at the deadline is the CALLER's wait, with `WakeTimeoutError` -- the
+   *  answer a wake that runs out of time already gives, so the lanes need no new outcome. */
   wake(key: ServiceKey, opts: { door: WakeDoor }): Promise<void> {
     const t = this.targetOf(key)
     if (!t) return Promise.reject(new NoTargetError())
     if (this.refuses(t, opts.door)) return Promise.reject(new ServiceStoppedError())
-    const inflight = this.wakes.get(key)
-    if (inflight) return inflight
-    const p = this.withOp([key], () => this.wakeLocked(key, opts.door))
-      .finally(() => { this.wakes.delete(key) })
-    this.wakes.set(key, p)
-    return p
+    let work = this.wakes.get(key)
+    if (!work) {
+      work = this.withOp([key], () => this.wakeLocked(key, opts.door))
+        .finally(() => { this.wakes.delete(key) })
+      this.wakes.set(key, work)
+      // Every caller can give up before this settles, so nothing may be attached when it does.
+      void work.catch(() => { /* reported to whoever was still waiting; see `bounded` */ })
+    }
+    return this.bounded(work, key)
+  }
+
+  /** One caller's view of a shared wake: it settles with the wake, or at this caller's own
+   *  deadline, whichever comes first. Each caller gets its own budget because each is a
+   *  different held connection, and the second request to arrive did not start waiting when the
+   *  first did. */
+  private bounded(work: Promise<void>, key: ServiceKey): Promise<void> {
+    const sec = this.cfg.sleep.wakeTimeoutSec
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        console.warn(`wake ${key} passed its ${sec}s bound; the caller is released and the wake continues under the lock`)
+        reject(new WakeTimeoutError(sec))
+      }, sec * 1000)
+      timer.unref?.()
+      work.then(() => { clearTimeout(timer); resolve() }, (e: unknown) => { clearTimeout(timer); reject(e) })
+    })
   }
 
   /** Traffic never wakes a service the developer stopped or suspended; the api and deploy doors are
@@ -700,7 +736,7 @@ export class Scheduler {
     // wanted: after a docker outage this read is the very evidence that the daemon is answering
     // again, and keeping only one entry left the eviction pool undateable and the floor
     // unenforced for the wake that needed it most.
-    const live = this.absorb(await this.runtime.containers()).get(t.container)
+    const live = (await this.readContainers()).get(t.container)
     if (!live) throw new NoContainerError()
     if (live.state === 'running') {
       // A deploy that ended in `onUp` makes this wake a no-op: stamp and go.

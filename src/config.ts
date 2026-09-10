@@ -61,7 +61,7 @@ export interface Config {
     createGraceSec: number        // INSTA_OSS_CREATE_GRACE_SEC 600
     stopGraceSec: number          // INSTA_OSS_STOP_GRACE_SEC   10
     stopGraceDbSec: number        // INSTA_OSS_STOP_GRACE_DB_SEC 30
-    wakeTimeoutSec: number        // INSTA_OSS_WAKE_TIMEOUT_SEC 60 (the READINESS wait; eviction before it is bounded by the candidate pool, one stop grace each)
+    wakeTimeoutSec: number        // INSTA_OSS_WAKE_TIMEOUT_SEC 60 (the whole wake as a CALLER sees it: the wait for the key, eviction, the start and readiness, per contract 00 lines 179-188)
     wakeProtectSec: number        // INSTA_OSS_WAKE_PROTECT_SEC 60
     ramFloorPct: number           // INSTA_OSS_RAM_FLOOR_PCT    15 (0..90; 0 disables the pressure pass)
     memBudgetMb: number | null    // INSTA_OSS_MEM_BUDGET_MB    null (synthetic total for tests/e2e; null = /proc/meminfo)
