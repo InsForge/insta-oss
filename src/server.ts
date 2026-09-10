@@ -253,7 +253,19 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     const { id, bid } = req.params as { id: string; bid: string }
     if (!gated(id, 'branch.delete', reply)) return reply
     try { return teardownReply(reply, await engine.destroyBranch(id, bid), '`insta branch delete` on it')  }
-    catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
+    catch (e) {
+      // Not every refusal is "no such branch". A 404 tells a CLI the branch is gone, so an
+      // operator told that about a branch that was FOUND (the default-branch refusal) goes
+      // looking for something that is right there, and a retryable lock-set exhaustion -- which
+      // the create path on this same file already answers 409 to -- reads as permanent. 409 is
+      // this server's code for "understood, and the state says no"; anything else here is a
+      // fault in the teardown itself, not a statement about the branch.
+      const m = e instanceof Error ? e.message : String(e)
+      const code = m.includes('not found') ? 404
+        : m.includes('cannot delete the default branch') || m.includes('could not settle its lock set') ? 409
+          : 500
+      return reply.code(code).send({ error: m })
+    }
   })
 
   // Structural merge: create on the target branch what exists on `from` and is missing there.

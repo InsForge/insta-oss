@@ -3567,6 +3567,21 @@ test('each cleanup-failed event of a project delete reports THAT branch, not the
   expect(counts[0]).toBe(counts[1])
 })
 
+test('a branch delete that refuses says why, instead of a blanket 404', async () => {
+  // Every throw out of `destroyBranch` used to answer 404. The default branch WAS found, so a
+  // 404 sends the operator looking for a branch that is right there, and the retryable lock-set
+  // exhaustion (409 on this file's create path) reads as permanent.
+  const id = await sourceWithEveryStep()
+  const main = await branchOf(id, 'main')
+  const def = await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${main}` })
+  expect(def.statusCode).toBe(409)
+  expect(def.json().error).toBe('cannot delete the default branch')
+  // ...and a branch that really is not there still answers 404.
+  const gone = await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/nope` })
+  expect(gone.statusCode).toBe(404)
+  expect(gone.json().error).toBe('branch not found')
+})
+
 test('a successful branch delete takes the branch-scoped secrets with it', async () => {
   // A user secret is keyed by branch NAME and a create inherits by name, so rows a delete left
   // behind are resurrected by the next branch of that name -- shadowing the project-wide value,
