@@ -181,11 +181,16 @@ export class LocalPostgres implements DatabaseAdapter {
    *  live, NoReflinkError when the filesystem cannot clone, and TornCopyError when even a retried
    *  clone came out unrecoverable; the caller streams a basebackup for all three. */
   private async forkByReflink(src: PgTarget & { url: string }, dst: PgTarget, opts: ForkOpts, isRetry: boolean): Promise<number> {
-    // Decided BEFORE anything is created or removed, so a source that turns out to be live costs
-    // the destination nothing.
+    // The leftovers of an interrupted earlier attempt go first, before the source is judged. They
+    // belong to no live branch row (that is what `referenced` checks, inside `clearOrphan`), so
+    // they are this operation's to clear whichever way the judgement goes -- and when the strict
+    // setting REFUSES on a live source there is no stream afterwards to clear them instead, so a
+    // half-started container and a half-written directory would be stranded with nothing left
+    // that names them. Clearing is confined to the destination; the source is untouched either
+    // way, so a live source still costs its own side nothing.
+    await this.clearOrphan(dst, opts)
     const before = await runFingerprint(src.container, this.exec)
     if (!atRest(before)) throw new RunningSourceError(sourceIsLive(src.container, stateOf(before)))
-    await this.clearOrphan(dst, opts)
     const t0 = Date.now()
     await this.data.clonePostgres(src.dataDir, dst.dataDir)
     // The belt for the gap between the two: nothing in this daemon can start the source while a

@@ -236,7 +236,9 @@ test('a fork of a RUNNING source streams instead of walking its data directory',
   expect(out.method).toBe('basebackup')
   expect(ops.filter((o) => o.startsWith('clone:'))).toEqual([])
   expect(indexOfMatch(calls, 'pg_basebackup')).toBeGreaterThanOrEqual(0)
-  // ...and nothing of the destination was touched before the decision.
+  // ...and the destination lost nothing to the decision: this fixture has no interrupted attempt
+  // sitting there (`isEmptyOrMissing` is true and the container does not exist), so the orphan
+  // sweep that now runs first finds nothing to remove.
   expect(ops.filter((o) => o.startsWith('remove:'))).toEqual([])
 })
 
@@ -396,6 +398,33 @@ test('a clone that comes out unrecoverable is retried exactly once, cleaning up 
   expect(calls.filter((a) => a[0] === 'rm' && a.includes('io-demo-feat-pg-db'))).toHaveLength(2)
   // And nothing streamed behind the operator's back.
   expect(indexOfMatch(calls, 'pg_basebackup')).toBe(-1)
+})
+
+test('an interrupted attempt is cleared even when the source turns out to be running', async () => {
+  // The strict setting refuses a live source rather than streaming, and that refusal used to
+  // return before the orphan sweep ran. What is left behind then is an earlier attempt's
+  // destination -- a container of the right name, a half-written data directory -- that no live
+  // branch row references and that no later step will clear either, because there is no stream
+  // to clear it: it just sits there holding a name, a port and disk.
+  const { calls, exec } = stubDocker({ running: ['io-demo-main-pg-db', 'io-demo-feat-pg-db'] })
+  const { ops, data } = stubData({ isEmptyOrMissing: async () => false })
+  const pg = new LocalPostgres({ cfg: cfgWith('reflink'), data, docker: exec })
+
+  await expect(pg.fork(src(), dst())).rejects.toThrow(/is running: a file-level clone/)
+  expect(calls.filter((a) => a[0] === 'rm' && a.includes('io-demo-feat-pg-db'))).toHaveLength(1)
+  expect(ops).toContain('remove:/data/pg/demo-feat-db')
+  // The source is not touched by any of it, refusal or not.
+  expect(calls.filter((a) => a[0] === 'rm' && a.includes('io-demo-main-pg-db'))).toEqual([])
+  expect(ops.filter((o) => o.includes('demo-main'))).toEqual([])
+
+  // ...and a destination a live row still references is left alone, exactly as on the paths that
+  // do not refuse: the `referenced` check survives the move.
+  const second = stubDocker({ running: ['io-demo-main-pg-db', 'io-demo-feat-pg-db'] })
+  const kept = stubData({ isEmptyOrMissing: async () => false })
+  const pg2 = new LocalPostgres({ cfg: cfgWith('reflink'), data: kept.data, docker: second.exec })
+  await expect(pg2.fork(src(), dst(), { referenced: () => true })).rejects.toThrow(/is running: a file-level clone/)
+  expect(second.calls.filter((a) => a[0] === 'rm')).toEqual([])
+  expect(kept.ops.filter((o) => o.startsWith('remove:'))).toEqual([])
 })
 
 test('INSTA_OSS_FORK=reflink on a filesystem that cannot clone fails instead of streaming', async () => {
