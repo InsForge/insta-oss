@@ -80,6 +80,14 @@ jsel() {
   ' "$1"
 }
 
+# fork_method BRANCH : the copy method branch.created recorded for BRANCH, empty if it recorded
+# none. Filtered on the event's branch, not on position: a suite that forks more than once emits
+# more than one branch.created, and reading [0] of the unfiltered list silently grades the wrong
+# fork.
+fork_method() {
+  insta events --json | jsel '(d.events||d).filter(function(e){return e.kind==="branch.created"&&e.branch==="'"$1"'"}).map(function(e){return (e.payload&&e.payload.db&&e.payload.db.method)||""}).filter(Boolean)[0]||""'
+}
+
 # allow_delete : flip the linked project's project.delete gate to allow, so the teardown is not
 # stopped by an approval. Through the route, because the shipped CLI has no `policy` verb: the
 # governance surface it exposes is `insta approvals`, and a cleanup path must not depend on

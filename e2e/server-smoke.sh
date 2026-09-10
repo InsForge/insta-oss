@@ -206,12 +206,6 @@ if insta services add postgres db >/dev/null 2>&1; then
 fi
 OK "several postgres per branch, duplicates refused"
 
-# fork_method BRANCH : the copy method branch.created recorded for BRANCH. Filtering on the event
-# branch, not on position, because step 6 forks twice and both events are branch.created.
-fork_method() {
-  insta events --json | jsel '(d.events||d).filter(function(e){return e.kind==="branch.created"&&e.branch==="'"$1"'"}).map(function(e){return (e.payload&&e.payload.db&&e.payload.db.method)||""}).filter(Boolean)[0]||""'
-}
-
 STEP "6. branch fork: a live parent streams, a parent at rest reflinks"
 psql "$DBURL" -v ON_ERROR_STOP=1 -qtAc \
   "create table qa_branch_probe(v text); insert into qa_branch_probe values ('from-main')" \

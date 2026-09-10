@@ -234,8 +234,19 @@ MARKER=$(cat "$DATA/volmarker.got")
 OK "compute volume forked with its files"
 EVENTS=$(insta events --json)
 printf '%s\n' "$EVENTS" | grep -q 'branch.created' || FAIL "no branch.created event"
-METHOD=$(printf '%s\n' "$EVENTS" | jsel '(d.events||d).filter(function(e){return e.kind==="branch.created"}).map(function(e){return (e.payload&&e.payload.db&&e.payload.db.method)||""}).filter(Boolean)[0]')
-OK "branch.created recorded, db.method=${METHOD:-unreported}"
+# Assert the method, do not merely print it. Local mode is the laptop path that must never
+# regress, and while it only reported the method it could not catch the class of regression that
+# turned server mode red: the rule changed, every prose statement of it was updated, and the one
+# executable statement was missed. The assertion is filesystem-independent here on purpose. Both
+# of these forks ran against a source this script had just written to over psql, and a reflink of
+# a live data directory copies a torn page image, so streaming is the only correct answer whether
+# or not this box can reflink. A `reflink` here would mean the at-rest rule had been lost.
+for _b in feat feat2; do
+  _m=$(fork_method "$_b")
+  [ "$_m" = "basebackup" ] \
+    || FAIL "$_b forked a RUNNING source, expected basebackup, branch.created says '${_m:-unreported}'"
+done
+OK "both forks of a live source streamed, as the at-rest rule requires"
 
 STEP "7. sleep and wake"
 WEBC=$(svc_container "$REF" web)
