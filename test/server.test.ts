@@ -13,7 +13,7 @@ import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
 import type { ComputeAdapter, StorageAdapter } from '../src/types'
 import { mutate } from '../src/state'
-import { calls, db, compute, storage, managed, makeEngine, resetFakes, testConfig } from './fakes'
+import { calls, db, compute, storage, managed, makeEngine, resetFakes, serverConfig, testConfig } from './fakes'
 
 let app: ReturnType<typeof buildServer>
 beforeEach(() => {
@@ -1571,6 +1571,52 @@ test('a redeploy re-checks nothing it already owns: the second deploy of a group
   expect(again.statusCode).toBe(200)
   expect(calls.filter((c) => c.startsWith('deploy:demo-main:web:'))).toHaveLength(2)
   expect(hostReservations()).toEqual({})
+})
+
+// Decision 5: every name a container on the branch must resolve to the box becomes an
+// `--add-host <name>:host-gateway`, because public DNS cannot be trusted to send it there. The
+// group's OWN name is in that set — docs/self-hosting/domains "Inside a branch" promises an app can
+// use the compute hostnames of its own branch — and a first deploy is where it is easiest to lose:
+// `apps[g].host` is written only after the container exists.
+const aliasesOf = (ref: string, group: string): string[] => {
+  const prefix = `deploy.aliases:${ref}:${group}:`
+  const line = calls.find((c) => c.startsWith(prefix))
+  return line === undefined ? [] : line.slice(prefix.length).split(',')
+}
+
+test('a first deploy hands the container its OWN hostname, not just its siblings', async () => {
+  const id = await createProject()
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:1', port: 3000, group: 'web' })
+  // Without this the brand new container is the one name it cannot reach: its own router URL.
+  expect(aliasesOf('demo-main', 'web')).toContain('web-demo-main.localhost')
+  // ...and everything it already carried is still there.
+  expect(aliasesOf('demo-main', 'web')).toContain('pg-db-demo-main.localhost')
+  expect(aliasesOf('demo-main', 'web')).toContain('host.docker.internal')
+
+  // A second group's first deploy carries its own name AND the group already deployed.
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'api:1', port: 3000, group: 'api' })
+  expect(aliasesOf('demo-main', 'api')).toContain('api-demo-main.localhost')
+  expect(aliasesOf('demo-main', 'api')).toContain('web-demo-main.localhost')
+
+  // A redeploy reads the recorded host and lists it exactly once (the set is keyed by name).
+  calls.length = 0
+  await post(`/projects/${id}/deploy`, { image: 'app:2', port: 3000, group: 'web' })
+  expect(aliasesOf('demo-main', 'web').filter((h) => h === 'web-demo-main.localhost')).toHaveLength(1)
+})
+
+test('server mode: a first deploy resolves its own hostname alongside api and the object store', async () => {
+  const engine = makeEngine(serverConfig())
+  const { project } = await engine.createProject('demo')
+  await engine.addDbService(project.id, 'db')
+  calls.length = 0
+  await engine.deploy(project.id, 'main', { image: 'app:1', port: 3000, group: 'web' })
+  const aliases = aliasesOf('demo-main', 'web')
+  expect(aliases).toContain('web-demo-main.example.test')
+  expect(aliases).toContain('pg-db-demo-main.example.test')
+  expect(aliases).toContain('api.example.test')
+  expect(aliases).toContain('s3.example.test')
 })
 
 // A branch reserves its NAME and its `ref` the same way, and for the same reason: the ref names the

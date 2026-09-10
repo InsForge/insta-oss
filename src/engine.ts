@@ -533,7 +533,7 @@ export class Engine {
       ({ url: adapterUrl } = await this.compute.deploy(this.ref(project, b), {
         image: opts.image, port, network: b.network, group,
         hostPort,                                                    // WP2 (local mode only)
-        hostAliases: this.hostAliasesFor(project, b),                // WP2
+        hostAliases: this.hostAliasesFor(project, b, group),         // WP2 (incl. THIS group's own host)
         volume: this.volumeMount(project, b, group),                 // WP4
         limits: this.limitsFor(project, `cp-${group}`),              // WP3
         // minted credentials (db + storage + managed databases) reach every compute deploy; user
@@ -2156,10 +2156,14 @@ export class Engine {
    *  minted hostnames, the daemon and object-store names its env points at, its bucket vhosts, its
    *  custom domains, and `host.docker.internal`. Public DNS cannot be trusted to send these to the box
    *  (sslip.io, NAT, private addresses), so each becomes `--add-host <name>:host-gateway`. */
-  hostAliasesFor(project: Project, branch: Branch): string[] {
+  hostAliasesFor(project: Project, branch: Branch, pendingGroup?: string): string[] {
     const ref = this.ref(project, branch)
     const out = new Set<string>()
     for (const [g, app] of Object.entries(branch.apps ?? {})) out.add(app.host ?? this.hostFor('compute', g, ref))
+    // The group being deployed RIGHT NOW: `deployLocked` writes `apps[g].host` only after the
+    // container exists, so on a first deploy the new group is not in `branch.apps` yet and the
+    // container would be the one name it cannot resolve — it could not reach its own router URL.
+    if (pendingGroup !== undefined) out.add(branch.apps?.[pendingGroup]?.host ?? this.hostFor('compute', pendingGroup, ref))
     for (const [id, db] of Object.entries(databasesOf(branch, ref))) out.add(db.host ?? this.hostFor('postgres', id.replace(/^pg-/, ''), ref))
     for (const m of this.managedList(project.id)) {
       const row = branch.managed?.[m.id]
