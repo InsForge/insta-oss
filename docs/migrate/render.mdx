@@ -82,11 +82,9 @@ Attach <your-domain> to the compute service and give me the DNS records to publi
 
 Publish the records at your DNS provider, then ask your agent to check the domain. Keep the Render service suspended, and do not delete it, until the old records have aged out of resolver caches.
 
-## Workers and cron jobs
+## Cron jobs
 
-A Render background worker becomes a second compute service. Give it a port to listen on and leave always-on enabled, because a suspended worker has no traffic to wake it.
-
-Render cron jobs have no direct equivalent. Use `pg_cron`, which InstaCloud's Postgres ships, or run a scheduler inside an always-on service.
+Cron jobs are not supported for now.
 
 And that is it. Every InstaCloud action your agent took is a command you can run yourself, in the [CLI reference](/reference/cli/overview); the inspection on the other side used that provider's own CLI and API.
 
