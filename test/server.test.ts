@@ -3387,6 +3387,41 @@ test('the branch teardown gates its row on the BYTES arm too, and the retry fini
   expect(loadState().branches[feat.id]).toBeUndefined()
 })
 
+test('a teardown that did not finish keeps the row, the scheduler ledger AND the domains', async () => {
+  // The row survives a failed demolition, and so must everything that names it. Forgetting a
+  // key whose container is still up drops that service's ledger and its in-flight hold counts,
+  // so a container still holding RAM is bookkept as new; releasing the hostnames while the old
+  // container is still answering on them lets something else claim them.
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  const feat = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')!
+  const key = `${feat.id}:cp-web`
+  expect((await post(`/projects/${id}/compute/domain?branch=feat`, { hostname: 'kept.example.com', group: 'web' })).statusCode).toBe(200)
+
+  // Something is in flight on the group when the teardown runs, which is what a hold count is.
+  engine.beginHold(key)
+  const destroy = vi.spyOn(db, 'destroy').mockRejectedValueOnce(new Error('container is in use'))
+  let refused
+  try {
+    refused = await del_(`/projects/${id}/branches/${feat.id}`)
+  } finally {
+    destroy.mockRestore()
+  }
+
+  expect(refused.statusCode).toBe(409)
+  expect(loadState().branches[feat.id]?.status).toBe('cleanup-failed')
+  // The scheduler still knows the service: its hold count survived the failed teardown.
+  expect(engine.holds(key)).toBe(1)
+  // ...and the hostname is still claimed, not free for something else to take.
+  expect(loadState().customDomains?.['kept.example.com']).toBeDefined()
+
+  // The retry finishes the demolition and releases all three together.
+  engine.endHold(key)
+  expect((await del_(`/projects/${id}/branches/${feat.id}`)).statusCode).toBe(200)
+  expect(loadState().branches[feat.id]).toBeUndefined()
+  expect(loadState().customDomains?.['kept.example.com']).toBeUndefined()
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))

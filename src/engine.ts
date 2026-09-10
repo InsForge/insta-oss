@@ -2521,6 +2521,18 @@ export class Engine {
         await count(t, () => this.data.remove(root), `remove the data directory ${root}`)
       }
     }
+    // ONE rule, the same one the row follows: a teardown that did not finish keeps the row, the
+    // scheduler's knowledge of it, and its claims. The retry re-runs the whole demolition and
+    // releases all three together.
+    //
+    // Both of these used to run whatever happened. Forgetting a key whose container survived
+    // drops that service's ledger entry and its in-flight hold counts, so the idle clock starts
+    // again from the next stamp and a container that is still holding RAM is bookkept as if it
+    // were new -- on a single-node box that is the resource the whole product is rationing.
+    // Releasing the domains is sharper still: the branch row is kept and refuses provisioning,
+    // so its hostnames must stay claimed rather than becoming available to something else while
+    // the old container is still answering on them.
+    if (t.failed > 0) return
     const ids = [...dbs.map((d) => d.id), ...managed.map((m) => m.id), ...Object.keys(b.apps).map((g) => `cp-${g}`)]
     this.scheduler.forget(ids.map((sid) => this.serviceKey(b, sid)))                                          // WP3
     this.releaseDomainsFor(project.id, b.id)                                                                  // WP2
