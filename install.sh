@@ -515,7 +515,9 @@ check_ports() {
 # documented 2 GiB machine passes and a 1 GiB one does not.
 MEM_FLOOR_MIB=1900
 DISK_FLOOR_GIB=15
-# The file is an argument so the check is testable without a Linux box.
+# The file is an argument so the check is testable without a Linux box. Production never passes it,
+# which is exactly what SC2120 (and SC2119 at the call site) reports; the seam is deliberate.
+# shellcheck disable=SC2120
 mem_total_mib() {
   _f=${1:-/proc/meminfo}
   [ -r "$_f" ] || return 1

@@ -24,7 +24,7 @@
 // (that is the only process that can read a PGDATA the postgres image chowned to its own uid), and
 // `--reflink=auto` copies plainly where it cannot clone.
 import { test, expect, beforeAll, afterAll } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadConfig } from '../src/config'
@@ -76,6 +76,17 @@ const volumeExists = async (volume: string): Promise<boolean> => {
   try { await docker(['volume', 'inspect', volume]); return true } catch { return false }
 }
 const branchRow = (): NonNullable<ReturnType<typeof loadState>['branches'][string]> => loadState().branches[BRANCH_ID]
+
+/** Read the migrated PGDATA the way the DAEMON reads it: through a helper container on the same
+ *  bind mount, exactly as `copyFromContainerVolume` does. The postgres image chowns PGDATA to its
+ *  own uid at mode 0700, so an unprivileged test process cannot stat a file that is genuinely
+ *  there; `existsSync` answered false for bytes the migration had just moved, which made this
+ *  suite prove nothing about the one thing it guards. */
+const existsInDataDir = async (path: string): Promise<boolean> => {
+  const out = await docker(['run', '--rm', '--mount', `type=bind,src=${DATA},dst=${DATA}`,
+    cfg.data.helperImage, 'sh', '-c', `if [ -e "${path}" ]; then printf yes; else printf no; fi`])
+  return out.toString().trim() === 'yes'
+}
 
 /** state.json exactly as a pre-scaffold daemon wrote it: `dbUrl` and no `databases`, a
  *  `computeVolumes` entry for the named volume, and no `dataVersion` anywhere. */
@@ -136,6 +147,11 @@ afterAll(async () => {
   for (const c of [LEGACY_PG, NEW_PG, APP]) await docker(['rm', '-f', '-v', c]).catch(() => { /* best effort */ })
   await docker(['volume', 'rm', LEGACY_VOL]).catch(() => { /* best effort */ })
   await docker(['network', 'rm', NETWORK]).catch(() => { /* best effort */ })
+  // Same 0700-owned-by-the-image PGDATA: an unprivileged `rmSync` cannot even scandir it, which is
+  // where the suite-level `EACCES: permission denied, scandir` came from. The container can.
+  await docker(['run', '--rm', '--mount', `type=bind,src=${DATA},dst=${DATA}`,
+    cfg.data.helperImage, 'sh', '-c', `rm -rf ${DATA}/pg ${DATA}/vol ${DATA}/md`])
+    .catch(() => { /* best effort */ })
   rmSync(DATA, { recursive: true, force: true })
 })
 
@@ -214,5 +230,5 @@ test('re-running is a no-op, stamp or no stamp', async () => {
   expect(branchRow().dataVersion).toBe(1)
   // Nothing recreated the volume behind us.
   expect(await volumeExists(LEGACY_VOL)).toBe(false)
-  expect(existsSync(join(DATA, 'pg', REF, 'db', 'PG_VERSION'))).toBe(true)
+  expect(await existsInDataDir(join(DATA, 'pg', REF, 'db', 'PG_VERSION'))).toBe(true)
 }, 600_000)
