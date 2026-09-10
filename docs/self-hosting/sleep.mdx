@@ -195,16 +195,28 @@ arriving from hosts nobody invited. They are ordinary HTTP requests, so they cou
 they wake the service, and an operator watching `docker ps` sees containers coming back on their
 own and concludes scale to zero is broken.
 
-We measured it on a public box. A control service whose hostname never received a public
-certificate slept on schedule twice in a row, while the services with published names were woken
-by traffic nobody sent on purpose.
+We measured it on a public box, and the numbers say more than the mechanism does. A freshly
+issued service hostname drew 141 requests from one credential scanner probing `/.env`,
+`/.env.local`, `/config.js` and `/settings.js` within about 15 minutes, and the requests kept
+arriving every 1 to 3 minutes, with the largest gap being 3 minutes. The compute idle window is
+300 seconds and any request resets it. So this is not an occasional extra wake: **on a
+per-hostname certificate, a public compute service never sleeps at all.** A control service whose
+hostname never received a public certificate slept on schedule twice in a row. Databases keep
+sleeping either way, because their lanes are not discoverable from a transparency log.
 
-What to do about it depends on what the service is for.
+The fix is the certificate, not the timer, and it is the same thing the managed cloud does: serve
+ONE wildcard certificate for `*.<domain>` so that deploying a service publishes nothing.
 
-- A service meant to be public will be woken by scanners. The cost is an extra wake now and then,
-  a second or two of startup each, not a service that never sleeps.
-- A service not meant to be public should not have a public name. Install with `--tls internal`
-  and the edge uses its own CA, which publishes nothing, or keep the name off public DNS.
+- **Supply a wildcard.** `--tls custom` with a certificate for `*.<domain>` issues nothing per
+  hostname, so no name is published, nothing arrives to find it, and the idle timer runs to the
+  end. See [TLS and what your domain costs you](/self-hosting/install#tls-and-what-your-domain-costs-you),
+  which also covers what you take on: renewal is yours.
+- **Or keep the box off public certificates.** `--tls internal` uses Caddy's own CA, which
+  publishes nothing; no browser trusts it without installing the root, which is fine for a box
+  you reach yourself.
+- **The auto sslip.io domain is the case that bites.** It exists to let you try the product in one
+  command, and it puts every hostname you deploy into a public log. Do not size a box, or judge
+  scale-to-zero, on that configuration.
 - To see what woke something, read `insta events --json`. Every `service.wake` carries the door it
   came in on, `traffic`, `api` or `deploy`, so a run of `traffic` wakes with no deploy near them is
   the scanners. The event does not record who sent the request; `insta logs` on the service does.

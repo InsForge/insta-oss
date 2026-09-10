@@ -252,6 +252,68 @@ release (`size` minus `c_min`), so a warm ARC does not read as a full machine. Y
 cap `zfs_arc_max` to keep the daemon from evicting; cap it if you want the ARC smaller for its own
 sake.
 
+## TLS and what your domain costs you
+
+Three modes, and the choice decides whether scale-to-zero holds for public compute services.
+
+| `--tls` | What the edge serves | What gets published |
+|---|---|---|
+| `acme` (default) | a certificate per hostname, issued on demand by Let's Encrypt | every hostname you deploy, to the public certificate transparency logs |
+| `internal` | a certificate per hostname from Caddy's own CA | nothing, but no browser trusts it without installing the root |
+| `custom` | one certificate you supply, for `*.<domain>` | nothing |
+
+### The cost of the auto sslip.io domain
+
+If you do not pass `--domain`, the installer derives one from your public IPv4 address
+(`<a-b-c-d>.sslip.io`) and `--tls acme` then issues a certificate per hostname. That is an
+evaluation convenience, and it has a measured consequence:
+
+- Certificate transparency is public and indexed. Every service you deploy publishes its exact
+  hostname within minutes of its first request.
+- Scanners read those logs. On a live box, a freshly issued service hostname drew 141 requests
+  from a credential scanner probing `/.env`, `/.env.local`, `/config.js` and `/settings.js`
+  within about 15 minutes, and then kept arriving every 1 to 3 minutes.
+- The idle timer for compute is 300 seconds and any request resets it. So a public compute
+  service on this configuration **never sleeps**. Scale-to-zero still holds for databases, whose
+  lanes are not discoverable this way, but not for the thing you point a browser at.
+
+That is not a warning about a risk; it is what happens. Use it to try the product, and use a
+domain of your own for anything you leave running.
+
+### `--tls custom`: a wildcard you supply
+
+With a certificate for `*.example.com` the edge serves it for every name under it and issues
+nothing, which is what the managed cloud does. No hostname is ever published, so nothing arrives
+to find it, so an idle compute service reaches its timer and sleeps.
+
+```bash
+sh install.sh --domain example.com --tls custom \
+  --tls-cert /etc/instacloud/tls/wildcard.crt \
+  --tls-key  /etc/instacloud/tls/wildcard.key
+```
+
+The certificate must cover `*.<domain>` and, ideally, `<domain>` itself. Both files are mounted
+read-only into the edge and the daemon at the same paths, and the daemon presents the same
+certificate on the database lanes, so nothing anywhere asks for a per-hostname certificate.
+
+What you take on:
+
+- **Renewal is yours.** Nothing renews a supplied certificate, and nothing here watches its
+  expiry. Replace the two files and run `docker compose -f /etc/instacloud/compose.yml restart
+  edge` (the daemon re-reads the file on the next handshake, so its lanes need no restart). Put a
+  reminder in whatever renews your other certificates; if it expires, browsers and `psql` will
+  say so before anything here does.
+- **A custom domain outside your wildcard has no certificate.** `insta compute domain` still
+  attaches the hostname and routes it, and `insta compute check-domain` reports it as `pending`
+  rather than `ready` because the certificate does not cover it. Add it as a SAN to the
+  certificate you supply, or keep that name on `--tls acme`.
+- **Issuance for the wildcard itself is not automated here.** A DNS-01 wildcard order needs a
+  Caddy build with your DNS provider's plugin, and the stock `caddy:2.11.4` image this stack runs
+  has none. Get the certificate however you already get certificates and hand it over.
+
+Moving back is a re-run: `sh install.sh --tls acme` drops the supplied pair and restores
+on-demand issuance.
+
 ## Uninstall
 
 Stop the stack and keep every byte of data:
