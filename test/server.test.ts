@@ -2779,6 +2779,12 @@ test('a branch delete whose container refuses to go keeps its data and its row',
   // it vanishing and reappearing on the next refresh.
   expect(del.statusCode).toBe(409)
   expect(del.json().teardown.failed).toBeGreaterThan(0)
+  // ...with an `error` beside it, or every client renders a bare "HTTP 409" for exactly the
+  // outcome this status exists to communicate. It names what refused and how to retry.
+  expect(del.json().error).toContain('io-demo-feat-pg-db')
+  expect(del.json().error).toContain('insta branch delete')
+  // The envelope itself stays the documented pair, with no extra fields on it.
+  expect(Object.keys(del.json().teardown).sort()).toEqual(['destroyed', 'failed'])
   // The bytes stay: something is still mounting them.
   expect(calls.filter((c) => c.startsWith('data.remove:'))).toEqual([])
   // ...and so does the row, marked, so the survivor is still named by something and
@@ -3032,6 +3038,8 @@ test('a compute removal whose container refuses to go keeps its volume bytes and
 
   expect(res.statusCode).toBe(409)          // the service is still there
   expect(res.json().teardown.failed).toBeGreaterThan(0)
+  expect(res.json().error).toContain('io-demo-main-app-web')
+  expect(res.json().error).toContain('insta services remove cp-web')
   expect(calls.filter((c) => c.startsWith('data.remove:'))).toEqual([])
   expect(loadState().branches[bid].apps.web).toBeDefined()
 })
@@ -3128,6 +3136,19 @@ test('a cleanup-failed branch is refused as a fork source and as a deploy target
   const deployed = await post(`/projects/${id}/deploy`, { image: 'app:9', port: 3000, group: 'web', branch: 'feat' })
   expect(deployed.statusCode).toBeGreaterThanOrEqual(400)
   expect(deployed.json().error).toContain('cannot be deployed to')
+  // ...and every other path that MATERIALISES something onto a branch, not just the two named
+  // first: a merge in either direction, and each of the three service adds.
+  const merged = await post(`/projects/${id}/branches/feat/merge`, { from: 'main' })
+  expect(merged.statusCode).toBeGreaterThanOrEqual(400)
+  expect(merged.json().error).toContain('cannot be merged into')
+  const mergedFrom = await post(`/projects/${id}/branches/main/merge`, { from: 'feat' })
+  expect(mergedFrom.statusCode).toBeGreaterThanOrEqual(400)
+  expect(mergedFrom.json().error).toContain('cannot be merged from')
+  for (const svc of [{ type: 'postgres', name: 'db9' }, { type: 'storage', name: 'store9' }, { type: 'redis', name: 'cache9' }]) {
+    const added = await post(`/projects/${id}/services?branch=feat`, { ...svc, branch: 'feat' })
+    expect(added.statusCode, svc.type).toBeGreaterThanOrEqual(400)
+    expect(added.json().error, svc.type).toContain('cannot be given new services')
+  }
   // ...and the way out is the one the message names: the delete retries the demolition.
   expect((await del_(`/projects/${id}/branches/${feat.id}`)).statusCode).toBe(200)
   expect(loadState().branches[feat.id]).toBeUndefined()

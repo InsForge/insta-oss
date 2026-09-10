@@ -206,7 +206,7 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     if (!gated(id, 'project.delete', reply)) return reply
     // The cloud's teardown summary, from the same envelope every delete route answers with
     // (decision 50; platform server.ts:1300 TeardownSummary).
-    return teardownReply(reply, await engine.destroyProject(id))
+    return teardownReply(reply, await engine.destroyProject(id), 're-running the project delete')
   })
 
   app.get('/projects/:id/branches', async (req) => ({
@@ -234,15 +234,25 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
    *  server already uses for "the request was understood and the state says no", and the body
    *  is the same teardown envelope either way, so a client that only reads counts is unaffected.
    *  Documented in COMPATIBILITY. */
-  const teardownReply = (reply: FastifyReply, teardown: Teardown): { teardown: Teardown } => {
-    if (teardown.failed > 0) reply.code(409)
-    return { teardown }
+  const teardownReply = (reply: FastifyReply, t: Teardown, retry: string): { teardown: { destroyed: number; failed: number }; error?: string } => {
+    const teardown = { destroyed: t.destroyed, failed: t.failed }   // the decision-50 envelope, exactly
+    if (t.failed === 0) return { teardown }
+    reply.code(409)
+    // An `error` beside it, because 409 without one renders as a bare "HTTP 409" in the
+    // dashboard (`ui/src/api.ts` reads error, then message, then code) -- for precisely the
+    // outcome this status was added to communicate. The daemon knows what refused and knows the
+    // recovery, so it says both.
+    const why = (t.reasons ?? []).join('; ')
+    return {
+      teardown,
+      error: `${t.failed} resource${t.failed === 1 ? '' : 's'} could not be removed${why ? ` (${why})` : ''}. Nothing that depended on ${t.failed === 1 ? 'it' : 'them'} was deleted and the row is kept, so ${retry} retries exactly this demolition`,
+    }
   }
 
   app.delete('/projects/:id/branches/:bid', async (req, reply) => {
     const { id, bid } = req.params as { id: string; bid: string }
     if (!gated(id, 'branch.delete', reply)) return reply
-    try { return teardownReply(reply, await engine.destroyBranch(id, bid)) }
+    try { return teardownReply(reply, await engine.destroyBranch(id, bid), '`insta branch delete` on it')  }
     catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 
@@ -770,7 +780,7 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
         : sid.startsWith('pg-') ? await engine.removeDbService(id, raw, on)
         : sid.startsWith('st-') ? await engine.removeStorageService(id, raw, on)
         : await engine.removeManagedService(id, raw, on)
-      return teardownReply(reply, teardown)
+      return teardownReply(reply, teardown, `\`insta services remove ${sid}\``)
     } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 

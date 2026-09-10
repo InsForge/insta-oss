@@ -71,7 +71,14 @@ export interface ServiceRow {
 
 /** What every DELETE route answers with (decision 50): how many provider objects went, and how
  *  many refused to. `failed` is not an error — a bucket already gone is still gone. */
-export interface Teardown { destroyed: number; failed: number }
+export interface Teardown {
+  destroyed: number
+  failed: number
+  /** What refused to go, in words, for the message the operator actually sees. The wire envelope
+   *  stays `{destroyed, failed}` (decision 50); `server.ts` lifts these into the `error` string
+   *  every existing client already renders. */
+  reasons?: string[]
+}
 /** The status of a branch whose teardown did not finish: the row is kept so the resources it names
  *  can be found and the demolition retried (`unwindBranch`). */
 export const CLEANUP_FAILED = 'cleanup-failed'
@@ -84,9 +91,12 @@ const movedUnderUs = (sid: string, what: string): Error =>
  *  add now needs); the third is slack for an add that lands between two rounds. */
 const CREATE_LOCK_ROUNDS = 3
 const newTeardown = (): Teardown => ({ destroyed: 0, failed: 0 })
-/** Run one teardown step and count it. */
-async function count(t: Teardown, fn: () => Promise<unknown>): Promise<void> {
-  try { await fn(); t.destroyed++ } catch { t.failed++ }
+/** Run one teardown step and count it. `what` names the thing for the operator's message. */
+async function count(t: Teardown, fn: () => Promise<unknown>, what?: string): Promise<void> {
+  try { await fn(); t.destroyed++ } catch (e) {
+    t.failed++
+    if (what) (t.reasons ??= []).push(`${what}: ${e instanceof Error ? e.message : String(e)}`)
+  }
 }
 /** Docker's own "there is no such network", in both spellings the CLI has used: dockerd's
  *  `Error response from daemon: network <name> not found` (Docker 27, measured on the box) and
@@ -143,7 +153,9 @@ async function removeContainer(sched: { containerPresence(c: string): Promise<'p
   const state = await sched.containerPresence(container)
   if (state === 'gone') { t.destroyed++; return true }
   t.failed++
-  console.warn(`container ${container} is ${state === 'unknown' ? 'in an unknown state (docker could not answer)' : 'still there'} after its removal${failure ? `: ${failure}` : ''}; its data is left in place and its row is kept`)
+  const why = `container ${container} is ${state === 'unknown' ? 'in an unknown state (docker could not answer)' : 'still there'} after its removal${failure ? `: ${failure}` : ''}`
+  ;(t.reasons ??= []).push(why)
+  console.warn(`${why}; its data is left in place and its row is kept`)
   return false
 }
 
@@ -155,7 +167,9 @@ async function removeContainer(sched: { containerPresence(c: string): Promise<'p
 async function countFailure(t: Teardown, what: string, fn: () => Promise<unknown>): Promise<void> {
   try { await fn() } catch (e) {
     t.failed++
-    console.warn(`could not ${what}: ${e instanceof Error ? e.message : String(e)}`)
+    const why = `could not ${what}: ${e instanceof Error ? e.message : String(e)}`
+    ;(t.reasons ??= []).push(why)
+    console.warn(why)
   }
 }
 // ---- end region WP5 ----
@@ -1349,6 +1363,11 @@ export class Engine {
     const source = this.getBranchByName(projectId, fromName)
     if (!source) throw new Error(`source branch not found: ${fromName}`)
     if (source.id === target.id) throw new Error('source and target are the same branch')
+    // A merge PROVISIONS onto the target (fresh databases, buckets, managed instances and a
+    // redeploy per group), and reads the source's registrations to decide what. Neither may be
+    // a half-demolished branch.
+    this.assertUsable(target, 'merged into')
+    this.assertUsable(source, 'merged from')
 
     const project = this.getProject(projectId)!
     const created: Array<{ type: string; name: string }> = []
@@ -1883,6 +1902,7 @@ export class Engine {
       if (!project) throw new Error('project not found')
       if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
       const b = this.targetBranch(projectId, opts.branch)
+      this.assertUsable(b, 'given new services')
       const existing = this.managedList(projectId).find((m) => m.type === type && m.name === name)
       if (existing && this.carries(project, b, existing, 'managed')) throw new Error(`${type} service "${name}" already exists`)
       const wouldMint = this.mintedManagedNames({ type, name })
@@ -2421,7 +2441,10 @@ export class Engine {
       const c = this.pgContainer(project, b, d.id)
       await prove(c, () => this.db.destroy(c))
     }
-    for (const x of stores) await count(t, () => this.storage.destroy(this.bucketOf(project, b, x.id), b.network))
+    for (const x of stores) {
+      const bucket = this.bucketOf(project, b, x.id)
+      await count(t, () => this.storage.destroy(bucket, b.network), `remove bucket ${bucket}`)
+    }
     // The object store is ONE container for the whole box, attached to this branch's network: it is
     // detached once, after every bucket on the network is gone (a per-bucket detach would strand the
     // purge of the next one), and before `network rm`, which refuses while anything is attached.
@@ -2447,10 +2470,7 @@ export class Engine {
       console.warn(`not removing the data of branch "${b.name}": ${survivors.join(', ')} ${survivors.length === 1 ? 'is' : 'are'} still there or unaccounted for`)
     } else {
       for (const root of this.layout().branchRoots(ref)) {
-        await count(t, () => this.data.remove(root).catch((e) => {
-          console.warn(`could not remove ${root}: ${e instanceof Error ? e.message : String(e)}`)
-          throw e
-        }))
+        await count(t, () => this.data.remove(root), `remove the data directory ${root}`)
       }
     }
     const ids = [...dbs.map((d) => d.id), ...managed.map((m) => m.id), ...Object.keys(b.apps).map((g) => `cp-${g}`)]
@@ -3277,7 +3297,15 @@ export class Engine {
    *  This was declined at round ten as a behaviour change on hot paths, and that reasoning is
    *  dead: since 4b489f6 keeping the row is the NORMAL outcome of a failed teardown rather than
    *  an exotic one, so these rows are common now, and a forkable half-demolished branch is a
-   *  data-integrity hazard this delta itself created. */
+   *  data-integrity hazard this delta itself created.
+   *
+   *  It guards the whole PROVISIONING family, not the two paths that were named first: the fork
+   *  source (`createBranchLocked`), the deploy target (`deployLocked`, which every redeploy goes
+   *  through, including a merge's and a volume removal's), both ends of a merge, and the three
+   *  service adds. What is deliberately NOT guarded is everything an operator needs in order to
+   *  GET OUT of the state: listing, reading, credentials, the lifecycle verbs, and the branch
+   *  delete that retries the demolition. `addComputeService` is not guarded either, because it
+   *  registers a project-level name and materialises nothing; its deploy is the guarded step. */
   private assertUsable(branch: Branch, what: string): void {
     if (branch.status !== CLEANUP_FAILED) return
     throw new Error(`branch "${branch.name}" is ${CLEANUP_FAILED}: its teardown did not finish, so it cannot be ${what}. Run \`insta branch delete ${branch.name}\` to retry the teardown`)
@@ -4088,6 +4116,7 @@ export class Engine {
       if (!project) throw new Error('project not found')
       this.assertServiceName(name)
       const b = this.targetBranch(projectId, opts.branch)
+      this.assertUsable(b, 'given new services')
       const existing = this.dbList(projectId).find((d) => d.name === name)
       if (existing && this.carries(project, b, existing, 'postgres')) throw new Error('service already exists on this branch')
       // What the TARGET BRANCH carries, which is what the message, contract line 725 and
@@ -4236,6 +4265,7 @@ export class Engine {
       if (!project) throw new Error('project not found')
       this.assertServiceName(name)
       const b = this.targetBranch(projectId, opts.branch)
+      this.assertUsable(b, 'given new services')
       const existing = this.stList(projectId).find((s) => s.name === name)
       if (existing && this.carries(project, b, existing, 'storage')) throw new Error('service already exists on this branch')
       // Per branch, for the reason spelled out in `addDbService`.
@@ -4297,7 +4327,7 @@ export class Engine {
     // bucket that is still there leaves objects and keys nobody can reach: the row stays.
     if (row) {
       const before = t.failed
-      await count(t, () => this.storage.destroy(row.bucket, branch.network))
+      await count(t, () => this.storage.destroy(row.bucket, branch.network), `remove bucket ${row.bucket}`)
       if (t.failed !== before) return t
     }
     mutate((st) => {
