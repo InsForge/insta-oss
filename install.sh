@@ -55,7 +55,18 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # /run/systemd/system exists only while systemd is PID 1.
 systemd_running() { have systemctl && [ -d /run/systemd/system ]; }
 randhex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
-valid_ip() { printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
+# A NEWLINE walks through a `grep -Eq '^...$'` check, because grep tests each LINE: `^` and `$`
+# anchor a line, never the string, so a value whose FIRST line is well shaped passes and carries
+# everything after the newline with it. That is not theoretical here: every checked value is
+# written into instad.env (where compose and `docker run --env-file` take the LAST duplicate of a
+# key), some are rendered into /etc/fstab a line at a time, and some are interpolated into the
+# firewall rules `run_rules` evals AS ROOT. No value this installer accepts is ever multi-line, so
+# the newline is refused ONCE, for every shape check, rather than pattern by pattern.
+NL='
+'
+# shaped VALUE ERE: a whole-STRING match, which is what every caller below meant to write.
+shaped() { case $1 in *"$NL"*) return 1 ;; esac; printf '%s' "$1" | grep -Eq "$2"; }
+valid_ip() { shaped "$1" '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
 private_ip() {
   case $1 in
     10.*|127.*|169.254.*|192.168.*) return 0 ;;
@@ -145,7 +156,7 @@ case $DATA in /?*) ;; *) die "INSTA_OSS_DATA_DIR must be an absolute path (got '
 # space-separated field and into compose, and it comes back out of instad.env on every upgrade,
 # so whitespace or a shell metacharacter in it is the same "planted once, used as root later"
 # shape as the lane range.
-printf '%s' "$DATA" | grep -Eq '^/[A-Za-z0-9._/-]*$' ||
+shaped "$DATA" '^/[A-Za-z0-9._/-]*$' ||
   die "INSTA_OSS_DATA_DIR must be an absolute path of letters, digits, dot, dash, underscore and / (got '$DATA')"
 DATA=${DATA%/}
 IMG=$DATA.img
@@ -154,7 +165,7 @@ IMG=$DATA.img
 IMAGE=$(resolve INSTA_OSS_IMAGE '' "$IMAGE_DEFAULT")
 # A reference, not a sentence: it is written into instad.env, which compose parses, and read
 # back from there on every upgrade. Same reasoning as the data directory.
-printf '%s' "$IMAGE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/:@-]*$' ||
+shaped "$IMAGE" '^[A-Za-z0-9][A-Za-z0-9._/:@-]*$' ||
   die "INSTA_OSS_IMAGE must be an image reference (got '$IMAGE')"
 IMAGE_TAG=''
 case ${IMAGE##*/} in *:*) IMAGE_TAG=${IMAGE##*:}; IMAGE=${IMAGE%:*} ;; esac
@@ -205,12 +216,13 @@ LANE_REDIS=$(lane_port INSTA_OSS_LANE_REDIS_PORT 6379)
 LANE_MONGO=$(lane_port INSTA_OSS_LANE_MONGO_PORT 27017)
 # The per-service lane range (server-mode MySQL). Validated as a RANGE, not as a port.
 LANE_RANGE=$(resolve INSTA_OSS_LANE_PORT_RANGE '' 20000-20999)
-# The WHOLE STRING, not its ends. `${LANE_RANGE%%-*}` and `${LANE_RANGE##*-}` read the text
+# The WHOLE STRING in both senses: not just its ends, and not just its first LINE (`shaped`).
+# `${LANE_RANGE%%-*}` and `${LANE_RANGE##*-}` read the text
 # before the FIRST hyphen and after the LAST one, so everything between them was never looked
 # at: a value of the shape `1-<payload>-2` gave a low of 1 and a high of 2, passed the numeric
 # checks, and was rendered into a firewall line that `run_rules` then evals AS ROOT. Shape
 # first, bounds second.
-printf '%s' "$LANE_RANGE" | grep -Eq '^[0-9]{1,5}-[0-9]{1,5}$' ||
+shaped "$LANE_RANGE" '^[0-9]{1,5}-[0-9]{1,5}$' ||
   die "INSTA_OSS_LANE_PORT_RANGE must be <low>-<high>, digits only (got '$LANE_RANGE')"
 LANE_RANGE_LO=${LANE_RANGE%%-*}
 LANE_RANGE_HI=${LANE_RANGE##*-}
@@ -248,7 +260,7 @@ if [ -z "$DOMAIN" ]; then
   fi
 fi
 DOMAIN=$(printf '%s' "$DOMAIN" | tr '[:upper:]' '[:lower:]' | sed 's/\.$//')
-printf '%s' "$DOMAIN" | grep -Eq '^[a-z0-9.-]+$' || die "domain must match [a-z0-9.-] (got '$DOMAIN')"
+shaped "$DOMAIN" '^[a-z0-9.-]+$' || die "domain must match [a-z0-9.-] (got '$DOMAIN')"
 DOMAIN_CHANGED=0
 [ -n "$OLD_DOMAIN" ] && [ "$OLD_DOMAIN" != "$DOMAIN" ] && DOMAIN_CHANGED=1
 
@@ -265,7 +277,7 @@ if [ "$TLS" = internal ] && { [ -n "$PRINT" ] || [ -f "$DATA/edge/ca.pem" ]; }; 
 # Every base is checked against the CIDR grammar before it is kept. It comes out of a file this
 # script does not own, it is interpolated into the firewall lines, and run_rules evals those, so
 # anything that is not a.b.c.d/len is dropped with a warning rather than carried into a root shell.
-valid_cidr() { printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'; }
+valid_cidr() { shaped "$1" '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'; }
 keep_cidrs() {
   _out=''
   for _c in $1; do
@@ -733,11 +745,14 @@ ensure_pools
 
 # ---- 3b. firewall ----
 # The LAST line of defence, on the final rendered rule rather than on any of the parts it was
-# built from. Every rule this script emits is machine-generated from validated values, so a
+# built from. `run_rules` reads its input a LINE at a time, so a value that smuggled a newline
+# past its own check would arrive here as two separate lines and each would be allowlisted
+# independently before its eval -- this layer never sees a multi-line string. It is `shaped`
+# anyway, so the two layers cannot disagree about what a whole value is. Every rule this script emits is machine-generated from validated values, so a
 # strict allowlist on the rendered line costs nothing and holds whatever upstream validation
 # misses or a future edit introduces: a line carrying a shell metacharacter never reaches
 # `eval`, and the install stops rather than running it as root.
-rule_ok() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9 ,:./=_-]*$'; }
+rule_ok() { shaped "$1" '^[A-Za-z0-9][A-Za-z0-9 ,:./=_-]*$'; }
 run_rules() {
   while read -r _l; do
     [ -n "$_l" ] || continue
@@ -797,7 +812,7 @@ make_loop_image() {
   [ "${_free:-0}" -ge 15 ] || die "need at least 15 GiB free under $_parent for the data volume (have ${_free:-0} GiB)"
   _size=$(resolve INSTA_OSS_DATA_IMG_GIB "$F_IMG_GIB" '')
   [ -n "$_size" ] || _size=$((_free - 5))
-  printf '%s' "$_size" | grep -Eq '^[0-9]+$' || die "--data-img-gib must be an integer (got '$_size')"
+  shaped "$_size" '^[0-9]+$' || die "--data-img-gib must be an integer (got '$_size')"
   [ "$_size" -ge 10 ] || _size=10
   log "no reflinks on $(df -P "$_parent" | awk 'NR==2 {print $1}'): creating a ${_size} GiB XFS reflink volume at $IMG"
   truncate -s "${_size}G" "$IMG"

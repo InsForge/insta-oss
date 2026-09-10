@@ -4,7 +4,7 @@
 // Everything that needs Docker lives in compose.int.test.ts and image.int.test.ts.
 import { test, expect } from 'vitest'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CONFIG_KEYS } from '../src/config'
@@ -404,7 +404,7 @@ test('the firewall rules follow the RESOLVED lane ports, and never the displaced
  *  them without running an install. */
 function shellHelpers(): string {
   const r = spawnSync('sh', ['-c',
-    `sed -n '/^log() /p;/^warn() /p;/^die() /p;/^rule_ok() /p;/^run_rules() {/,/^}/p;/^apply_rules() {/,/^}/p' ${SCRIPT}`,
+    `sed -n "/^log() /p;/^warn() /p;/^die() /p;/^NL='$/,/^'$/p;/^shaped() /p;/^rule_ok() /p;/^run_rules() {/,/^}/p;/^apply_rules() {/,/^}/p" ${SCRIPT}`,
   ], { encoding: 'utf8' })
   return r.stdout
 }
@@ -433,6 +433,31 @@ test('a lane RANGE is validated as a whole string, not by its two ends', () => {
   }
   // ...and the shape it is supposed to accept still is.
   expect(run(['--print-firewall'], { INSTA_OSS_LANE_PORT_RANGE: '30000-30099' })).toContain('30000:30099')
+})
+
+test('an embedded NEWLINE is refused in every operator value that is checked by shape', () => {
+  // The second half of "the whole string, not part of it". `grep` tests each LINE, so a check
+  // written `^...$` anchors a line: a value whose FIRST line is well shaped passed it and carried
+  // everything after the newline along -- into instad.env, where compose and `--env-file` take
+  // the LAST duplicate of a key, into /etc/fstab as a second entry, and into the firewall lines
+  // `run_rules` evals as root. Every shape check goes through `shaped` now, which refuses a
+  // newline before it looks at anything else.
+  const cases: Array<{ key: string; value: string; says: string }> = [
+    { key: 'INSTA_OSS_LANE_PORT_RANGE', value: '20000-20999\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_LANE_PORT_RANGE' },
+    { key: 'INSTA_OSS_DATA_DIR', value: '/var/lib/instacloud\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_DATA_DIR' },
+    { key: 'INSTA_OSS_IMAGE', value: 'ghcr.io/insforge/instacloud\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_IMAGE' },
+    { key: 'INSTA_OSS_DOMAIN', value: 'example.test\nINSTA_OSS_MODE=local', says: 'domain must match' },
+    { key: 'INSTA_OSS_PUBLIC_IP', value: '1.2.3.4\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_PUBLIC_IP' },
+  ]
+  for (const { key, value, says } of cases) {
+    for (const mode of ['--print-env', '--print-firewall']) {
+      const r = tryRun([mode], { INSTA_OSS_DOMAIN: 'example.test', [key]: value })
+      expect(r.status, `${mode} ${key}`).toBe(1)
+      expect(r.stderr, `${mode} ${key}`).toContain(says)
+      // ...and nothing of the smuggled line was rendered before the refusal.
+      expect(r.stdout, `${mode} ${key}`).not.toContain('INSTA_OSS_MODE=local')
+    }
+  }
 })
 
 test('a value planted in instad.env is refused on the UPGRADE path too', () => {
@@ -467,6 +492,14 @@ test('run_rules refuses a line it does not recognise, before the eval', () => {
     expect(r.status, hostile).toBe(1)
     expect(r.stderr, hostile).toContain('unexpected characters')
   }
+  // ...and a newline cannot smuggle a rule past this layer either: `run_rules` reads a LINE at a
+  // time, so a two-line rendering is two rules and each is allowlisted on its own before its
+  // eval. (This is why the newline hole above was a hole in the FIRST layer only.)
+  const probe = join(tmpdir(), `io-rule-nl-${process.pid}`)
+  const two = spawnSync('sh', ['-c', `${helpers}\nprintf '%s\\n' 'ufw allow 443' ${JSON.stringify(`id > ${probe}`)} | run_rules`], { encoding: 'utf8' })
+  expect(two.status).toBe(1)
+  expect(two.stderr).toContain('unexpected characters')
+  expect(existsSync(probe)).toBe(false)
   // ...and every rule the script actually renders passes it, so the allowlist is not theatre.
   const rules = run(['--print-firewall']).split('\n').filter((l) => l && !l.startsWith('#'))
   expect(rules.length).toBeGreaterThan(4)
@@ -612,7 +645,17 @@ const cidrHelpers = (): string => {
   const end = script.indexOf('POOL_BASES=$POOL_BASE_DEFAULT', start)
   expect(start, 'valid_cidr is gone from install.sh').toBeGreaterThan(0)
   expect(end).toBeGreaterThan(start)
-  return `warn() { printf 'warning: %s\\n' "$*" >&2; }\n${script.slice(start, end)}`
+  return `warn() { printf 'warning: %s\\n' "$*" >&2; }\n${shapedHelper()}${script.slice(start, end)}`
+}
+
+/** `shaped` and its NL, sliced out of the script: every shape check in the installer goes
+ *  through it, so a helper lifted out of the file needs it to run at all. */
+const shapedHelper = (): string => {
+  const start = script.indexOf("NL='")
+  const end = script.indexOf('valid_ip() ', start)
+  expect(start, 'the newline guard is gone from install.sh').toBeGreaterThan(0)
+  expect(end).toBeGreaterThan(start)
+  return script.slice(start, end)
 }
 
 test('only a CIDR block survives into the firewall lines the installer evals', () => {
