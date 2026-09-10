@@ -3286,7 +3286,9 @@ export class Engine {
     if (!Engine.NAME_RE.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
   }
 
-  /** The cloud's per-type branch cap, minus its dash and upgrade hint (there is no plan to buy). */
+  /** The cloud's per-type BRANCH cap, minus its dash and upgrade hint (there is no plan to buy).
+   *  Callers count what the target branch carries: services are branch-scoped, so the project's
+   *  registration list is every name on every branch and not this branch's load. */
   private assertTypeCap(count: number, type: string): void {
     if (count >= this.cfg.services.maxPerType) {
       throw new Error(`branch has reached this plan's limit of ${this.cfg.services.maxPerType} ${type} services (INSTA_OSS_MAX_SERVICES_PER_TYPE)`)
@@ -3318,7 +3320,12 @@ export class Engine {
       const b = this.targetBranch(projectId, opts.branch)
       const existing = this.dbList(projectId).find((d) => d.name === name)
       if (existing && this.carries(project, b, existing, 'postgres')) throw new Error('service already exists on this branch')
-      if (!existing) this.assertTypeCap(this.dbList(projectId).length, 'postgres')
+      // What the TARGET BRANCH carries, which is what the message, contract line 725 and
+      // COMPATIBILITY all say the cap counts. Under the old fan-out the two were the same number;
+      // branch-scoped they are not, and counting registrations refused a branch its FIRST database
+      // once the cap's worth of names existed anywhere in the project, while waving a
+      // re-materialisation of an already-registered name past the cap entirely.
+      this.assertTypeCap(this.dbList(projectId).filter((d) => this.carries(project, b, d, 'postgres')).length, 'postgres')
       const entry = existing ?? { id: pgServiceId(name), name, dataId: randomUUID().slice(0, 8), createdAt: Date.now(), ...(opts.templateDeploymentId ? { templateDeploymentId: opts.templateDeploymentId } : {}) }
       const ref = this.ref(project, b)
       // ONE synchronous mutate checks the hostname and records the registration, before any
@@ -3439,7 +3446,8 @@ export class Engine {
       const b = this.targetBranch(projectId, opts.branch)
       const existing = this.stList(projectId).find((s) => s.name === name)
       if (existing && this.carries(project, b, existing, 'storage')) throw new Error('service already exists on this branch')
-      if (!existing) this.assertTypeCap(this.stList(projectId).length, 'storage')
+      // Per branch, for the reason spelled out in `addDbService`.
+      this.assertTypeCap(this.stList(projectId).filter((x) => this.carries(project, b, x, 'storage')).length, 'storage')
       const entry = existing ?? { id: storageServiceId(name), name, createdAt: Date.now(), ...(opts.public !== undefined ? { public: opts.public } : {}) }
       mutate((st) => {
         if (existing) return

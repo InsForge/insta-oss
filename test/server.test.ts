@@ -2274,6 +2274,39 @@ test('the per-type cap is the cloud message with the env var named', async () =>
   await two.close()
 })
 
+// The cap is per BRANCH: the message says so, and so do the contract and COMPATIBILITY. Under the
+// old fan-out the branch's load and the project's registration count were the same number, so
+// counting registrations was right by accident; branch-scoped it refuses a branch its first
+// service because some OTHER branch filled the quota.
+test('the per-type cap counts what the BRANCH carries, not the project registrations', async () => {
+  const two = buildServer(makeEngine(testConfig({ INSTA_OSS_MAX_SERVICES_PER_TYPE: '2' })))
+  const id = (await two.inject({ method: 'POST', url: '/orgs/local/projects', payload: { name: 'demo' } })).json().project.id
+  const add = (type: string, name: string, branch?: string) => two.inject({
+    method: 'POST', url: `/projects/${id}/services`, payload: { type, name, ...(branch ? { branch } : {}) },
+  })
+  // feat is cut before anything exists, so it carries nothing at all.
+  expect((await two.inject({ method: 'POST', url: `/projects/${id}/branches`, payload: { name: 'feat', from: 'main' } })).statusCode).toBe(201)
+  expect((await add('postgres', 'db')).statusCode).toBe(201)
+  expect((await add('postgres', 'analytics')).statusCode).toBe(201)
+  expect((await add('postgres', 'reports')).statusCode).toBe(400)          // main is full
+
+  // feat carries none of them, so it gets its own two...
+  expect((await add('postgres', 'db', 'feat')).statusCode).toBe(201)
+  expect((await add('postgres', 'reports', 'feat')).statusCode).toBe(201)
+  // ...and then it is full too, including for a name the project already has registered, which
+  // the old check skipped entirely because the registration existed.
+  const full = await add('postgres', 'analytics', 'feat')
+  expect(full.statusCode).toBe(400)
+  expect(full.json().error).toBe("branch has reached this plan's limit of 2 postgres services (INSTA_OSS_MAX_SERVICES_PER_TYPE)")
+
+  // Storage counts the same way, on its own quota.
+  expect((await add('storage', 'a')).statusCode).toBe(201)
+  expect((await add('storage', 'b')).statusCode).toBe(201)
+  expect((await add('storage', 'c')).statusCode).toBe(400)
+  expect((await add('storage', 'c', 'feat')).statusCode).toBe(201)
+  await two.close()
+})
+
 // Decision 51: name and lane reservations happen in one synchronous mutate before provisioning
 // awaits, so two concurrent adds on two projects both succeed and neither sees the other's half.
 test('two concurrent service adds on two projects both succeed', async () => {
