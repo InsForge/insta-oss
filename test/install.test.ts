@@ -4,7 +4,7 @@
 // Everything that needs Docker lives in compose.int.test.ts and image.int.test.ts.
 import { test, expect } from 'vitest'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CONFIG_KEYS } from '../src/config'
@@ -252,6 +252,8 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
   const wild = join(dir, 'wild.crt')
   const apex = join(dir, 'apex.crt')
   const wrong = join(dir, 'wrong.crt')
+  const sampled = join(dir, 'sampled.crt')
+  const future = join(dir, 'future.crt')
   // Committed rather than minted: OpenSSL only grew `req -not_before/-not_after` in 3.5, and the
   // CI runner's 3.0 cannot mint an expired certificate at all. The fixture is the portable way
   // to exercise the installer's refusal, and it is a self-signed pair for a test domain.
@@ -264,6 +266,10 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
     openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${apex} -subj '/CN=example.test' -addext 'subjectAltName=DNS:example.test' 2>/dev/null`)
     openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${wrong} -subj '/CN=*.elsewhere.test' -addext 'subjectAltName=DNS:*.elsewhere.test' 2>/dev/null`)
     openssl(`openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${other} -out ${mismatched} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`)
+    // The regression for the check that only SAMPLED names: exactly the three that were sampled
+    // and nothing else. It passed, and then the first real service, on a hostname nobody had
+    // enumerated, got a certificate that did not cover it.
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${sampled} -subj '/CN=api.example.test' -addext 'subjectAltName=DNS:api.example.test,DNS:console.example.test,DNS:web-example-main.example.test' 2>/dev/null`)
     writeFileSync(junk, 'this is not a certificate\n')
 
     const bad: Array<[string, string, string]> = [
@@ -271,8 +277,10 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
       [wild, junk, 'not a PEM private key'],
       [mismatched, key, 'is not the key for'],
       [expired, expiredKey, 'has already expired'],
-      [apex, key, 'does not cover api.example.test'],
-      [wrong, key, 'does not cover api.example.test'],
+      [apex, key, 'does not carry the SAN DNS:*.example.test'],
+      [wrong, key, 'does not carry the SAN DNS:*.example.test'],
+      // Sampling cannot establish "every hostname this box will ever deploy".
+      [sampled, key, 'does not carry the SAN DNS:*.example.test'],
     ]
     for (const [c, k, says] of bad) {
       // A --print-* run over files that EXIST checks them too, which is how this runs without
@@ -281,6 +289,21 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
       expect(r.status, says).toBe(1)
       expect(r.stderr, says).toContain(says)
     }
+    // A certificate that is not valid YET. `-checkend 0` only proves notAfter is in the future,
+    // so this installed cleanly and was then rejected by every client, while the install said it
+    // had worked. Skipped where openssl cannot date a certificate forward (`req -not_before`
+    // arrived in 3.5), rather than silently not testing it.
+    const dated = spawnSync('sh', ['-c',
+      `openssl req -x509 -key ${key} -sha256 -not_before 20990101000000Z -not_after 20990201000000Z -out ${future} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (dated.status === 0) {
+      const r = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', future, '--tls-key', key], { INSTA_OSS_DOMAIN: 'example.test' })
+      expect(r.status).toBe(1)
+      expect(r.stderr).toContain('is not valid yet')
+    } else {
+      expect(dated.stderr, 'openssl cannot date a certificate forward here').toBeDefined()
+    }
+
     // ...and the pair that can serve gets past the certificate checks, failing later for the
     // reason a non-root run always fails.
     const ok = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', wild, '--tls-key', key], { INSTA_OSS_DOMAIN: 'example.test' })
@@ -290,6 +313,48 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
     expect(tryRun(['--print-env', '--tls', 'custom', '--tls-cert', '/nope/c.crt', '--tls-key', '/nope/k.key'], { INSTA_OSS_DOMAIN: 'example.test' }).status).toBe(0)
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a symlinked certificate mounts the directory it RESOLVES to as well', () => {
+  // certbot's `live/<domain>/fullchain.pem` is a relative link into `../../archive/<domain>/`,
+  // which is the commonest real source of these files. Mounting only the link's own directory
+  // puts a dangling link inside both containers: valid on the host, unreadable where it is
+  // used. Refusing the standard layout would be a poor trade, so the target's directory is
+  // mounted too and the configured path keeps pointing at the link.
+  const root = mkdtempSync(join(tmpdir(), 'io-le-'))
+  try {
+    mkdirSync(join(root, 'archive', 'example.test'), { recursive: true })
+    mkdirSync(join(root, 'live', 'example.test'), { recursive: true })
+    // Real files behind the links: the validation above them is reachable now, and a placeholder
+    // would fail as "not a PEM certificate" rather than testing the mount.
+    const mint = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${join(root, 'archive', 'example.test', 'privkey1.pem')} -out ${join(root, 'archive', 'example.test', 'fullchain1.pem')} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (mint.status !== 0) throw new Error(`openssl failed: ${mint.stderr}`)
+    symlinkSync('../../archive/example.test/fullchain1.pem', join(root, 'live', 'example.test', 'fullchain.pem'))
+    symlinkSync('../../archive/example.test/privkey1.pem', join(root, 'live', 'example.test', 'privkey.pem'))
+
+    const compose = run(['--print-compose', '--tls', 'custom',
+      '--tls-cert', join(root, 'live', 'example.test', 'fullchain.pem'),
+      '--tls-key', join(root, 'live', 'example.test', 'privkey.pem'),
+    ], { INSTA_OSS_DOMAIN: 'example.test' })
+    // Both directories, in both containers: the link's, so the configured path exists, and the
+    // target's, so it resolves. (A temp dir on macOS is itself a symlink under /var, so the
+    // rendered paths are compared by suffix rather than by the string that was passed in.)
+    for (const dir of ['/live/example.test:', '/archive/example.test:']) {
+      expect(compose.split('\n').filter((l) => l.includes(dir) && l.trim().endsWith(':ro')), dir).toHaveLength(2)
+    }
+    // ...and the Caddyfile still names the link, not the target, so a renewal that re-points it
+    // needs no reinstall.
+    const caddy = run(['--print-caddyfile', '--tls', 'custom',
+      '--tls-cert', join(root, 'live', 'example.test', 'fullchain.pem'),
+      '--tls-key', join(root, 'live', 'example.test', 'privkey.pem'),
+    ], { INSTA_OSS_DOMAIN: 'example.test' })
+    expect(caddy).toContain('/live/example.test/fullchain.pem')
+    expect(caddy).not.toContain('fullchain1.pem')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
 

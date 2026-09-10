@@ -61,6 +61,25 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # /run/systemd/system exists only while systemd is PID 1.
 systemd_running() { have systemctl && [ -d /run/systemd/system ]; }
 randhex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+# The path a symlink chain ends at, or the path itself. Plain `readlink`, one component at a
+# time: `readlink -f` is GNU-only and this also has to run on a developer's macOS while the suite
+# does. Bounded, so a link that points at itself stops rather than spinning.
+resolve_link() {
+  _p=$1
+  _n=0
+  while [ -L "$_p" ] && [ "$_n" -lt 8 ]; do
+    _t=$(readlink "$_p") || break
+    case $_t in
+      /*) _p=$_t ;;
+      *) _p=$(dirname "$_p")/$_t ;;
+    esac
+    _n=$((_n + 1))
+  done
+  # Normalise, so `/a/b/../c` is not mounted as a different path than `/a/c`.
+  _d=$(cd "$(dirname "$_p")" 2>/dev/null && pwd -P) || { printf '%s' "$_p"; return 0; }
+  printf '%s/%s' "$_d" "$(basename "$_p")"
+}
+
 # A NEWLINE walks through a `grep -Eq '^...$'` check, because grep tests each LINE: `^` and `$`
 # anchor a line, never the string, so a value whose FIRST line is well shaped passes and carries
 # everything after the newline with it. That is not theoretical here: every checked value is
@@ -221,9 +240,20 @@ if [ "$TLS" = custom ]; then
     # nothing; a real install refuses rather than bringing a stack up that cannot serve TLS.
     if [ -z "$PRINT" ] && [ ! -r "$_f" ]; then die "cannot read '$_f': --tls custom serves this file, so the install stops here rather than starting an edge with no certificate"; fi
   done
-  # The directories are what gets mounted (see `tls_mounts`), so they are resolved here, once.
+  # The directories are what gets mounted (see `tls_mounts`), so they are resolved here, once --
+  # and so are SYMLINKS, because the commonest real source of these files is certbot, whose
+  # `live/<domain>/fullchain.pem` is a relative link into `../../archive/<domain>/`. Mounting
+  # only the link's own directory puts a dangling link inside both containers: valid on the
+  # host, unreadable where it is used. Refusing that layout would refuse the standard one, so
+  # the target's directory is mounted too and the configured path keeps pointing at the link,
+  # which then resolves inside the container exactly as it does outside. A renewal that
+  # re-points the link at `fullchain2.pem` stays visible for the same reason.
   TLS_CERT_DIR=$(dirname "$TLS_CERT")
   TLS_KEY_DIR=$(dirname "$TLS_KEY")
+  TLS_CERT_REAL=$(resolve_link "$TLS_CERT")
+  TLS_KEY_REAL=$(resolve_link "$TLS_KEY")
+  TLS_CERT_REAL_DIR=$(dirname "$TLS_CERT_REAL")
+  TLS_KEY_REAL_DIR=$(dirname "$TLS_KEY_REAL")
 elif [ -n "$TLS_CERT" ] || [ -n "$TLS_KEY" ]; then
   # A flag or an environment variable is a REQUEST, and nothing in this mode would serve it, so it
   # stops. A value that only the previous install left in instad.env is not a request: it is how a
@@ -350,21 +380,51 @@ if [ "$TLS" = custom ]; then
     if [ -z "$_cpub" ] || [ "$_cpub" != "$_kpub" ]; then
       die "'$TLS_KEY' is not the key for '$TLS_CERT' (their public keys differ): the edge would fail to load the pair and crash-loop"
     fi
+    # BOTH boundaries. `-checkend 0` proves only that notAfter is in the future, so a
+    # future-dated certificate passed it, installed cleanly, and was then rejected by every
+    # browser and every psql client while the install said it had worked.
     openssl x509 -in "$TLS_CERT" -noout -checkend 0 >/dev/null 2>&1 ||
       die "'$TLS_CERT' has already expired ($(openssl x509 -in "$TLS_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)); replace it before installing"
-    # Every name this install will actually serve. A wildcard covers all three; a certificate for
-    # the apex alone, or for another domain entirely, fails here instead of at a browser.
-    # The OUTPUT, not the exit status: `x509 -checkhost` prints "does match" or "does NOT match"
-    # in every version that has the flag, and returns 1 for a miss only in newer ones (OpenSSL 3.0
-    # on an Ubuntu 24.04 runner returns 0 either way, which is how a green local run shipped a
-    # check that passed for the wrong domain).
-    for _h in "api.$DOMAIN" "console.$DOMAIN" "web-example-main.$DOMAIN"; do
+    _nb=$(openssl x509 -in "$TLS_CERT" -noout -startdate 2>/dev/null | cut -d= -f2)
+    # GNU date on the boxes this installs on; the BSD form is for a developer running the suite
+    # on macOS. A date neither can parse is a warning, not a refusal: an unreadable timestamp
+    # must not block an install the way an invalid certificate does.
+    _nbs=$(date -u -d "$_nb" +%s 2>/dev/null || date -j -f '%b %d %T %Y %Z' "$_nb" +%s 2>/dev/null || printf '')
+    if [ -z "$_nbs" ]; then
+      warn "could not read the start date of '$TLS_CERT' ($_nb); its notBefore was not checked"
+    elif [ "$_nbs" -gt "$(date -u +%s)" ]; then
+      die "'$TLS_CERT' is not valid yet (notBefore $_nb): it would be rejected by every client until then, and the install would still have said it worked"
+    fi
+    # The WILDCARD, explicitly, and this is the point of the mode rather than a detail. Sampling
+    # names cannot establish the property: a certificate carrying exactly api, console and one
+    # made-up service name passed, and then the first real service got a hostname-invalid
+    # certificate. What this mode promises is arbitrary FUTURE hostnames with nothing issued, and
+    # only `*.$DOMAIN` promises that.
+    _sans=$(openssl x509 -in "$TLS_CERT" -noout -ext subjectAltName 2>/dev/null | tr -d ' ' | tr '\n' ',')
+    [ -n "$_sans" ] || _sans=$(openssl x509 -in "$TLS_CERT" -noout -text 2>/dev/null |
+      grep -A1 'Subject Alternative Name' | tr -d ' ' | tr '\n' ',')
+    # grep -F, not a `case` glob: the `*` in `DNS:*.` is a wildcard to `case` and would match any
+    # single-label SAN, which is the opposite of the check.
+    printf '%s' ",$_sans," | grep -qF ",DNS:*.$DOMAIN," ||
+      die "'$TLS_CERT' does not carry the SAN DNS:*.$DOMAIN: --tls custom serves this one certificate for every hostname this box will ever deploy, so a wildcard is what it needs (it has: $(printf '%s' "$_sans" | sed 's/,$//'))"
+    # ...and the two names an operator is handed. A wildcard covers both; this names which one is
+    # missing when it does not. The OUTPUT, not the exit status: `x509 -checkhost` prints "does
+    # match" or "does NOT match" in every version that has the flag, and returns 1 for a miss
+    # only in newer ones (OpenSSL 3.0 on an Ubuntu runner returns 0 either way).
+    for _h in "api.$DOMAIN" "console.$DOMAIN"; do
       _hostout=$(openssl x509 -in "$TLS_CERT" -noout -checkhost "$_h" 2>/dev/null || true)
       case $_hostout in
         *'does match'*) ;;
-        *) die "'$TLS_CERT' does not cover $_h: --tls custom serves it for every name under $DOMAIN, so it needs *.$DOMAIN (subject $(openssl x509 -in "$TLS_CERT" -noout -subject 2>/dev/null | cut -d= -f2-))" ;;
+        *) die "'$TLS_CERT' does not cover $_h, which this install prints as its own URL (subject $(openssl x509 -in "$TLS_CERT" -noout -subject 2>/dev/null | cut -d= -f2-))" ;;
       esac
     done
+    # The bare domain is not covered by a wildcard and is not fatal: nothing here is served on it
+    # by default, but an operator who points it at this box will get a name mismatch.
+    _apexout=$(openssl x509 -in "$TLS_CERT" -noout -checkhost "$DOMAIN" 2>/dev/null || true)
+    case $_apexout in
+      *'does match'*) ;;
+      *) warn "'$TLS_CERT' does not cover the bare $DOMAIN (a wildcard does not): anything served on it will be a name mismatch" ;;
+    esac
     openssl x509 -in "$TLS_CERT" -noout -checkend 1814400 >/dev/null 2>&1 ||
       warn "'$TLS_CERT' expires within 21 days ($(openssl x509 -in "$TLS_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)): nothing renews a supplied certificate, and the daemon will keep saying so"
   }
@@ -589,8 +649,12 @@ EOF
 # restart. One mount when both files share a directory, which is the usual case.
 tls_mounts() {
   [ "$TLS" = custom ] || return 0
-  printf '\n      - %s:%s:ro' "$TLS_CERT_DIR" "$TLS_CERT_DIR"
-  [ "$TLS_KEY_DIR" = "$TLS_CERT_DIR" ] || printf '\n      - %s:%s:ro' "$TLS_KEY_DIR" "$TLS_KEY_DIR"
+  _seen=''
+  for _d in "$TLS_CERT_DIR" "$TLS_KEY_DIR" "$TLS_CERT_REAL_DIR" "$TLS_KEY_REAL_DIR"; do
+    case " $_seen " in *" $_d "*) continue ;; esac
+    _seen="$_seen $_d"
+    printf '\n      - %s:%s:ro' "$_d" "$_d"
+  done
 }
 
 # Caddyfile with concrete values (Caddy has no env placeholders for an omitted email line).
@@ -1101,7 +1165,10 @@ if [ "$TLS" = custom ]; then
   _served=''
   _t=0
   while [ "$_t" -lt 60 ]; do
-    if curl -sk --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 10 -o /dev/null "https://api.$DOMAIN/healthz"; then
+    # `--noproxy '*'`: this probe is pinned to loopback on purpose, and an https_proxy in the
+    # environment would otherwise send it elsewhere -- at best failing a good install, at worst
+    # verifying the PROXY's certificate instead of the one being checked.
+    if curl -sk --noproxy '*' --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 10 -o /dev/null "https://api.$DOMAIN/healthz"; then
       _served=$(printf '' | openssl s_client -connect 127.0.0.1:443 -servername "api.$DOMAIN" 2>/dev/null |
         openssl x509 -noout -serial 2>/dev/null | cut -d= -f2)
       [ -n "$_served" ] && break
@@ -1117,6 +1184,20 @@ if [ "$TLS" = custom ]; then
     compose logs --tail=30 edge 2>&1 || true
     die "the edge is serving certificate serial $_served, not the $_ours in $TLS_CERT (see the log above)"
   fi
+  # `-k` proved it is OUR certificate (the serial above) and nothing about whether a client will
+  # accept it. Two of the three cases can be checked from here and are: a certificate that is its
+  # own trust anchor (self-signed, what an internal box usually has) verifies against itself, and
+  # a publicly-issued one verifies against the system store -- either way including the HOSTNAME,
+  # which is the part `-k` throws away. The third, a private CA this box does not trust but your
+  # clients do, cannot be verified from here and is a legitimate configuration, so it is a
+  # precise warning rather than a failed install.
+  if curl -sS --noproxy '*' --cacert "$TLS_CERT" --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 10 -o /dev/null "https://api.$DOMAIN/healthz" 2>/dev/null; then
+    log "the supplied certificate verifies for api.$DOMAIN against itself"
+  elif curl -sS --noproxy '*' --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 10 -o /dev/null "https://api.$DOMAIN/healthz" 2>/dev/null; then
+    log "the supplied certificate verifies for api.$DOMAIN against this box's trust store"
+  else
+    warn "the edge is serving your certificate, but neither the certificate itself nor this box's trust store verifies it for api.$DOMAIN: fine if it is issued by a private CA your clients trust, and a browser error if it is not"
+  fi
   log "serving the supplied certificate $TLS_CERT for *.$DOMAIN (nothing is issued, so no hostname is published)"
 else
 # The internal issuer is local and answers in seconds; ACME does not, and four minutes covers a
@@ -1130,7 +1211,8 @@ if [ "$TLS" = internal ]; then CERT_WAIT=60; else CERT_WAIT=240; fi
 _started=$(date +%s)
 _tries=0
 while :; do
-  curl -sk --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 60 -o /dev/null "https://api.$DOMAIN/healthz" || true
+  # Pinned to loopback, so an https_proxy in the environment must not answer it.
+  curl -sk --noproxy '*' --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 60 -o /dev/null "https://api.$DOMAIN/healthz" || true
   if cert_present; then break; fi
   _tries=$((_tries + 1))
   if [ "$(( $(date +%s) - _started ))" -ge "$CERT_WAIT" ]; then break; fi
