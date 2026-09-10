@@ -208,14 +208,18 @@ function makeData(): DataDirOps {
  *  field being absent here rather than set to a convenient constant. It carried
  *  `dataId: 'cache'` while the comment claimed there was none anywhere, and that is why a
  *  per-branch mint of the missing id survived: nothing in this file ever exercised the mint.
- *  `secondBranch` is what makes the id's PROJECT scope observable at all. */
-function writeLegacyState(opts: { managed?: boolean; secondBranch?: boolean } = {}): void {
+ *  `secondBranch` is what makes the id's PROJECT scope observable at all, and `managedDataId`
+ *  models the one install that legitimately HAS one before this pass runs: a boot that was
+ *  interrupted after the backfill persisted the id and before the copy finished. A test that
+ *  seeds anything at a managed data path needs it, because the path is `<prefix>-<dataId>` and
+ *  seeding before the id exists writes to a directory the migration will never look at. */
+function writeLegacyState(opts: { managed?: boolean; secondBranch?: boolean; managedDataId?: string } = {}): void {
   writeFileSync(cfg.statePath, JSON.stringify({
     projects: {
       [PROJECT_ID]: {
         id: PROJECT_ID, name: 'demo', status: 'ready', createdAt: 1, refSlug: 'demo',
         computeGroups: ['web'], computeVolumes: { web: { id: VOL_ID, sizeGib: 1 } },
-        ...(opts.managed ? { managedServices: [{ id: 'md-cache', type: 'redis', name: 'cache' }] } : {}),
+        ...(opts.managed ? { managedServices: [{ id: 'md-cache', type: 'redis', name: 'cache', ...(opts.managedDataId ? { dataId: opts.managedDataId } : {}) }] } : {}),
       },
     },
     branches: {
@@ -634,14 +638,30 @@ test('a PARTIAL /data target is recopied rather than taken for a finished one', 
 })
 
 test('a PARTIAL managed data path is recopied rather than taken for a finished one', async () => {
-  writeLegacyState({ managed: true })
+  // The install this models is one whose EARLIER migration was interrupted mid-copy, so its
+  // registration already carries the id its partial directory was written under. Seeding
+  // without that id is what made this test vacuous: `mdDir()` reads the id from live state, the
+  // seed landed under the `not-minted-yet` placeholder, the migration minted a fresh id and
+  // copied elsewhere, and the case never had a partial destination in it at all. The
+  // placeholder fails loudly on a READ and silently creates a directory on a WRITE, which is
+  // why nothing said so.
+  writeLegacyState({ managed: true, managedDataId: 'cache' })
   world.containers.set(MD_REDIS, { running: true, mounts: [] })
   world.sources.set(MD_REDIS, REDIS_FILES)
-  world.add(`${mdDir()}/data/dump.rdb`)   // half of an interrupted direct copy
+  const seeded = `${mdDir()}/data`
+  world.add(`${seeded}/dump.rdb`)   // half of an interrupted direct copy
 
   expect(await boot()).toEqual({ migrated: [REF], skipped: [], failed: [] })
-  expect(contentsOf(`${mdDir()}/data`)).toEqual(['appendonly.aof', 'dump.rdb'])
+  // THE GUARD: the seed has to be where the migration copies, or this case asserts nothing
+  // about a partial destination. A misplaced fixture fails here instead of passing quietly.
+  expect(`${mdDir()}/data`).toBe(seeded)
+  expect(contentsOf(seeded)).toEqual(['appendonly.aof', 'dump.rdb'])
   expect(world.containers.get(MD_REDIS)?.mounts).toEqual([mdDir()])
+  // ...and nothing was written under any OTHER id, which is the other way the seed could have
+  // been misdirected.
+  const mdRoot = join(cfg.dataDir, 'md', REF)
+  const dirs = new Set([...world.paths].filter((x) => x.startsWith(`${mdRoot}/`)).map((x) => x.slice(mdRoot.length + 1).split('/')[0]))
+  expect([...dirs].sort()).toEqual(['rd-cache'])
 })
 
 test('a non-empty target with NO app container is left alone, and its volume is kept', async () => {
