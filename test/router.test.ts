@@ -14,7 +14,7 @@ import { Certs, findCertFiles } from '../src/router/certs'
 import { createPgLane, errorResponse, PG_ERRORS } from '../src/router/pg'
 import { createSniLane } from '../src/router/tls'
 import { buildTable, type Route } from '../src/router/table'
-import { resolveOrWake, SSL_REQUEST, startupMessage } from '../src/router/wake'
+import { probePg, resolveOrWake, SSL_REQUEST, startupMessage } from '../src/router/wake'
 import { engineRouterDeps } from '../src/router/deps'
 import type { ServiceState, UpstreamAddr, UpstreamLike } from '../src/router/deps'
 import type { Config } from '../src/config'
@@ -969,4 +969,54 @@ test('an engine that cannot report state is not read as "running": the lane stil
   const out = await resolveOrWake({ upstream, stateOf: deps.stateOf, wake: deps.wake }, route, { probe: async () => true })
   expect(woke).toBe(1)
   expect(out.woke).toBe(true)
+})
+
+test('a pg handshake answering something this protocol does not define is NOT ready', async () => {
+  // The handshake ended in a bare `done('ready')`, so any first byte at all finished a wake:
+  // an allowlist here, exactly like `probeRedis` next door. The server below completes the SSL
+  // negotiation and then answers garbage, which is what a half-initialised container, a proxy
+  // in the way or a truncated read looks like.
+  const answers: Buffer[] = [Buffer.from('N'), Buffer.from('\u0000\u0000')]
+  const srv = createNetServer((sock) => {
+    let i = 0
+    sock.on('data', () => { const a = answers[i++]; if (a) sock.write(a) })
+  })
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r))
+  const port = (srv.address() as { port: number }).port
+  try {
+    // Three polls' worth of window, so this is "never ready", not "not ready yet".
+    expect(await probePg('127.0.0.1', port, 600)).toBe(false)
+  } finally {
+    await new Promise<void>((r) => srv.close(() => r()))
+  }
+})
+
+test('a pg handshake that answers an ErrorResponse IS ready: the server is talking', async () => {
+  // The other side of the allowlist: an error reply is the postmaster answering, and only
+  // 57P03 (still starting up) means ask again. This is what keeps the fix from being a hang.
+  const srv = createNetServer((sock) => {
+    let seen = 0
+    sock.on('data', () => {
+      seen++
+      if (seen === 1) return void sock.write(Buffer.from('N'))
+      const body = Buffer.concat([
+        Buffer.from('S'), Buffer.from('FATAL\u0000', 'latin1'),
+        Buffer.from('C'), Buffer.from('28P01\u0000', 'latin1'),
+        Buffer.from('M'), Buffer.from('password authentication failed\u0000', 'latin1'),
+        Buffer.from('\u0000', 'latin1'),
+      ])
+      const msg = Buffer.alloc(5 + body.length)
+      msg.write('E', 0, 'latin1')
+      msg.writeInt32BE(body.length + 4, 1)
+      body.copy(msg, 5)
+      sock.write(msg)
+    })
+  })
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r))
+  const port = (srv.address() as { port: number }).port
+  try {
+    expect(await probePg('127.0.0.1', port, 600)).toBe(true)
+  } finally {
+    await new Promise<void>((r) => srv.close(() => r()))
+  }
 })

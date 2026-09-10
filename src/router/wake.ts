@@ -115,8 +115,15 @@ export function errorResponseCode(msg: Buffer): string | null {
 
 /** Postgres wire readiness (the equivalent of pg_isready without a docker exec per 250 ms): connect,
  *  offer SSLRequest (the image answers `N` by default; on `S` wrap in TLS), send a Startup for
- *  postgres/postgres, then read the first message: `R` (authentication) = ready; `E` with 57P03
- *  (starting up) = retry; any other `E` = the server is up and talking; refused = retry. */
+ *  postgres/postgres, then read the first message. An ALLOWLIST, like `probeRedis` next door:
+ *  `R` (authentication) = ready; `E` = the server is up and talking, unless its code says it is
+ *  still starting; anything else, including a first byte this protocol does not define and an
+ *  empty read, = retry. It used to end with a bare `done('ready')`, so a wake was declared
+ *  finished by whatever arrived on the socket. */
+/** `cannot_connect_now`: the postmaster is up but still recovering, which is the one error that
+ *  means "ask again" rather than "it is answering". */
+const PG_STARTING_UP = '57P03'
+
 export async function probePg(host: string, port: number, windowMs: number, signal?: AbortSignal): Promise<boolean> {
   const deadline = Date.now() + windowMs
   do {
@@ -138,10 +145,11 @@ function pgHandshakeOnce(host: string, port: number, timeoutMs: number): Promise
     const startup = (): void => {
       sock.write(startupMessage({ user: 'postgres', database: 'postgres' }))
       sock.once('data', (msg: Buffer) => {
+        if (msg.length === 0) return done('retry')
         const type = String.fromCharCode(msg[0])
         if (type === 'R') return done('ready')
-        if (type === 'E') return done(errorResponseCode(msg) === '57P03' ? 'retry' : 'ready')
-        done('ready')
+        if (type === 'E') return done(errorResponseCode(msg) === PG_STARTING_UP ? 'retry' : 'ready')
+        done('retry')
       })
     }
     sock.once('error', () => done('retry'))
