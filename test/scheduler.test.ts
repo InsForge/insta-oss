@@ -4,7 +4,7 @@
 // operation lock and eviction testable without containers.
 import { test, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
-  NoContainerError, Scheduler, ServiceStoppedError, WakeTimeoutError,
+  EVICTION_CEILING, NoContainerError, Scheduler, ServiceStoppedError, WakeTimeoutError,
   type ServiceTarget, type SleepReason, type WakeDoor,
 } from '../src/scheduler'
 import type { ServiceKey } from '../src/types'
@@ -460,6 +460,45 @@ test('eviction does not give up when the target set grows under it', async () =>
   expect(stopped).toBeGreaterThan(22)
   expect(calls).toContain(`runtime.start:${waking.container}`)
 })
+
+test('the eviction guard is a CONSTANT: a pool that grows every turn still terminates', async () => {
+  // The distinguishing case between the three forms this guard has had. A bound sampled once is
+  // too small when the set grows; a bound re-read from `targets().length` in the loop condition
+  // grows WITH the set it is bounding, so a pool that gains a candidate every turn is never
+  // bounded by it at all. A constant is finite by inspection, and this is the case that tells
+  // the two apart: services arrive as fast as they are evicted, and the loop still stops.
+  const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '50' })
+  const waking = h.add(K)
+  h.runtime.put(waking.container, 'exited')
+  let n = 0
+  const addVictim = (): string => {
+    const key = `44444444-4444-4444-4444-444444444444:cp-v${n++}`
+    h.add(key)
+    return key
+  }
+  for (let i = 0; i < 5; i++) addVictim()
+  await h.sched.sweep()
+  // A floor this loop cannot reach by evicting: a 50% floor of 4 TiB against victims worth
+  // 256 MiB each is 16,384 evictions, more than the ceiling, so the ceiling is what stops it.
+  h.runtime.mem = { totalBytes: 8 * 1024 * 1024 * MiB, availableBytes: 1 * MiB }
+  calls.length = 0
+  vi.advanceTimersByTime(20_000)
+
+  // Every stop registers another running service, for ever: the pool never empties.
+  const realStop = h.runtime.stop.bind(h.runtime)
+  h.runtime.stop = async (container: string, grace: number) => {
+    h.sched.onUp(addVictim())
+    vi.advanceTimersByTime(20_000)
+    return realStop(container, grace)
+  }
+
+  await h.sched.wake(K, { door: 'traffic' })
+
+  // It stopped, and it stopped AT the ceiling: neither of the two earlier forms could.
+  const stopped = calls.filter((c) => c.startsWith('runtime.stop:')).length
+  expect(stopped).toBe(EVICTION_CEILING)
+  expect(calls).toContain(`runtime.start:${waking.container}`)
+}, 120_000)
 
 test('a wake with NO victim available still starts: no room found is not a failure', async () => {
   // The whole fail-closed change above rests on this distinction. `evictForRoom` warns and

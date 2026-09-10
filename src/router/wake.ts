@@ -1,6 +1,7 @@
 // Readiness probes and the shared resolve-then-wake step every lane runs (02 sections 3.4, 4, 5, 6).
 // The router keeps NO wake singleflight and NO wake timer of its own: `deps.wake` is the
-// scheduler's, already singleflight per key and bounded by wakeTimeoutSec (decision 52). What lives
+// scheduler's, already singleflight per key (decision 52), with `wakeTimeoutSec` bounding its
+// READINESS wait and the candidate pool bounding the eviction that may precede it. What lives
 // here is what happens around it: resolve the upstream, decide whether a wake is needed, re-resolve
 // AFTER the wake (a deploy may have replaced the container), then probe the port until it accepts.
 import { connect as netConnect, type Socket } from 'node:net'

@@ -150,12 +150,21 @@ async function networkState(network: string): Promise<'present' | 'missing' | 'u
  *  So the removal is not the evidence: the probe after it is, three ways like the network and
  *  fingerprint probes (`gone` only when docker ANSWERED and the container was not in the answer).
  *  Only `gone` returns true, and only a true return may delete the bytes or the row. */
-async function removeContainer(sched: { containerPresence(c: string): Promise<'present' | 'gone' | 'unknown'> }, t: Teardown, container: string, remove: () => Promise<unknown>): Promise<boolean> {
+async function removeContainer(
+  sched: { containerPresence(c: string): Promise<'present' | 'gone' | 'unknown'> },
+  t: Teardown, container: string, remove: () => Promise<unknown>,
+  known?: 'present' | 'gone' | 'unknown',
+): Promise<boolean> {
   // What was there BEFORE, so the summary counts a demolition rather than a no-op: a container
   // that was never there is not one destroyed, and counting it inflates the number with work
   // that did not happen. The removal is still attempted either way -- docker's own view can be
   // ahead of ours, and an adapter may have cleanup of its own to do.
-  const before = await sched.containerPresence(container)
+  //
+  // `known` is that answer taken from a snapshot the CALLER already has. `containerPresence` is
+  // an uncached `docker ps -a` over every container on the box, so a caller tearing down many
+  // of them (a branch, a project) reads it once instead of once per container; the probe AFTER
+  // the removal is always live, because a cached one cannot see the removal it is checking.
+  const before = known ?? await sched.containerPresence(container)
   let failure: string | undefined
   try { await remove() } catch (e) { failure = e instanceof Error ? e.message : String(e) }
   const state = await sched.containerPresence(container)
@@ -2441,8 +2450,13 @@ export class Engine {
     // Every container this branch owns, so what follows can be gated on them ACTUALLY being
     // gone rather than on the removal call having returned.
     const survivors: string[] = []
+    // ONE `docker ps -a` for the whole branch, rather than one per container before each
+    // removal: a 26-branch project delete walked this per container and paid for a full
+    // listing every time.
+    const snapshot = await this.scheduler.containerSnapshot()
     const prove = async (container: string, remove: () => Promise<unknown>): Promise<void> => {
-      if (!(await removeContainer(this.scheduler, t, container, remove))) survivors.push(container)
+      const known = snapshot === null ? 'unknown' as const : snapshot.has(container) ? 'present' as const : 'gone' as const
+      if (!(await removeContainer(this.scheduler, t, container, remove, known))) survivors.push(container)
     }
     const groups = Object.keys(b.apps ?? {})
     if (groups.length) {

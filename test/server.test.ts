@@ -3295,6 +3295,29 @@ test('a branch delete re-drives its keys when a service is added while it queues
   }
 })
 
+test('a container that was never there is not counted as a demolition', async () => {
+  // `removeContainer` incremented `destroyed` whenever the container was gone AFTERWARDS,
+  // including when it had never been there, so the summary counted work that did not happen.
+  // The removal is still attempted; only the COUNT is conditional.
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  const feat = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')!
+
+  // Its postgres container vanished out of band: the row still names it, docker does not have it.
+  runtime.drop('io-demo-feat-pg-db')
+  const withGhost = (await del_(`/projects/${id}/branches/${feat.id}`)).json().teardown as { destroyed: number; failed: number }
+
+  // ...and the same branch shape with the container really there, as the baseline.
+  expect((await post(`/projects/${id}/branches`, { name: 'feat2' })).statusCode).toBe(201)
+  const feat2 = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat2')!
+  const whole = (await del_(`/projects/${id}/branches/${feat2.id}`)).json().teardown as { destroyed: number; failed: number }
+
+  expect(whole.failed).toBe(0)
+  expect(withGhost.failed).toBe(0)
+  // Exactly one fewer demolition, because exactly one container was not there to demolish.
+  expect(withGhost.destroyed).toBe(whole.destroyed - 1)
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))

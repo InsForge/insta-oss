@@ -525,9 +525,11 @@ ssh_advice() {
 # rule here: SSH policy belongs to the operator, and an installer that edits it either skips a
 # rule the box needed or widens one the operator narrowed on purpose. The advisory above tells
 # them what to allow; this only opens what insta-oss itself needs.
-# Every rule below is generated from the RESOLVED lane values, never from the defaults, and each
-# one is re-checked on the way out: `run_rules` evals these lines, so nothing that failed
-# validation may reach it even if a later edit sets these variables somewhere else.
+# Every rule below is generated from the RESOLVED lane values, never from the defaults. The
+# on-the-way-out check is `rule_ok` on the FINAL rendered line, not a re-check of each part:
+# `lane_ports` re-checks the three ports, but the range was interpolated with neither, which is
+# how the eval got reachable. A check on the line covers every part, including the ones nobody
+# thought to re-check, and `run_rules` aborts rather than evaling.
 lane_ports() {   # the container-facing set: the edge plus the three database lanes
   for _p in 443 "$LANE_PG" "$LANE_REDIS" "$LANE_MONGO"; do
     valid_port "$_p" || die "refusing to write a firewall rule for '$_p': not a port"

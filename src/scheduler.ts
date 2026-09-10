@@ -91,7 +91,7 @@ const DEFAULT_RSS: Record<ServiceKind, number> = { compute: 256 * MiB, postgres:
 /** A runaway ceiling for the eviction loop, sampled from nothing and high enough that no real
  *  box reaches it: the loop's real terminators are the floor being met and the candidate pool
  *  being empty, and `tried` makes it provably unable to revisit a service. */
-const EVICTION_CEILING = 10_000
+export const EVICTION_CEILING = 10_000
 /** How many idle services the sweep stops at once. */
 const SLEEP_CONCURRENCY = 4
 /** Readiness poll interval inside a wake. */
@@ -255,6 +255,17 @@ export class Scheduler {
    *  and the container was not in the answer, `unknown` when it could not answer at all. The
    *  teardown paths delete bind-mounted bytes only on a `gone`, because deleting the files a
    *  surviving container is still writing is the one mistake there is no recovering from. */
+  /** Every container name docker lists, or null when it could not answer. One read for a caller
+   *  that is about to ask about many of them; `containerPresence` is the single-name form and
+   *  each call is a full `docker ps -a`. */
+  async containerSnapshot(): Promise<Set<string> | null> {
+    try {
+      return new Set((await this.runtime.containers()).keys())
+    } catch {
+      return null
+    }
+  }
+
   async containerPresence(container: string): Promise<'present' | 'gone' | 'unknown'> {
     try {
       return (await this.runtime.containers()).has(container) ? 'present' : 'gone'

@@ -29,8 +29,10 @@ export interface RouterDeps {
    *  parses or clones state (decision 54). */
   table?(): RouteTable
   stateOf(route: Route): ServiceState
-  /** `engine.wake(key, { door: 'traffic' })`: already singleflight per key and bounded by
-   *  wakeTimeoutSec, so the router keeps no second map and no second timer (decision 52). */
+  /** `engine.wake(key, { door: 'traffic' })`: already singleflight per key, so the router keeps
+   *  no second map and no second timer (decision 52). `wakeTimeoutSec` bounds the READINESS
+   *  wait; the eviction that may precede it is bounded by the candidate pool instead (each
+   *  victim costs one stop grace), so a wake under memory pressure can exceed it. */
   wake(route: Route): Promise<void>
   touch(key: ServiceKey): void
   beginHold(key: ServiceKey): void
