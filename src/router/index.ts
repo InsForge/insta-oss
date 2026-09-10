@@ -284,7 +284,7 @@ export class Router {
     const s = createPgLane({
       cfg: this.cfg, upstream: this.deps.upstream, stateOf: this.deps.stateOf, wake: this.deps.wake,
       table: () => this.table(), touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
-      signal: this.abort.signal, secureContext: () => this.defaultContext, sniCallback: this.certs.sniCallback(() => this.defaultContext, (h) => this.table().byHost(h) !== undefined), log: this.log,
+      signal: this.abort.signal, secureContext: () => this.defaultContext, sniCallback: this.certs.sniCallback(() => this.defaultContext, (h) => this.ownsHostname(h)), log: this.log,
     }, this.cfg.lanes.bind, port)
     s.on('connection', (c: Socket) => this.track(c))
     return s
@@ -294,7 +294,7 @@ export class Router {
     const s = createSniLane({
       cfg: this.cfg, upstream: this.deps.upstream, stateOf: this.deps.stateOf, wake: this.deps.wake,
       table: () => this.table(), touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
-      signal: this.abort.signal, defaultMaterial: this.defaultMaterial, sniCallback: this.certs.sniCallback(() => this.defaultContext, (h) => this.table().byHost(h) !== undefined), log: this.log,
+      signal: this.abort.signal, defaultMaterial: this.defaultMaterial, sniCallback: this.certs.sniCallback(() => this.defaultContext, (h) => this.ownsHostname(h)), log: this.log,
     }, kind, bind, port)
     s.on('connection', (c: Socket) => this.track(c))
     this.tlsLanes.add(s)
@@ -394,14 +394,17 @@ export class Router {
     return s
   }
 
-  // ---- the ask endpoint's answer ---------------------------------------------------------------
+  // ---- ownership: the ask endpoint's answer, and what may drive certificate work ----------------
 
-  /** Every hostname this box serves: the table's own names plus the bucket vhosts it builds. */
+  /** Every hostname this box actually serves: `hosts()` is the EXPLICIT membership set (service
+   *  names, api/console, the object store and the vhost of every bucket that exists), never the
+   *  wildcard. `byHost()` is deliberately wider on the object-store suffix, so that any single
+   *  label under `*.s3.<domain>` reaches the store and gets its own 404 from it, and that is
+   *  routing, not ownership: answering yes here would let an arbitrary name walk the certificate
+   *  store and buy a 15 s issuance handshake on a public lane for the price of one packet. */
   ownsHostname(host: string): boolean {
     if (this.deps.ownsHostname) return this.deps.ownsHostname(host)
-    const h = hostOnly(host)
-    if (this.table().hosts().has(h)) return true
-    return this.table().byHost(h) !== undefined
+    return this.table().hosts().has(hostOnly(host))
   }
 }
 

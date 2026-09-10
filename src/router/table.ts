@@ -207,7 +207,10 @@ export function buildTable(state: State, cfg: Config, log: (msg: string) => void
       const h = hostOnly(host)
       const exact = byHost.get(h)
       if (exact) return exact
-      // `<bucket>.s3.<domain>`: exactly one label in front of the suffix (server mode only).
+      // `<bucket>.s3.<domain>`: exactly one label in front of the suffix (server mode only). This
+      // match is ROUTING, not ownership: the bucket need not exist, and the object store answers
+      // its own 404. Ownership (`hosts()`, which carries only buckets that exist) is what
+      // authorizes certificate work; a `byHost` hit here must never stand in for it.
       if (vhost && h.endsWith(vhostSuffix)) {
         const label = h.slice(0, -vhostSuffix.length)
         if (label && !label.includes('.') && label !== '*') return vhost

@@ -866,6 +866,55 @@ test('sniCallback hands the default context to a servername the route table does
   expect(issued).toEqual([])
 })
 
+test('a name under the bucket suffix that no bucket owns is refused for certificate work, a registered host is not', async () => {
+  const cfg = serverConfig()
+  const state: State = {
+    ...EMPTY,
+    projects: { p1: project() },
+    branches: {
+      b1: branch({
+        databases: { 'pg-db': { url: 'postgres://x', container: 'io-demo-main-pg-db' } },
+        buckets: { 'st-store': { bucket: 'io-demo-main-store', env: {} } },
+      }),
+    },
+  }
+  const h = await harness(cfg, state)
+  const dbHost = 'pg-db-demo-main.example.test'
+  const bucketHost = 'io-demo-main-store.s3.example.test'
+  const stranger = 'not-a-bucket.s3.example.test'
+  try {
+    // Routing still matches ANY single label under the suffix: the object store answers its own 404.
+    expect(h.router.table().byHost(stranger)?.kind).toBe('garage-vhost')
+    // Ownership does not, and ownership is what authorizes certificate work.
+    expect(h.router.ownsHostname(stranger)).toBe(false)
+    expect(h.router.ownsHostname(bucketHost)).toBe(true)
+    expect(h.router.ownsHostname(dbHost)).toBe(true)
+    expect(h.router.ownsHostname(`api.${cfg.domain}`)).toBe(true)
+    expect(h.router.ownsHostname('nothing.example.test')).toBe(false)
+
+    // The predicate the database lanes hand to Certs is this one, so a stranger arriving as a TLS
+    // servername on the public pg/redis/mongo ports reads no store and buys no issuance handshake.
+    const certDir = mkdtempSync(join(tmpdir(), 'io-certs-'))
+    mkdirSync(join(certDir, 'local', dbHost), { recursive: true })
+    cpSync(join('test', 'fixtures', 'local', 'router.test', 'router.test.crt'), join(certDir, 'local', dbHost, `${dbHost}.crt`))
+    cpSync(join('test', 'fixtures', 'local', 'router.test', 'router.test.key'), join(certDir, 'local', dbHost, `${dbHost}.key`))
+    const issued: string[] = []
+    const certs = new Certs({ certDir, issue: async (x) => { issued.push(x) } })
+    const cb = certs.sniCallback(null, (x) => h.router.ownsHostname(x))
+    const ask = (servername: string): Promise<unknown> =>
+      new Promise((resolve, reject) => cb(servername, (e, ctx) => (e ? reject(e) : resolve(ctx))))
+
+    expect(await ask(stranger)).toBeUndefined()
+    expect(await ask('anything.s3.example.test')).toBeUndefined()
+    expect(issued).toEqual([])
+    // A hostname the box really serves still gets its certificate.
+    expect(await ask(dbHost)).toBeDefined()
+    expect(issued).toEqual([])
+  } finally {
+    await h.close()
+  }
+})
+
 // ---- write classes: what actually rebuilds the table --------------------------------------------
 
 test('an audit event does not rebuild the route table; a real service change does', async () => {

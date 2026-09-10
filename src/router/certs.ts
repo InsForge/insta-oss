@@ -98,9 +98,11 @@ export class Certs {
   }
 
   /** Node's SNICallback: the host's context, else `fallback` (never an alert on a missing cert).
-   *  `owns` is the route table's verdict, and a servername it does not know never reaches the store:
-   *  the lanes listen on 0.0.0.0, and a miss costs a directory walk plus a 15 s issuance handshake,
-   *  so a scanner sending fresh servernames would otherwise buy that work for the price of a packet.
+   *  `owns` is EXPLICIT ownership (`Router.ownsHostname`, the route table's `hosts()` membership),
+   *  not the wider `byHost()` routing lookup, which matches any single label under the object-store
+   *  suffix. A servername ownership does not know never reaches the store: the lanes listen on
+   *  0.0.0.0, and a miss costs a directory walk plus a 15 s issuance handshake, so a scanner sending
+   *  fresh servernames would otherwise buy that work for the price of a packet.
    *  It stays optional because the pg lane's own tests build a Certs with no table behind it. */
   sniCallback(fallback: SecureContext | null | (() => SecureContext | null), owns?: (host: string) => boolean): (servername: string, cb: (err: Error | null, ctx?: SecureContext) => void) => void {
     // A function reads the router's CURRENT default. The lanes are built before the edge has issued
