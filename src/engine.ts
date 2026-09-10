@@ -644,9 +644,11 @@ export class Engine {
    *  a row the user can see and act on, and a name freed by abandoning resources nobody can reach,
    *  this takes the first. Nothing is kept on the success path, which is the common one.
    *
-   *  Best effort throughout. The caller is already throwing the failure the user needs to see, and
-   *  a compensation that throws its own would replace it with a worse one; what it reports back is
-   *  whether the name is free again. */
+   *  Best effort throughout, and that means the bookkeeping too, not just the demolition: the
+   *  state write, the lane release, the router invalidation and the event all sit inside a catch
+   *  of their own. The caller is already throwing the failure the user needs to see, and a
+   *  compensation that throws its own would replace it with a worse one; what it reports back is
+   *  whether the name is free again, re-read from the row when a step did throw. */
   private async unwindBranch(project: Project, b: Branch, secretsCloned: boolean): Promise<{ complete: boolean; kept?: string }> {
     // The row as it stands now, not the snapshot the create started from: the deploy loop wrote
     // apps onto it, and those are what `teardownBranch` forgets from the scheduler.
@@ -663,51 +665,63 @@ export class Engine {
       console.warn(`could not fully undo the failed create of branch "${b.name}": ${failure}`)
     }
     const complete = t.failed === 0 && failure === undefined
-    this.forkResults.delete(b.id)
     let kept: string | undefined
-    mutate((s) => {
-      // Every name this branch has answered to: the one the create minted, the one it carried into
-      // the teardown, and the one it has RIGHT NOW (a rename can land during the teardown too).
-      const names = [b.name, row.name, s.branches[b.id]?.name].filter((n): n is string => typeof n === 'string')
-      // Names OTHER branches hold, computed before this row goes either way, so a kept row does
-      // not shield its own secret copies from the sweep below.
-      const taken = new Set(Object.values(s.branches).filter((x) => x.id !== b.id && x.projectId === b.projectId).map((x) => x.name))
-      if (complete) delete s.branches[b.id]
-      else if (s.branches[b.id]) {
-        s.branches[b.id].status = CLEANUP_FAILED
-        kept = s.branches[b.id].name
+    // Everything below is bookkeeping, and "best effort throughout" has to cover it too: a throw
+    // out of the state write, the lane release, the router invalidation or the event would leave
+    // the caller re-throwing THIS error instead of the create failure the user needs to see, and
+    // would skip whichever of these steps came after it. So they run inside a catch of their own,
+    // and the verdict is then re-read from the state rather than assumed: what the caller needs
+    // to know is whether the name is free, and only the row can answer that.
+    try {
+      this.forkResults.delete(b.id)
+      mutate((s) => {
+        // Every name this branch has answered to: the one the create minted, the one it carried into
+        // the teardown, and the one it has RIGHT NOW (a rename can land during the teardown too).
+        const names = [b.name, row.name, s.branches[b.id]?.name].filter((n): n is string => typeof n === 'string')
+        // Names OTHER branches hold, computed before this row goes either way, so a kept row does
+        // not shield its own secret copies from the sweep below.
+        const taken = new Set(Object.values(s.branches).filter((x) => x.id !== b.id && x.projectId === b.projectId).map((x) => x.name))
+        if (complete) delete s.branches[b.id]
+        else if (s.branches[b.id]) {
+          s.branches[b.id].status = CLEANUP_FAILED
+          kept = s.branches[b.id].name
+        }
+        // The clone inherits the source's branch-scoped secrets BY NAME, so the copies it made are
+        // exactly the rows naming a branch that is about to stop existing. Only drop them when that
+        // step actually ran: a failure before it has nothing of its own to clean.
+        //
+        // BOTH names, because `renameBranch` is synchronous state work that takes no operation lock
+        // (it moves no container), so it can land at any await this create makes -- and when it does
+        // it carries the branch's secret rows to the new name with it. Matching only the name the
+        // create started with then left every inherited copy behind under the new one. A branch id
+        // on the rows would be the better key, but `UserSecret` is `{name, value, branch, service}`
+        // with the branch as a NAME (that is what `userSecretsFor`, the CLI's `--branch` and the
+        // rename itself all read), so keying by id means migrating every stored row and every
+        // reader; two names is the fix that fits the shape the data actually has.
+        // They go even when the row is kept: the kept row is a handle for finishing the demolition,
+        // not a usable branch, and leaving the copies would hand them to the create that follows the
+        // delete -- which is the double inheritance this sweep exists to prevent.
+        if (secretsCloned) {
+          const list = s.userSecrets[b.projectId]
+          // ...but never a name some OTHER branch holds now: a rename frees the old name, and if a
+          // branch created since owns it, its secrets are not ours to delete.
+          const ours = new Set(names.filter((n) => !taken.has(n)))
+          if (list) s.userSecrets[b.projectId] = list.filter((u) => u.branch === null || !ours.has(u.branch))
+        }
+        // The row superseded the ref claim on commit; if anything re-took it, it is not ours.
+        if (s.branchReservations?.[ref] === b.id) delete s.branchReservations[ref]
+      })
+      // Only stale RESERVATIONS: a kept row's own `lanes` stay claimed, because the containers that
+      // refused to go may still be listening on them.
+      this.releaseLanes(b.id)
+      this.router.invalidate()
+      if (!complete) {
+        this.emit(project.id, kept ?? row.name, 'resource', 'branch.cleanupFailed', { teardown: t, ...(failure ? { error: failure } : {}) })
       }
-      // The clone inherits the source's branch-scoped secrets BY NAME, so the copies it made are
-      // exactly the rows naming a branch that is about to stop existing. Only drop them when that
-      // step actually ran: a failure before it has nothing of its own to clean.
-      //
-      // BOTH names, because `renameBranch` is synchronous state work that takes no operation lock
-      // (it moves no container), so it can land at any await this create makes -- and when it does
-      // it carries the branch's secret rows to the new name with it. Matching only the name the
-      // create started with then left every inherited copy behind under the new one. A branch id
-      // on the rows would be the better key, but `UserSecret` is `{name, value, branch, service}`
-      // with the branch as a NAME (that is what `userSecretsFor`, the CLI's `--branch` and the
-      // rename itself all read), so keying by id means migrating every stored row and every
-      // reader; two names is the fix that fits the shape the data actually has.
-      // They go even when the row is kept: the kept row is a handle for finishing the demolition,
-      // not a usable branch, and leaving the copies would hand them to the create that follows the
-      // delete -- which is the double inheritance this sweep exists to prevent.
-      if (secretsCloned) {
-        const list = s.userSecrets[b.projectId]
-        // ...but never a name some OTHER branch holds now: a rename frees the old name, and if a
-        // branch created since owns it, its secrets are not ours to delete.
-        const ours = new Set(names.filter((n) => !taken.has(n)))
-        if (list) s.userSecrets[b.projectId] = list.filter((u) => u.branch === null || !ours.has(u.branch))
-      }
-      // The row superseded the ref claim on commit; if anything re-took it, it is not ours.
-      if (s.branchReservations?.[ref] === b.id) delete s.branchReservations[ref]
-    })
-    // Only stale RESERVATIONS: a kept row's own `lanes` stay claimed, because the containers that
-    // refused to go may still be listening on them.
-    this.releaseLanes(b.id)
-    this.router.invalidate()
-    if (!complete) {
-      this.emit(project.id, kept ?? row.name, 'resource', 'branch.cleanupFailed', { teardown: t, ...(failure ? { error: failure } : {}) })
+    } catch (e) {
+      console.warn(`could not finish the unwind of branch "${b.name}": ${e instanceof Error ? e.message : String(e)}`)
+      const left = loadState().branches[b.id]
+      return left ? { complete: false, kept: left.name } : { complete }
     }
     return { complete, ...(kept !== undefined ? { kept } : {}) }
   }

@@ -2147,6 +2147,31 @@ test('a create whose CLEANUP fails keeps a row naming the resources, and the del
   await assertRetryWorks(id)
 })
 
+test('a compensation that fails in its own bookkeeping still reports the create failure', async () => {
+  const id = await sourceWithEveryStep()
+  // The router blows up, but only once the create is already unwinding (invalidating the table is
+  // one of the last things the compensation does). The user must still be told `bucket boom`, the
+  // failure they can act on, and not `router boom` from the cleanup that ran afterwards.
+  let unwinding = false
+  engine.router = { invalidate: () => { if (unwinding) throw new Error('router boom') } }
+  const cloneInto = vi.spyOn(storage, 'cloneInto').mockImplementationOnce(async () => {
+    unwinding = true
+    throw new Error('bucket boom')
+  })
+
+  const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
+  cloneInto.mockRestore()
+  engine.router = { invalidate: () => { /* back to the no-op */ } }
+
+  expect(bad.statusCode).toBeGreaterThanOrEqual(400)
+  expect(bad.json().error).toContain('bucket boom')
+  expect(bad.json().error).not.toContain('router boom')
+  // ...and the state work that ran BEFORE the throw stands: the row is gone, so the name is free
+  // and the retry is an ordinary create.
+  expect(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual(['main'])
+  await assertRetryWorks(id)
+})
+
 test('a network that refuses to go is a FAILED teardown, so the row is kept rather than dropped', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
