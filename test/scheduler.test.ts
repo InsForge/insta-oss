@@ -418,6 +418,48 @@ test('a sweep whose docker read FAILS stops nothing on the snapshot it already h
   expect(t2.sleptAt ?? null).toBeNull()
 })
 
+test('a SLOW listing is dated when it was issued, and does not un-say what happened meanwhile', async () => {
+  // Widening the cache update from one entry to the whole map bought the re-dating that keeps a
+  // long eviction pass sighted, and brought two hazards with it. Both are about a read that is
+  // in flight while the box moves: a listing describes the box as it was when it was ISSUED.
+  const h = harness()
+  const a = h.add(K, { idleSec: 10 })
+  const b = h.add(K2, { idleSec: 10 })
+  h.sched.touch(a.key)
+  h.sched.touch(b.key)
+  await h.sched.sweep()
+
+  // A `docker ps -a` that takes ten seconds to answer -- the degraded docker this dating exists
+  // for -- while a lifecycle stop completes on the OTHER key in that window.
+  const listing = new Map([
+    [a.container, { state: 'running' as const, id: 'cid-a' }],
+    [b.container, { state: 'running' as const, id: 'cid-b' }],
+  ])
+  h.runtime.containers = async () => {
+    vi.advanceTimersByTime(10_000)
+    h.sched.onStopped(b.key)
+    return listing
+  }
+  await h.sched.refreshStates()
+
+  // The newer fact stands: the listing said `running` about B, but only as of before the stop.
+  expect(h.sched.stateOf(b.key)).toBe('stopped')
+  expect(h.sched.stateOf(a.key)).toBe('running')
+
+  // ...and A's entry is ten seconds into its budget already, not freshly minted at read-return:
+  // at exactly two sweep intervals from the ISSUE it is out of date and the sweep leaves it be.
+  vi.advanceTimersByTime(60_000 - 10_000)
+  h.runtime.containers = async () => { throw new Error('Cannot connect to the Docker daemon') }
+  const said: string[] = []
+  const warn = vi.spyOn(console, 'warn').mockImplementation((m: unknown) => { said.push(String(m)) })
+  try {
+    await h.sched.sweep()
+  } finally {
+    warn.mockRestore()
+  }
+  expect(said.some((m) => m.startsWith('warn: sleep '))).toBe(false)
+})
+
 test('the freshness bound is a duration, and its BOUNDARY is closed', async () => {
   // The gate reads "no older than two sweep intervals", and the two are not the same sentence:
   // at exactly the bound the observation predates the SECOND consecutive failed read, which is

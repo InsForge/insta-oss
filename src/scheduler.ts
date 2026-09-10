@@ -291,15 +291,37 @@ export class Scheduler {
     }
   }
 
-  /** Take a FULL `docker ps -a` listing as the snapshot, dated now, and hand it back to the
-   *  caller. Every full read goes through here, whoever made it and whatever they wanted from
-   *  it: a read that proves what is running re-dates everything it saw, not just the one entry
-   *  its caller asked about. */
+  /** Fold a FULL `docker ps -a` listing into the snapshot and hand the result back. Every full
+   *  read goes through here, whoever made it and whatever they wanted from it: a read that
+   *  proves what is running re-dates everything it saw, not just the one entry its caller asked
+   *  about. That is what keeps the freshness gate from being evaluated against a read that a
+   *  docker recovery, a stop grace or an eviction turn has since made old.
+   *
+   *  `at` is when the read was ISSUED, and the caller passes it, because a `docker ps -a` that
+   *  took ten seconds to answer describes the box as it was ten seconds ago -- and a degraded
+   *  docker is exactly the case this dating exists for. Stamping the return would record the
+   *  slowest reads as the freshest facts.
+   *
+   *  A listing therefore never overwrites something learned SINCE it was issued: a wake or a
+   *  sleep completing on another key while this read was in flight is the newer fact, and it
+   *  stays. That is also why this is a fold and not a replacement -- a full listing does say
+   *  which containers are gone, but only about the ones nobody has spoken for more recently. */
+  private absorb(containers: Map<string, { state: ContainerState; id: string }>, at: number): Map<string, { state: ContainerState; id: string; at: number }> {
+    const next = new Map(this.stateCache)
+    for (const [name, c] of containers) {
+      const known = next.get(name)
+      if (!known || known.at <= at) next.set(name, { ...c, at })
+    }
+    for (const [name, known] of next) if (!containers.has(name) && known.at <= at) next.delete(name)
+    this.stateCache = next
+    return next
+  }
+
+  /** One full read, dated from when it was ISSUED. Every caller of `runtime.containers()` that
+   *  feeds the snapshot goes through this rather than timing itself. */
   private async readContainers(): Promise<Map<string, { state: ContainerState; id: string; at: number }>> {
-    const containers = await this.runtime.containers()
     const at = Date.now()
-    this.stateCache = new Map([...containers].map(([name, c]) => [name, { ...c, at }]))
-    return this.stateCache
+    return this.absorb(await this.runtime.containers(), at)
   }
 
   /** True while any operation holds or waits on the key (the sweep's in-flight test). */
@@ -513,6 +535,12 @@ export class Scheduler {
     // One extra `docker ps -a` per sweep tick, next to a phase that just spent seconds stopping
     // containers; if it fails, the pass finds no dateable victim and says so, which is the
     // intended behaviour rather than a new one.
+    //
+    // It is BELT, not the mechanism, and a future edit must not mistake it for one: what keeps
+    // a long pass sighted is that every full read re-dates the whole snapshot, so each turn's
+    // own `sleep()` re-dates the turn after it. Dropping this line leaves the suite green. It
+    // stays for the case those reads do not cover: a sweep whose sleep phase stopped nothing at
+    // all, where the pass would otherwise judge by the read at the top of the sweep.
     await this.refreshStates()
     await this.evictForRoom(0, new Set())
   }
