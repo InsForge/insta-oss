@@ -1,7 +1,7 @@
 // Contract tests: the daemon must serve the exact shapes the stock `insta` CLI consumes.
 // Fake adapters (test/fakes.ts) — no Docker needed. docker() is mocked (engine only uses it for
 // networks and the ps snapshots). Package regions sit at the END of this file (contract 00 §1.3).
-import { test, expect, beforeEach, vi } from 'vitest'
+import { test, expect, afterEach, beforeEach, vi } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -22,6 +22,16 @@ beforeEach(() => {
   resetFakes()
   engine = makeEngine()
   app = buildServer(engine)
+})
+
+// A test that fails or TIMES OUT never reaches its own cleanup line, and two kinds of mock
+// outlive it: `vi.spyOn` spies (which `resetFakes()` knows nothing about) and `dockerFn`'s
+// implementation, which is sticky across tests. The concurrency tests below exist precisely to
+// detect a wedge, so leaving their restoration to a line after the assertions would leak a
+// paused gate into every later test in this file the first time one of them fired.
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
 })
 
 const post = (url: string, payload?: unknown) => app.inject({ method: 'POST', url, payload })
