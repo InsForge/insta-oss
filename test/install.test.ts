@@ -369,6 +369,94 @@ test('the firewall rules follow the RESOLVED lane ports, and never the displaced
   expect(env.INSTA_OSS_LANE_PORT_RANGE).toBe('30000-30099')
 })
 
+/** The shell functions this file tests directly, lifted out of the script so a case can drive
+ *  them without running an install. */
+function shellHelpers(): string {
+  const r = spawnSync('sh', ['-c',
+    `sed -n '/^log() /p;/^warn() /p;/^die() /p;/^rule_ok() /p;/^run_rules() {/,/^}/p;/^apply_rules() {/,/^}/p' ${SCRIPT}`,
+  ], { encoding: 'utf8' })
+  return r.stdout
+}
+
+test('a lane RANGE is validated as a whole string, not by its two ends', () => {
+  // The root RCE. `${LANE_RANGE%%-*}` reads the text before the FIRST hyphen and
+  // `${LANE_RANGE##*-}` the text after the LAST, so a value shaped `1-<anything>-2` had a valid
+  // low and a valid high and everything between them was never looked at. It was rendered into
+  // a firewall line, and `run_rules` evals those AS ROOT.
+  const payloads = [
+    '1-;id;-2',
+    '1-$(id)-2',
+    '1-`id`-2',
+    '1-|id|-2',
+    '20000 20999',
+    '20000--20999',
+    '1-2-3',
+  ]
+  for (const bad of payloads) {
+    for (const mode of ['--print-firewall', '--print-env']) {
+      const r = tryRun([mode], { INSTA_OSS_LANE_PORT_RANGE: bad, INSTA_OSS_DOMAIN: 'example.test' })
+      expect(r.status, `${mode} ${bad}`).toBe(1)
+      expect(r.stderr, `${mode} ${bad}`).toContain('INSTA_OSS_LANE_PORT_RANGE')
+      expect(r.stdout, `${mode} ${bad}`).not.toContain('id')
+    }
+  }
+  // ...and the shape it is supposed to accept still is.
+  expect(run(['--print-firewall'], { INSTA_OSS_LANE_PORT_RANGE: '30000-30099' })).toContain('30000:30099')
+})
+
+test('a value planted in instad.env is refused on the UPGRADE path too', () => {
+  // `resolve()` reads the existing instad.env, the docs invite operators to edit it, and
+  // re-running the script IS the upgrade. So a bad value planted once would execute as root on
+  // every later upgrade with nothing in the environment to see.
+  const cfg = mkdtempSync(join(tmpdir(), 'io-cfg-'))
+  try {
+    writeFileSync(join(cfg, 'instad.env'), 'INSTA_OSS_LANE_PORT_RANGE=1-;id;-2\n')
+    const r = tryRun(['--print-firewall'], { IO_CFG_DIR: cfg })
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('INSTA_OSS_LANE_PORT_RANGE')
+
+    // The same for the two other operator values that are read back from there and end up in
+    // /etc/fstab and in the compose file.
+    writeFileSync(join(cfg, 'instad.env'), 'INSTA_OSS_DATA_DIR=/var/lib/instacloud x\n')
+    expect(tryRun(['--print-firewall'], { IO_CFG_DIR: cfg }).stderr).toContain('INSTA_OSS_DATA_DIR')
+    writeFileSync(join(cfg, 'instad.env'), 'INSTA_OSS_IMAGE=img;id\n')
+    expect(tryRun(['--print-firewall'], { IO_CFG_DIR: cfg }).stderr).toContain('INSTA_OSS_IMAGE')
+  } finally {
+    rmSync(cfg, { recursive: true, force: true })
+  }
+})
+
+test('run_rules refuses a line it does not recognise, before the eval', () => {
+  // The last line of defence, on the FINAL rendered line: whatever upstream validation misses,
+  // or a future edit introduces, a line carrying a shell metacharacter must not reach `eval`.
+  const helpers = shellHelpers()
+  expect(helpers).toContain('rule_ok()')
+  for (const hostile of ['ufw allow 1;id', 'ufw allow $(id)', 'ufw allow `id`', 'ufw allow 1 && id', 'ufw allow 1 > /tmp/x']) {
+    const r = spawnSync('sh', ['-c', `${helpers}\nprintf '%s\\n' ${JSON.stringify(hostile)} | run_rules`], { encoding: 'utf8' })
+    expect(r.status, hostile).toBe(1)
+    expect(r.stderr, hostile).toContain('unexpected characters')
+  }
+  // ...and every rule the script actually renders passes it, so the allowlist is not theatre.
+  const rules = run(['--print-firewall']).split('\n').filter((l) => l && !l.startsWith('#'))
+  expect(rules.length).toBeGreaterThan(4)
+  for (const rule of rules) {
+    const r = spawnSync('sh', ['-c', `${helpers}\nrule_ok ${JSON.stringify(rule)}`], { encoding: 'utf8' })
+    expect(r.status, rule).toBe(0)
+  }
+})
+
+test('a renderer that dies aborts the install instead of reporting success', () => {
+  // `fw_ufw | run_rules` ran the renderer in a SUBSHELL: a `die` there exited the subshell, the
+  // pipeline's status was `run_rules` succeeding, and with no `pipefail` the script carried on
+  // and reported a successful install. The second layer was theatre.
+  const helpers = shellHelpers()
+  expect(helpers).toContain('apply_rules()')
+  const dying = spawnSync('sh', ['-c', `set -eu\n${helpers}\nbad() { die 'rendering failed'; }\napply_rules bad\necho REACHED`], { encoding: 'utf8' })
+  expect(dying.status).toBe(1)
+  expect(dying.stdout).not.toContain('REACHED')
+  expect(dying.stderr).toMatch(/rendering failed|could not render/)
+})
+
 test('a lane port or range that is not one is refused before any rule is written', () => {
   // `run_rules` EVALS what these renderers produce. Their input was script-internal until the
   // rules started following the resolved values; a lane port is operator input now.

@@ -34,7 +34,9 @@
 set -eu
 
 # ---- constants ----
-CFG=/etc/instacloud
+# IO_CFG_DIR is a TEST HOOK, never set in production: it is what lets the suite exercise the
+# UPGRADE path, where values come back out of an instad.env the operator may have edited.
+CFG=${IO_CFG_DIR:-/etc/instacloud}
 ENV_FILE=$CFG/instad.env
 DATA_DEFAULT=/var/lib/instacloud
 IMAGE_DEFAULT=ghcr.io/insforge/instacloud
@@ -139,11 +141,21 @@ UPGRADE=0
 
 DATA=$(resolve INSTA_OSS_DATA_DIR "$F_DATA_DIR" "$DATA_DEFAULT")
 case $DATA in /?*) ;; *) die "INSTA_OSS_DATA_DIR must be an absolute path (got '$DATA')" ;; esac
+# ...and a path, not a sentence. This one is not eval'd, but it IS written into /etc/fstab as a
+# space-separated field and into compose, and it comes back out of instad.env on every upgrade,
+# so whitespace or a shell metacharacter in it is the same "planted once, used as root later"
+# shape as the lane range.
+printf '%s' "$DATA" | grep -Eq '^/[A-Za-z0-9._/-]*$' ||
+  die "INSTA_OSS_DATA_DIR must be an absolute path of letters, digits, dot, dash, underscore and / (got '$DATA')"
 DATA=${DATA%/}
 IMG=$DATA.img
 
 # INSTA_OSS_IMAGE may carry a tag (INSTA_OSS_IMAGE=ghcr.io/insforge/instacloud:ci); the tag is the version.
 IMAGE=$(resolve INSTA_OSS_IMAGE '' "$IMAGE_DEFAULT")
+# A reference, not a sentence: it is written into instad.env, which compose parses, and read
+# back from there on every upgrade. Same reasoning as the data directory.
+printf '%s' "$IMAGE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/:@-]*$' ||
+  die "INSTA_OSS_IMAGE must be an image reference (got '$IMAGE')"
 IMAGE_TAG=''
 case ${IMAGE##*/} in *:*) IMAGE_TAG=${IMAGE##*:}; IMAGE=${IMAGE%:*} ;; esac
 
@@ -193,12 +205,15 @@ LANE_REDIS=$(lane_port INSTA_OSS_LANE_REDIS_PORT 6379)
 LANE_MONGO=$(lane_port INSTA_OSS_LANE_MONGO_PORT 27017)
 # The per-service lane range (server-mode MySQL). Validated as a RANGE, not as a port.
 LANE_RANGE=$(resolve INSTA_OSS_LANE_PORT_RANGE '' 20000-20999)
+# The WHOLE STRING, not its ends. `${LANE_RANGE%%-*}` and `${LANE_RANGE##*-}` read the text
+# before the FIRST hyphen and after the LAST one, so everything between them was never looked
+# at: a value of the shape `1-<payload>-2` gave a low of 1 and a high of 2, passed the numeric
+# checks, and was rendered into a firewall line that `run_rules` then evals AS ROOT. Shape
+# first, bounds second.
+printf '%s' "$LANE_RANGE" | grep -Eq '^[0-9]{1,5}-[0-9]{1,5}$' ||
+  die "INSTA_OSS_LANE_PORT_RANGE must be <low>-<high>, digits only (got '$LANE_RANGE')"
 LANE_RANGE_LO=${LANE_RANGE%%-*}
 LANE_RANGE_HI=${LANE_RANGE##*-}
-case $LANE_RANGE in
-  *-*) ;;
-  *) die "INSTA_OSS_LANE_PORT_RANGE must be <low>-<high> (got '$LANE_RANGE')" ;;
-esac
 { valid_port "$LANE_RANGE_LO" && valid_port "$LANE_RANGE_HI" && [ "$LANE_RANGE_LO" -le "$LANE_RANGE_HI" ]; } ||
   die "INSTA_OSS_LANE_PORT_RANGE must be <low>-<high> with 1 <= low <= high <= 65535 (got '$LANE_RANGE')"
 
@@ -710,13 +725,36 @@ ensure_pools() {
 ensure_pools
 
 # ---- 3b. firewall ----
-run_rules() { while read -r _l; do log "  $_l"; eval "$_l" >/dev/null 2>&1 || warn "failed: $_l"; done; }
+# The LAST line of defence, on the final rendered rule rather than on any of the parts it was
+# built from. Every rule this script emits is machine-generated from validated values, so a
+# strict allowlist on the rendered line costs nothing and holds whatever upstream validation
+# misses or a future edit introduces: a line carrying a shell metacharacter never reaches
+# `eval`, and the install stops rather than running it as root.
+rule_ok() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9 ,:./=_-]*$'; }
+run_rules() {
+  while read -r _l; do
+    [ -n "$_l" ] || continue
+    rule_ok "$_l" || die "refusing to run a firewall rule with unexpected characters: $_l"
+    log "  $_l"
+    eval "$_l" >/dev/null 2>&1 || warn "failed: $_l"
+  done
+}
+# ...and the renderer runs FIRST, into a variable, with its status checked. `fw_ufw | run_rules`
+# put the renderer in a subshell, so a `die` inside it exited that subshell only: the pipeline's
+# status was `run_rules` succeeding, and with no `pipefail` the script carried on and reported a
+# successful install. The here-document keeps `run_rules` in THIS shell, so its own `die` aborts.
+apply_rules() {   # apply_rules RENDERER
+  _rendered=$("$1") || die "could not render the firewall rules ($1)"
+  run_rules <<RULES
+$_rendered
+RULES
+}
 if have ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
   log "ufw is active: allowing the edge, the database lane and container-to-host traffic"
-  fw_ufw | run_rules
+  apply_rules fw_ufw
 elif have firewall-cmd && [ "$(firewall-cmd --state 2>/dev/null || true)" = running ]; then
   log "firewalld is running: allowing the edge, the database lane and container-to-host traffic"
-  fw_firewalld | run_rules
+  apply_rules fw_firewalld
 else
   # No host firewall to restrict anything, and the lanes bind 0.0.0.0 in server mode
   # (INSTA_OSS_LANE_BIND above), so 6379 and 27017 are reachable from wherever this box is
