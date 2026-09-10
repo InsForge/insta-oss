@@ -3225,6 +3225,76 @@ test('a registered group that was never deployed is still a no-op, not a refusal
   expect(res.json().state).toBe('none')
 })
 
+test('a branch delete re-drives its keys when a service is added while it queues', async () => {
+  // The delete builds `branchKeys` BEFORE it waits. An add only HOLDS the branch key while it
+  // provisions, so an add already in flight when the delete snapshots finishes and releases
+  // before the delete acquires: its new service is outside the key set the delete is holding.
+  // The delete then tears that service down with none of its keys held, and a traffic wake can
+  // take the service key independently and race `docker start` against the container removal,
+  // the network removal and the data deletion.
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  const feat = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')!
+
+  // 1. An add is IN FLIGHT on feat, holding its branch key.
+  let enterAdd!: () => void
+  let goAdd!: () => void
+  const inAdd = new Promise<void>((r) => { enterAdd = r })
+  const addGate = new Promise<void>((r) => { goAdd = r })
+  const realProvision = db.provision.bind(db)
+  const provision = vi.spyOn(db, 'provision').mockImplementationOnce(async (t, opts) => {
+    enterAdd()
+    await addGate
+    return realProvision(t, opts)
+  })
+
+  // 2. ...and the delete snapshots its keys now, without pg-db2, which does not exist yet.
+  let enterTeardown!: () => void
+  let goTeardown!: () => void
+  const inTeardown = new Promise<void>((r) => { enterTeardown = r })
+  const teardownGate = new Promise<void>((r) => { goTeardown = r })
+  const realStDestroy = storage.destroy.bind(storage)
+  const stDestroy = vi.spyOn(storage, 'destroy').mockImplementation(async (bucket, network) => {
+    if (bucket.includes('demo-feat')) { enterTeardown(); await teardownGate }
+    return realStDestroy(bucket, network)
+  })
+
+  try {
+    const add = post(`/projects/${id}/services?branch=feat`, { type: 'postgres', name: 'db2', branch: 'feat' })
+    await within(10_000, inAdd, 'the service add')
+    let deleted = false
+    const del = del_(`/projects/${id}/branches/${feat.id}`).then((r) => { deleted = true; return r })
+    await settle()
+    expect(deleted).toBe(false)
+
+    // 3. The add completes and releases; the delete acquires and re-reads a row carrying db2.
+    goAdd()
+    expect((await within(10_000, add, 'the service add')).statusCode).toBe(201)
+    await within(10_000, inTeardown, 'the teardown of feat')
+
+    // 4. A traffic wake on the NEW service, while the teardown is running. With the re-drive
+    //    the delete holds that key, so this waits; without it, it runs INSIDE the teardown and
+    //    races `docker start` against the removal.
+    let woke = false
+    const wake = engine.wake(`${feat.id}:pg-db2`, { door: 'traffic' })
+      .then(() => { woke = true }).catch(() => { woke = true })
+    await settle()
+    expect(woke).toBe(false)
+
+    goTeardown()
+    expect((await within(10_000, del, 'the branch delete')).statusCode).toBe(200)
+    await within(10_000, wake, 'the wake')
+    // The new service went with the branch: its container was destroyed and no row is left.
+    expect(calls).toContain('db.destroy:io-demo-feat-pg-db2')
+    expect(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual(['main'])
+  } finally {
+    goAdd()
+    goTeardown()
+    provision.mockRestore()
+    stDestroy.mockRestore()
+  }
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))

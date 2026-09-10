@@ -2508,14 +2508,26 @@ export class Engine {
     if (b.isDefault) throw new Error('cannot delete the default branch')
     // Whole-branch keys: a delete cannot interleave with a create still building this branch, nor
     // with a deploy or a lifecycle op on one of its services.
-    return this.withOp(this.branchKeys(project, b), async () => {
+    //
+    // ...and the set is RE-DRIVEN over the union when the row grew, exactly as `createBranch`
+    // and `destroyProject` do it. My earlier note here claimed the snapshot was sound because
+    // every add takes `branchOp(b)`, and that reasoning is wrong: an add only HOLDS that key
+    // while it provisions, so it can finish and release BEFORE this delete acquires it, leaving
+    // its new service outside the snapshot the keys were built from. The delete then tears that
+    // service down holding none of its keys, and a traffic wake can take the service key
+    // independently and race `docker start` against the container removal, the network removal
+    // and the data deletion.
+    let keys = this.branchKeys(project, b)
+    for (let round = 1; ; round++) {
+      const settled = new Set(keys)
+      const out = await this.withOp([...settled], async (): Promise<{ teardown: Teardown } | { union: ServiceKey[] }> => {
       // The row as it stands INSIDE the lock, not the snapshot the keys were built from: a
       // deploy or a create that was ahead of this in the queue has since written to it, and
       // tearing down the snapshot would miss whatever it added (`freshRemoval`'s rule, one level
-      // up). The KEYS are still the snapshot's, and here that is sound rather than a gap: every
-      // operation that can add a service or a group to this branch takes `branchOp(b)` too, so
-      // none of them can have run since, and one that was in flight held it before this did.
+      // up).
       const { project: live, branch: row } = this.freshRemoval(projectId, branchId, branchId, 'branch delete')
+      const needed = this.branchKeys(live, row)
+      if (!needed.every((k) => settled.has(k))) return { union: [...new Set([...settled, ...needed])] }
       const t = newTeardown()
       await this.teardownBranch(live, row, t)
       // The row goes only when the demolition all went. Dropping it over a container that is
@@ -2532,8 +2544,14 @@ export class Engine {
         this.emit(projectId, row.name, 'resource', 'branch.cleanupFailed', { teardown: t })
       }
       this.router.invalidate()
-      return t
-    })
+      return { teardown: t }
+      })
+      if ('teardown' in out) return out.teardown
+      if (round >= CREATE_LOCK_ROUNDS) {
+        throw new Error(`branch delete could not settle its lock set after ${CREATE_LOCK_ROUNDS} rounds: services are being added to "${b.name}" concurrently, retry the delete`)
+      }
+      keys = out.union
+    }
   }
 
   async destroyProject(projectId: string): Promise<Teardown> {
