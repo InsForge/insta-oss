@@ -720,6 +720,9 @@ export class Engine {
     // The parent's name as the secret copy below actually found it, so the event reports the
     // branch this fork came from rather than a name that moved while it was being built.
     let sourceName = source.name
+    // ...and the CLONE's own name, for the same reason and read the same way. `provisionBranch`
+    // has already committed this row, so `renameBranch` can move it at any await below.
+    let cloneName = name
     try {
       // WP4 hook: /data volumes fork BEFORE the redeploy loop, so each new container starts on its
       // own copy rather than sharing the source's bytes.
@@ -747,11 +750,19 @@ export class Engine {
       // secrets. A synchronous read inside the same mutate has no window at all. A parent row
       // that is somehow gone by now falls back to the name the create started with, which is the
       // best evidence left.
+      // The DESTINATION is read from the same state, in the same mutate, and for a worse
+      // reason than the source. The clone's row is committed and visible, so a rename can move
+      // it while the volumes fork and the containers deploy; writing the inherited rows under
+      // the name captured at the start then files them under a name this branch no longer
+      // answers to. That is not "the clone loses its secrets": secret resolution is by NAME, so
+      // the next branch to take the freed old name INHERITS THEM. A cross-branch leak of
+      // credentials, from a rename that looks like a metadata edit.
       mutate((st) => {
         const parent = st.branches[source.id]
         sourceName = parent?.name ?? source.name
+        cloneName = st.branches[b.id]?.name ?? name
         const list = st.userSecrets[projectId] ?? []
-        const inherited = list.filter((u) => u.branch === sourceName).map((u) => ({ ...u, branch: name }))
+        const inherited = list.filter((u) => u.branch === sourceName).map((u) => ({ ...u, branch: cloneName }))
         st.userSecrets[projectId] = [...list, ...inherited]
         const bindings = parent?.bindings ?? source.bindings
         if (bindings?.length) st.branches[b.id].bindings = bindings.map((x) => ({ ...x }))
@@ -766,8 +777,11 @@ export class Engine {
       // shows whether the box reflinked or fell back to streaming and copying.
       const db = this.forkResults.get(b.id)
       this.forkResults.delete(b.id)
-      this.emit(projectId, name, 'resource', 'branch.created', { from: sourceName, ...(db ? { db } : {}), volumes })
-      return b
+      // Both names as the copy actually found them, so the event does not report a branch that
+      // no longer answers to the name in it, and the caller gets the row as it stands rather
+      // than the snapshot taken at commit time.
+      this.emit(projectId, cloneName, 'resource', 'branch.created', { from: sourceName, ...(db ? { db } : {}), volumes })
+      return loadState().branches[b.id] ?? b
     } catch (e) {
       const undone = await this.unwindBranch(project, b, secretsCloned)
       // The user is told the name is still taken, on the error they already have: with the message
@@ -3427,7 +3441,16 @@ export class Engine {
    *  the union re-drive `createBranch` runs, and adding a second re-driving acquisition to a
    *  path that also holds the provision chain is a change to make deliberately, not at the end
    *  of a round. (`destroyProject` had the same shape and no longer does: it re-drives its
-   *  acquisition over the union, which is the remedy this one is declining for now.) */
+   *  acquisition over the union, which is the remedy this one is declining for now.)
+   *
+   *  The branch born in that window is most often a branch create's own DESTINATION, which
+   *  `provisionBranch` commits before its post-commit steps finish. That case is closed at the
+   *  consequence rather than at the lock: every name-keyed write the create makes afterwards
+   *  reads the row's CURRENT name inside the same synchronous mutate that uses it, so a rename
+   *  landing anywhere in that window changes what the create writes rather than stranding it.
+   *  What remains is the redeploy loop, which resolves the clone by name: a rename landing
+   *  exactly there fails the create LOUDLY (`branch "x" not found`) and unwinds it, rather than
+   *  writing anything under the wrong name. */
   private renameKeys(projectId: string, serviceId: string): ServiceKey[] {
     return this.listBranches(projectId).flatMap((b) => [this.branchOp(b), this.serviceKey(b, serviceId)])
   }

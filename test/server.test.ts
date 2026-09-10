@@ -3422,6 +3422,64 @@ test('a teardown that did not finish keeps the row, the scheduler ledger AND the
   expect(loadState().customDomains?.['kept.example.com']).toBeUndefined()
 })
 
+test('a SUCCESSFUL create whose destination is renamed mid-flight does not leak its secrets', async () => {
+  // The mirror of the source-side bug, and worse. `provisionBranch` commits the clone's row
+  // before the post-commit steps, so a rename can move it while the volumes fork and the
+  // containers deploy. The secret copy wrote the inherited rows under the name captured at the
+  // start, and resolution is BY NAME: the renamed branch does not get them, and the next branch
+  // to take the freed old name DOES. A cross-branch leak of credentials.
+  const id = await sourceWithEveryStep()
+  // Paused inside the clone's own redeploy, which is the last post-commit step before the
+  // secrets are copied: the rename then lands in the window the finding is about and the
+  // create still SUCCEEDS. (A rename landing earlier, before the redeploy loop resolves the
+  // clone by name, fails the create loudly and unwinds it, which is the documented residual.)
+  let enterDeploy!: () => void
+  let goDeploy!: () => void
+  const inDeploy = new Promise<void>((r) => { enterDeploy = r })
+  const deployGate = new Promise<void>((r) => { goDeploy = r })
+  const realDeploy = compute.deploy.bind(compute)
+  const deploySpy = vi.spyOn(compute, 'deploy').mockImplementation(async (ref, o) => {
+    if (ref.includes('demo-feat')) { enterDeploy(); await deployGate }
+    return realDeploy(ref, o)
+  })
+  const create = post(`/projects/${id}/branches`, { name: 'feat' })
+  await within(10_000, inDeploy, "the clone's redeploy")
+  const featId = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')!.id
+
+  try {
+    // The rename lands in the window: past the row's commit, before the secrets are copied.
+    expect((await app.inject({ method: 'PATCH', url: `/projects/${id}/branches/${featId}`, payload: { name: 'renamed' } })).statusCode).toBe(200)
+    goDeploy()
+    expect((await within(10_000, create, 'the branch create')).statusCode).toBe(201)
+  } finally {
+    goDeploy()
+    deploySpy.mockRestore()
+  }
+
+  // Half one: the branch that exists has the secrets it inherited.
+  expect((await get(`/projects/${id}/secrets?branch=renamed`)).json().secrets.API_KEY).toBe('from-main')
+  // ...and the event names the branch as it stands, not as the create first saw it.
+  const ev = loadState().events.filter((e) => e.kind === 'branch.created' && e.branch === 'renamed')
+  expect(ev).toHaveLength(1)
+
+  // Half two, THE LEAK. Nothing may be filed under the freed name, or under any name no
+  // branch holds: those rows are what a later branch picks up.
+  expect((loadState().userSecrets[id] ?? []).filter((u) => u.branch === 'feat')).toEqual([])
+  const names = new Set(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name))
+  for (const u of loadState().userSecrets[id] ?? []) {
+    if (u.branch !== null) expect(names.has(u.branch), `${u.name}@${u.branch}`).toBe(true)
+  }
+
+  // ...and the branch that later TAKES that name gets only what it inherits itself. (The name
+  // frees on the rename but the ref does not, so reusing it means deleting the renamed branch
+  // first, which is the reachable path: a branch delete does not sweep secret rows.)
+  expect((await del_(`/projects/${id}/branches/${featId}`)).statusCode).toBe(200)
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  const rows = (loadState().userSecrets[id] ?? []).filter((u) => u.branch === 'feat' && u.name === 'API_KEY')
+  expect(rows).toHaveLength(1)
+  expect((await get(`/projects/${id}/secrets?branch=feat`)).json().secrets.API_KEY).toBe('from-main')
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
