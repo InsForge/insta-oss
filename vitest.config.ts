@@ -12,6 +12,16 @@ const docker = !!process.env.RUN_DOCKER_TESTS
 export default defineConfig({
   test: {
     root: '.', testTimeout: 120_000, hookTimeout: 120_000, pool: 'forks',
+    // Restore spies and mock implementations after every test. Three separate review rounds found
+    // the same leak: a test installs a gate or a throwing mock, restores it on the line AFTER its
+    // assertions, and a timeout -- which is exactly what the concurrency tests exist to detect --
+    // skips the restore and silently corrupts every later test in the file. Measured before
+    // enabling: `mockRestore` on a `vi.fn(impl)` restores the implementation passed to `vi.fn`,
+    // and every `vi.mock` factory here is that shape, so this returns each file to its intended
+    // default rather than blanking it. Nothing in the suite relies on a mock persisting across
+    // cases (no module-scope spies, no `beforeAll` mock setup, and the `.int.test.ts` suites use
+    // neither `vi.mock` nor `vi.spyOn`).
+    restoreMocks: true,
     // ONE Docker suite at a time (CONTRIBUTING, "One Docker suite at a time"). The integration
     // suites share global resources: the single `io-garage` container, dockerd's address pool
     // (stock daemons hand out ~31 user-defined networks), and, for the suites that build their
