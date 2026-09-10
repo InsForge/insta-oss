@@ -90,7 +90,8 @@ test('a basebackup fork appends the replication line to the SOURCE only, before 
   const out = await pg.fork(src(), dst())
   expect(out.method).toBe('basebackup')
 
-  const appends = calls.filter((a) => a.join(' ').includes(HBA))
+  // The append and the strip both name the marker, so tell them apart by shape.
+  const appends = calls.filter((a) => a.join(' ').includes(HBA) && a.join(' ').includes('grep -q'))
   expect(appends).toHaveLength(1)
   // On the source container, and idempotent: the shell line greps before it appends.
   expect(appends[0]).toContain('io-demo-main-pg-db')
@@ -99,6 +100,14 @@ test('a basebackup fork appends the replication line to the SOURCE only, before 
   // Before the stream, and the config is reloaded so the running server picks it up.
   expect(indexOfMatch(calls, HBA)).toBeLessThan(indexOfMatch(calls, 'pg_basebackup'))
   expect(indexOfMatch(calls, 'pg_reload_conf')).toBeLessThan(indexOfMatch(calls, 'pg_basebackup'))
+
+  // A base backup copies pg_hba.conf, so the child would otherwise inherit the line and pass it on
+  // again. It is stripped from the copy after the stream and BEFORE the child is ever started, so a
+  // branch that is never a source accepts no replication connection.
+  const strips = calls.filter((a) => a.join(' ').includes('sed -i') && a.join(' ').includes(HBA))
+  expect(strips).toHaveLength(1)
+  expect(strips[0].join(' ')).toContain('/out/pg_hba.conf')
+  expect(indexOfMatch(calls, 'pg_basebackup')).toBeLessThan(indexOfMatch(calls, 'sed -i'))
 })
 
 test('a reflink fork writes no replication line at all: nothing streams', async () => {
@@ -164,9 +173,12 @@ test('a source that already carries the line is not asked twice in one fork', as
   await pg.fork(src(), dst())
   await pg.fork(src(), dst({ container: 'io-demo-two-pg-db', dataDir: '/data/pg/demo-two-db' }))
   // Once per fork, always against the source, never against a destination.
-  const appends = calls.filter((a) => a.join(' ').includes(HBA))
+  const appends = calls.filter((a) => a.join(' ').includes(HBA) && a.join(' ').includes('grep -q'))
   expect(appends).toHaveLength(2)
   for (const a of appends) expect(a).toContain('io-demo-main-pg-db')
+  // And each destination is stripped, so neither child can become a source by inheritance.
+  const strips = calls.filter((a) => a.join(' ').includes('sed -i') && a.join(' ').includes(HBA))
+  expect(strips).toHaveLength(2)
 })
 
 // ---- fork ordering -----------------------------------------------------------------------------

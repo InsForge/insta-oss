@@ -197,6 +197,16 @@ export class LocalPostgres implements DatabaseAdapter {
       if (dst.dataDir) await this.data.remove(dst.dataDir).catch(() => {})
       throw new Error(`pg_basebackup failed: ${firstLine(e)}`)
     }
+    // A base backup copies pg_hba.conf, so the child arrives carrying the source's replication
+    // line. Appending that line only on a source is worth nothing if every child inherits it and
+    // then passes it on again, so strip it from the copy BEFORE the child ever starts: a branch
+    // that is never a basebackup source should not accept a replication connection at all. This
+    // runs in a throwaway container for the same reason the backup did, since the directory it
+    // just wrote is owned by the image's uid and an unprivileged daemon cannot edit it.
+    if (dst.dataDir) {
+      await this.exec(['run', '--rm', '-v', `${dst.dataDir}:/out`, IMAGE,
+        'sed', '-i', `/insta-oss basebackup/d`, '/out/pg_hba.conf'])
+    }
     await this.run(dst, opts, [])
     await this.waitReady(dst.container)
   }

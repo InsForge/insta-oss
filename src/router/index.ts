@@ -284,7 +284,7 @@ export class Router {
     const s = createPgLane({
       cfg: this.cfg, upstream: this.deps.upstream, stateOf: this.deps.stateOf, wake: this.deps.wake,
       table: () => this.table(), touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
-      signal: this.abort.signal, secureContext: () => this.defaultContext, sniCallback: this.certs.sniCallback(() => this.defaultContext, (h) => this.ownsHostname(h)), log: this.log,
+      signal: this.abort.signal, secureContext: () => this.defaultContext, sniCallback: this.certs.sniCallback(() => this.defaultContext, (h) => this.ownsHostnameMemo(h)), log: this.log,
     }, this.cfg.lanes.bind, port)
     s.on('connection', (c: Socket) => this.track(c))
     return s
@@ -294,7 +294,7 @@ export class Router {
     const s = createSniLane({
       cfg: this.cfg, upstream: this.deps.upstream, stateOf: this.deps.stateOf, wake: this.deps.wake,
       table: () => this.table(), touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
-      signal: this.abort.signal, defaultMaterial: this.defaultMaterial, sniCallback: this.certs.sniCallback(() => this.defaultContext, (h) => this.ownsHostname(h)), log: this.log,
+      signal: this.abort.signal, defaultMaterial: this.defaultMaterial, sniCallback: this.certs.sniCallback(() => this.defaultContext, (h) => this.ownsHostnameMemo(h)), log: this.log,
     }, kind, bind, port)
     s.on('connection', (c: Socket) => this.track(c))
     this.tlsLanes.add(s)
@@ -404,6 +404,21 @@ export class Router {
    *  store and buy a 15 s issuance handshake on a public lane for the price of one packet. */
   ownsHostname(host: string): boolean {
     if (this.deps.ownsHostname) return this.deps.ownsHostname(host)
+    return this.table().hosts().has(hostOnly(host))
+  }
+
+  /**
+   * The same question on the TLS hot path, answered from the memoized table only.
+   *
+   * `ownsHostname` prefers `deps.ownsHostname`, which is the engine's version: it calls
+   * `loadState()` and rebuilds the whole route table on every call. That is right for the ask
+   * endpoint, which is loopback-only, low volume and wants freshness. It is wrong here. These
+   * lanes listen on every interface in server mode, so an SNI scan would turn one unauthenticated
+   * ClientHello into a full state clone and table rebuild, and cost the daemon far more than it
+   * costs the scanner. The memoized table is already invalidated by every routing write, so it is
+   * as fresh as the routes themselves.
+   */
+  private ownsHostnameMemo(host: string): boolean {
     return this.table().hosts().has(hostOnly(host))
   }
 }
