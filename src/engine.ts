@@ -148,10 +148,18 @@ async function networkState(network: string): Promise<'present' | 'missing' | 'u
  *  fingerprint probes (`gone` only when docker ANSWERED and the container was not in the answer).
  *  Only `gone` returns true, and only a true return may delete the bytes or the row. */
 async function removeContainer(sched: { containerPresence(c: string): Promise<'present' | 'gone' | 'unknown'> }, t: Teardown, container: string, remove: () => Promise<unknown>): Promise<boolean> {
+  // What was there BEFORE, so the summary counts a demolition rather than a no-op: a container
+  // that was never there is not one destroyed, and counting it inflates the number with work
+  // that did not happen. The removal is still attempted either way -- docker's own view can be
+  // ahead of ours, and an adapter may have cleanup of its own to do.
+  const before = await sched.containerPresence(container)
   let failure: string | undefined
   try { await remove() } catch (e) { failure = e instanceof Error ? e.message : String(e) }
   const state = await sched.containerPresence(container)
-  if (state === 'gone') { t.destroyed++; return true }
+  if (state === 'gone') {
+    if (before !== 'gone') t.destroyed++
+    return true
+  }
   t.failed++
   const why = `container ${container} is ${state === 'unknown' ? 'in an unknown state (docker could not answer)' : 'still there'} after its removal${failure ? `: ${failure}` : ''}`
   ;(t.reasons ??= []).push(why)
@@ -1425,6 +1433,16 @@ export class Engine {
     const key = this.serviceKey(branch, serviceId)
     const desired = verb === 'start' ? 'running' : verb === 'stop' ? 'stopped' : 'suspended'
     let state = 'none'
+    // The group NAME was resolved before the lock, and a compute rename that ran while this
+    // queued moves it. `branch.apps[group]` is then undefined, the whole body below is skipped,
+    // and the verb answers 200 with `state: none` having done nothing -- indistinguishable from
+    // the legitimate registered-but-never-deployed no-op, which is the case that block exists
+    // for. The REGISTRATION is what tells the two apart, so it is asked first. This was the last
+    // site where the rule stated engine-wide (`freshRemoval`: no operation acts on an identity
+    // it resolved before its lock) did not hold.
+    if (!this.computeGroupNames(projectId).includes(group)) {
+      throw new Error(`compute service "${group}" changed while this ${verb} was queued (renamed or removed); nothing was done, list the services and retry with the current name`)
+    }
     if (branch.apps[group]) {
       const op = this.compute[verb]
       if (!op) throw new Error(`${verb} is not supported by this compute adapter`)
@@ -3308,7 +3326,14 @@ export class Engine {
    *  registers a project-level name and materialises nothing; its deploy is the guarded step. */
   private assertUsable(branch: Branch, what: string): void {
     if (branch.status !== CLEANUP_FAILED) return
-    throw new Error(`branch "${branch.name}" is ${CLEANUP_FAILED}: its teardown did not finish, so it cannot be ${what}. Run \`insta branch delete ${branch.name}\` to retry the teardown`)
+    // The DEFAULT branch cannot be pointed at `insta branch delete`: that refuses with "cannot
+    // delete the default branch", so the operator would be sent to a dead end by the message
+    // that was supposed to be the way out. `destroyProject` is what marked it and re-running it
+    // is what retries the demolition.
+    const retry = branch.isDefault
+      ? 'Re-run `insta project delete` to retry the teardown'
+      : `Run \`insta branch delete ${branch.name}\` to retry the teardown`
+    throw new Error(`branch "${branch.name}" is ${CLEANUP_FAILED}: its teardown did not finish, so it cannot be ${what}. ${retry}`)
   }
 
   /** What a service RENAME holds: every branch's branch key and its key for this service.

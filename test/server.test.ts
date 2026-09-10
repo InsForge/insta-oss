@@ -3154,6 +3154,77 @@ test('a cleanup-failed branch is refused as a fork source and as a deploy target
   expect(loadState().branches[feat.id]).toBeUndefined()
 })
 
+test('a lifecycle verb queued behind a compute rename refuses instead of answering "none"', async () => {
+  // The last site where an operation acted on an identity it resolved before its lock.
+  // `lifecycleLocked` re-reads the branch row but tested the PRE-LOCK group name, so a rename
+  // that landed while the verb queued made `branch.apps[group]` undefined, the body was
+  // skipped, and it answered 200 {"state":"none"} having done nothing -- the same answer as a
+  // group that is registered and never deployed, which is a real case.
+  const id = await sourceWithEveryStep()
+  let enterRename!: () => void
+  let goRename!: () => void
+  const inRename = new Promise<void>((r) => { enterRename = r })
+  const renameGate = new Promise<void>((r) => { goRename = r })
+  const realRename = compute.rename!.bind(compute)
+  const rename = vi.spyOn(compute, 'rename').mockImplementation(async (ref, from_, to) => {
+    enterRename()
+    await renameGate
+    return realRename(ref, from_, to)
+  })
+
+  try {
+    const renaming = post(`/projects/${id}/services/cp-web/rename`, { name: 'api' })
+    await within(10_000, inRename, 'the rename')
+    let stopped = false
+    const stop = post(`/projects/${id}/services/cp-web/stop`).then((r) => { stopped = true; return r })
+    await settle()
+    expect(stopped).toBe(false)
+
+    goRename()
+    expect((await within(10_000, renaming, 'the rename')).statusCode).toBe(200)
+    const answer = await within(10_000, stop, 'the stop')
+
+    expect(answer.statusCode).toBeGreaterThanOrEqual(400)
+    expect(answer.json().error).toContain('changed while this stop was queued')
+    // ...and the group that now exists is untouched: nothing was stopped behind the operator's back.
+    expect(loadState().branches[await branchOf(id, 'main')].apps.api?.desiredState).not.toBe('stopped')
+  } finally {
+    goRename()
+    rename.mockRestore()
+  }
+})
+
+test('the cleanup-failed DEFAULT branch is told to re-run the project delete, not the branch one', async () => {
+  // `destroyProject` marks every branch whose teardown failed, the default included, and
+  // `insta branch delete` refuses the default branch outright: pointing there is a dead end,
+  // and the message was the operator's only way out.
+  const id = await sourceWithEveryStep()
+  const destroy = vi.spyOn(db, 'destroy').mockRejectedValueOnce(new Error('container is in use'))
+  try {
+    await engine.destroyProject(id).catch(() => undefined)
+  } finally {
+    destroy.mockRestore()
+  }
+  const main = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'main')!
+  expect(main.status).toBe('cleanup-failed')
+  expect(main.isDefault).toBe(true)
+
+  const deployed = await post(`/projects/${id}/deploy`, { image: 'app:9', port: 3000, group: 'web' })
+  expect(deployed.statusCode).toBeGreaterThanOrEqual(400)
+  expect(deployed.json().error).toContain('insta project delete')
+  expect(deployed.json().error).not.toContain('insta branch delete')
+})
+
+test('a registered group that was never deployed is still a no-op, not a refusal', async () => {
+  // The case the refusal must not swallow: `services add compute` registers a project-level
+  // name, and until a deploy puts a container on a branch the verb has nothing to do there.
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'worker' })).statusCode).toBe(201)
+  const res = await post(`/projects/${id}/services/cp-worker/stop`)
+  expect(res.statusCode).toBe(200)
+  expect(res.json().state).toBe('none')
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
