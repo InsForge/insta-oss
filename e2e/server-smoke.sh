@@ -206,14 +206,25 @@ if insta services add postgres db >/dev/null 2>&1; then
 fi
 OK "several postgres per branch, duplicates refused"
 
-STEP "6. branch fork, with a hard reflink assertion"
+# fork_method BRANCH : the copy method branch.created recorded for BRANCH. Filtering on the event
+# branch, not on position, because step 6 forks twice and both events are branch.created.
+fork_method() {
+  insta events --json | jsel '(d.events||d).filter(function(e){return e.kind==="branch.created"&&e.branch==="'"$1"'"}).map(function(e){return (e.payload&&e.payload.db&&e.payload.db.method)||""}).filter(Boolean)[0]||""'
+}
+
+STEP "6. branch fork: a live parent streams, a parent at rest reflinks"
 psql "$DBURL" -v ON_ERROR_STOP=1 -qtAc \
   "create table qa_branch_probe(v text); insert into qa_branch_probe values ('from-main')" \
   >/dev/null || FAIL "could not seed the probe table"
 psql "$DBURL" -v ON_ERROR_STOP=1 -qtAc \
   "create table qa_bulk as select generate_series(1,700000) i, repeat('x',64) p" \
   >/dev/null || FAIL "could not seed 50 MB of bulk data"
+
+# 6a. Fork a RUNNING parent. The seeding above left main's postgres live, and a reflink of a live
+# data directory copies a torn page image, so this fork must stream with pg_basebackup instead.
+# Asserting the method here is what keeps the safe path from silently regressing to a fast one.
 measure insta branch create feat --from main >/dev/null || FAIL "branch create failed"
+FEAT_MS=$MEASURED_MS
 FEAT_IDS=$(insta services list --branch feat --json | jsel '(d.services||d).map(function(s){return s.id}).join(",")')
 case $FEAT_IDS in
   *:pg-db*) OK "feat service ids are branch qualified" ;;
@@ -225,6 +236,8 @@ FEATHOST=$(url_host "$FEATURL")
 ensure_host "$FEATHOST"
 FEATVAL=$(psql "$FEATURL" -v ON_ERROR_STOP=1 -qtAc 'select v from qa_branch_probe limit 1')
 [ "$FEATVAL" = "from-main" ] || FAIL "feat did not inherit the seeded row"
+FEATBULK=$(psql "$FEATURL" -v ON_ERROR_STOP=1 -qtAc 'select count(*) from qa_bulk')
+[ "$FEATBULK" = "700000" ] || FAIL "feat inherited a torn copy of qa_bulk: $FEATBULK rows, expected 700000"
 psql "$FEATURL" -v ON_ERROR_STOP=1 -qtAc \
   "insert into qa_branch_probe values ('only-on-feat')" >/dev/null
 MAINCOUNT=$(psql "$DBURL" -v ON_ERROR_STOP=1 -qtAc 'select count(*) from qa_branch_probe')
@@ -234,10 +247,29 @@ FEAT_APP=$(printf '%s\n' "$URL" | sed -e 's/-main\./-feat./')
 ensure_host "$(url_host "$FEAT_APP")"
 wait_for 90 curl_ok "$FEAT_APP/" || FAIL "$FEAT_APP never answered after hold and wake"
 OK "the feat app answers after hold and wake"
-METHOD=$(insta events --json | jsel '(d.events||d).filter(function(e){return e.kind==="branch.created"}).map(function(e){return (e.payload&&e.payload.db&&e.payload.db.method)||""}).filter(Boolean)[0]')
+FEAT_METHOD=$(fork_method feat)
+[ "$FEAT_METHOD" = "basebackup" ] \
+  || FAIL "a fork of a RUNNING parent must stream, branch.created says '$FEAT_METHOD'"
+OK "a live parent streams (basebackup in ${FEAT_MS}ms)"
+
+# 6b. Fork the same parent AT REST. Nothing has touched main since the count above, so the idle
+# sweep stops its postgres, and only then is the reflink fast path legal. This is the arm that
+# proves the sub-second fork, and it is the reason the data dir is on reflink-capable xfs.
+MAINPG=$(pg_container "$REF" db)
+wait_for 120 sh -c "[ \"\$(docker inspect -f '{{.State.Status}}' $MAINPG)\" = exited ]" \
+  || FAIL "main postgres never went idle, state is $(cstate "$MAINPG")"
+measure insta branch create rest --from main >/dev/null || FAIL "branch create from an idle parent failed"
+RESTURL=$(insta db url --branch rest --group db)
+ensure_host "$(url_host "$RESTURL")"
+RESTBULK=$(psql "$RESTURL" -v ON_ERROR_STOP=1 -qtAc 'select count(*) from qa_bulk')
+[ "$RESTBULK" = "700000" ] || FAIL "the at-rest fork is torn: $RESTBULK rows of qa_bulk, expected 700000"
+RESTVAL=$(psql "$RESTURL" -v ON_ERROR_STOP=1 -qtAc 'select v from qa_branch_probe limit 1')
+[ "$RESTVAL" = "from-main" ] || FAIL "the at-rest fork did not inherit the seeded row"
+REST_METHOD=$(fork_method rest)
 if [ "$REFLINK" = "1" ]; then
   # The method is the claim worth failing on: branch.created records what the fork actually did.
-  [ "$METHOD" = "reflink" ] || FAIL "expected a reflink fork, branch.created says '$METHOD'"
+  [ "$REST_METHOD" = "reflink" ] \
+    || FAIL "a fork of a parent AT REST must reflink, branch.created says '$REST_METHOD'"
   # The DURATION is not, by default. This measures the whole HTTPS round trip (checkpoint, reflink
   # copy, bucket clone, redeploy asleep), and on a runner without a reflink filesystem the data dir
   # is a loop-mounted image, which is not the substrate the sub-second figure was measured on. A
@@ -253,7 +285,11 @@ if [ "$REFLINK" = "1" ]; then
     OK "reflink fork in ${MEASURED_MS}ms"
   fi
 else
-  SKIP "fork method '$METHOD' in ${MEASURED_MS}ms (no reflink filesystem)"
+  # No reflink filesystem, so the fast path is unavailable and streaming is the correct answer even
+  # at rest. The method is still asserted: silence here would hide a fork that did neither.
+  [ "$REST_METHOD" = "basebackup" ] \
+    || FAIL "without reflinks a fork must stream, branch.created says '$REST_METHOD'"
+  SKIP "at-rest fork streamed in ${MEASURED_MS}ms (no reflink filesystem)"
 fi
 
 STEP "7. sleep and wake"
