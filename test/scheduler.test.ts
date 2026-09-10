@@ -1171,9 +1171,13 @@ test('a timed-out docker call reports the timeout, not the child\'s own dying er
     ({ done: Promise.reject(new Error('signal SIGKILL')), kill: () => {} })
   // Expired first, so the caller is told what actually happened to its command.
   const slow = { done: new Promise<string>((_, reject) => { setTimeout(() => { reject(new Error('signal SIGKILL')) }, 30) }), kill: () => {} }
+  // The handler is attached BEFORE the clock moves: a rejection that lands while nothing is
+  // waiting on it is an unhandled rejection, and vitest fails the run for it (it did, in CI,
+  // where the turn ordering differs from here).
   const p = withTimeout(slow, 10, 'stop')
+  const rejects = expect(p).rejects.toThrow(/docker stop timed out after 10 ms \(the command was killed and has exited\)/)
   await vi.advanceTimersByTimeAsync(40)
-  await expect(p).rejects.toThrow(/docker stop timed out after 10 ms \(the command was killed and has exited\)/)
+  await rejects
   // ...and a call that fails on its own, inside the deadline, keeps its own error.
   await expect(withTimeout(failing(), 10_000, 'stop')).rejects.toThrow(/signal SIGKILL/)
 })
