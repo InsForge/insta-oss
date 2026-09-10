@@ -23,5 +23,5 @@ jobs:
           INSTA_OSS_SCHEDULER: '0'
       # ---- WP4 ----
       # ---- WP6 ----
-      - run: shellcheck -s sh install.sh
+      - run: shellcheck -s sh install.sh e2e/lib.sh e2e/local-smoke.sh e2e/server-smoke.sh
       - run: docker build --build-arg VERSION=ci -t instacloud:ci .

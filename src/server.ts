@@ -460,19 +460,15 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     const { id, sid } = req.params as { id: string; sid: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     if (!gated(id, 'service.remove', reply)) return reply
-    // The volume RECORD is a project-level service setting (decision 49, the same shelf as limits
-    // and always-on), so detaching it drops the mount on every branch and takes every branch's
-    // bytes with it. The caller must not be able to name one branch and silently lose another's:
-    // the sibling delete routes are branch-scoped, so a qualified id or ?branch here reads as a
-    // scoping request this route cannot honour. Refuse it and say why rather than widening it.
-    const scoped = parseServiceId(sid)?.branchId !== undefined || (req.query as { branch?: string }).branch !== undefined
-    if (scoped) {
-      return reply.code(400).send({
-        error: 'a volume is a project-level setting: detaching it removes the disk on every branch. '
-          + 'Re-send without a branch to confirm, or remove the service on this branch instead.',
-      })
-    }
-    try { return await engine.removeServiceVolume(id, sid) }
+    // Strips the qualifier and proceeds, like GET and PUT on this same resource (contract section
+    // 10, which names `volume` in that family and specifies the response as unchanged). Detaching
+    // is project-wide BY DESIGN here: the volume record is a project-level service setting and the
+    // engine's contract note calls the rebuild eager across every branch that deploys the group.
+    // So the qualifier is redundant rather than dangerous, and refusing it, as an earlier revision
+    // of this route did, left a decision-49 client with no id it could send: that form is the only
+    // one `GET /services?branch=` hands back off the default branch, and the contract declares it
+    // opaque, so "re-send without the branch" asked the caller to parse it.
+    try { return await engine.removeServiceVolume(id, bareSid(sid)) }
     catch (e) {
       const m = e instanceof Error ? e.message : String(e)
       return reply.code(m.includes('no volume') ? 404 : errCode(m)).send({ error: m })

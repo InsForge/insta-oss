@@ -986,20 +986,16 @@ test('volume delete (cloud 2026-08-08 contract): eager rebuild without the mount
   await post(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 5 })
   await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
   calls.length = 0
-  // A volume is a project-level setting, so detaching it takes EVERY branch's bytes. The sibling
-  // delete routes are branch-scoped, so naming a branch here reads as a scoping request this route
-  // cannot honour, and silently widening it is how the compute-remove data loss happened. Refused,
-  // with nothing destroyed, rather than obeyed for one branch and applied to all.
-  const scopedByQuery = await del_(`/projects/${id}/services/cp-api/volume?branch=main`)
-  expect(scopedByQuery.statusCode).toBe(400)
-  expect(scopedByQuery.json().error).toContain('project-level setting')
+  // All three verbs on this resource take the qualified id and strip it (contract section 10 names
+  // `volume` in that family). Detaching is project-wide by design, so the qualifier is redundant
+  // rather than a scoping request: what matters is that DELETE accepts the SAME id GET and PUT do,
+  // because that is the only form `GET /services?branch=` hands a caller off the default branch and
+  // decision 49 declares it opaque, so there is no bare id for such a client to fall back to.
   const branchId = (await get(`/projects/${id}/branches`)).json().branches[0].id as string
-  const scopedById = await del_(`/projects/${id}/services/${branchId}:cp-api/volume`)
-  expect(scopedById.statusCode).toBe(400)
-  expect(calls.some((c) => c.startsWith('deploy:'))).toBe(false)
-  expect((await get(`/projects/${id}/services/cp-api/volume`)).json().volume).not.toBeNull()
+  expect((await get(`/projects/${id}/services/${branchId}:cp-api/volume`)).statusCode).toBe(200)
+  expect((await put(`/projects/${id}/services/${branchId}:cp-api/volume`, { sizeGib: 10 })).statusCode).toBe(200)
 
-  const del = await del_(`/projects/${id}/services/cp-api/volume`)
+  const del = await del_(`/projects/${id}/services/${branchId}:cp-api/volume`)
   expect(del.statusCode).toBe(200)
   expect(del.json()).toMatchObject({ removed: true, volume: null, service: { volume_gib: null } })
   // EAGER: the deployed branch was rebuilt WITHOUT the mount right away — no deploy.volume call.

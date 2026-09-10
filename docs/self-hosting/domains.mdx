@@ -78,9 +78,11 @@ export NODE_EXTRA_CA_CERTS=/var/lib/instacloud/edge/ca.pem
 export AWS_CA_BUNDLE=/var/lib/instacloud/edge/ca.pem
 ```
 
-`AWS_CA_BUNDLE` is the one S3 clients read: the AWS CLI, boto3 and the AWS SDKs ignore the other
-three, so without it an upload to `https://s3.example.com` fails with `SSL validation failed` and
-`unable to get local issuer certificate` while curl and psql against the same box are fine.
+`AWS_CA_BUNDLE` is what the AWS CLI and boto3 read, and they read none of the other three, so
+without it an upload to `https://s3.example.com` fails with `SSL validation failed` and `unable to
+get local issuer certificate` while curl and psql against the same box are fine. The AWS SDK for
+JavaScript has no equivalent knob: it uses Node's trust store, so `NODE_EXTRA_CA_CERTS` above
+already covers it. Exporting all four is the simple answer whichever client you reach for.
 
 ### When one hostname will not verify
 

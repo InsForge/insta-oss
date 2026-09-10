@@ -16,6 +16,7 @@ set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
+# shellcheck source=e2e/lib.sh disable=SC1091  # resolved at run time from $HERE, not cwd.
 . "$HERE/lib.sh"
 
 PORT=${INSTA_OSS_PORT:-8080}

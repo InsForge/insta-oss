@@ -159,6 +159,8 @@ pg_container() {
 
 # slug NAME : the engine slug rule (lowercase, non-alphanumeric to dashes, trimmed, 20 chars).
 slug() {
+  # shellcheck disable=SC2019,SC2018  # ASCII on purpose: this mirrors the engine's slug(), which
+  # reduces to [a-z0-9-]; a locale-aware class would accept characters the engine then strips.
   printf '%s\n' "$1" | tr 'A-Z' 'a-z' | sed -e 's/[^a-z0-9]\{1,\}/-/g' \
     -e 's/^-\{1,\}//' -e 's/-\{1,\}$//' | cut -c1-20
 }
@@ -179,6 +181,7 @@ measure() {
   "$@"
   _rc=$?
   _t1=$(_now_ms)
+  # shellcheck disable=SC2034  # read by callers after this function returns, not in this file.
   MEASURED_MS=$((_t1 - _t0))
   return $_rc
 }
