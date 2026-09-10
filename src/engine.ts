@@ -210,26 +210,41 @@ export class Engine {
    *  reservation and the op lock have an owner from the start (decision 51). WP5 rewrites this method
    *  over registrations; the hooks it calls (contract 7.2) are already in place. */
   private async provisionBranch(project: Project, name: string, isDefault: boolean, source: Branch | null, branchId: string): Promise<Branch> {
+    const ref = this.ref(project, name)
+    // FIRST, and synchronously: the name and the ref are claimed before a single resource exists
+    // (decision 51). A concurrent create of the same branch refuses here, having created nothing,
+    // rather than building the whole stack a second time on top of the winner's.
+    this.reserveBranchRef(project, name, ref, branchId)
     const network = this.net(project, name)
     try { await docker(['network', 'create', network]) } catch (e) {
       // Stock dockerd hands out only 31 user-defined networks from its default pools and every
       // branch is one, so this is the failure a busy box hits first. Anything else here is the
-      // network already existing (an interrupted create, or a re-provision).
+      // network already existing, and the reservation above is what makes reusing it safe: no
+      // branch row and no other operation holds this ref, so the leftover is an interrupted
+      // create of OUR branch and not a live one's network.
       const m = e instanceof Error ? e.message : String(e)
       if (/non-overlapping IPv4 address pool/i.test(m)) {
+        this.releaseBranchRef(ref, branchId)
         throw new Error('docker has no free network subnets; see docs/self-hosting/install (default-address-pools)')
       }
     }
-    const ref = this.ref(project, name)
     const dbs = this.dbList(project.id)
     const stores = this.stList(project.id)
     const managedRegs = this.managedList(project.id)
     // Check every hostname this branch will mint and reserve every lane port it needs BEFORE the
     // first provisioning await, inside the engine-wide provision chain (decision 51). The check
     // itself writes nothing, so it stays out of a mutate: the chain is what makes it atomic.
-    for (const d of dbs) this.assertHostFree(this.labelFor('postgres', d.name, ref))
-    for (const m of managedRegs) this.assertHostFree(this.labelFor(m.type, m.name, ref))
-    const lanes = this.allocLanes(project, branchId, this.branchServiceIds(project))                      // WP2
+    let lanes: Record<string, number>
+    try {
+      for (const d of dbs) this.assertHostFree(this.labelFor('postgres', d.name, ref))
+      for (const m of managedRegs) this.assertHostFree(this.labelFor(m.type, m.name, ref))
+      lanes = this.allocLanes(project, branchId, this.branchServiceIds(project))                          // WP2
+    } catch (e) {
+      // Nothing is provisioned yet, so the ref claim is the only thing to give back — and it has to
+      // be, or the retry that follows fixing the collision would refuse itself as "in flight".
+      this.releaseBranchRef(ref, branchId)
+      throw e
+    }
     // Every provider object this call created, so one compensation path can undo the whole stack.
     const madeDbs: PgTarget[] = []
     const madeBuckets: string[] = []
@@ -239,10 +254,16 @@ export class Engine {
       for (const b of madeBuckets) await this.storage.destroy(b, network).catch(() => {})
       if (this.storage.detachFrom) await this.storage.detachFrom(network).catch(() => {})
       for (const d of madeDbs) await this.db.destroy(d.container).catch(() => {})
-      // A half-written data directory must not survive to be cloned over (WP4).
-      for (const root of this.layout().branchRoots(ref)) await this.data.remove(root).catch(() => {})
-      await docker(['network', 'rm', network]).catch(() => {})
+      // The branch root and the network carry no owner of their own — they are named after the ref,
+      // which another operation may by then legitimately own. Remove them only while THIS operation
+      // still holds the ref claim, so a compensation can never tear down a branch that succeeded.
+      if (this.ownsBranchRef(ref, branchId)) {
+        // A half-written data directory must not survive to be cloned over (WP4).
+        for (const root of this.layout().branchRoots(ref)) await this.data.remove(root).catch(() => {})
+        await docker(['network', 'rm', network]).catch(() => {})
+      }
       this.releaseLanes(branchId)                                                                         // WP2
+      this.releaseBranchRef(ref, branchId)
     }
     const databases: NonNullable<Branch['databases']> = {}
     const buckets: NonNullable<Branch['buckets']> = {}
@@ -312,12 +333,14 @@ export class Engine {
       ...(Object.keys(lanes).length ? { lanes } : {}),
       dataVersion: 1,                                                                                     // WP4
     }
-    // The same mutate that writes the row drops the lane reservations it supersedes.
+    // The same mutate that writes the row drops the reservations it supersedes: the row IS the
+    // claim on the ref and on every lane port from here on.
     mutate((s) => {
       s.branches[b.id] = b
       for (const [port, owner] of Object.entries(s.laneReservations ?? {})) {
         if (owner === branchId) delete s.laneReservations![port]
       }
+      if (s.branchReservations?.[ref] === branchId) delete s.branchReservations[ref]
     })
     // WP3 hook: the scheduler learns the branch's database keys (no-op stub until WP3).
     this.scheduler.register([...Object.keys(databases), ...Object.keys(managed)].map((sid) => this.serviceKey(b, sid)))
@@ -2035,6 +2058,44 @@ export class Engine {
       s.hostReservations = s.hostReservations ?? {}
       for (const label of labels) s.hostReservations[label] = owner
     })
+  }
+
+  /** Claim a branch NAME and the `ref` every one of its resources is named after, in ONE synchronous
+   *  mutate before `provisionBranch`'s first await (decision 51).
+   *
+   *  `createBranch`'s duplicate-name check was check-then-act across the operation and provision
+   *  locks: two calls for the same name both passed it, and the loser then built the same ref a
+   *  second time — same network, same container names, same buckets, same data directories — while
+   *  its compensation removed the branch root the winner had just filled. The reservation makes the
+   *  ref an EXCLUSIVE claim held for the whole provision: the loser refuses before it creates
+   *  anything, and the compensation path can prove the resources it is about to remove are its own.
+   *
+   *  The ref is checked as well as the name because it is what the resources are named after: two
+   *  different names that slug to one ref would collide on every container. */
+  private reserveBranchRef(project: Project, name: string, ref: string, branchId: string): void {
+    mutate((s) => {
+      for (const b of Object.values(s.branches)) {
+        if (b.projectId !== project.id) continue
+        if (b.name === name) throw new Error(`branch "${name}" already exists`)
+        if (this.ref(project, b) === ref) throw new Error(`branch "${name}" already exists as "${b.name}" (both name the resources ${ref})`)
+      }
+      const holder = s.branchReservations?.[ref]
+      if (holder !== undefined && holder !== branchId) throw new Error(`branch "${name}" already exists (a create for it is in flight)`)
+      s.branchReservations = s.branchReservations ?? {}
+      s.branchReservations[ref] = branchId
+    })
+  }
+
+  /** Whether THIS operation still holds the ref: what the compensation path asks before it removes
+   *  a branch-root directory or a network, neither of which carries an owner of its own. */
+  private ownsBranchRef(ref: string, branchId: string): boolean {
+    return loadState().branchReservations?.[ref] === branchId
+  }
+
+  /** Compensation path: drop the branch reservation a failed provision took. On success the branch
+   *  row supersedes it and `provisionBranch` clears it in the same mutate that writes the row. */
+  private releaseBranchRef(ref: string, branchId: string): void {
+    mutate((s) => { if (s.branchReservations?.[ref] === branchId) delete s.branchReservations[ref] })
   }
 
   /** Compensation path: drop the host reservations a failed operation took. */

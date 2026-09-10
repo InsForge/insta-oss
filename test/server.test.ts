@@ -1573,6 +1573,72 @@ test('a redeploy re-checks nothing it already owns: the second deploy of a group
   expect(hostReservations()).toEqual({})
 })
 
+// A branch reserves its NAME and its `ref` the same way, and for the same reason: the ref names the
+// network, every container, every bucket and every data directory, so two creates that both pass a
+// check-then-act uniqueness test build one stack twice — and the loser's compensation then removes
+// the branch root the winner just filled.
+const branchReservations = (): Record<string, string> => loadState().branchReservations ?? {}
+
+test('two concurrent createBranch calls for one name: one wins, the other is refused, and the winner survives', async () => {
+  // Driven on the engine rather than through inject, because inject dispatches on a macrotask: the
+  // first request would run to completion in microtasks and the second would never overlap it.
+  const engine = makeEngine()
+  const { project } = await engine.createProject('demo')
+  await engine.addDbService(project.id, 'db')
+  await engine.addStorageService(project.id, 'store')
+  calls.length = 0
+  vi.mocked(dockerFn).mockClear()
+
+  // BOTH calls are made in one tick, so the second enters createBranch while the first is suspended
+  // mid-provision: both see a state with no `feat` branch, which is the interleaving a pre-check
+  // outside the lock cannot see.
+  const settled = await Promise.allSettled([
+    engine.createBranch(project.id, 'feat'),
+    engine.createBranch(project.id, 'feat'),
+  ])
+  const won = settled.filter((r) => r.status === 'fulfilled')
+  const lost = settled.filter((r) => r.status === 'rejected')
+  expect(won).toHaveLength(1)
+  expect(lost).toHaveLength(1)
+  expect(String((lost[0] as PromiseRejectedResult).reason)).toContain('branch "feat" already exists')
+
+  // One branch, one stack: the loser provisioned no second copy of the same ref.
+  const rows = engine.listBranches(project.id).filter((b) => b.name === 'feat')
+  expect(rows).toHaveLength(1)
+  expect(rows[0].id).toBe((won[0] as PromiseFulfilledResult<{ id: string }>).value.id)
+  expect(calls.filter((c) => c.startsWith('db.fork:'))).toEqual(['db.fork:io-demo-main-pg-db->io-demo-feat-pg-db'])
+  expect(calls.filter((c) => c.startsWith('st.provision:'))).toEqual(['st.provision:demo-feat:store'])
+
+  // ...and, the part a destructive compensation has to fail on: NOTHING of the winner's was torn
+  // down. No container destroyed, no bucket destroyed, no branch-root directory removed, and the
+  // branch network still there.
+  expect(calls.filter((c) => /^(db|st|md)\.destroy:/.test(c))).toEqual([])
+  expect(calls.filter((c) => c.startsWith('data.remove:'))).toEqual([])
+  expect(vi.mocked(dockerFn).mock.calls.map((c) => (c[0] as string[]).join(' '))).not.toContain('network rm io-demo-feat')
+  // The winner's own records survived intact, so its credentials still point at live resources.
+  const winner = loadState().branches[rows[0].id]
+  expect(winner.databases?.['pg-db']?.container).toBe('io-demo-feat-pg-db')
+  expect(winner.buckets?.['st-store']?.bucket).toBe('io-demo-feat-store')
+  // The claim retires with the row it protected: a later create of the same name is refused by the
+  // row, never by a leaked reservation.
+  expect(branchReservations()).toEqual({})
+})
+
+test('a failed branch create gives its ref claim back, and compensates only its own resources', async () => {
+  const id = await createProject()
+  const fork = vi.spyOn(db, 'fork').mockRejectedValueOnce(new Error('boom'))
+  const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
+  expect(bad.statusCode).toBeGreaterThanOrEqual(400)
+  // It owned the ref, so it is allowed to remove the branch root it was filling...
+  expect(calls.some((c) => c.startsWith('data.remove:'))).toBe(true)
+  // ...and it hands the claim straight back, or the retry below would refuse itself as in flight.
+  expect(branchReservations()).toEqual({})
+
+  fork.mockRestore()
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  expect(branchReservations()).toEqual({})
+})
+
 /** The default branch's id (host reservations and app rows are keyed by it). */
 async function branchOf(id: string, name = 'main'): Promise<string> {
   return (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === name).id

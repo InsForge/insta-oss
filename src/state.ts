@@ -43,6 +43,7 @@ export interface State {
   customDomains: Record<string, CustomDomainEntry>           // key = normalized hostname
   laneReservations?: Record<string, string>                  // lane port -> branchId, written synchronously by allocLanes before provisioning awaits; released by compensation, superseded by branch.lanes (decision 51)
   hostReservations?: Record<string, string>                  // minted hostname LABEL -> owning operation, written synchronously by reserveHosts before the first await; released by compensation, superseded by the row that records the host (decision 51)
+  branchReservations?: Record<string, string>                // branch REF -> owning branchId, written synchronously by reserveBranchRef before provisionBranch's first await; released by compensation, superseded by the branch row (decision 51)
   // ---- end region WP2 ----
   // ---- region WP5 (templates/parity) ----
   templateDeployments: Record<string, TemplateDeploymentRecord>
