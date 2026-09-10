@@ -418,6 +418,32 @@ test('a sweep whose docker read FAILS stops nothing on the snapshot it already h
   expect(t2.sleptAt ?? null).toBeNull()
 })
 
+test('the freshness bound is a duration, and its BOUNDARY is closed', async () => {
+  // The gate reads "no older than two sweep intervals", and the two are not the same sentence:
+  // at exactly the bound the observation predates the SECOND consecutive failed read, which is
+  // one more than the docstring allows. Nothing pinned it either way, and this gate has already
+  // turned the memory floor off once, so the boundary is a test rather than a reading.
+  const bound = 60_000                                        // 2 x the 30 s default sweep
+  for (const [age, acted] of [[bound - 1, true], [bound, false]] as const) {
+    const h = harness()
+    const t = h.add(K, { idleSec: 10 })
+    h.sched.touch(t.key)
+    await h.sched.sweep()                                     // seeds the snapshot; not idle yet
+    h.runtime.containers = async () => { throw new Error('Cannot connect to the Docker daemon') }
+    vi.advanceTimersByTime(age)                               // idle now, and the snapshot is `age` old
+    const said: string[] = []
+    const warn = vi.spyOn(console, 'warn').mockImplementation((m: unknown) => { said.push(String(m)) })
+    try {
+      await h.sched.sweep()
+    } finally {
+      warn.mockRestore()
+    }
+    // Entering `sleep()` is the observable: it re-reads under the lock, fails, and says so.
+    // That the backstop then catches it is not the point -- the pass should not have acted.
+    expect(said.some((m) => m.startsWith('warn: sleep ')), `age ${age}`).toBe(acted)
+  }
+})
+
 test('the pressure pass evicts after a REALISTIC sleep phase, not only against a fresh snapshot', async () => {
   // Every other eviction case here runs the pressure pass moments after the sweep's own read,
   // which is why a freshness gate that can never pass in production still looked fine. In a

@@ -384,10 +384,12 @@ export class Scheduler {
     for (const [name, { id }] of containers) if (id) this.upstream.forgetIfChanged(name, id)
   }
 
-  /** How old an observation may be and still be acted on: ONE missed read, never two. Derived
-   *  from the sweep interval rather than fixed, because that is the rate these facts are
-   *  refreshed at; a floor keeps a very short interval from making every fact stale by the time
-   *  it is used. */
+  /** How old an observation may be and still be acted on: STRICTLY LESS THAN two sweep
+   *  intervals (floored, so a very short interval does not make every fact stale by the time it
+   *  is used). Derived from the sweep interval because that is the rate these facts are
+   *  refreshed at. Stated as a duration rather than as a count of missed reads: at exactly two
+   *  intervals the observation predates the second consecutive failed read, and `<=` would have
+   *  acted on it, so the boundary is closed here and pinned by a test. */
   private maxStateAgeMs(): number {
     return Math.max(2 * this.cfg.sleep.sweepSec * 1000, MIN_STATE_AGE_MS)
   }
@@ -402,13 +404,13 @@ export class Scheduler {
    *  answer than a slightly old one. It is applied where being wrong STOPS a container. */
   private observedRunning(container: string, now: number): boolean {
     const live = this.stateCache.get(container)
-    return live?.state === 'running' && now - live.at <= this.maxStateAgeMs()
+    return live?.state === 'running' && now - live.at < this.maxStateAgeMs()
   }
 
   /** True when nothing in the snapshot is fresh enough to act on, i.e. the last read failed (or
    *  never happened) long enough ago that this scheduler cannot say what is running. */
   private statesStale(now: number): boolean {
-    for (const live of this.stateCache.values()) if (now - live.at <= this.maxStateAgeMs()) return false
+    for (const live of this.stateCache.values()) if (now - live.at < this.maxStateAgeMs()) return false
     return true
   }
 
