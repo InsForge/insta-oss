@@ -8,7 +8,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyServerFac
 import fastifyStatic from '@fastify/static'
 import { registerAuth } from './auth'
 import { loadConfig, type Config } from './config'
-import type { Engine } from './engine'
+import type { Engine, Teardown } from './engine'
 import * as govern from './govern'
 import { isManagedDbType, parseServiceId } from './manageddb'
 import { GateRefused, TemplateError } from './templates/executor'
@@ -206,7 +206,7 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     if (!gated(id, 'project.delete', reply)) return reply
     // The cloud's teardown summary, from the same envelope every delete route answers with
     // (decision 50; platform server.ts:1300 TeardownSummary).
-    return { teardown: await engine.destroyProject(id) }
+    return teardownReply(reply, await engine.destroyProject(id))
   })
 
   app.get('/projects/:id/branches', async (req) => ({
@@ -227,10 +227,22 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     }
   })
 
+  /** A teardown that did not finish is not a 200. The row is KEPT on that outcome (marked
+   *  `cleanup-failed`, since 4b489f6), which is right: the resources it names have to stay
+   *  reachable. But answering 200 tells a CLI or a dashboard the thing is gone, and it then
+   *  shows the branch vanishing and reappearing on the next refresh. 409 is the code this
+   *  server already uses for "the request was understood and the state says no", and the body
+   *  is the same teardown envelope either way, so a client that only reads counts is unaffected.
+   *  Documented in COMPATIBILITY. */
+  const teardownReply = (reply: FastifyReply, teardown: Teardown): { teardown: Teardown } => {
+    if (teardown.failed > 0) reply.code(409)
+    return { teardown }
+  }
+
   app.delete('/projects/:id/branches/:bid', async (req, reply) => {
     const { id, bid } = req.params as { id: string; bid: string }
     if (!gated(id, 'branch.delete', reply)) return reply
-    try { return { teardown: await engine.destroyBranch(id, bid) } }
+    try { return teardownReply(reply, await engine.destroyBranch(id, bid)) }
     catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 
@@ -758,7 +770,7 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
         : sid.startsWith('pg-') ? await engine.removeDbService(id, raw, on)
         : sid.startsWith('st-') ? await engine.removeStorageService(id, raw, on)
         : await engine.removeManagedService(id, raw, on)
-      return { teardown }
+      return teardownReply(reply, teardown)
     } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 
