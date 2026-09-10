@@ -254,6 +254,7 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
   const wrong = join(dir, 'wrong.crt')
   const sampled = join(dir, 'sampled.crt')
   const future = join(dir, 'future.crt')
+  const shouty = join(dir, 'shouty.crt')
   // Committed rather than minted: OpenSSL only grew `req -not_before/-not_after` in 3.5, and the
   // CI runner's 3.0 cannot mint an expired certificate at all. The fixture is the portable way
   // to exercise the installer's refusal, and it is a self-signed pair for a test domain.
@@ -270,6 +271,10 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
     // and nothing else. It passed, and then the first real service, on a hostname nobody had
     // enumerated, got a certificate that did not cover it.
     openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${sampled} -subj '/CN=api.example.test' -addext 'subjectAltName=DNS:api.example.test,DNS:console.example.test,DNS:web-example-main.example.test' 2>/dev/null`)
+    // A certificate whose SANs are capitalised. DNS names are case-insensitive (RFC 4343) and so
+    // is TLS name matching, so this covers exactly the same hostnames and every client accepts
+    // it; a case-sensitive comparison here refused a certificate that works.
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${shouty} -subj '/CN=*.Example.Test' -addext 'subjectAltName=DNS:*.Example.Test,DNS:Example.Test' 2>/dev/null`)
     writeFileSync(junk, 'this is not a certificate\n')
 
     const bad: Array<[string, string, string]> = [
@@ -303,6 +308,10 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
     } else {
       expect(dated.stderr, 'openssl cannot date a certificate forward here').toBeDefined()
     }
+
+    // The capitalised pair is accepted, for the same reason a browser would accept it.
+    const caps = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', shouty, '--tls-key', key], { INSTA_OSS_DOMAIN: 'example.test' })
+    expect(caps.status, caps.stderr).toBe(0)
 
     // ...and the pair that can serve gets past the certificate checks, failing later for the
     // reason a non-root run always fails.

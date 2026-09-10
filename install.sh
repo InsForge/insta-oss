@@ -404,8 +404,12 @@ if [ "$TLS" = custom ]; then
     [ -n "$_sans" ] || _sans=$(openssl x509 -in "$TLS_CERT" -noout -text 2>/dev/null |
       grep -A1 'Subject Alternative Name' | tr -d ' ' | tr '\n' ',')
     # grep -F, not a `case` glob: the `*` in `DNS:*.` is a wildcard to `case` and would match any
-    # single-label SAN, which is the opposite of the check.
-    printf '%s' ",$_sans," | grep -qF ",DNS:*.$DOMAIN," ||
+    # single-label SAN, which is the opposite of the check. And -i, because DNS names are
+    # case-insensitive (RFC 4343) and TLS name matching is: a certificate carrying
+    # `DNS:*.Example.Com` covers exactly the same names as one carrying `DNS:*.example.com`, and
+    # every client would accept it. $DOMAIN is already lower-cased by the shape check above, so
+    # the case that varies is the one inside the certificate, which this install does not own.
+    printf '%s' ",$_sans," | grep -qiF ",DNS:*.$DOMAIN," ||
       die "'$TLS_CERT' does not carry the SAN DNS:*.$DOMAIN: --tls custom serves this one certificate for every hostname this box will ever deploy, so a wildcard is what it needs (it has: $(printf '%s' "$_sans" | sed 's/,$//'))"
     # ...and the two names an operator is handed. A wildcard covers both; this names which one is
     # missing when it does not. The OUTPUT, not the exit status: `x509 -checkhost` prints "does
