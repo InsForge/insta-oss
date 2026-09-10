@@ -2450,6 +2450,65 @@ test('branch merge creates on the target every service the source has and it lac
   expect(calls.filter((c) => c.startsWith('db.fork:'))).toEqual([])
 })
 
+// Every branch-scoped READ owes the same answer the list gives: a registration is the project's
+// namespace entry for a NAME, never proof that this branch has the thing. Advertising a service
+// the branch does not carry hands out a domain, an endpoint and a health verdict for something
+// that is not there, and the credential route said so with a successful empty object.
+test('a branch-scoped read never advertises a service the branch does not carry', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics', branch: 'feat' })
+  await post(`/projects/${id}/services`, { type: 'storage', name: 'uploads', branch: 'feat' })
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache', branch: 'feat' })
+
+  // credentials: a 404 that names the branch, not a 200 carrying `{}`.
+  const cred = await get(`/projects/${id}/services/pg-analytics/credentials`)
+  expect(cred.statusCode).toBe(404)
+  expect(cred.json().error).toBe('service not found on branch "main"')
+  expect((await get(`/projects/${id}/services/st-uploads/credentials?branch=main`)).statusCode).toBe(404)
+  expect((await get(`/projects/${id}/services/rd-cache/credentials`)).statusCode).toBe(404)
+  // ...and on the branch that carries them it is still the bundle.
+  const featSid = (await listOn(id, 'feat')).find((x) => x.name === 'analytics')!.id
+  expect((await get(`/projects/${id}/services/${featSid}/credentials`)).json().credentials.DATABASE_URL).toMatch(/^postgres:\/\//)
+
+  // runtime-health: no row at all here. One was reported, against a container docker has never
+  // heard of, which reads as `crashed` for a service that simply lives elsewhere.
+  const rows = (r: { services: Array<{ serviceId: string }> }): string[] => r.services.map((x) => x.serviceId).sort()
+  expect(rows((await get(`/projects/${id}/runtime-health`)).json())).toEqual(['pg-db'])
+  expect(rows((await get(`/projects/${id}/runtime-health?branch=feat`)).json())).toEqual(['pg-analytics', 'pg-db', 'rd-cache'])
+
+  // the names-only inventory, per branch, and the single service's name list
+  const tree = (await get(`/projects/${id}/secrets/tree`)).json()
+  const svcOf = (branch: string): string[] => tree.branches.find((b: { name: string }) => b.name === branch)
+    .services.map((x: { name: string }) => x.name).sort()
+  expect(svcOf('main')).toEqual(['db', 'store'])
+  expect(svcOf('feat')).toEqual(['analytics', 'cache', 'db', 'store', 'uploads'])
+  expect((await get(`/projects/${id}/services/rd-cache/secrets`)).statusCode).toBe(404)
+  expect((await get(`/projects/${id}/services/rd-cache/secrets?branch=feat`)).statusCode).toBe(200)
+
+  // the project detail's resource list
+  const mainId = await branchOf(id, 'main')
+  const mine = (await get(`/projects/${id}`)).json().resources.filter((r: { branchId: string }) => r.branchId === mainId)
+  expect(mine.map((r: { name: string }) => r.name).sort()).toEqual(['db', 'store'])
+
+  // storage actions on a bucket this branch has no credentials for: a 404, never a call signed
+  // with an empty env.
+  calls.length = 0
+  expect((await get(`/projects/${id}/services/st-uploads/objects`)).statusCode).toBe(404)
+  expect((await put(`/projects/${id}/services/st-uploads/access`, { public: true })).statusCode).toBe(404)
+  expect(calls).toEqual([])
+
+  // ...and the database routes resolve inside the branch: main carries exactly one postgres, so
+  // it is not ambiguous, while feat really does carry two.
+  const inst = await get(`/projects/${id}/database/instance`)
+  expect(inst.statusCode).toBe(200)
+  expect(inst.json()).toMatchObject({ id: 'pg-db' })
+  expect((await get(`/projects/${id}/database/instance?group=analytics`)).statusCode).toBe(404)
+  const both = await get(`/projects/${id}/database/instance?branch=feat`)
+  expect(both.statusCode).toBe(400)
+  expect(both.json().error).toBe('multiple postgres services - specify one: analytics, db')
+})
+
 // Removal is the other half of the same model: the cloud made a service branch-owned so that
 // "add/remove stay local and branches diverge". Tearing every branch's copy down meant deleting
 // the service you added on `feat` also destroyed main's database and its bytes.

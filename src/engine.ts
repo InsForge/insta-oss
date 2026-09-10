@@ -216,6 +216,20 @@ export class Engine {
     if (!this.carries(project, branch, reg, type)) throw new Error(`service not found on branch "${branch.name}"`)
   }
 
+  /** Which branch-scoped kind a service type is, or undefined for compute: a compute group is a
+   *  project-level registration that owns no per-branch resources until a deploy puts a container
+   *  on a branch (the one stated divergence, recorded in COMPATIBILITY). */
+  private branchKind(type: 'postgres' | 'storage' | 'compute' | ManagedDbType): 'postgres' | 'storage' | 'managed' | undefined {
+    return type === 'compute' ? undefined : type === 'postgres' || type === 'storage' ? type : 'managed'
+  }
+
+  /** `assertCarries` for a resolved service id: the branch-scoped 404 every `/services/:sid/*`
+   *  read and action owes a service that lives on some OTHER branch. A no-op for compute. */
+  private assertServiceOnBranch(project: Project, branch: Branch, sid: string, type: 'postgres' | 'storage' | 'compute' | ManagedDbType): void {
+    const kind = this.branchKind(type)
+    if (kind) this.assertCarries(project, branch, { id: sid }, kind)
+  }
+
   /** The branch a service REMOVAL acts on, plus the bare service id: the qualifier on the id
    *  first, then `?branch`, then the default branch (decision 49). That is the branch `add`
    *  resolves through `targetBranch`, so a remove undoes exactly what an add did and nothing on
@@ -923,19 +937,22 @@ export class Engine {
       (b.bindings ?? []).filter((x) => x.target === `compute/${group}`).map((x) => x.envName)
     return {
       projectWide: list.filter((u) => u.branch === null).map((u) => u.name).sort(),
+      // Per branch, only the services that branch CARRIES: the tree is an inventory of the names
+      // a branch's env actually holds, and `secrets` never mints a credential for a service with
+      // no row here, so listing one promised a name that is nowhere in the bundle.
       branches: this.listBranches(projectId).map((b) => ({
         name: b.name,
         isDefault: b.isDefault,
         services: [
-          ...this.dbList(projectId).map((d) => ({
+          ...this.dbList(projectId).filter((d) => this.carries(project, b, d, 'postgres')).map((d) => ({
             type: 'postgres', name: d.name,
             secrets: [...this.mintedNamesOf(project, d.id), ...bound(b.name, `postgres/${d.name}`)].sort(),
           })),
-          ...this.stList(projectId).map((s) => ({
+          ...this.stList(projectId).filter((s) => this.carries(project, b, s, 'storage')).map((s) => ({
             type: 'storage', name: s.name,
             secrets: [...this.mintedNamesOf(project, s.id), ...bound(b.name, `storage/${s.name}`)].sort(),
           })),
-          ...this.managedList(projectId).map((m) => ({
+          ...this.managedList(projectId).filter((m) => this.carries(project, b, m, 'managed')).map((m) => ({
             type: m.type, name: m.name,
             secrets: [...this.mintedManagedNames(m), ...bound(b.name, `${m.type}/${m.name}`)].sort(),
           })),
@@ -951,12 +968,15 @@ export class Engine {
     return Object.keys(suffixBundle(MANAGED_DB[m.type].bundle('h', 'p'), m.name))
   }
 
-  /** A service's secret names (names only): minted credentials + user secrets bound to it. */
-  serviceSecretNames(projectId: string, serviceId: string): string[] {
+  /** A service's secret names (names only): minted credentials + user secrets bound to it. Named
+   *  on ONE branch, like every other `/services/:sid/*` read: the names of a service this branch
+   *  does not carry are the names of nothing. */
+  serviceSecretNames(projectId: string, serviceId: string, branchName?: string): string[] {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
-    const { serviceId: sid } = this.resolveSid(projectId, serviceId)
+    const { branch, serviceId: sid } = this.resolveSid(projectId, serviceId, branchName)
     const svc = this.serviceOf(projectId, sid)
+    this.assertServiceOnBranch(project, branch, sid, svc.type)
     const list = loadState().userSecrets[projectId] ?? []
     const bound = list.filter((u) => u.service === `${svc.type}/${svc.name}`).map((u) => u.name)
     return [...new Set([...this.mintedNamesOf(project, sid), ...bound])].sort()
@@ -1111,6 +1131,7 @@ export class Engine {
     const svc = this.serviceOf(projectId, sid)
     if (svc.type !== 'storage') throw new Error('access control is only supported for storage services')
     const project = this.getProject(projectId)!
+    this.assertCarries(project, branch, { id: sid }, 'storage')
     if (!this.storage.setAccess) throw new Error('access control is not supported by this storage adapter')
     await this.storage.setAccess(this.bucketOf(project, branch, sid), branch.network, isPublic)
     mutate((s) => {
@@ -1133,6 +1154,8 @@ export class Engine {
     const svc = this.serviceOf(projectId, sid)
     if (svc.type !== 'storage') throw new Error('object operations are only supported for storage services')
     const project = this.getProject(projectId)!
+    // A bucket that is not on THIS branch is a 404, not an object listing signed with `{}`.
+    this.assertCarries(project, branch, { id: sid }, 'storage')
     return { ...branch, s3: this.bucketHandle(project, branch, sid)?.env ?? {} }
   }
 
@@ -1230,13 +1253,17 @@ export class Engine {
       if (!states) return { status: 'unknown', machines: 0, failing: 0 }
       return this.healthOverlay(states.get(container), desired, sleptAt, this.serviceKey(branch, serviceId))
     }
+    // Only what THIS branch carries, like the services list: a registration another branch
+    // materialised has no container here, so reporting a row for it read as `crashed` (a desired
+    // state of running against a container docker has never heard of) for a service that is
+    // simply not on this branch.
     return {
       services: [
-        ...this.dbList(projectId).map((d) => ({
+        ...this.dbList(projectId).filter((d) => this.carries(project, branch, d, 'postgres')).map((d) => ({
           serviceId: d.id,
           ...health(this.pgContainer(project, branch, d.id), 'running', branch.databases?.[d.id]?.sleptAt, d.id),
         })),
-        ...this.managedList(projectId).map((m) => ({ serviceId: m.id, ...health(managedContainerName(ref, m.type, m.name), 'running', branch.managed?.[m.id]?.sleptAt, m.id) })),
+        ...this.managedList(projectId).filter((m) => this.carries(project, branch, m, 'managed')).map((m) => ({ serviceId: m.id, ...health(managedContainerName(ref, m.type, m.name), 'running', branch.managed?.[m.id]?.sleptAt, m.id) })),
         ...this.computeGroupNames(projectId).map((g) => {
           const app = branch.apps[g]
           if (!app) return { serviceId: `cp-${g}`, status: 'none', machines: 0, failing: 0 }
@@ -1925,7 +1952,7 @@ export class Engine {
     // same `?group=` the database routes take.
     if (component === 'db') {
       return this.dbList(project.id)
-        .filter((d) => !group || d.name === group)
+        .filter((d) => (!group || d.name === group) && this.carries(project, branch, d, 'postgres'))
         .map((d) => this.pgContainer(project, branch, d.id))
     }
     if (component !== 'compute') {
@@ -2016,12 +2043,14 @@ export class Engine {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     const branches = this.listBranches(projectId)
+    // One row per service a branch actually carries (managed already did this): a registration
+    // another branch materialised reported here as `ready` with an undefined url or bucket.
     const resources = branches.flatMap((b) => [
-      ...this.dbList(projectId).map((d) => ({
+      ...this.dbList(projectId).filter((d) => this.carries(project, b, d, 'postgres')).map((d) => ({
         kind: 'postgres', name: d.name as string | null, branchId: b.id,
         ref: { url: this.dbHandle(project, b, d.id)?.url }, status: 'ready',
       })),
-      ...this.stList(projectId).map((x) => ({
+      ...this.stList(projectId).filter((x) => this.carries(project, b, x, 'storage')).map((x) => ({
         kind: 'storage', name: x.name as string | null, branchId: b.id,
         ref: { bucket: this.bucketHandle(project, b, x.id)?.bucket }, status: 'ready',
       })),
@@ -3195,7 +3224,11 @@ export class Engine {
   credentials(projectId: string, serviceId: string, branchName?: string): Record<string, string> {
     const { branch, serviceId: sid } = this.resolveSid(projectId, serviceId, branchName)
     const project = this.getProject(projectId)!
-    this.serviceOf(projectId, sid) // 404 for an id no registration claims
+    const svc = this.serviceOf(projectId, sid) // 404 for an id no registration claims
+    // ...and a 404 for one this BRANCH does not carry. `credentialsOn` answers `{}` for a service
+    // with no row here, which the route served as a 200: a caller asking for the credentials of a
+    // database that lives on another branch was told, successfully, that it has none.
+    this.assertServiceOnBranch(project, branch, sid, svc.type)
     return this.credentialsOn(project, branch, sid)
   }
 
@@ -3501,7 +3534,11 @@ export class Engine {
   /** Which postgres service a `/database/*` request means: `?group=`, or the project's sole one. */
   dbTarget(projectId: string, branchName?: string, group?: string): { project: Project; branch: Branch; serviceId: string; container: string; url: string } {
     const { project, branch } = this.branchOrThrow(projectId, branchName)
-    const list = this.dbList(projectId)
+    // The postgres services on THIS branch. Counting registrations another branch materialised
+    // made `insta db url --branch feat` answer "multiple postgres services - specify one: a, b"
+    // on a branch that carries exactly one of them, and pick one it does not carry when it was
+    // the only registration.
+    const list = this.dbList(projectId).filter((d) => this.carries(project, branch, d, 'postgres'))
     const reg = group !== undefined
       ? list.find((d) => d.name === group) ?? (() => { throw new Error(`postgres service not found: ${group}`) })()
       : list.length === 1 ? list[0]

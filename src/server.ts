@@ -392,7 +392,9 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     const { id, sid } = req.params as { id: string; sid: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     if (!gated(id, 'secrets.read', reply)) return reply
-    try { return { secrets: engine.serviceSecretNames(id, sid) } }
+    // Same branch resolution as every other `/services/:sid/*` route (decision 49): a qualified
+    // sid names the branch, then `?branch`, then the default.
+    try { return { secrets: engine.serviceSecretNames(id, sid, (req.query as { branch?: string }).branch) } }
     catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 
