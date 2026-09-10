@@ -2980,4 +2980,3 @@ test('a compute service answers its source locally — it always runs an image; 
   expect((await app.inject({ method: 'GET', url: `/projects/${id}/services/cp-nope/source` })).statusCode).toBe(404)
   expect((await app.inject({ method: 'GET', url: `/projects/${id}/services/pg-db/source` })).statusCode).toBe(400)
 })
-

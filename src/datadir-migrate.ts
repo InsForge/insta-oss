@@ -320,4 +320,3 @@ export function swapUrlHost(url: string, container: string): string {
   const slash = rest.indexOf('/')
   return `${url.slice(0, at + 1)}${container}:5432${slash === -1 ? '' : rest.slice(slash)}`
 }
-
