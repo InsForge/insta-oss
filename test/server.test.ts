@@ -2644,6 +2644,40 @@ test('a branch-scoped read never advertises a service the branch does not carry'
   expect(both.json().error).toBe('multiple postgres services - specify one: analytics, db')
 })
 
+// Two readers left over from the same sweep: the unsuffixed alias belongs to the oldest service
+// of its type the BRANCH carries (that is how the values are assembled), and a user secret bound
+// to a service is stored per branch, so it can only bind to a service that branch has.
+test('the alias holder, and what a secret can bind to, are per branch as well', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics' })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  const featSid = (name: string) => listOn(id, 'feat').then((rows) => rows.find((x) => x.name === name)!.id)
+  await del_(`/projects/${id}/services/${await featSid('db')}`)   // feat now carries `analytics` only
+
+  // The bundle gives feat's unsuffixed DATABASE_URL to `analytics`, the oldest it carries...
+  const featSecrets = (await get(`/projects/${id}/secrets?branch=feat`)).json().secrets
+  expect(featSecrets.DATABASE_URL).toBe(featSecrets.DATABASE_URL_ANALYTICS)
+  // ...so the names-only views have to say the same thing, per branch.
+  const tree = (await get(`/projects/${id}/secrets/tree`)).json()
+  const secretsOf = (branch: string, name: string): string[] => tree.branches
+    .find((b: { name: string }) => b.name === branch).services
+    .find((x: { name: string }) => x.name === name).secrets
+  expect(secretsOf('feat', 'analytics')).toEqual(['DATABASE_URL', 'DATABASE_URL_ANALYTICS'])
+  expect(secretsOf('main', 'analytics')).toEqual(['DATABASE_URL_ANALYTICS'])
+  expect(secretsOf('main', 'db')).toContain('DATABASE_URL')
+  expect((await get(`/projects/${id}/services/${await featSid('analytics')}/secrets`)).json().secrets)
+    .toEqual(['DATABASE_URL', 'DATABASE_URL_ANALYTICS'])
+  expect((await get(`/projects/${id}/services/pg-analytics/secrets`)).json().secrets).toEqual(['DATABASE_URL_ANALYTICS'])
+
+  // And a secret bound to a service feat does not have is refused, not stored where nothing can
+  // read it: user secrets are per branch, and the branch-scoped inventory would not list it.
+  const bind = await put(`/projects/${id}/secrets/APP_TOKEN`, { value: 't', branch: 'feat', service: 'postgres/db' })
+  expect(bind.statusCode).toBe(400)
+  expect(bind.json().error).toBe('service not found: postgres/db')
+  expect((await put(`/projects/${id}/secrets/APP_TOKEN`, { value: 't', branch: 'feat', service: 'postgres/analytics' })).statusCode).toBe(200)
+  expect((await put(`/projects/${id}/secrets/APP_TOKEN`, { value: 't', branch: 'main', service: 'postgres/db' })).statusCode).toBe(200)
+})
+
 // Removal is the other half of the same model: the cloud made a service branch-owned so that
 // "add/remove stay local and branches diverge". Tearing every branch's copy down meant deleting
 // the service you added on `feat` also destroyed main's database and its bytes.

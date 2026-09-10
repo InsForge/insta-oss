@@ -768,11 +768,17 @@ export class Engine {
     if (branch && !this.getBranchByName(projectId, branch)) throw new Error(`branch "${branch}" not found`)
     if (service) {
       if (!branch) throw new Error('binding a secret to a service requires a branch')
+      // The services THIS branch has. A user secret is stored per branch, so binding one to a
+      // service that lives on another branch writes a row nothing reads: no env carries it and,
+      // now that the inventory is branch-scoped, nothing lists it either. Compute stays
+      // project-wide, as everywhere else.
+      const project = this.getProject(projectId)!
+      const b = this.getBranchByName(projectId, branch)!
       const valid = [
-        ...this.dbList(projectId).map((d) => `postgres/${d.name}`),
-        ...this.stList(projectId).map((s) => `storage/${s.name}`),
+        ...this.dbList(projectId).filter((d) => this.carries(project, b, d, 'postgres')).map((d) => `postgres/${d.name}`),
+        ...this.stList(projectId).filter((x) => this.carries(project, b, x, 'storage')).map((x) => `storage/${x.name}`),
         ...this.computeGroupNames(projectId).map((g) => `compute/${g}`),
-        ...this.managedList(projectId).map((m) => `${m.type}/${m.name}`)]
+        ...this.managedList(projectId).filter((m) => this.carries(project, b, m, 'managed')).map((m) => `${m.type}/${m.name}`)]
       if (!valid.includes(service)) throw new Error(`service not found: ${service}`)
     }
     mutate((st) => {
@@ -952,11 +958,11 @@ export class Engine {
         services: [
           ...this.dbList(projectId).filter((d) => this.carries(project, b, d, 'postgres')).map((d) => ({
             type: 'postgres', name: d.name,
-            secrets: [...this.mintedNamesOf(project, d.id), ...bound(b.name, `postgres/${d.name}`)].sort(),
+            secrets: [...this.mintedNamesOf(project, b, d.id), ...bound(b.name, `postgres/${d.name}`)].sort(),
           })),
           ...this.stList(projectId).filter((s) => this.carries(project, b, s, 'storage')).map((s) => ({
             type: 'storage', name: s.name,
-            secrets: [...this.mintedNamesOf(project, s.id), ...bound(b.name, `storage/${s.name}`)].sort(),
+            secrets: [...this.mintedNamesOf(project, b, s.id), ...bound(b.name, `storage/${s.name}`)].sort(),
           })),
           ...this.managedList(projectId).filter((m) => this.carries(project, b, m, 'managed')).map((m) => ({
             type: m.type, name: m.name,
@@ -985,7 +991,7 @@ export class Engine {
     this.assertServiceOnBranch(project, branch, sid, svc.type)
     const list = loadState().userSecrets[projectId] ?? []
     const bound = list.filter((u) => u.service === `${svc.type}/${svc.name}`).map((u) => u.name)
-    return [...new Set([...this.mintedNamesOf(project, sid), ...bound])].sort()
+    return [...new Set([...this.mintedNamesOf(project, branch, sid), ...bound])].sort()
   }
 
   /** Structural merge (additive, no data — platform spec §6): materialize on the target branch
@@ -3160,21 +3166,24 @@ export class Engine {
     return out
   }
 
-  /** Env names one service mints (names only, for the inventory routes): always its SUFFIXED set,
-   *  plus the canonical unsuffixed keys when it is the oldest of its type and therefore holds the
-   *  aliases. Derived from the same rule the value assembly above applies. */
-  private mintedNamesOf(project: Project, serviceId: string): string[] {
+  /** Env names one service mints ON ONE BRANCH (names only, for the inventory routes): always its
+   *  SUFFIXED set, plus the canonical unsuffixed keys when it is the oldest of its type and
+   *  therefore holds the aliases. Derived from the same rule the value assembly above applies —
+   *  including which service holds the aliases, which `dbSecretsFor` and `storageSecretsFor`
+   *  decide over the services the BRANCH carries. The project's oldest registration may not be on
+   *  this branch at all, and naming it here reported `DATABASE_URL` under a service the branch
+   *  does not have while the branch's real alias holder showed none. */
+  private mintedNamesOf(project: Project, branch: Branch, serviceId: string): string[] {
     const parsed = parseServiceId(serviceId)
     if (!parsed) return []
     if (parsed.type === 'postgres') {
-      const canonical = this.dbList(project.id)[0]?.id === parsed.serviceId
+      const canonical = this.dbList(project.id).find((d) => this.carries(project, branch, d, 'postgres'))?.id === parsed.serviceId
       return [...(canonical ? ['DATABASE_URL'] : []), `DATABASE_URL_${envSuffix(parsed.name)}`]
     }
     if (parsed.type === 'storage') {
-      const branch = this.listBranches(project.id).find((b) => b.isDefault) ?? this.listBranches(project.id)[0]
-      const env = branch ? this.bucketHandle(project, branch, parsed.serviceId)?.env : undefined
+      const env = this.bucketHandle(project, branch, parsed.serviceId)?.env
       const keys = env ? Object.keys(env) : [...CANONICAL_KEYS.storage]
-      const canonical = this.stList(project.id)[0]?.id === parsed.serviceId
+      const canonical = this.stList(project.id).find((x) => this.carries(project, branch, x, 'storage'))?.id === parsed.serviceId
       return [...(canonical ? keys : []), ...keys.map((k) => `${k}_${envSuffix(parsed.name)}`)]
     }
     if (isManagedDbType(parsed.type)) return this.mintedManagedNames({ type: parsed.type, name: parsed.name })
@@ -3410,7 +3419,10 @@ export class Engine {
       if (newName === reg.name) return { id: reg.id, type: 'postgres', name: reg.name, status: 'ready', pg_version: PG_VERSION }
       if (this.dbList(projectId).some((d) => d.name === newName)) throw new Error(`postgres service "${newName}" already exists`)
       const newId = pgServiceId(newName)
-      const branches = this.listBranches(projectId)
+      // Only the branches that CARRY it: a rename mints a hostname exactly where the service has a
+      // row, so checking the label on branches without one refused the rename over a collision
+      // that would never happen (the managed rename already scopes this to its carriers).
+      const branches = this.listBranches(projectId).filter((b) => this.carries(project, b, reg, 'postgres'))
       for (const b of branches) this.assertHostFree(this.labelFor('postgres', newName, this.ref(project, b)))
       for (const b of branches) {
         const row = this.dbHandle(project, b, serviceId)
