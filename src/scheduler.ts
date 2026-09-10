@@ -879,6 +879,56 @@ export function cgroupMemory(root = '/sys/fs/cgroup'): { availableBytes: number;
   }
 }
 
+/** The ZFS ARC's RECLAIMABLE part, in bytes, or 0 on a machine with no ZFS.
+ *
+ *  On Linux the ARC is not page cache: it is allocated through the SPL's own caches and scatter
+ *  ABDs, so it is counted in neither the page-cache nor the reclaimable-slab terms the kernel
+ *  builds `MemAvailable` from. It is nonetheless given back under pressure, down to `c_min`,
+ *  through the ARC's shrinker. So on a ZFS host with a warm ARC, `MemAvailable` understates what
+ *  is available by most of the ARC, and this daemon would read a box that is fine as permanently
+ *  under its RAM floor and evict continuously -- on the product whose whole premise is keeping
+ *  branches asleep and waking them on traffic. `cgroupMemory` already adds a reclaimable term
+ *  back for the same reason; the `/proc/meminfo` path had no equivalent.
+ *
+ *  `size - c_min` is the part the shrinker may take: `c_min` is the floor the ARC will not go
+ *  below (1/32 of RAM by default). Absent or unparseable file: 0, never an error, because the
+ *  safe direction here is the SMALLER number -- a machine with no ZFS must be bit for bit
+ *  unaffected, and a probe that cannot answer must not be the thing that switches the floor off.
+ *
+ *  If a future OpenZFS ever accounts the ARC into `MemAvailable` (it would have to register the
+ *  pages under a counter the kernel's MemAvailable sums, which it does not do today), this term
+ *  would double count. That is why the caller CLAMPS to the total: the error would be bounded by
+ *  the ARC rather than unbounded, and it would show up as evicting late rather than never. */
+export function arcReclaimable(procRoot = '/proc'): number {
+  try {
+    // `name  type  data`, three columns, after two header lines.
+    const text = readFileSync(join(procRoot, 'spl', 'kstat', 'zfs', 'arcstats'), 'utf8')
+    const field = (name: string): number => Number(new RegExp(`^${name}\\s+\\d+\\s+(\\d+)\\b`, 'm').exec(text)?.[1] ?? NaN)
+    const size = field('size')
+    if (!Number.isFinite(size)) return 0
+    const floor = field('c_min')
+    return Math.max(0, size - (Number.isFinite(floor) ? floor : 0))
+  } catch {
+    return 0
+  }
+}
+
+/** What the MACHINE has, from `/proc/meminfo`, with the ZFS ARC's reclaimable part added back.
+ *  Clamped to the total: available can never exceed it, whatever the two sources say. */
+export function hostMemory(procRoot = '/proc'): { availableBytes: number; totalBytes: number } | null {
+  try {
+    const text = readFileSync(join(procRoot, 'meminfo'), 'utf8')
+    const kb = (field: string): number => Number(new RegExp(`^${field}:\\s+(\\d+) kB`, 'm').exec(text)?.[1] ?? NaN)
+    const total = kb('MemTotal')
+    const available = kb('MemAvailable')
+    if (!Number.isFinite(total) || !Number.isFinite(available)) return null
+    const totalBytes = total * 1024
+    return { totalBytes, availableBytes: Math.min(totalBytes, available * 1024 + arcReclaimable(procRoot)) }
+  } catch {
+    return null
+  }
+}
+
 /** The `Runtime` over the docker CLI. One `docker ps -a` per sweep and one `docker stats` when
  *  anything runs; `memory()` is synchronous, so it answers from this process's cgroup ceiling or
  *  /proc/meminfo (Linux, whichever is tighter) or from the synthetic budget minus the last RSS
@@ -937,17 +987,12 @@ export class DockerRuntime implements Runtime {
 
   private meminfo(): { availableBytes: number; totalBytes: number } | null {
     if (this.meminfoMissing) return null
-    try {
-      const text = readFileSync('/proc/meminfo', 'utf8')
-      const kb = (field: string): number => Number(new RegExp(`^${field}:\\s+(\\d+) kB`, 'm').exec(text)?.[1] ?? NaN)
-      const total = kb('MemTotal')
-      const available = kb('MemAvailable')
-      if (!Number.isFinite(total) || !Number.isFinite(available)) { this.meminfoMissing = true; return null }
-      return { totalBytes: total * 1024, availableBytes: available * 1024 }
-    } catch {
-      this.meminfoMissing = true
-      return null
-    }
+    // Read on the same cadence as everything else here: `memory()` is called once per sweep and
+    // once per wake that needs room, and the ARC file is read with it, so the two halves of the
+    // sum are always the same moment.
+    const out = hostMemory()
+    if (!out) { this.meminfoMissing = true; return null }
+    return out
   }
 
   async start(container: string): Promise<void> {

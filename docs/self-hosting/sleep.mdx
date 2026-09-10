@@ -82,6 +82,11 @@ when it runs in a container that has one, whichever is smaller. A ceiling matter
 `/proc/meminfo` describes the machine even from inside a container, so a memory-limited daemon
 would otherwise believe it had the whole box and evict nothing.
 
+On ZFS the reading adds back the reclaimable part of the ARC. The ARC is not page cache, so the
+kernel's `MemAvailable` leaves it out even though it is handed back under pressure, and a host
+with a warm ARC would otherwise read as permanently under the floor and evict on every sweep. See
+[ZFS](/self-hosting/install#zfs).
+
 On macOS the reading Docker reports is not the host memory, so pressure eviction is off unless you
 set `INSTA_OSS_MEM_BUDGET_MB` to the budget you want the daemon to assume.
 

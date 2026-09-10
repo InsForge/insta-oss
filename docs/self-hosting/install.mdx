@@ -221,6 +221,37 @@ losetup -c "$(findmnt -no SOURCE /var/lib/instacloud)"
 xfs_growfs /var/lib/instacloud
 ```
 
+### ZFS
+
+ZFS works, and nothing here needs configuring for it. Two things are worth knowing.
+
+**Branching uses native cloning only when block cloning is on.** The probe is a real
+`cp --reflink=always`, not a list of filesystem names, so a pool with block cloning enabled gets
+sub-second forks the same way XFS and Btrfs do, and a pool without it falls back to
+`pg_basebackup` and a file copy. Block cloning arrived in OpenZFS 2.2 and ships DISABLED by
+default in the 2.2 series after an early data-corruption bug, which includes the 2.2.x that Ubuntu
+24.04 carries. So a stock Ubuntu 24.04 ZFS root probes as no-reflink, and on an empty data
+directory the installer then builds its XFS loop image on top of ZFS. That works, and it is two
+layers of copy-on-write with the ARC caching the image underneath. If you would rather have one
+layer, turn block cloning on before installing, or pass `--data-dir` to a dataset you are happy to
+keep as ZFS and accept streaming forks.
+
+```bash
+zpool get feature@block_cloning rpool          # active | enabled | disabled
+cat /sys/module/zfs/parameters/zfs_bclone_enabled   # 1 = on
+```
+
+Enabling it is a pool upgrade plus the module parameter, and it is your call whether to take that
+on: read the OpenZFS release notes for the version you run first.
+
+**The ARC is counted as available memory.** The daemon evicts sleeping services when free memory
+falls under a floor (see [sleep](/self-hosting/sleep)). On Linux the ZFS ARC is not page cache, so
+the kernel's own `MemAvailable` does not count it even though the ARC gives memory back under
+pressure. The daemon reads `/proc/spl/kstat/zfs/arcstats` and adds back the part the ARC will
+release (`size` minus `c_min`), so a warm ARC does not read as a full machine. You do not need to
+cap `zfs_arc_max` to keep the daemon from evicting; cap it if you want the ARC smaller for its own
+sake.
+
 ## Uninstall
 
 Stop the stack and keep every byte of data:
