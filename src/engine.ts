@@ -1439,6 +1439,12 @@ export class Engine {
       }
     })
     this.scheduler.register(provisioned.map((p) => this.serviceKey(p.branch, entry.id))) // WP3
+    // Its postgres and storage siblings do this and managed did not. `reconcile()` is what opens a
+    // lane listener, and it runs only at `router.start()` and on invalidate, so a managed database
+    // added after boot had no lane until something unrelated invalidated. Server-mode redis and
+    // mongodb hide it behind their fixed lanes, so what it actually broke was local mode and
+    // server-mode MySQL, which take a per-service port.
+    this.router.invalidate()                                          // WP2
     this.emit(projectId, b.name, 'resource', 'service.added', { type, name })
     return this.managedRow(entry)
   }
