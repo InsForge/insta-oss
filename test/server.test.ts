@@ -2288,6 +2288,117 @@ test('storage rename re-keys the id only; the bucket handle is immutable', async
   // ...and the minted env names follow the NEW name.
   expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.BUCKET_NAME_ASSETS).toBe('io-demo-main-store')
 })
+
+// ---- services are branch-scoped, like the cloud's -------------------------------------------
+// The hosted control plane made a service branch-owned in migration 0022_branch_scoped_services
+// ("it becomes branch-owned so add/remove stay local and branches diverge"): POST /services takes
+// an optional `branch`, resolves it to the default branch when absent, and writes ONE row on ONE
+// branch with no fan-out. insta-oss used to materialise every registration on every branch, so
+// `insta services add postgres db --branch feat` also built a database, with its own credentials,
+// on main. The registration stays project-level here (a service id is the project's namespace and
+// has to be stable across branches, decision 49); the SERVICE is the row on the branch.
+const names = (rows: Array<{ name: string }>): string[] => rows.map((s) => s.name).sort()
+const listOn = async (id: string, branch: string): Promise<Array<{ id: string; name: string; type: string }>> =>
+  (await get(`/projects/${id}/services?branch=${branch}`)).json().services
+
+test('a service added with ?branch lands on that branch ONLY, and nothing is built on the others', async () => {
+  const id = await createProject()
+  expect((await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })).statusCode).toBe(201)
+  calls.length = 0
+
+  expect((await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics', branch: 'feat' })).statusCode).toBe(201)
+  expect((await post(`/projects/${id}/services`, { type: 'storage', name: 'uploads', branch: 'feat' })).statusCode).toBe(201)
+  expect((await post(`/projects/${id}/services`, { type: 'redis', name: 'cache', branch: 'feat' })).statusCode).toBe(201)
+
+  // Exactly one container/bucket each, on feat's ref. Nothing was provisioned against main's.
+  expect(calls).toContain('db.provision:io-demo-feat-pg-analytics')
+  expect(calls).toContain('st.provision:demo-feat:uploads')
+  expect(calls).toContain('md.provision:io-demo-feat-rd-cache')
+  expect(calls.filter((c) => c.includes('demo-main'))).toEqual([])
+
+  // The rows exist on feat and on no other branch, so no credentials were minted on main.
+  const mainB = await branchOf(id), featB = await branchOf(id, 'feat')
+  expect(Object.keys(loadState().branches[featB].databases ?? {}).sort()).toEqual(['pg-analytics', 'pg-db'])
+  expect(Object.keys(loadState().branches[mainB].databases ?? {})).toEqual(['pg-db'])
+  expect(loadState().branches[mainB].buckets?.['st-uploads']).toBeUndefined()
+  expect(loadState().branches[mainB].managed?.['rd-cache']).toBeUndefined()
+
+  // ...and the listing agrees, per branch.
+  expect(names(await listOn(id, 'feat'))).toEqual(['analytics', 'cache', 'db', 'store', 'uploads'])
+  expect(names(await listOn(id, 'main'))).toEqual(['db', 'store'])
+})
+
+test('a service added with no branch lands on the default branch only', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  calls.length = 0
+  expect((await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics' })).statusCode).toBe(201)
+  expect(calls.filter((c) => c.startsWith('db.provision:'))).toEqual(['db.provision:io-demo-main-pg-analytics'])
+  expect(names(await listOn(id, 'main'))).toEqual(['analytics', 'db', 'store'])
+  expect(names(await listOn(id, 'feat'))).toEqual(['db', 'store'])
+})
+
+test('an unknown ?branch on a service add is a 404, not a silent write to the default branch', async () => {
+  const id = await createProject()
+  calls.length = 0
+  const r = await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics', branch: 'nope' })
+  expect(r.statusCode).toBe(404)
+  expect(r.json().error).toBe('branch "nope" not found')
+  expect(calls.filter((c) => c.startsWith('db.provision:'))).toEqual([])
+  expect(names(await listOn(id, 'main'))).toEqual(['db', 'store'])
+})
+
+test('the same name is addable on a second branch, and refused on a branch that already carries it', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  // main already carries `db` from the fixture, so a second add there is the conflict...
+  const dup = await post(`/projects/${id}/services`, { type: 'postgres', name: 'db', branch: 'main' })
+  expect(dup.statusCode).toBe(409)
+  expect(dup.json().error).toBe('service already exists on this branch')
+  // ...while `analytics`, added on feat only, can still be added to main afterwards: one
+  // registration, one row per branch, each with its own container and its own data directory.
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics', branch: 'feat' })
+  calls.length = 0
+  expect((await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics', branch: 'main' })).statusCode).toBe(201)
+  expect(calls).toContain('db.provision:io-demo-main-pg-analytics')
+  // One registration, not two.
+  expect(loadState().projects[id].dbServices?.filter((d) => d.name === 'analytics')).toHaveLength(1)
+  expect(names(await listOn(id, 'main'))).toEqual(['analytics', 'db', 'store'])
+})
+
+test('a new branch forks what its SOURCE carries, not every registration the project ever made', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  // Added to feat only, AFTER main was branched.
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics', branch: 'feat' })
+
+  // A branch cut from main does not inherit feat's service...
+  expect((await post(`/projects/${id}/branches`, { name: 'from-main', from: 'main' })).statusCode).toBe(201)
+  expect(names(await listOn(id, 'from-main'))).toEqual(['db', 'store'])
+  // ...and one cut from feat does.
+  expect((await post(`/projects/${id}/branches`, { name: 'from-feat', from: 'feat' })).statusCode).toBe(201)
+  expect(names(await listOn(id, 'from-feat'))).toEqual(['analytics', 'db', 'store'])
+  expect(loadState().branches[await branchOf(id, 'from-feat')].databases?.['pg-analytics']).toBeDefined()
+})
+
+test('branch merge creates on the target every service the source has and it lacks, empty', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics', branch: 'feat' })
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache', branch: 'feat' })
+  calls.length = 0
+
+  const r = await post(`/projects/${id}/branches/main/merge`, { from: 'feat' })
+  expect(r.statusCode).toBe(200)
+  const { created, skipped } = r.json()
+  expect(created).toEqual(expect.arrayContaining([{ type: 'postgres', name: 'analytics' }, { type: 'redis', name: 'cache' }]))
+  // The two the target already had are reported as skipped, not rebuilt.
+  expect(skipped).toEqual(expect.arrayContaining([{ type: 'postgres', name: 'db', reason: 'exists' }, { type: 'storage', name: 'store', reason: 'exists' }]))
+  expect(calls.filter((c) => c.startsWith('db.provision:'))).toEqual(['db.provision:io-demo-main-pg-analytics'])
+  expect(names(await listOn(id, 'main'))).toEqual(['analytics', 'cache', 'db', 'store'])
+  // Structural only: the merge provisions a fresh empty database, it never forks feat's data.
+  expect(calls.filter((c) => c.startsWith('db.fork:'))).toEqual([])
+})
 // ---- end region WP5 ----
 
 test('a compute service answers its source locally — it always runs an image; the repo routes stay cloud-only', async () => {

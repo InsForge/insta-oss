@@ -321,14 +321,19 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     const body = (req.body ?? {}) as { type?: string; name?: string; branch?: string; public?: boolean; volumeGib?: number; port?: number; alwaysOn?: boolean; image?: string }
     if (!body.type || !body.name) return reply.code(400).send({ error: 'type and name required' })
     if (!gated(id, 'service.add', reply)) return reply
-    // Every type is a project-level registration materialised on every branch: postgres gets its
-    // own container per branch, storage its own bucket, managed databases a fresh private instance
-    // with fresh credentials (no data clone), compute a group whose container arrives on first
-    // deploy. `image` is accepted and ignored — the image reaches a service through deploy.
+    // `branch` names the branch the service is created on, defaulting to the project's default
+    // branch — the cloud's shape (platform server.ts:1492) and what the docs promise. Postgres,
+    // storage and managed databases are created on THAT branch only: each is real infrastructure
+    // with its own credentials, and fanning them out meant an agent adding a database on its own
+    // branch also built one on main. A compute group is the exception: it is a registration and
+    // nothing else until a deploy puts a container on a branch, so it stays project-level and
+    // `branch` does not apply to it. `image` is accepted and ignored — the image reaches a service
+    // through deploy.
     const add = async (): Promise<unknown> => {
-      if (body.type === 'postgres') return engine.addDbService(id, body.name!)
-      if (body.type === 'storage') return engine.addStorageService(id, body.name!, { ...(body.public !== undefined ? { public: body.public } : {}) })
-      if (isManagedDbType(body.type!)) return engine.addManagedService(id, body.type as 'redis' | 'mysql' | 'mongodb', body.name!)
+      const on = { ...(body.branch !== undefined ? { branch: body.branch } : {}) }
+      if (body.type === 'postgres') return engine.addDbService(id, body.name!, on)
+      if (body.type === 'storage') return engine.addStorageService(id, body.name!, { ...on, ...(body.public !== undefined ? { public: body.public } : {}) })
+      if (isManagedDbType(body.type!)) return engine.addManagedService(id, body.type as 'redis' | 'mysql' | 'mongodb', body.name!, on)
       // volumeGib (compute only) attaches a persistent /data volume (also attachable later via
       // PUT …/volume, and deletable via DELETE …/volume — cloud parity).
       return engine.addComputeService(id, body.name!, body.volumeGib, {

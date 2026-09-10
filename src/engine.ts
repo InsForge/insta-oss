@@ -189,6 +189,27 @@ export class Engine {
     return this.listBranches(projectId).find((b) => b.name === name)
   }
 
+  /** The branch a branch-scoped operation acts on: the one named, else the project's default. The
+   *  cloud's `resolveBranch` (platform `src/provisioning/services.ts:344`), which is what every
+   *  service add, list and merge resolves through there. */
+  private targetBranch(projectId: string, branchName?: string): Branch {
+    const branches = this.listBranches(projectId)
+    const b = branchName
+      ? branches.find((x) => x.name === branchName)
+      : branches.find((x) => x.isDefault) ?? branches[0]
+    if (!b) throw new Error(branchName ? `branch "${branchName}" not found` : 'project has no branches')
+    return b
+  }
+
+  /** Whether a branch actually CARRIES a registered service, as opposed to the project having
+   *  registered the name. Services are branch-scoped (see `addDbService`), so this is what the
+   *  services list, `mergeBranch` and a clone's materialisation all ask. */
+  private carries(project: Project, branch: Branch, reg: { id: string }, type: 'postgres' | 'storage' | 'managed'): boolean {
+    if (type === 'postgres') return !!this.dbHandle(project, branch, reg.id)
+    if (type === 'storage') return !!this.bucketHandle(project, branch, reg.id)
+    return !!branch.managed?.[reg.id]
+  }
+
   /** The postgres handle of ONE database service on a branch: READ from the row (decision 17); a
    *  row provisioned before the data migration still runs today's `io-<ref>-pg` container. */
   private pgContainer(project: Project, branch: Branch, serviceId = 'pg-db'): string {
@@ -228,9 +249,15 @@ export class Engine {
         throw new Error('docker has no free network subnets; see docs/self-hosting/install (default-address-pools)')
       }
     }
-    const dbs = this.dbList(project.id)
-    const stores = this.stList(project.id)
-    const managedRegs = this.managedList(project.id)
+    // A clone materialises exactly what its SOURCE carries, never every registration the project
+    // has ever made: services are branch-scoped, so a postgres added to `main` after `feat` was cut
+    // must not appear on `feat`, and one added to `feat` must not reach `main`. This is the cloud's
+    // `forkFromParent`, which iterates the parent BRANCH's services (platform
+    // `src/provisioning/branch.ts:270`). A project's first branch has no source and, at that point,
+    // no registrations either.
+    const dbs = this.dbList(project.id).filter((d) => !source || this.carries(project, source, d, 'postgres'))
+    const stores = this.stList(project.id).filter((s) => !source || this.carries(project, source, s, 'storage'))
+    const managedRegs = this.managedList(project.id).filter((m) => !source || this.carries(project, source, m, 'managed'))
     // Check every hostname this branch will mint and reserve every lane port it needs BEFORE the
     // first provisioning await, inside the engine-wide provision chain (decision 51). The check
     // itself writes nothing, so it stays out of a mutate: the chain is what makes it atomic.
@@ -773,8 +800,16 @@ export class Engine {
     const rt = (serviceId: string): string | undefined => (branch ? this.rowRuntime(this.serviceKey(branch, serviceId)) : undefined)
     const id = (serviceId: string): string => (branch ? this.qualifiedId(branch, serviceId) : serviceId)
     const settings = (serviceId: string): ServiceSettings => project.serviceSettings?.[serviceId] ?? {}
+    // Only what THIS branch carries. Postgres, storage and managed databases are branch-scoped
+    // (see `addDbService`), so listing every registration would advertise a domain, an endpoint and
+    // a set of credentials for a service that does not exist on the branch being listed — which is
+    // also what the cloud refuses to do: its list resolves one branch and filters on `branch_id`
+    // (platform `src/provisioning/repos.ts:475`). With no branch resolved (no branches at all) the
+    // registrations are all there is to report.
+    const on = <T extends { id: string }>(regs: T[], type: 'postgres' | 'storage' | 'managed'): T[] =>
+      (branch ? regs.filter((r) => this.carries(project, branch, r, type)) : regs)
     return [
-      ...this.dbList(projectId).map((d) => ({
+      ...on(this.dbList(projectId), 'postgres').map((d) => ({
         id: id(d.id), type: 'postgres', name: d.name, status: 'ready', pg_version: PG_VERSION,
         ...this.rowNetwork(project, branch, { id: d.id, type: 'postgres', name: d.name }),
         runtime: rt(d.id),
@@ -783,7 +818,7 @@ export class Engine {
       })),
       // Storage endpoint/container derive from the branch's OWN minted creds, so branches
       // provisioned by an older storage adapter still report their real server.
-      ...this.stList(projectId).map((s) => ({
+      ...on(this.stList(projectId), 'storage').map((s) => ({
         id: id(s.id), type: 'storage', name: s.name, status: 'ready',
         public: (branch ? this.bucketHandle(project, branch, s.id)?.public : s.public) ?? s.public ?? false,
         ...this.rowNetwork(project, branch, { id: s.id, type: 'storage', name: s.name }),
@@ -797,7 +832,7 @@ export class Engine {
       // Managed databases (redis/mysql/mongodb): one private container per branch. `port` +
       // `volume_gib` are what the CLI renders (`tcp/6379  vol 1Gi`); the volume size is the
       // cloud's fixed 1Gi, advisory locally like every other recorded size.
-      ...this.managedList(projectId).map((m) => ({
+      ...on(this.managedList(projectId), 'managed').map((m) => ({
         id: id(m.id), type: m.type, name: m.name, status: 'ready',
         port: MANAGED_DB[m.type].port, volume_gib: MANAGED_DB[m.type].volumeGib,
         always_on: branch ? this.effectiveAlwaysOn(project, branch, m.id) : undefined,
@@ -906,14 +941,29 @@ export class Engine {
     if (!source) throw new Error(`source branch not found: ${fromName}`)
     if (source.id === target.id) throw new Error('source and target are the same branch')
 
+    const project = this.getProject(projectId)!
     const created: Array<{ type: string; name: string }> = []
-    // Every non-compute service is a project-level registration materialized on every branch, so
-    // the target always already has it (fresh + empty for managed databases — data never merges).
-    const skipped: Array<{ type: string; name: string; reason: string }> = [
-      ...this.dbList(projectId).map((d) => ({ type: 'postgres', name: d.name, reason: 'exists' })),
-      ...this.stList(projectId).map((x) => ({ type: 'storage', name: x.name, reason: 'exists' })),
-      ...this.managedList(projectId).map((m) => ({ type: m.type as string, name: m.name, reason: 'exists' })),
+    const skipped: Array<{ type: string; name: string; reason: string }> = []
+    // Services are branch-scoped, so a merge has real work to do for every type: create on the
+    // target what the SOURCE carries and the target does not, fresh and empty, data never carried
+    // (the cloud's structural merge, platform `src/provisioning/services.ts:2685`). Anything the
+    // target already has is skipped rather than rebuilt.
+    const structural: Array<[type: 'postgres' | 'storage' | 'managed', regs: Array<{ id: string; name: string; type?: string }>]> = [
+      ['postgres', this.dbList(projectId)],
+      ['storage', this.stList(projectId)],
+      ['managed', this.managedList(projectId)],
     ]
+    for (const [kind, regs] of structural) {
+      for (const reg of regs) {
+        const label = kind === 'managed' ? String(reg.type) : kind
+        if (!this.carries(project, source, reg, kind)) continue
+        if (this.carries(project, target, reg, kind)) { skipped.push({ type: label, name: reg.name, reason: 'exists' }); continue }
+        if (kind === 'postgres') await this.addDbService(projectId, reg.name, { branch: target.name })
+        else if (kind === 'storage') await this.addStorageService(projectId, reg.name, { branch: target.name })
+        else await this.addManagedService(projectId, reg.type as ManagedDbType, reg.name, { branch: target.name })
+        created.push({ type: label, name: reg.name })
+      }
+    }
     for (const [group, app] of Object.entries(source.apps).sort(([a], [b]) => a.localeCompare(b))) {
       if (target.apps[group]) { skipped.push({ type: 'compute', name: group, reason: 'exists' }); continue }
       await this.deployAllocatingPort(projectId, target.name, group, app)
@@ -1332,43 +1382,43 @@ export class Engine {
     return { id: m.id, type: m.type, name: m.name, status: 'ready', port: MANAGED_DB[m.type].port, volume_gib: MANAGED_DB[m.type].volumeGib }
   }
 
-  /** Add a managed database: register on the project and materialize one private container per
-   *  branch, each with a fresh password (like the cloud, where every branch gets a fresh app +
-   *  empty volume + password — data is never cloned). Cloud deviation, same as compute groups:
-   *  oss services are project-level registrations, so the service appears on EVERY branch rather
-   *  than only the one it was added on. */
-  async addManagedService(projectId: string, type: ManagedDbType, name: string): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
+  /** Add a managed database to ONE branch (`opts.branch`, else the project's default): a private
+   *  container with a fresh password and an empty volume, exactly as the cloud materialises one.
+   *  Data is never cloned for this type, on any path.
+   *
+   *  Branch-scoped for the reason spelled out on `addDbService`: fanning out meant an agent adding
+   *  a redis on its own branch also got one, with its own credentials, on `main`. */
+  async addManagedService(projectId: string, type: ManagedDbType, name: string, opts: { branch?: string } = {}): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
-    if (this.managedList(projectId).some((m) => m.type === type && m.name === name)) throw new Error(`${type} service "${name}" already exists`)
+    const b = this.targetBranch(projectId, opts.branch)
+    const existing = this.managedList(projectId).find((m) => m.type === type && m.name === name)
+    if (existing && this.carries(project, b, existing, 'managed')) throw new Error(`${type} service "${name}" already exists`)
     const wouldMint = this.mintedManagedNames({ type, name })
     const clash = (loadState().userSecrets[projectId] ?? []).find((u) => wouldMint.includes(u.name))
     if (clash) throw new Error(`service would mint secret names already used by user secrets: ${clash.name}`)
     // WP4: an immutable directory key, minted once and stored, so a rename never detaches the data
-    // (decision 16). The directory is `md/<ref>/<prefix>-<dataId>` on every branch.
-    const entry = { id: managedServiceId(type, name), type, name, createdAt: Date.now(), dataId: randomUUID().slice(0, 8) }
-    const branches = this.listBranches(projectId)
-    // Every hostname this service will mint, checked against ALL service labels and reserved in
-    // ONE synchronous mutate before the first provisioning await (decision 51) — the same rule the
+    // (decision 16). The directory is `md/<ref>/<prefix>-<dataId>` on every branch that carries it.
+    const entry = existing ?? { id: managedServiceId(type, name), type, name, createdAt: Date.now(), dataId: randomUUID().slice(0, 8) }
+    // The hostname this service will mint, checked against ALL service labels and reserved in ONE
+    // synchronous mutate before the first provisioning await (decision 51) — the same rule the
     // postgres and compute registrations follow. `<type>-<name>-<ref>` shares its label space with
     // compute's `<group>-<ref>`, so a redis called `cache` collides with a group called
     // `redis-cache`; minting it unchecked would shadow one of them in the route table.
     const owner = `${projectId}:${entry.id}`
-    this.reserveHosts(branches.map((b) => this.labelFor(type, name, this.ref(project, b))), owner)
+    this.reserveHosts([this.labelFor(type, name, this.ref(project, b))], owner)
     const provisioned: Array<{ branch: Branch; password: string; container: string; dataDir: string }> = []
     try {
-      for (const b of branches) {
-        const password = randomBytes(32).toString('base64url')
-        const ref = this.ref(project, b)
-        const container = managedContainerName(ref, type, name)
-        const dataDir = await this.ensureManagedDirs(ref, type, entry.dataId)
-        await this.managedDb.provision(
-          { container, network: b.network, type, name, password, dataDir },
-          { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, entry.id) },
-        )
-        provisioned.push({ branch: b, password, container, dataDir })
-      }
+      const password = randomBytes(32).toString('base64url')
+      const ref = this.ref(project, b)
+      const container = managedContainerName(ref, type, name)
+      const dataDir = await this.ensureManagedDirs(ref, type, entry.dataId ?? name)
+      await this.managedDb.provision(
+        { container, network: b.network, type, name, password, dataDir },
+        { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, entry.id) },
+      )
+      provisioned.push({ branch: b, password, container, dataDir })
     } catch (e) {
       for (const p of provisioned) await this.managedDb.destroy(p.container).catch(() => {})
       for (const p of provisioned) await this.data.remove(p.dataDir).catch(() => {})                       // WP4
@@ -1377,7 +1427,9 @@ export class Engine {
     }
     mutate((st) => {
       const pr = st.projects[projectId]
-      pr.managedServices = [...(pr.managedServices ?? []), entry]
+      // Only a registration this call MADE is added: one that already existed is other branches'
+      // service too, and re-appending it would duplicate the row.
+      if (!existing) pr.managedServices = [...(pr.managedServices ?? []), entry]
       for (const p of provisioned) {
         // Record the minted hostname on the row, like `provisionBranch` does: the row is what the
         // route table and the credentials bundle read, and it retires the reservation.
@@ -1387,7 +1439,7 @@ export class Engine {
       }
     })
     this.scheduler.register(provisioned.map((p) => this.serviceKey(p.branch, entry.id))) // WP3
-    this.emit(projectId, null, 'resource', 'service.added', { type, name })
+    this.emit(projectId, b.name, 'resource', 'service.added', { type, name })
     return this.managedRow(entry)
   }
 
@@ -3129,43 +3181,57 @@ export class Engine {
     }
   }
 
-  /** Register a postgres service and materialise one container per branch, like a managed database:
-   *  oss services are project-level registrations, so the service appears on EVERY branch. */
-  async addDbService(projectId: string, name: string, opts: { templateDeploymentId?: string } = {}): Promise<ServiceRow> {
+  /** Add a postgres service to ONE branch: `opts.branch`, else the project's default branch.
+   *
+   *  Services are BRANCH-scoped, as they are in the cloud. The hosted control plane made a service
+   *  branch-owned in migration `0022_branch_scoped_services.sql` ("a service was a project-level
+   *  catalog entry materialized on every branch; it becomes branch-owned so add/remove stay local
+   *  and branches diverge"), `POST /projects/:id/services` takes an optional `branch` and resolves
+   *  it to the default branch when absent (platform `src/server.ts:1492`, `src/provisioning/
+   *  services.ts:662`), and the write itself is one row on one branch: "Branch-owned: one row on
+   *  this branch, materialized only here as the lineage origin. No fan-out." Fanning out here
+   *  instead meant `insta services add postgres db --branch feat` silently built a second database,
+   *  with its own credentials, on `main`.
+   *
+   *  insta-oss keeps the REGISTRATION project-level, because a service id is the project's name
+   *  space and has to stay stable across branches (contract decision 49); the service itself is the
+   *  row on the branch. So a name this project has registered but this branch does not carry is
+   *  MATERIALISED here rather than refused, which is what the cloud does too (it creates a fresh
+   *  row with its own lineage and no data). A name this branch already carries is the conflict. */
+  async addDbService(projectId: string, name: string, opts: { templateDeploymentId?: string; branch?: string } = {}): Promise<ServiceRow> {
     return this.serialize('provision', async () => {
       const project = this.getProject(projectId)
       if (!project) throw new Error('project not found')
       this.assertServiceName(name)
-      if (this.dbList(projectId).some((d) => d.name === name)) throw new Error('service already exists on this branch')
-      this.assertTypeCap(this.dbList(projectId).length, 'postgres')
-      const branches = this.listBranches(projectId)
-      const entry = { id: pgServiceId(name), name, dataId: randomUUID().slice(0, 8), createdAt: Date.now(), ...(opts.templateDeploymentId ? { templateDeploymentId: opts.templateDeploymentId } : {}) }
-      // ONE synchronous mutate reserves the name and every hostname it will mint, before any
+      const b = this.targetBranch(projectId, opts.branch)
+      const existing = this.dbList(projectId).find((d) => d.name === name)
+      if (existing && this.carries(project, b, existing, 'postgres')) throw new Error('service already exists on this branch')
+      if (!existing) this.assertTypeCap(this.dbList(projectId).length, 'postgres')
+      const entry = existing ?? { id: pgServiceId(name), name, dataId: randomUUID().slice(0, 8), createdAt: Date.now(), ...(opts.templateDeploymentId ? { templateDeploymentId: opts.templateDeploymentId } : {}) }
+      const ref = this.ref(project, b)
+      // ONE synchronous mutate checks the hostname and records the registration, before any
       // provisioning await (decision 51).
       mutate((st) => {
-        for (const b of branches) this.assertHostFree(this.labelFor('postgres', name, this.ref(project, b)))
+        this.assertHostFree(this.labelFor('postgres', name, ref))
+        if (existing) return
         const pr = st.projects[projectId]
         pr.dbServices = [...(pr.dbServices ?? []), entry]
       })
-      const done: Array<{ branch: Branch; container: string; dataDir: string }> = []
+      const container = pgContainerName(ref, name)
+      const dataDir = this.layout().pg(ref, entry.dataId)
       try {
-        for (const b of branches) {
-          const ref = this.ref(project, b)
-          const container = pgContainerName(ref, name)
-          const dataDir = this.layout().pg(ref, entry.dataId)
-          const { url } = await this.db.provision({ container, network: b.network, dataDir }, { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, entry.id) })
-          done.push({ branch: b, container, dataDir })
-          const host = this.hostFor('postgres', name, ref)
-          mutate((st) => { (st.branches[b.id].databases ??= {})[entry.id] = { url, container, dataId: entry.dataId, host } })
-          this.scheduler.register([this.serviceKey(b, entry.id)])                                   // WP3
-        }
+        const { url } = await this.db.provision({ container, network: b.network, dataDir }, { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, entry.id) })
+        const host = this.hostFor('postgres', name, ref)
+        mutate((st) => { (st.branches[b.id].databases ??= {})[entry.id] = { url, container, dataId: entry.dataId, host } })
+        this.scheduler.register([this.serviceKey(b, entry.id)])                                     // WP3
       } catch (e) {
-        for (const d of done) {
-          await this.db.destroy(d.container).catch(() => {})
-          await this.data.remove(d.dataDir).catch(() => {})
-          mutate((st) => { delete st.branches[d.branch.id].databases?.[entry.id] })
-        }
+        await this.db.destroy(container).catch(() => {})
+        await this.data.remove(dataDir).catch(() => {})
         mutate((st) => {
+          delete st.branches[b.id].databases?.[entry.id]
+          // Only a registration THIS call made is rolled back: one that already existed is other
+          // branches' service too.
+          if (existing) return
           const pr = st.projects[projectId]
           pr.dbServices = (pr.dbServices ?? []).filter((d) => d.id !== entry.id)
         })
@@ -3173,7 +3239,7 @@ export class Engine {
       }
       // The new lane must be listening before `insta db url` is followed by a psql.
       this.router.invalidate()
-      this.emit(projectId, null, 'resource', 'service.added', { type: 'postgres', name })
+      this.emit(projectId, b.name, 'resource', 'service.added', { type: 'postgres', name })
       return { id: entry.id, type: 'postgres', name, status: 'ready', pg_version: PG_VERSION }
     })
   }
@@ -3252,43 +3318,45 @@ export class Engine {
 
   // ---- storage service registrations -------------------------------------------------------------
 
-  /** Register a storage service and provision one bucket per branch. */
-  async addStorageService(projectId: string, name: string, opts: { public?: boolean } = {}): Promise<ServiceRow> {
+  /** Add a storage service to ONE branch: `opts.branch`, else the project's default branch. Same
+   *  branch scoping, and the same reason for it, as `addDbService`. */
+  async addStorageService(projectId: string, name: string, opts: { public?: boolean; branch?: string } = {}): Promise<ServiceRow> {
     return this.serialize('provision', async () => {
       const project = this.getProject(projectId)
       if (!project) throw new Error('project not found')
       this.assertServiceName(name)
-      if (this.stList(projectId).some((s) => s.name === name)) throw new Error('service already exists on this branch')
-      this.assertTypeCap(this.stList(projectId).length, 'storage')
-      const branches = this.listBranches(projectId)
-      const entry = { id: storageServiceId(name), name, createdAt: Date.now(), ...(opts.public !== undefined ? { public: opts.public } : {}) }
+      const b = this.targetBranch(projectId, opts.branch)
+      const existing = this.stList(projectId).find((s) => s.name === name)
+      if (existing && this.carries(project, b, existing, 'storage')) throw new Error('service already exists on this branch')
+      if (!existing) this.assertTypeCap(this.stList(projectId).length, 'storage')
+      const entry = existing ?? { id: storageServiceId(name), name, createdAt: Date.now(), ...(opts.public !== undefined ? { public: opts.public } : {}) }
       mutate((st) => {
+        if (existing) return
         const pr = st.projects[projectId]
         pr.storageServices = [...(pr.storageServices ?? []), entry]
       })
-      const done: Array<{ branch: Branch; bucket: string }> = []
+      let made: string | undefined
       try {
-        for (const b of branches) {
-          const st = await this.storage.provision(this.ref(project, b), b.network, name)
-          done.push({ branch: b, bucket: st.bucket })
-          if (opts.public === true && this.storage.setAccess) await this.storage.setAccess(st.bucket, b.network, true)
-          mutate((s) => { (s.branches[b.id].buckets ??= {})[entry.id] = { bucket: st.bucket, env: st.env, ...(opts.public !== undefined ? { public: opts.public } : {}) } })
-        }
+        const out = await this.storage.provision(this.ref(project, b), b.network, name)
+        made = out.bucket
+        if (opts.public === true && this.storage.setAccess) await this.storage.setAccess(out.bucket, b.network, true)
+        mutate((s) => { (s.branches[b.id].buckets ??= {})[entry.id] = { bucket: out.bucket, env: out.env, ...(opts.public !== undefined ? { public: opts.public } : {}) } })
       } catch (e) {
-        for (const d of done) {
-          await this.storage.destroy(d.bucket, d.branch.network).catch(() => {})
-          mutate((s) => { delete s.branches[d.branch.id].buckets?.[entry.id] })
-          await this.detachIfLastBucket(d.branch)
-        }
+        if (made !== undefined) await this.storage.destroy(made, b.network).catch(() => { /* best-effort */ })
         mutate((s) => {
+          delete s.branches[b.id].buckets?.[entry.id]
+          // Only a registration THIS call made is rolled back: one that already existed is other
+          // branches' service too.
+          if (existing) return
           const pr = s.projects[projectId]
           pr.storageServices = (pr.storageServices ?? []).filter((x) => x.id !== entry.id)
         })
+        await this.detachIfLastBucket(b)
         throw e
       }
       // The bucket vhost is a route in server mode, and the deploy alias list just grew.
       this.router.invalidate()
-      this.emit(projectId, null, 'resource', 'service.added', { type: 'storage', name })
+      this.emit(projectId, b.name, 'resource', 'service.added', { type: 'storage', name })
       return { id: entry.id, type: 'storage', name, status: 'ready', public: opts.public ?? false }
     })
   }

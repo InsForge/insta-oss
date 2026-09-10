@@ -406,7 +406,9 @@ export class TemplateExecutor {
           // record is read back by every later step (and by the catalog's live check).
           entry.serviceId = parseServiceId(existingRow.id)?.serviceId ?? existingRow.id
         } else if (svc.type === 'postgres') {
-          const row = await this.engine.addDbService(projectId, platformName, { templateDeploymentId: id })
+          // On the deployment's OWN branch: services are branch-scoped, so without this a template
+          // deployed to a branch would put its database on the default branch instead.
+          const row = await this.engine.addDbService(projectId, platformName, { templateDeploymentId: id, branch: branchName })
           entry.serviceId = row.id
         } else {
           const row = this.engine.addComputeService(projectId, platformName, entry.volumeGib, {
