@@ -49,12 +49,18 @@ type ForkOpts = ProvisionOpts & { ensureSourceRunning?: () => Promise<void> }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+/** The docker seam, the way `Scheduler` takes a `Runtime`: production is the docker CLI in
+ *  `src/docker.ts`, and a test injects a stub so this adapter has coverage without a container. */
+export type DockerExec = (args: string[], opts?: { input?: Buffer; mergeStderr?: boolean }) => Promise<Buffer>
+
 export class LocalPostgres implements DatabaseAdapter {
   private readonly cfg: Config
   private readonly data: DataDirOps
-  constructor(opts: { cfg?: Config; data?: DataDirOps } = {}) {
+  private readonly exec: DockerExec
+  constructor(opts: { cfg?: Config; data?: DataDirOps; docker?: DockerExec } = {}) {
     this.cfg = opts.cfg ?? loadConfig()
     this.data = opts.data ?? sharedDataDir(this.cfg)
+    this.exec = opts.docker ?? docker
   }
 
   async provision(t: PgTarget, opts: ProvisionOpts = {}): Promise<{ url: string }> {
@@ -70,7 +76,6 @@ export class LocalPostgres implements DatabaseAdapter {
       '-e', `POSTGRES_PASSWORD=${password}`, '-e', `POSTGRES_DB=${DB}`,
     ])
     await this.waitReady(t.container)
-    await this.ensureHba(t.container)
     return { url: `postgres://postgres:${password}@${t.container}:5432/${DB}` }
   }
 
@@ -106,7 +111,7 @@ export class LocalPostgres implements DatabaseAdapter {
     const deadline = Date.now() + QUERY_DEADLINE_MS
     for (;;) {
       try {
-        const out = await docker(['exec', '-i', container, 'psql', '-U', 'postgres', '-d', DB,
+        const out = await this.exec(['exec', '-i', container, 'psql', '-U', 'postgres', '-d', DB,
           '-v', 'ON_ERROR_STOP=1', '-tAc', sql])
         return out.toString().trim()
       } catch (e) {
@@ -119,16 +124,16 @@ export class LocalPostgres implements DatabaseAdapter {
 
   /** Container only, with its anonymous volumes (`-v`): the engine removes the data directory. */
   async destroy(container: string): Promise<void> {
-    try { await docker(['rm', '-f', '-v', container]) } catch { /* already gone */ }
+    try { await this.exec(['rm', '-f', '-v', container]) } catch { /* already gone */ }
   }
 
   async rename(container: string, to: string): Promise<void> {
-    await docker(['rename', container, to])
+    await this.exec(['rename', container, to])
   }
 
   // ---- internals ----
 
-  private run(t: PgTarget, opts: ProvisionOpts, env: string[]): Promise<void> { return pgRun(t, opts, env) }
+  private run(t: PgTarget, opts: ProvisionOpts, env: string[]): Promise<void> { return pgRun(t, opts, env, this.exec) }
 
   /** An interrupted provision or fork leaves a container of the right name, or a half-written data
    *  directory, behind. Both are removed before a retry (a `branch create feat` after a daemon crash
@@ -136,9 +141,9 @@ export class LocalPostgres implements DatabaseAdapter {
    *  live branch row still references is left alone. */
   private async clearOrphan(t: PgTarget, opts: ProvisionOpts): Promise<void> {
     if (opts.referenced?.(t.container)) return
-    if (await containerExists(t.container)) {
+    if (await containerExists(t.container, this.exec)) {
       console.warn(`removing orphan from an interrupted fork: container ${t.container}`)
-      await docker(['rm', '-f', '-v', t.container]).catch(() => { /* raced away */ })
+      await this.exec(['rm', '-f', '-v', t.container]).catch(() => { /* raced away */ })
     }
     if (t.dataDir && !(await this.data.isEmptyOrMissing(t.dataDir))) {
       console.warn(`removing orphan from an interrupted fork: ${t.dataDir}`)
@@ -152,7 +157,7 @@ export class LocalPostgres implements DatabaseAdapter {
     await this.clearOrphan(dst, opts)
     // A CHECKPOINT flushes the source's dirty buffers so the copy needs the least redo. A source
     // that is asleep (or stops between the check and the call) is already at rest.
-    if (await isRunning(src.container)) {
+    if (await isRunning(src.container, this.exec)) {
       await this.query(src.container, 'CHECKPOINT').catch(() => { /* stopped underneath us: at rest */ })
     }
     const t0 = Date.now()
@@ -161,9 +166,9 @@ export class LocalPostgres implements DatabaseAdapter {
     try {
       await this.waitReady(dst.container)
     } catch (e) {
-      const logs = await docker(['logs', '--tail', '200', dst.container], { mergeStderr: true })
+      const logs = await this.exec(['logs', '--tail', '200', dst.container], { mergeStderr: true })
         .then((b) => b.toString()).catch(() => '')
-      await docker(['rm', '-f', '-v', dst.container]).catch(() => {})
+      await this.exec(['rm', '-f', '-v', dst.container]).catch(() => {})
       await this.data.remove(dst.dataDir).catch(() => {})
       if (!TORN_COPY.test(logs)) throw e
       if (isRetry) throw new TornCopyError(`clone of ${src.container} did not recover: ${firstLine(e)}`)
@@ -183,7 +188,7 @@ export class LocalPostgres implements DatabaseAdapter {
     await this.ensureHba(src.container)
     if (dst.dataDir) await this.data.ensureDir(dst.dataDir, 0o700)
     try {
-      await docker(['run', '--rm', '--network', src.network,
+      await this.exec(['run', '--rm', '--network', src.network,
         '-v', `${dst.dataDir}:/out`,
         '-e', `PGPASSWORD=${passwordOf(src.url)}`,
         IMAGE, 'pg_basebackup', '-h', src.container, '-p', '5432', '-U', 'postgres', '-D', '/out',
@@ -197,13 +202,16 @@ export class LocalPostgres implements DatabaseAdapter {
   }
 
   private waitReady(container: string, timeoutMs = READY_TIMEOUT_MS): Promise<void> {
-    return pgWaitReady(container, timeoutMs)
+    return pgWaitReady(container, timeoutMs, this.exec)
   }
 
   /** `pg_basebackup` authenticates as a replication connection, which the stock image's pg_hba.conf
-   *  does not allow from another container. Appended once, idempotently, after readiness. */
+   *  does not allow from another container. Appended once, idempotently, after readiness, and ONLY
+   *  to a database that is about to be a basebackup source. It is password gated, so it is not an
+   *  escalation, but in server mode the database lane publishes on every interface, and a database
+   *  that will never be a source has no reason to let a leaked password become a physical replica. */
   private async ensureHba(container: string): Promise<void> {
-    await pgAppendHba(container)
+    await pgAppendHba(container, this.exec)
     await this.query(container, 'select pg_reload_conf()')
   }
 }
@@ -218,8 +226,8 @@ class TornCopyError extends Error {}
  *  fails instead. Never `--stop-signal`: the image's STOPSIGNAL is SIGINT, which is Postgres's fast
  *  shutdown (SIGTERM would be a smart shutdown that waits for clients). A non-empty bind source
  *  skips initdb, so the existing password and configuration travel with the files. */
-export async function pgRun(t: PgTarget, opts: { publishLoopback?: boolean; limits?: ServiceLimits } = {}, env: string[] = []): Promise<void> {
-  await docker(['run', '-d', '--restart', 'unless-stopped', '--name', t.container, '--network', t.network,
+export async function pgRun(t: PgTarget, opts: { publishLoopback?: boolean; limits?: ServiceLimits } = {}, env: string[] = [], exec: DockerExec = docker): Promise<void> {
+  await exec(['run', '-d', '--restart', 'unless-stopped', '--name', t.container, '--network', t.network,
     ...env,
     // ---- args WP2 ----
     ...(opts.publishLoopback ? ['-p', '127.0.0.1::5432'] : []),
@@ -233,13 +241,13 @@ export async function pgRun(t: PgTarget, opts: { publishLoopback?: boolean; limi
 /** TCP readiness (#34): `pg_isready` over 127.0.0.1 AND one statement that must come back. The
  *  image's initdb phase runs a temporary server on the unix socket only, so this is the one probe
  *  that cannot answer "ready" too early. A container that exits ends the wait with its own logs. */
-export async function pgWaitReady(container: string, timeoutMs = READY_TIMEOUT_MS): Promise<void> {
+export async function pgWaitReady(container: string, timeoutMs = READY_TIMEOUT_MS, exec: DockerExec = docker): Promise<void> {
   const deadline = Date.now() + timeoutMs
   let last = ''
   for (;;) {
     try {
-      await docker(['exec', container, 'pg_isready', '-h', '127.0.0.1', '-p', '5432', '-U', 'postgres', '-d', DB])
-      const out = (await docker(['exec', container, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-d', DB,
+      await exec(['exec', container, 'pg_isready', '-h', '127.0.0.1', '-p', '5432', '-U', 'postgres', '-d', DB])
+      const out = (await exec(['exec', container, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-d', DB,
         '-tAc', 'select 1'])).toString().trim()
       // A real server answers `1`; an empty capture only happens with a stubbed docker in tests.
       if (out === '' || out.split('\n')[0].trim() === '1') return
@@ -247,9 +255,9 @@ export async function pgWaitReady(container: string, timeoutMs = READY_TIMEOUT_M
     } catch (e) {
       last = firstLine(e)
     }
-    const status = await containerStatus(container)
+    const status = await containerStatus(container, exec)
     if (status === 'exited' || status === 'dead' || status === null) {
-      const logs = await docker(['logs', '--tail', '40', container], { mergeStderr: true })
+      const logs = await exec(['logs', '--tail', '40', container], { mergeStderr: true })
         .then((b) => b.toString().trim()).catch(() => '')
       throw new Error(`postgres "${container}" ${status === null ? 'is gone' : 'exited'} before it became ready: ${last}\n${logs}`)
     }
@@ -259,9 +267,9 @@ export async function pgWaitReady(container: string, timeoutMs = READY_TIMEOUT_M
 }
 
 /** The replication line `pg_basebackup` needs, appended once. The caller reloads the config. */
-export async function pgAppendHba(container: string): Promise<void> {
+export async function pgAppendHba(container: string, exec: DockerExec = docker): Promise<void> {
   const conf = `${PGDATA}/pg_hba.conf`
-  await docker(['exec', container, 'sh', '-c',
+  await exec(['exec', container, 'sh', '-c',
     `grep -q 'insta-oss basebackup' ${conf} || echo '${HBA_LINE}' >> ${conf}`])
 }
 
@@ -270,20 +278,20 @@ function limitArgs(limits?: ServiceLimits): string[] {
   return ['--cpus', String(limits.cpu), '--memory', `${limits.memoryMb}m`, '--memory-swap', `${limits.memoryMb}m`]
 }
 
-async function containerStatus(container: string): Promise<string | null> {
+async function containerStatus(container: string, exec: DockerExec = docker): Promise<string | null> {
   try {
-    return (await docker(['inspect', '-f', '{{.State.Status}}', container])).toString().trim()
+    return (await exec(['inspect', '-f', '{{.State.Status}}', container])).toString().trim()
   } catch {
     return null
   }
 }
 
-async function containerExists(container: string): Promise<boolean> {
-  return (await containerStatus(container)) !== null
+async function containerExists(container: string, exec: DockerExec = docker): Promise<boolean> {
+  return (await containerStatus(container, exec)) !== null
 }
 
-async function isRunning(container: string): Promise<boolean> {
-  return (await containerStatus(container)) === 'running'
+async function isRunning(container: string, exec: DockerExec = docker): Promise<boolean> {
+  return (await containerStatus(container, exec)) === 'running'
 }
 
 /** The clone's DSN is the source's with the host swapped: a file-level fork inherits the source's
