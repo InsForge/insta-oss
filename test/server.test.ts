@@ -3318,6 +3318,75 @@ test('a container that was never there is not counted as a demolition', async ()
   expect(withGhost.destroyed).toBe(whole.destroyed - 1)
 })
 
+test('bytes that could not be removed keep the row too, and the advised retry works', async () => {
+  // The fail-closed rule reached the CONTAINER arm of all four removals and the BYTES arm of
+  // only one (storage). With the container removed and `data.remove` failing, the other three
+  // answered 409 saying the row was kept and to retry, dropped the row, the scheduler key and
+  // the registration anyway, and the retry then answered 404 -- with the directory still on
+  // disk and nothing naming it. Asserting the 409 alone passes on the broken code; what binds
+  // it is the row surviving AND the retry working.
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })).statusCode).toBe(201)
+  const bid = await branchOf(id, 'main')
+
+  for (const [sid, present] of [['pg-db', 'databases'], ['rd-cache', 'managed'], ['cp-web', 'apps']] as const) {
+    const busy = vi.spyOn(data, 'remove').mockImplementation(async (path: string) => {
+      if (path.includes('/pg/') || path.includes('/md/') || path.includes('/vol/')) throw new Error('device or resource busy')
+    })
+    let refused
+    try {
+      refused = await del_(`/projects/${id}/services/${sid}`)
+    } finally {
+      busy.mockRestore()
+    }
+
+    expect(refused.statusCode, sid).toBe(409)
+    expect(refused.json().teardown.failed, sid).toBeGreaterThan(0)
+    // The row the 409 says it kept is actually there...
+    const row = loadState().branches[bid]
+    const held = present === 'apps' ? row.apps.web : present === 'databases' ? row.databases?.['pg-db'] : row.managed?.['rd-cache']
+    expect(held, sid).toBeDefined()
+    // ...the service still lists, so the id in the retry resolves...
+    const rows = (await get(`/projects/${id}/services?branch=main`)).json().services as Array<{ id: string }>
+    expect(rows.some((r) => r.id === sid), sid).toBe(true)
+    // ...and the retry the message advises actually works, rather than answering 404.
+    const retry = await del_(`/projects/${id}/services/${sid}`)
+    expect(retry.statusCode, sid).toBe(200)
+    expect(retry.json().teardown.failed, sid).toBe(0)
+  }
+})
+
+test('the branch teardown gates its row on the BYTES arm too, and the retry finishes it', async () => {
+  // The same question one level up, answered by measurement rather than by reading: the branch
+  // and project teardowns decide the row from the WHOLE counter (`t.failed === 0`), not from
+  // the container step, so a data root that refuses keeps the row exactly as a surviving
+  // container does. This pins that, because the two arms were fixed in different rounds.
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  const feat = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')!
+
+  const busy = vi.spyOn(data, 'remove').mockImplementation(async (path: string) => {
+    if (path.includes('demo-feat')) throw new Error('device or resource busy')
+  })
+  let refused
+  try {
+    refused = await del_(`/projects/${id}/branches/${feat.id}`)
+  } finally {
+    busy.mockRestore()
+  }
+
+  // Containers all went; only the bytes refused. The row stays, marked, and says why.
+  expect(refused.statusCode).toBe(409)
+  expect(refused.json().teardown.failed).toBeGreaterThan(0)
+  expect(refused.json().error).toContain('data directory')
+  expect(loadState().branches[feat.id]?.status).toBe('cleanup-failed')
+  // ...and the retry the message advises finishes the demolition.
+  const retry = await del_(`/projects/${id}/branches/${feat.id}`)
+  expect(retry.statusCode).toBe(200)
+  expect(retry.json().teardown.failed).toBe(0)
+  expect(loadState().branches[feat.id]).toBeUndefined()
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))

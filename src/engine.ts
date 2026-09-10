@@ -1860,7 +1860,16 @@ export class Engine {
       const container = `io-${this.ref(project, branch)}-app-${name}`
       if (await removeContainer(this.scheduler, t, container, () => docker(['rm', '-f', '-v', container]))) {
         // WP4: the /data bytes are a directory under the data dir; remove it AFTER the container.
-        if (vol) await count(t, () => this.data.remove(this.layout().vol(this.ref(project, branch), vol.id)))
+        // ...and the BYTES arm gates the row exactly as the container arm does: a directory that
+        // could not be removed is still on disk, and dropping the row, the scheduler key and the
+        // registration leaves it with nothing naming it, on a 409 whose message says the row was
+        // kept and to retry. The retry then answers 404.
+        const beforeBytes = t.failed
+        if (vol) {
+          const dir = this.layout().vol(this.ref(project, branch), vol.id)
+          await count(t, () => this.data.remove(dir), `remove the /data directory ${dir}`)
+          if (t.failed !== beforeBytes) return t
+        }
         mutate((st) => {
           delete st.branches[branch.id].apps[name]
           st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.target !== `compute/${name}`)
@@ -2015,8 +2024,12 @@ export class Engine {
     const container = managedContainerName(ref, m.type, m.name)
     // Proven gone before the bytes and the row, like every other teardown here.
     if (!(await removeContainer(this.scheduler, t, container, () => this.managedDb.destroy(container)))) return t
-    // WP4: the data goes with the container (same irreversibility class as the compute service).
-    await count(t, () => this.data.remove(this.layout().md(ref, m.type, m.dataId ?? m.name)))
+    // WP4: the data goes with the container (same irreversibility class as the compute service),
+    // and it gates the row for the same reason the container does.
+    const beforeBytes = t.failed
+    const dir = this.layout().md(ref, m.type, m.dataId ?? m.name)
+    await count(t, () => this.data.remove(dir), `remove the data directory ${dir}`)
+    if (t.failed !== beforeBytes) return t
     mutate((st) => {
       delete st.branches[branch.id].managed?.[sid]
       st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.source !== `${m.type}/${m.name}`)
@@ -4254,7 +4267,12 @@ export class Engine {
       if (row && !(await removeContainer(this.scheduler, t, row.container, () => this.db.destroy(row.container)))) {
         return t
       }
-      await count(t, () => this.data.remove(this.layout().pg(this.ref(project, branch), reg.dataId)))
+      // The bytes gate the row too, not only the container: a PGDATA that could not be removed
+      // with its row dropped is a database directory nothing names.
+      const beforeBytes = t.failed
+      const dir = this.layout().pg(this.ref(project, branch), reg.dataId)
+      await count(t, () => this.data.remove(dir), `remove the data directory ${dir}`)
+      if (t.failed !== beforeBytes) return t
       mutate((st) => {
         delete st.branches[branch.id].databases?.[sid]
         st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.source !== `postgres/${reg.name}`)
