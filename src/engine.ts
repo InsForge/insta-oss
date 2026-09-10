@@ -2205,9 +2205,11 @@ export class Engine {
     // The object store is ONE container for the whole box, attached to this branch's network: it is
     // detached once, after every bucket on the network is gone (a per-bucket detach would strand the
     // purge of the next one), and before `network rm`, which refuses while anything is attached.
-    // Counted, not swallowed: a detach that failed leaves the store attached and the `network rm`
-    // below refuses while anything is, so both of these decide whether this branch is actually
-    // gone -- which is what `unwindBranch` reads the counter for.
+    // Counted rather than swallowed, so an adapter that reports a failed detach is not lost from
+    // the verdict `unwindBranch` reads. The only shipped adapter does not report one (Garage's
+    // `detachFrom` swallows its own error), so today this line cannot fire: what actually catches
+    // a detach that failed is the `network rm` below, which dockerd refuses while an endpoint is
+    // still attached, and that IS counted.
     if (this.storage.detachFrom) await countFailure(t, `detach the object store from ${b.network}`, () => this.storage.detachFrom!(b.network))
     const managed = this.managedList(project.id).filter((m) => this.carries(project, b, m, 'managed'))
     for (const m of managed) await count(t, () => this.managedDb.destroy(managedContainerName(ref, m.type, m.name)))
@@ -2250,12 +2252,23 @@ export class Engine {
     const branches = this.listBranches(projectId)
     // The PROJECT key plus every branch's keys, in one sorted acquisition (never one branch at a
     // time: that is the ordering a concurrent multi-branch operation can deadlock against). The
-    // project key is what makes the list below complete: a branch create that has not committed
+    // project key is what makes the LIST below complete: a branch create that has not committed
     // its row yet is in no branch list, so its keys cannot be acquired here, and without a key
     // covering the project the delete would queue on the SOURCE branch, wait for the create, and
     // then remove the project while the clone it never saw kept its containers, its network and
     // its bytes. `createProject` and `createBranch` hold the same key, so no branch of this
     // project can come into existence while this runs.
+    //
+    // KNOWN GAP, stated rather than papered over: the list is complete, the KEYS are not. A
+    // branch that committed its row between the snapshot and the acquisition is torn down here
+    // without its own `branchOp` or service keys ever being held, so a `deploy`, a lifecycle op
+    // or a traffic wake on that branch can race the teardown and leave a container behind. Both
+    // reviewers graded it a Suggestion and it stays open deliberately: the obvious remedy is to
+    // acquire the late branch's keys while already holding this one, which is exactly the second
+    // acquisition the `branchOp` docstring forbids, and the alternative (re-driving one sorted
+    // acquisition over the union) is a change to an acquisition path that this round is not the
+    // moment for. It needs a project delete racing a branch create AND an operation landing on
+    // the new branch, and `DELETE /projects/:id` is govern-gated to `approve` by default.
     return this.withOp([this.projectOp(project), ...branches.flatMap((b) => this.branchKeys(project, b))], async () => {
       const t = newTeardown()
       // Re-read under the lock rather than trusting the pre-lock snapshot: the rows may have
@@ -3376,11 +3389,14 @@ export class Engine {
    *  database does not survive its own recovery. A `/data` volume has neither: there is no
    *  protocol that streams an arbitrary application's files consistently, so the only choices
    *  here are copying a live tree or refusing every branch create of an app that is awake. What
-   *  the copy holds is what the app would find after a power cut, each file as it stood when the
-   *  walk reached it, which is a state an app with data it cares about already has to tolerate;
-   *  failing the create instead would be the worse answer by a distance. Stated as a divergence
-   *  in COMPATIBILITY and in the branching docs, and a caller who wants a quiescent copy stops
-   *  the group first (`insta compute stop <group>`, or let the idle sweep put it to sleep). */
+   *  the copy holds is each file as it stood when the walk reached it: MANY moments of the tree,
+   *  not the single instant a crash or a power cut freezes, so an invariant spanning two files
+   *  can land broken in a way no crash would produce. That is the same distinction this PR draws
+   *  for Postgres, and the reason the database refuses the walk where it has an alternative;
+   *  here there is none, and failing every branch create of an awake app would be the worse
+   *  answer by a distance. Stated as a divergence in COMPATIBILITY and in the branching docs,
+   *  and a caller who wants a quiescent copy stops the group first (`insta compute stop
+   *  <group>`, or lets the idle sweep put it to sleep). */
   async forkVolumes(project: Project, source: Branch, target: Branch): Promise<Array<{ group: string; method: 'reflink' | 'copy'; ms: number }>> {
     const out: Array<{ group: string; method: 'reflink' | 'copy'; ms: number }> = []
     const srcRef = this.ref(project, source)
