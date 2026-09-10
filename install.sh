@@ -426,6 +426,13 @@ render_daemon_json() { printf '%s\n' "$POOL_JSON"; }
 # Apps reach the router at the host through --add-host ...:host-gateway; that traffic arrives on the
 # branch bridge and traverses the host INPUT chain, which a default-deny firewall drops silently.
 fw_ufw() {
+  # SSH FIRST, always. Ubuntu's /etc/default/ufw ships DEFAULT_INPUT_POLICY="DROP", so a rule set
+  # that does not name 22 locks the operator out of the box the moment ufw is enabled. It does
+  # not look like it at the time: ufw accepts RELATED,ESTABLISHED, so the session that ran this
+  # survives and the lockout appears on the next reconnect or the next reboot. These rules are
+  # only applied to an ALREADY ACTIVE ufw, where SSH is normally allowed already and this is a
+  # no-op; it is here so that a re-run heals a box whose ufw was enabled without it.
+  log 'ufw allow 22/tcp'
   for _b in $POOL_BASES; do
     log "ufw allow from $_b to any port 443,5432,6379,27017 proto tcp"
     log "ufw allow from $_b to any port 20000:20999 proto tcp"
@@ -630,8 +637,12 @@ else
   # security group instead, and refusing would break every one of those installs.
   warn "no active ufw or firewalld found, so nothing here restricts the database lanes"
   warn "  the redis (6379) and mongodb (27017) lanes listen on all interfaces and are NOT meant to be public"
-  warn "  restrict them at your cloud security group, or enable ufw and re-run this script to have it do it:"
-  warn "    ufw allow 80,443,5432/tcp && ufw enable && sh install.sh -y"
+  warn "  restrict them at your cloud security group, or enable ufw yourself:"
+  warn "    ufw allow 22/tcp            # your SSH port FIRST, or enabling ufw locks you out"
+  warn "    ufw allow 80,443,5432/tcp   # the edge and the postgres lane"
+  warn "    ufw enable"
+  warn "  then re-run the installer the same way you installed it, so it adds the container rules"
+  warn "  for the database lanes (they are what lets your apps reach them)"
 fi
 
 # ---- 5. data dir and reflinks ----

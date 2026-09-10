@@ -138,8 +138,18 @@ reach them by hostname from the branch network. Two things decide the rest:
   27017 are then reachable from the internet.
 
 So do one of these before you put anything in them: restrict the two ports at your cloud security
-group, which is how most of these boxes are protected, or enable `ufw` and re-run the installer,
-which allows 80, 443 and 5432 publicly and the database lanes to Docker's address pools only. The
+group, which is how most of these boxes are protected, or enable `ufw` yourself and then re-run
+the installer, which allows 80, 443 and 5432 publicly and the database lanes to Docker's address
+pools only:
+
+```bash
+ufw allow 22/tcp            # your SSH port FIRST: ufw defaults to DROP and will cut you off
+ufw allow 80,443,5432/tcp
+ufw enable
+```
+
+Allow SSH before you enable it, every time. An enable without it looks fine from the session that
+ran it, because established connections survive, and locks you out on the next reconnect. The
 tighter option, and the one to ask for if you want it, is binding the redis and mongodb lanes to
 the docker bridge instead of `0.0.0.0`; today `INSTA_OSS_LANE_BIND` moves all the lanes together,
 Postgres included, so it is not a per-lane switch yet.

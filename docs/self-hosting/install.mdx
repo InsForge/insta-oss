@@ -64,11 +64,19 @@ script. The build needs about 1 GiB of free memory and a minute on a 2 vCPU box.
 4. Checks the sizing: the vCPU count, `MemTotal`, and the free space on the filesystem that will
    hold the data directory. See [Requirements](#requirements) for what is fatal and what is a
    warning.
-5. Opens the firewall, but only when one is active. Under `ufw`: inbound 80, 443 and 5432, plus
-   443, 5432, 6379, 27017 and 20000 to 20999 from `docker0` and from every Docker address pool.
+5. Opens the firewall, but only when one is active. Under `ufw`: 22 first (see below), then
+   inbound 80, 443 and 5432, plus 443, 5432, 6379, 27017 and 20000 to 20999 from `docker0` and
+   from every Docker address pool.
    Under `firewalld`: the same container ports in the `docker` zone and 80, 443 and 5432 in the
    `public` one. Both are idempotent and every rule is printed. `--print-firewall` shows the list
    without touching anything.
+
+   The SSH rule is there because Ubuntu's `ufw` defaults its input policy to `DROP`: a rule set
+   that does not name your SSH port cuts you off the moment `ufw` is enabled, and it does it
+   quietly, because established connections keep working and the lockout only shows on the next
+   reconnect or reboot. If your SSH is not on 22, allow that port yourself before enabling `ufw`.
+   Where `ufw` is already active this rule is a no-op, and it is emitted so that re-running the
+   installer repairs a box that was enabled without one.
 6. Installs Docker when missing, enables it, requires `docker compose version`, and starts the
    daemon when it is installed but not answering.
 7. Writes `/etc/docker/daemon.json` with `default-address-pools` and restarts Docker, on a fresh

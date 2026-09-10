@@ -259,6 +259,18 @@ test('--print-firewall lists the docker0 and inbound rules; the script gates the
   // most of these boxes are protected that way and refusing would break every such install.
   expect(script).toMatch(/no active ufw or firewalld found/)
   expect(script).toMatch(/redis \(6379\) and mongodb \(27017\)[^\n]*NOT meant to be public/)
+  // ...and the advice has to be SAFE TO FOLLOW, which is a separate claim from being printed.
+  // Ubuntu's /etc/default/ufw ships DEFAULT_INPUT_POLICY="DROP", so a recipe that enables ufw
+  // without allowing SSH locks the operator out of the box: silently, because ufw accepts
+  // RELATED,ESTABLISHED, so the session that ran it survives and the lockout lands on the next
+  // reconnect. On a throwaway cloud box with no serial console that means rebuilding it.
+  const recipe = script.slice(script.indexOf('no active ufw or firewalld found'))
+  const enable = recipe.indexOf('ufw enable')
+  expect(enable).toBeGreaterThan(0)
+  expect(recipe.slice(0, enable)).toMatch(/ufw allow 22\/tcp/)     // SSH before the enable
+  // And the applied rule set carries it too, so re-running heals a box already enabled without it.
+  expect(out).toContain('ufw allow 22/tcp')
+  expect(out.indexOf('ufw allow 22/tcp')).toBeLessThan(out.indexOf('ufw allow 80,443,5432/tcp'))
 })
 
 test('the run path: every port the daemon binds is refused, readiness on /healthz, the final lines', () => {
