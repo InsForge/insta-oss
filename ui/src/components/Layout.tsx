@@ -1,20 +1,27 @@
 import { Outlet, NavLink, Link, useNavigate, useParams } from 'react-router-dom'
-import { cn } from '@insforge/ui'
+import {
+  Button, cn, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
+} from '@insforge/ui'
 import {
   Box,
   ChartColumn,
+  ChevronDown,
   Database,
   GitBranch,
   History,
   KeyRound,
+  LayoutTemplate,
+  LogOut,
   ScrollText,
   Settings,
   ShieldCheck,
+  User,
   Zap,
   type LucideIcon,
 } from 'lucide-react'
 import { api } from '../api'
 import { usePoll } from '../hooks'
+import { useAuth } from './AuthGate'
 import { Chip } from './ui'
 
 function Picker({ value, options, onPick }: { value: string; options: { key: string; label: string }[]; onPick: (k: string) => void }) {
@@ -30,6 +37,31 @@ function Picker({ value, options, onPick }: { value: string; options: { key: str
   )
 }
 
+/** Who this dashboard is: `local` in local mode, the admin's email with a menu in server mode. */
+function Identity() {
+  const auth = useAuth()
+  const nav = useNavigate()
+  if (auth.mode === 'local') return <span className="text-sm text-muted-foreground">local</span>
+  const label = auth.user?.email ?? auth.user?.name ?? 'admin'
+  const signOut = async () => { await auth.signOut(); nav('/login', { replace: true }) }
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm" className="gap-1.5 px-2 text-sm font-medium" title={label}>
+          <User className="size-4 text-muted-foreground" />
+          <span className="max-w-48 truncate">{label}</span>
+          <ChevronDown className="size-3.5 text-muted-foreground" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">
+        <DropdownMenuItem onSelect={() => nav('/account/tokens')}><KeyRound className="mr-2 size-4" /> API tokens</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={signOut}><LogOut className="mr-2 size-4" /> Sign out</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 function TopBar() {
   const { projectId, branch } = useParams()
   const nav = useNavigate()
@@ -41,7 +73,7 @@ function TopBar() {
   return (
     <header className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
       <div className="flex items-center gap-2">
-        <span className="text-sm text-muted-foreground">local</span>
+        <Identity />
         <span className="text-border">/</span>
         <Picker
           value={projectId ?? ''}
@@ -122,6 +154,7 @@ function SideBar() {
           {isDefault && <Chip>Prod</Chip>}
         </div>
         <SideItem to={`${base}/services`} label="Service" icon={Box} />
+        <SideItem to={`${base}/templates`} label="Templates" icon={LayoutTemplate} />
         <SideItem to={`${base}/secrets`} label="Secrets" icon={KeyRound} />
         <SideItem to={`${base}/database`} label="Database" icon={Database} />
         <SideItem to={`${base}/logs`} label="Logs" icon={ScrollText} />

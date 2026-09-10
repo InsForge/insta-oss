@@ -24,6 +24,7 @@ templates/<code>/
 scripts/
   lint.mjs               # the rules CI enforces (npm run lint)
   version-guard.mjs      # a changed template must bump its version (npm run version-guard)
+  build-targets.mjs      # meta.architectures -> the image workflow's buildx platform list
   publish.mjs            # registry -> hosted catalog sync, run by CI on merge
   deploy.mjs             # local executor for trying a template by hand
 ```
@@ -40,6 +41,29 @@ A value under `env.fixed` may interpolate another service's address as `${servic
 **managed database is different**: it has no URL, and its credentials arrive under `env.platform`
 as `${{services.<name>.<KEY>}}` — note the doubled braces. The two are not interchangeable, and
 each is rejected in the other's place. See [AGENTS.md](AGENTS.md) for the field rules.
+
+## Architectures
+
+Every manifest declares `meta.architectures`, the image workflow builds exactly that list, and the
+catalog serves it so `insta template deploy` can refuse a template this box cannot run before it
+creates anything. The rules and the traps are in [AGENTS.md](AGENTS.md#architectures).
+
+Where the record stands, and what each row rests on:
+
+| Template | `amd64` | `arm64` | Evidence |
+|---|---|---|---|
+| `9router` | yes | yes | Upstream's `0.5.55` index carries both. The Dockerfile used to pin that index's amd64 CHILD digest, which is why this template could not cross-build; it now pins the index |
+| `claude-code` | yes | yes | `node:24-bookworm-slim` is a multi-arch index, the ttyd 1.7.7 release ships an `aarch64` asset with its own pinned checksum, and the npm package is architecture-independent |
+| `codex` | yes | yes | Same base, same ttyd asset. `codex --version` answers inside the arm64 image, so the CLI's platform-specific parts resolved |
+| `dsh` | yes | yes | Same base. `bubblewrap` is in Debian for arm64, and the `@vscode/ripgrep` the harness bundles resolves its arm64 optional package (the Dockerfile asserts the binary exists) |
+| `hermes` | yes | yes | Upstream's `v2026.8.27` index carries both; this image only adds an entrypoint |
+| `n8n` | yes | yes | The official `n8nio/n8n:2.36.5` index carries both. Nothing is rebuilt here |
+| `openclaw` | yes | yes | Upstream's index carries both; this image only adds an entrypoint |
+| `pi` | yes | yes | Same base and ttyd asset as the other terminal templates |
+
+Every row above was checked by building the template for `linux/arm64` on an arm64 machine and
+starting the resulting image until it answered its own manifest healthcheck. Re-check a row the
+same way rather than trusting it after a base image or upstream version moves.
 
 ## Logo attribution
 

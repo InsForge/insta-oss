@@ -6,10 +6,11 @@
 // "nothing to build" case the job exists to produce.
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
+import { targetsFor } from './build-targets.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 // The workflow step runs from the repo root, so `find templates ...` resolves there, not here.
@@ -127,10 +128,17 @@ beforeAll(() => {
   }
 });
 
+// logo: none and architectures declared so the fixture is otherwise CLEAN, and a positive case can
+// assert exit 0.
+const lintBase = {
+  version: '1.0.0', maintainer: 'official', upstream: { pinned: 'v1' },
+  meta: { category: 'test', logo: 'none', architectures: ['amd64', 'arm64'] },
+};
+const lintWeb = { type: 'web', image: 'docker.io/library/nginx:1.27', port: 80, healthcheck: '/' };
+
 describe('lint: sizing is the platform\'s, on every service type', () => {
-  // logo: none so the fixture is otherwise CLEAN, and the positive case can assert exit 0.
-  const base = { version: '1.0.0', maintainer: 'official', upstream: { pinned: 'v1' }, meta: { category: 'test', logo: 'none' } };
-  const web = { type: 'web', image: 'docker.io/library/nginx:1.27', port: 80, healthcheck: '/' };
+  const base = lintBase;
+  const web = lintWeb;
 
   it('refuses spec and a sized volume on a compute service', () => {
     for (const [field, extra] of [['spec', { spec: '1vcpu-1gb' }], ['volume', { volume: { size: 10 } }]]) {
@@ -167,5 +175,77 @@ describe('lint: a self-built image must be tagged with its own version', () => {
     const m = yaml.load(readFileSync(join(root, 'hermes/insta.template.yaml'), 'utf8'));
     expect(String(Object.values(m.services)[0].image)).toContain('ghcr.io/insforge/insta-oss/templates/hermes:');
     expect(String(Object.values(m.services)[0].image)).toContain(String(m.version));
+  });
+});
+
+// The architectures a template's image is published for: the workflow's buildx `platforms`, the
+// catalog's answer to "will this run here", and the deploy path's precondition all read this one
+// field, so a template that omits it or misspells it must not reach main.
+describe('lint and the build matrix agree on meta.architectures', () => {
+  const base = lintBase;
+  const web = lintWeb;
+
+  it('rejects a template that declares none', () => {
+    const meta = { ...base.meta };
+    delete meta.architectures;
+    const r = withTemplate({ ...base, meta, services: { web } }, () => run('lint.mjs'));
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain('missing meta.architectures');
+  });
+
+  it('rejects an unknown architecture and a repeated one', () => {
+    const bad = withTemplate({ ...base, meta: { ...base.meta, architectures: ['amd64', 'riscv64'] }, services: { web } }, () => run('lint.mjs'));
+    expect(bad.code).toBe(1);
+    expect(bad.out).toContain("carries 'riscv64'");
+    const dupe = withTemplate({ ...base, meta: { ...base.meta, architectures: ['amd64', 'amd64'] }, services: { web } }, () => run('lint.mjs'));
+    expect(dupe.code).toBe(1);
+    expect(dupe.out).toContain('the same architecture twice');
+  });
+
+  it('accepts an honestly single-architecture template', () => {
+    const r = withTemplate({ ...base, meta: { ...base.meta, architectures: ['amd64'] }, services: { web } }, () => run('lint.mjs'));
+    expect(r.code, r.out).toBe(0);
+  });
+
+  it('turns each code into its own version tag and platform list', () => {
+    const targets = targetsFor(['n8n', 'hermes'], root);
+    expect(targets).toEqual([
+      { code: 'n8n', version: yaml.load(readFileSync(join(root, 'n8n/insta.template.yaml'), 'utf8')).version, platforms: 'linux/amd64,linux/arm64' },
+      { code: 'hermes', version: yaml.load(readFileSync(join(root, 'hermes/insta.template.yaml'), 'utf8')).version, platforms: 'linux/amd64,linux/arm64' },
+    ]);
+  });
+
+  it('derives an amd64-only platform list rather than assuming both', () => {
+    withTemplate({ ...base, meta: { ...base.meta, architectures: ['amd64'] }, services: { web } }, () => {
+      const [dir] = readdirSync(root).filter((d) => d.startsWith(FIXTURE_PREFIX));
+      expect(targetsFor([dir], root)).toEqual([{ code: dir, version: '1.0.0', platforms: 'linux/amd64' }]);
+    });
+  });
+
+  it('stops the build instead of guessing when a template declares none', () => {
+    withTemplate({ ...base, meta: (() => { const meta = { ...base.meta }; delete meta.architectures; return meta; })(), services: { web } }, () => {
+      const dirs = readdirSync(root).filter((d) => d.startsWith(FIXTURE_PREFIX));
+      expect(() => targetsFor([dirs[0]], root)).toThrow(/meta\.architectures is missing/);
+    });
+  });
+
+  it('every buildable template in the tree yields a platform list', () => {
+    const buildable = readdirSync(root)
+      .filter((d) => d !== 'scripts' && d !== 'node_modules' && existsSync(join(root, d, 'Dockerfile')))
+      .sort();
+    expect(buildable.length).toBeGreaterThan(0);
+    for (const t of targetsFor(buildable, root)) {
+      expect(t.platforms, t.code).toMatch(/^linux\/(amd64|arm64)(,linux\/(amd64|arm64))*$/);
+    }
+  });
+
+  it('the workflow reads its matrix from the manifest, not from a fixed platform line', () => {
+    const wf = yaml.load(readFileSync(join(repoRoot, '.github/workflows/templates-build-images.yml'), 'utf8'));
+    expect(wf.jobs.build.strategy.matrix.include).toBe('${{ fromJson(needs.discover.outputs.targets) }}');
+    const push = wf.jobs.build.steps.find((s) => String(s.uses ?? '').startsWith('docker/build-push-action'));
+    expect(push.with.platforms).toBe('${{ matrix.platforms }}');
+    // The pushed index is checked against the same claim, which is what the amd64-only state
+    // this replaced would have failed on.
+    expect(JSON.stringify(wf.jobs.build.steps)).toContain('carries every declared architecture');
   });
 });

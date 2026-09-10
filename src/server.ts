@@ -2,17 +2,21 @@
 // Instacloud platform control-plane, so the stock `insta` CLI and MCP work unchanged — just
 // pointed at localhost. Single-tenant: no OAuth; a builtin "local" org/user stand in for the
 // account system. Cloud-only surfaces (billing, usage, tokens, members) return 501.
-import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyServerFactory } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { Engine } from './engine'
+import { registerAuth } from './auth'
+import { loadConfig, type Config } from './config'
+import { LifecycleFailedError } from './engine'
+import type { Engine, Teardown } from './engine'
 import * as govern from './govern'
-import { isManagedDbType, parseManagedServiceId } from './manageddb'
+import { isManagedDbType, parseServiceId } from './manageddb'
+import { GateRefused, TemplateError } from './templates/executor'
+import { ManifestError, MissingTemplateVariablesError } from './templates/manifest'
+import { loadState } from './state'
 import { isGatedAction, type Approval, type AuditEvent, type GatedAction } from './types'
 
-const LOCAL_USER = { id: 'local', email: null, name: 'local' }
 const LOCAL_ORG = { id: 'local', name: 'local', is_personal: true, role: 'owner' }
 
 const approvalOut = (a: Approval) => ({
@@ -22,8 +26,31 @@ const eventOut = (e: AuditEvent) => ({
   id: e.id, branch: e.branch, source: e.source, kind: e.kind, payload: e.payload, created_at: e.createdAt,
 })
 
-export function buildServer(engine: Engine): FastifyInstance {
-  const app = Fastify({ logger: false })
+/** Path prefixes the API owns: a GET outside them falls back to the dashboard shell (SPA routing).
+ *  Each package appends its prefixes on its marked line (contract 00 section 1.1). */
+export const API_PREFIXES: string[] = [
+  '/projects', '/orgs', '/me', '/tokens', '/healthz', '/regions', '/images', '/invitations', '/github',
+  '/api', '/auth', '/tls',
+  '/templates', '/template-deployments',
+]
+
+/** True when the API owns `url`: a GET outside these prefixes falls back to the dashboard shell
+ *  (SPA routing) and, in server mode, needs no credentials (decision 9). A function declaration, so
+ *  the server/auth import cycle (auth.ts reads the allowlist) is safe at module init. */
+export function isApiPath(url: string): boolean {
+  return API_PREFIXES.some((p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`))
+}
+
+/** `serverFactory` is forwarded straight into Fastify() so the router (WP2) can hand it the shared
+ *  listener; undefined until then. `cfg` is the boot config (tests pass their own). */
+export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { serverFactory?: FastifyServerFactory } = {}): FastifyInstance {
+  // 'loopback', not `true`. The only proxy in front of the daemon is the edge, on 127.0.0.1, and it
+  // APPENDS the peer to X-Forwarded-For. `trustProxy: true` trusts the whole chain and takes its
+  // LEFTMOST entry, which is whatever the remote client wrote, so `req.ip` was forgeable from
+  // outside and the sign-in limiter, which buckets by it, could be walked past with a fresh header
+  // per attempt. Trusting only the loopback hop takes the rightmost untrusted entry, which is the
+  // address the edge itself observed. Same reasoning as the router's `proto()`.
+  const app = Fastify({ logger: false, trustProxy: cfg.trustProxy ? 'loopback' : false, forceCloseConnections: 'idle', ...(opts.serverFactory ? { serverFactory: opts.serverFactory } : {}) })
 
   // Tolerate bodyless POSTs sent as application/json (the CLI does this on approve/deny).
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
@@ -31,6 +58,10 @@ export function buildServer(engine: Engine): FastifyInstance {
     if (s === '') return done(null, undefined)
     try { done(null, JSON.parse(s)) } catch (e) { done(e as Error) }
   })
+
+  // Identity (WP1): in server mode the guard plus /api/auth/*, /auth/*, /me and /tokens; in local
+  // mode exactly today's /me and the three /tokens 501s, and no hook.
+  registerAuth(app, cfg)
 
   const notCloud = (reply: FastifyReply, what: string) =>
     reply.code(501).send({ error: `${what} is cloud-only — insta-oss is a single-tenant local runtime` })
@@ -52,12 +83,8 @@ export function buildServer(engine: Engine): FastifyInstance {
   }
 
   app.get('/healthz', async () => ({ ok: true }))
-  app.get('/me', async () => ({ user: LOCAL_USER }))
   app.get('/orgs', async () => ({ orgs: [LOCAL_ORG] }))
   app.post('/orgs', async (_req, reply) => notCloud(reply, 'org management'))
-  app.get('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
-  app.post('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
-  app.delete('/tokens/:tid', async (_req, reply) => notCloud(reply, 'agent tokens'))
   app.get('/orgs/:id/billing', async (_req, reply) => notCloud(reply, 'billing'))
   // Billing sub-surfaces too — the MCP sweep found checkout/portal falling to bare 404s.
   app.get('/orgs/:id/billing/cycle', async (_req, reply) => notCloud(reply, 'billing'))
@@ -81,7 +108,13 @@ export function buildServer(engine: Engine): FastifyInstance {
   // Everything is one region here: the machine the daemon runs on (CLI shape: {slug, label}).
   app.get('/regions', async () => ({ regions: [{ slug: 'local', label: 'Local (this machine)' }] }))
   // ---- observability (docker + SQL backed; same response shapes as the cloud) ----
-  const obsCode = (m: string): number => (m.includes('not found') ? 404 : 502)
+  // A project, branch or service that is not there, plus the one message that says so in the
+  // cloud's own words: `no postgres service in this project (add one with ...)` is a 404 on every
+  // route that resolves a database, not a 400 or a 502 (plan 05 section 6).
+  const notFoundish = (m: string): boolean => m.includes('not found') || m.startsWith('no postgres service in this project')
+  // WP3 (decision 48): an observability read never wakes a database. When the instance is asleep the
+  // engine says so and the page reports 503, so a dashboard poll is not what keeps it up.
+  const obsCode = (m: string): number => (notFoundish(m) ? 404 : /sleeping/.test(m) ? 503 : 502)
   // Each managed type is its own component, never folded into compute (cloud parity, platform
   // #243). Absent stays the historical compute default; junk is the cloud's 400.
   const COMPONENTS = ['db', 'compute', 'redis', 'mysql', 'mongodb'] as const
@@ -121,21 +154,23 @@ export function buildServer(engine: Engine): FastifyInstance {
   // Point-in-time DB signals — run SQL against the branch database (same queries as the cloud).
   app.get('/projects/:id/database/metrics', async (req, reply) => {
     const { id } = req.params as { id: string }
-    try { return await engine.dbMetricsSnapshot(id, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbMetricsSnapshot(id, q.branch, q.group) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
   })
 
   app.get('/projects/:id/database/activity', async (req, reply) => {
     const { id } = req.params as { id: string }
-    try { return await engine.dbActivity(id, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbActivity(id, q.branch, q.group) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
   })
 
   app.get('/projects/:id/database/query-stats', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const q = req.query as { branch?: string; limit?: string; sort?: string }
+    const q = req.query as { branch?: string; limit?: string; sort?: string; group?: string }
     const sort = (['total', 'mean', 'calls'] as const).find((s) => s === q.sort)
-    try { return await engine.dbQueryStats(id, q.branch, { limit: q.limit ? Number(q.limit) : undefined, sort }) }
+    try { return await engine.dbQueryStats(id, q.branch, { limit: q.limit ? Number(q.limit) : undefined, sort, group: q.group }) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
   })
 
@@ -144,14 +179,16 @@ export function buildServer(engine: Engine): FastifyInstance {
     if (!name) return reply.code(400).send({ error: 'name required' })
     try {
       const { project, defaultBranch } = await engine.createProject(name)
+      // EMPTY, like the cloud (provisioning/service.ts provisionProject): a project starts with a
+      // branch and nothing in it; services arrive through `insta services add`.
       return reply.code(201).send({
         project: { id: project.id, name: project.name, status: project.status },
         defaultBranch: { id: defaultBranch.id, name: defaultBranch.name },
-        resources: [{ kind: 'postgres' }, { kind: 'storage' }, { kind: 'compute' }],
+        resources: [],
       })
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e)
-      return reply.code(m.includes('already exists') ? 409 : 400).send({ error: m })
+      return reply.code(m.includes('already exists') ? 409 : provisionCode(m)).send({ error: m })
     }
   })
 
@@ -168,8 +205,9 @@ export function buildServer(engine: Engine): FastifyInstance {
     const { id } = req.params as { id: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     if (!gated(id, 'project.delete', reply)) return reply
-    await engine.destroyProject(id)
-    return {}
+    // The cloud's teardown summary, from the same envelope every delete route answers with
+    // (decision 50; platform server.ts:1300 TeardownSummary).
+    return teardownReply(reply, await engine.destroyProject(id), 're-running the project delete')
   })
 
   app.get('/projects/:id/branches', async (req) => ({
@@ -185,15 +223,50 @@ export function buildServer(engine: Engine): FastifyInstance {
       const b = await engine.createBranch(id, name, from)
       return reply.code(201).send({ branch: { id: b.id, name: b.name } })
     } catch (e) {
-      return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) })
+      const m = e instanceof Error ? e.message : String(e)
+      return reply.code(provisionCode(m, 409)).send({ error: m })
     }
   })
+
+  /** A teardown that did not finish is not a 200. The row is KEPT on that outcome (marked
+   *  `cleanup-failed`, since 4b489f6), which is right: the resources it names have to stay
+   *  reachable. But answering 200 tells a CLI or a dashboard the thing is gone, and it then
+   *  shows the branch vanishing and reappearing on the next refresh. 409 is the code this
+   *  server already uses for "the request was understood and the state says no", and the body
+   *  is the same teardown envelope either way, so a client that only reads counts is unaffected.
+   *  Documented in COMPATIBILITY. */
+  const teardownReply = (reply: FastifyReply, t: Teardown, retry: string): { teardown: { destroyed: number; failed: number }; error?: string } => {
+    const teardown = { destroyed: t.destroyed, failed: t.failed }   // the decision-50 envelope, exactly
+    if (t.failed === 0) return { teardown }
+    reply.code(409)
+    // An `error` beside it, because 409 without one renders as a bare "HTTP 409" in the
+    // dashboard (`ui/src/api.ts` reads error, then message, then code) -- for precisely the
+    // outcome this status was added to communicate. The daemon knows what refused and knows the
+    // recovery, so it says both.
+    const why = (t.reasons ?? []).join('; ')
+    return {
+      teardown,
+      error: `${t.failed} resource${t.failed === 1 ? '' : 's'} could not be removed${why ? ` (${why})` : ''}. Nothing that depended on ${t.failed === 1 ? 'it' : 'them'} was deleted and the row is kept, so ${retry} retries exactly this demolition`,
+    }
+  }
 
   app.delete('/projects/:id/branches/:bid', async (req, reply) => {
     const { id, bid } = req.params as { id: string; bid: string }
     if (!gated(id, 'branch.delete', reply)) return reply
-    try { await engine.destroyBranch(id, bid); return {} }
-    catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
+    try { return teardownReply(reply, await engine.destroyBranch(id, bid), '`insta branch delete` on it')  }
+    catch (e) {
+      // Not every refusal is "no such branch". A 404 tells a CLI the branch is gone, so an
+      // operator told that about a branch that was FOUND (the default-branch refusal) goes
+      // looking for something that is right there, and a retryable lock-set exhaustion -- which
+      // the create path on this same file already answers 409 to -- reads as permanent. 409 is
+      // this server's code for "understood, and the state says no"; anything else here is a
+      // fault in the teardown itself, not a statement about the branch.
+      const m = e instanceof Error ? e.message : String(e)
+      const code = m.includes('not found') ? 404
+        : m.includes('cannot delete the default branch') || m.includes('could not settle its lock set') ? 409
+          : 500
+      return reply.code(code).send({ error: m })
+    }
   })
 
   // Structural merge: create on the target branch what exists on `from` and is missing there.
@@ -235,7 +308,12 @@ export function buildServer(engine: Engine): FastifyInstance {
     if (!body.image) return reply.code(400).send({ error: 'image required' })
     if (!gated(id, 'deploy', reply)) return reply
     try { return await engine.deploy(id, body.branch ?? 'main', { image: body.image, port: body.port, group: body.group }) }
-    catch (e) { return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) }) }
+    catch (e) {
+      // 409 for the one failure that is not about the request: the image went out and the
+      // container could not be put back into the standing stopped/suspended state it had.
+      const m = e instanceof Error ? e.message : String(e)
+      return reply.code(e instanceof LifecycleFailedError ? 409 : 400).send({ error: m })
+    }
   })
 
   app.get('/projects/:id/policy', async (req) => ({
@@ -280,52 +358,57 @@ export function buildServer(engine: Engine): FastifyInstance {
 
   app.post('/projects/:id/services', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const body = (req.body ?? {}) as { type?: string; name?: string; branch?: string; public?: boolean; volumeGib?: number }
+    const body = (req.body ?? {}) as { type?: string; name?: string; branch?: string; public?: boolean; volumeGib?: number; port?: number; alwaysOn?: boolean; image?: string }
     if (!body.type || !body.name) return reply.code(400).send({ error: 'type and name required' })
     if (!gated(id, 'service.add', reply)) return reply
-    // Contract parity: postgres/storage add succeeds idempotently (insta-oss has one of each,
-    // auto-provisioned) — the same `services add postgres|storage|compute` script runs on both.
-    if (body.type === 'postgres' || body.type === 'storage') {
-      try {
-        const service = engine.fixedService(id, body.type)
-        // `services add storage <name> --public` provisions the bucket public on the cloud;
-        // here the bucket already exists, so apply the access mode to it.
-        if (body.type === 'storage' && body.public === true) {
-          return reply.code(201).send({ service: await engine.setServiceAccess(id, service.id, true, body.branch) })
-        }
-        return reply.code(201).send({ service })
-      } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
+    // `branch` names the branch the service is created on, defaulting to the project's default
+    // branch — the cloud's shape (platform server.ts:1492) and what the docs promise. Postgres,
+    // storage and managed databases are created on THAT branch only: each is real infrastructure
+    // with its own credentials, and fanning them out meant an agent adding a database on its own
+    // branch also built one on main. A compute group is the exception: it is a registration and
+    // nothing else until a deploy puts a container on a branch, so it stays project-level and
+    // `branch` does not apply to it. `image` is accepted and ignored — the image reaches a service
+    // through deploy.
+    const add = async (): Promise<unknown> => {
+      const on = { ...(body.branch !== undefined ? { branch: body.branch } : {}) }
+      if (body.type === 'postgres') return engine.addDbService(id, body.name!, on)
+      if (body.type === 'storage') return engine.addStorageService(id, body.name!, { ...on, ...(body.public !== undefined ? { public: body.public } : {}) })
+      if (isManagedDbType(body.type!)) return engine.addManagedService(id, body.type as 'redis' | 'mysql' | 'mongodb', body.name!, on)
+      // volumeGib (compute only) attaches a persistent /data volume (also attachable later via
+      // PUT …/volume, and deletable via DELETE …/volume — cloud parity).
+      return engine.addComputeService(id, body.name!, body.volumeGib, {
+        ...(body.alwaysOn !== undefined ? { alwaysOn: body.alwaysOn } : {}),
+        ...(body.port !== undefined ? { port: body.port } : {}),
+      })
     }
-    // Managed databases (redis | mysql | mongodb): a fresh private instance per branch, fresh
-    // credentials, no data clone — cloud parity (platform #235/#236).
-    if (isManagedDbType(body.type)) {
-      try { return reply.code(201).send({ service: await engine.addManagedService(id, body.type, body.name) }) }
-      catch (e) {
-        const m = e instanceof Error ? e.message : String(e)
-        const code = m.includes('already exists') || m.includes('already used') ? 409 : m.includes('not found') ? 404 : 400
-        return reply.code(code).send({ error: m })
-      }
+    if (!['postgres', 'storage', 'compute'].includes(body.type) && !isManagedDbType(body.type)) {
+      return reply.code(400).send({ error: `unknown service type: ${body.type}` })
     }
-    if (body.type !== 'compute') return reply.code(400).send({ error: `unknown service type: ${body.type}` })
-    // volumeGib (compute only) attaches a persistent /data volume (also attachable later via
-    // PUT …/volume, and deletable via DELETE …/volume — cloud parity).
-    try { return reply.code(201).send({ service: engine.addComputeService(id, body.name, body.volumeGib) }) }
+    try { return reply.code(201).send({ service: await add() }) }
     catch (e) {
       const m = e instanceof Error ? e.message : String(e)
-      return reply.code(m.includes('already exists') ? 409 : 400).send({ error: m })
+      const code = m.includes('already exists') || m.includes('already used') || m.includes('already used by') ? 409
+        : m.includes('is reserved by the daemon') ? 409
+        : m.includes('not found') ? 404
+        : provisionCode(m)
+      return reply.code(code).send({ error: m })
     }
   })
 
   // ---- service lifecycle + access (contract parity) ----
   // Ungated like the platform; ?branch= scopes the target (default branch otherwise) because
   // oss service ids are stable across branches rather than per-branch rows.
-  const errCode = (m: string): number => (m.includes('not found') ? 404 : 400)
+  // A transition the RUNTIME refused is not a bad request: 409, the code this file already uses
+  // for "understood, and the state says no" (the teardown envelope). Nothing was recorded when
+  // one of these is thrown, so the verb can simply be retried.
+  const errCode = (m: string, e?: unknown): number =>
+    (e instanceof LifecycleFailedError ? 409 : notFoundish(m) ? 404 : 400)
   for (const verb of ['start', 'stop', 'suspend'] as const) {
     app.post(`/projects/:id/services/:sid/${verb}`, async (req, reply) => {
       const { id, sid } = req.params as { id: string; sid: string }
       if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
       try { return await engine.lifecycle(id, sid, verb, (req.query as { branch?: string }).branch) }
-      catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+      catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m, e)).send({ error: m }) }
     })
   }
 
@@ -338,7 +421,7 @@ export function buildServer(engine: Engine): FastifyInstance {
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     if (!gated(id, 'deploy', reply)) return reply
     try { return await engine.restart(id, sid, (req.query as { branch?: string }).branch) }
-    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m, e)).send({ error: m }) }
   })
 
   app.get('/projects/:id/services/:sid/state', async (req, reply) => {
@@ -353,7 +436,9 @@ export function buildServer(engine: Engine): FastifyInstance {
     const { id, sid } = req.params as { id: string; sid: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     if (!gated(id, 'secrets.read', reply)) return reply
-    try { return { secrets: engine.serviceSecretNames(id, sid) } }
+    // Same branch resolution as every other `/services/:sid/*` route (decision 49): a qualified
+    // sid names the branch, then `?branch`, then the default.
+    try { return { secrets: engine.serviceSecretNames(id, sid, (req.query as { branch?: string }).branch) } }
     catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 
@@ -368,20 +453,26 @@ export function buildServer(engine: Engine): FastifyInstance {
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
   })
 
-  // Rename a service and re-key what derives from its name. Gated — service.rename. The fixed
-  // postgres/storage pair is name-fixed locally (their minted names are unsuffixed).
+  // Rename a service and re-key what derives from its name. Gated — service.rename. Every type is
+  // renamable: a postgres service moves its container and minted hostname while KEEPING its data
+  // directory (the id is immutable, decision 16); a storage rename is a re-key only, because a
+  // bucket handle is baked into every object URL and into the key scoped to it.
   app.post('/projects/:id/services/:sid/rename', async (req, reply) => {
-    const { id, sid } = req.params as { id: string; sid: string }
+    const { id, sid: raw } = req.params as { id: string; sid: string }
     const { name } = (req.body ?? {}) as { name?: string }
     if (!name) return reply.code(400).send({ error: 'name required' })
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
-    if (!sid.startsWith('cp-') && !parseManagedServiceId(sid)) {
-      return reply.code(501).send({ error: 'renaming postgres/storage services is cloud-only — insta-oss provisions one fixed pair (db/store) per project' })
-    }
+    // resolveSid rather than bareSid, per contract section 10, which names rename in that family:
+    // a qualified sid that points at a deleted or foreign branch must 404, not have its qualifier
+    // discarded and the rename applied to whatever the bare id happens to match.
+    let sid: string
+    try { sid = engine.resolveSid(id, raw, (req.query as { branch?: string }).branch).serviceId }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
     if (!gated(id, 'service.rename', reply)) return reply
     try {
-      const service = sid.startsWith('cp-')
-        ? await engine.renameComputeService(id, sid.slice(3), name)
+      const service = sid.startsWith('cp-') ? await engine.renameComputeService(id, sid.slice(3), name)
+        : sid.startsWith('pg-') ? await engine.renameDbService(id, sid, name)
+        : sid.startsWith('st-') ? await engine.renameStorageService(id, sid, name)
         : await engine.renameManagedService(id, sid, name)
       return { service }
     } catch (e) {
@@ -398,7 +489,13 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.get('/projects/:id/services/:sid/volume', async (req, reply) => {
     const { id, sid } = req.params as { id: string; sid: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
-    try { return engine.serviceVolume(id, sid) }
+    // resolveSid, like DELETE below: contract section 10 says every /services/:sid/* route resolves
+    // the qualifier and 404s when the branch is gone or belongs to another project. Stripping it
+    // unread meant a stale qualifier read back a silent 200 on a resource it no longer named.
+    try {
+      const { serviceId } = engine.resolveSid(id, sid, (req.query as { branch?: string }).branch)
+      return engine.serviceVolume(id, serviceId)
+    }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
   })
 
@@ -407,7 +504,12 @@ export function buildServer(engine: Engine): FastifyInstance {
     const { sizeGib } = (req.body ?? {}) as { sizeGib?: number }
     if (typeof sizeGib !== 'number') return reply.code(400).send({ error: 'sizeGib (number) required' })
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
-    try { return await engine.setServiceVolume(id, sid, sizeGib) }
+    // Same resolution as GET and DELETE: a stale qualifier used to write the project-level record
+    // and answer 200, which is the worst of the three because it is a silent successful write.
+    try {
+      const { serviceId } = engine.resolveSid(id, sid, (req.query as { branch?: string }).branch)
+      return await engine.setServiceVolume(id, serviceId, sizeGib)
+    }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
   })
 
@@ -418,7 +520,23 @@ export function buildServer(engine: Engine): FastifyInstance {
     const { id, sid } = req.params as { id: string; sid: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     if (!gated(id, 'service.remove', reply)) return reply
-    try { return await engine.removeServiceVolume(id, sid) }
+    // Strips the qualifier and proceeds, like GET and PUT on this same resource (contract section
+    // 10, which names `volume` in that family and specifies the response as unchanged). Detaching
+    // is project-wide BY DESIGN here: the volume record is a project-level service setting and the
+    // engine's contract note calls the rebuild eager across every branch that deploys the group.
+    // So the qualifier is redundant rather than dangerous, and refusing it, as an earlier revision
+    // of this route did, left a decision-49 client with no id it could send: that form is the only
+    // one `GET /services?branch=` hands back off the default branch, and the contract declares it
+    // opaque, so "re-send without the branch" asked the caller to parse it.
+    // resolveSid, not bareSid: bareSid strips the qualifier without looking at it, so a stale or
+    // foreign branch id would be discarded in silence and the detach would go ahead on a project
+    // the caller never named. resolveSid validates the branch belongs to this project and throws
+    // 'branch not found' otherwise. GET and PUT above now do the same; when this route was fixed
+    // first they did not, and the comment here claimed they did.
+    try {
+      const { serviceId } = engine.resolveSid(id, sid, (req.query as { branch?: string }).branch)
+      return await engine.removeServiceVolume(id, serviceId)
+    }
     catch (e) {
       const m = e instanceof Error ? e.message : String(e)
       return reply.code(m.includes('no volume') ? 404 : errCode(m)).send({ error: m })
@@ -427,15 +545,26 @@ export function buildServer(engine: Engine): FastifyInstance {
 
   app.get('/projects/:id/database/instance', async (req, reply) => {
     const { id } = req.params as { id: string }
-    try { return engine.dbInstance(id, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return engine.dbInstance(id, q.branch, q.group) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
   })
 
   app.patch('/projects/:id/database/settings', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const body = (req.body ?? {}) as { volumeSize?: string; storageSize?: string }
-    try { return engine.dbSettings(id, body, (req.query as { branch?: string }).branch) }
-    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+    // WP3: `scaleToZero`, `idleTimeout`, `cpu` and `memory` are real levers on the branch's own
+    // postgres container now, not accepted-and-ignored cloud fields.
+    const body = (req.body ?? {}) as {
+      volumeSize?: string; storageSize?: string
+      scaleToZero?: boolean; idleTimeout?: number | string; cpu?: number | string; memory?: number | string
+    }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbSettings(id, body, q.branch, q.group) }
+    catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      const status = (e as { status?: number }).status
+      return reply.code(typeof status === 'number' ? status : errCode(m)).send({ error: m })
+    }
   })
 
   // ---- database management (password / databases / extensions / insight — cloud parity).
@@ -443,72 +572,72 @@ export function buildServer(engine: Engine): FastifyInstance {
   // database + extension management is ungated. SQL failures map: exists→409, missing→404.
   const dbErr = (reply: FastifyReply, e: unknown): FastifyReply => {
     const m = e instanceof Error ? e.message : String(e)
-    const code = m.includes('already exists') ? 409 : m.includes('does not exist') || m.includes('not found') ? 404 : 400
+    const code = m.includes('already exists') ? 409 : m.includes('does not exist') || notFoundish(m) ? 404 : 400
     return reply.code(code).send({ error: m })
   }
 
   app.post('/projects/:id/database/password', async (req, reply) => {
     const { id } = req.params as { id: string }
     const { password } = (req.body ?? {}) as { password?: string }
+    const q = req.query as { branch?: string; group?: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     if (!gated(id, 'secrets.read', reply)) return reply
-    try { return await engine.dbSetPassword(id, password, (req.query as { branch?: string }).branch) }
+    try { return await engine.dbSetPassword(id, password, q.branch, q.group) }
     catch (e) { return dbErr(reply, e) }
   })
 
   app.get('/projects/:id/database/databases', async (req, reply) => {
     const { id } = req.params as { id: string }
-    try { return await engine.dbListDatabases(id, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbListDatabases(id, q.branch, q.group) }
     catch (e) { return dbErr(reply, e) }
   })
 
   app.post('/projects/:id/database/databases', async (req, reply) => {
     const { id } = req.params as { id: string }
     const { name } = (req.body ?? {}) as { name?: string }
+    const q = req.query as { branch?: string; group?: string }
     if (!name) return reply.code(400).send({ error: 'name required' })
-    try { return reply.code(201).send(await engine.dbCreateDatabase(id, name, (req.query as { branch?: string }).branch)) }
+    try { return reply.code(201).send(await engine.dbCreateDatabase(id, name, q.branch, q.group)) }
     catch (e) { return dbErr(reply, e) }
   })
 
   app.delete('/projects/:id/database/databases/:database', async (req, reply) => {
     const { id, database } = req.params as { id: string; database: string }
-    try { await engine.dbDeleteDatabase(id, database, (req.query as { branch?: string }).branch); return { ok: true } }
+    const q = req.query as { branch?: string; group?: string }
+    try { await engine.dbDeleteDatabase(id, database, q.branch, q.group); return { ok: true } }
     catch (e) { return dbErr(reply, e) }
   })
 
   app.get('/projects/:id/database/extensions', async (req, reply) => {
     const { id } = req.params as { id: string }
-    try { return await engine.dbExtensions(id, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbExtensions(id, q.branch, q.group) }
     catch (e) { return dbErr(reply, e) }
   })
 
   app.patch('/projects/:id/database/extensions', async (req, reply) => {
     const { id } = req.params as { id: string }
     const body = (req.body ?? {}) as { enable?: string[]; disable?: string[] }
-    try { return await engine.dbPatchExtensions(id, body, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbPatchExtensions(id, body, q.branch, q.group) }
     catch (e) { return dbErr(reply, e) }
   })
 
   app.get('/projects/:id/database/insight', async (req, reply) => {
     const { id } = req.params as { id: string }
-    try { return await engine.dbInsight(id, (req.query as { branch?: string }).branch) }
+    const q = req.query as { branch?: string; group?: string }
+    try { return await engine.dbInsight(id, q.branch, q.group) }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(obsCode(m)).send({ error: m }) }
   })
 
   // Machine scaling / instance specs are cloud pricing concepts — clean 501, never a bare 404.
   app.post('/projects/:id/services/:sid/scale', async (_req, reply) => notCloud(reply, 'machine scaling'))
   app.post('/projects/:id/services/:sid/upgrade', async (_req, reply) => notCloud(reply, 'instance spec upgrades'))
-  // Same family: limits are tier caps, always-on is the scale-to-zero lever, and the service
-  // PATCH bundles both. Locally nothing scales to zero and nothing enforces a quota.
-  app.get('/projects/:id/services/:sid/limits', async (_req, reply) => notCloud(reply, 'machine limits'))
-  app.put('/projects/:id/services/:sid/limits', async (_req, reply) => notCloud(reply, 'machine limits'))
-  app.put('/projects/:id/services/:sid/always-on', async (_req, reply) => notCloud(reply, 'always-on (scale-to-zero is a cloud lever; local containers already stay up)'))
+  // The service PATCH bundles limits + always-on (both real routes once WP3 lands, region C below).
   app.patch('/projects/:id/services/:sid', async (_req, reply) => notCloud(reply, 'service spec patching'))
-  // Cloud deploy plumbing: custom domains need real DNS + certs, deploy tokens mint Fly builder
-  // credentials (local source deploys will be `docker build`, roadmap Phase 4).
-  app.post('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
-  app.get('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
-  app.delete('/projects/:id/compute/domain', async (_req, reply) => notCloud(reply, 'custom domains'))
+  // Cloud deploy plumbing: deploy tokens mint Fly builder credentials (local source deploys will be
+  // `docker build`, roadmap Phase 4). Custom domains: region B below.
   app.post('/projects/:id/deploy-token', async (_req, reply) => notCloud(reply, 'deploy tokens (remote builders)'))
   // Managed backups ride the cloud's database infra; locally the database is your container.
   app.post('/projects/:id/backups', async (_req, reply) => notCloud(reply, 'managed backups (locally: pg_dump with the DATABASE_URL from `insta secrets`)'))
@@ -532,11 +661,15 @@ export function buildServer(engine: Engine): FastifyInstance {
   app.post('/projects/:id/services/:sid/source/deploy', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
   app.get('/projects/:id/services/:sid/source/builds', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
   // A local compute service always runs an image, so its source is a real answer, not a 501.
+  // Branch-aware like every other `/services/:sid/*` route (decision 49): a qualified sid picks the
+  // branch first, then `?branch`, then the default; rows off the default branch carry a qualified
+  // id, so the row is matched on its bare service id.
   app.get('/projects/:id/services/:sid/source', async (req, reply) => {
-    const { id, sid } = req.params as { id: string; sid: string }
-    const branch = (req.query as { branch?: string }).branch
+    const { id, sid: raw } = req.params as { id: string; sid: string }
     try {
-      const svc = (await engine.services(id, branch)).find((s) => s.id === sid)
+      const { branch, serviceId } = engine.resolveSid(id, raw, (req.query as { branch?: string }).branch)
+      const rows = await engine.services(id, branch.name)
+      const svc = rows.find((s) => (parseServiceId(s.id)?.serviceId ?? s.id) === serviceId)
       if (!svc) return reply.code(404).send({ error: 'service not found' })
       if (svc.type !== 'compute') return reply.code(400).send({ error: 'only a compute service has a source' })
       return { source: { type: 'image', image: svc.image ?? null } }
@@ -544,6 +677,14 @@ export function buildServer(engine: Engine): FastifyInstance {
   })
   // Not-yet surfaces (real local answers exist meanwhile):
   app.get('/projects/:id/deploy-events', async (_req, reply) => notYet(reply, 'the deploy-event feed', 'use `insta events` and `insta logs`'))
+  // Aliasing one credential onto an env name of your choosing. The credentials themselves are
+  // already in every compute container, under their own names and, for the oldest service of each
+  // type, the unsuffixed ones as well, so the local answer is to read those. `insta secrets bind`,
+  // `unbind`, `bindings` and `sources` all land here, and a bare 404 would read as a broken CLI.
+  const noBindings = 'read the credential straight from the container environment (`insta secrets list` names them) or set your own name with `insta secrets set`'
+  app.get('/projects/:id/secret-bindings', async (_req, reply) => notYet(reply, 'service credential bindings', noBindings))
+  app.put('/projects/:id/secret-bindings/:envName', async (_req, reply) => notYet(reply, 'service credential bindings', noBindings))
+  app.delete('/projects/:id/secret-bindings/:envName', async (_req, reply) => notYet(reply, 'service credential bindings', noBindings))
 
   // Project rename — display name only, like the cloud: every resource keeps its frozen slug.
   app.patch('/projects/:id', async (req, reply) => {
@@ -644,16 +785,24 @@ export function buildServer(engine: Engine): FastifyInstance {
     catch (e) { return objErr(reply, e) }
   })
 
+  // Remove a service and answer the cloud's teardown summary (decision 50): how many containers,
+  // buckets and directories went, and how many refused to. EVERY type is removed from ONE branch,
+  // resolved exactly as an add resolves one: the qualifier on the id first, then `?branch`, then
+  // the default (decision 49). Removing every branch's copy destroyed main's database, and its
+  // bytes, when the caller asked to drop the one on `feat`; a compute group was the last arm still
+  // doing it, and a group's `/data` volume is per branch, so it took main's volume with it. The
+  // project-level registration retires with the last branch that carries the name.
   app.delete('/projects/:id/services/:sid', async (req, reply) => {
-    const { id, sid } = req.params as { id: string; sid: string }
-    if (!sid.startsWith('cp-') && !parseManagedServiceId(sid)) {
-      return reply.code(501).send({ error: 'removing postgres/storage services is cloud-only — insta-oss provisions one of each per project' })
-    }
+    const { id, sid: raw } = req.params as { id: string; sid: string }
+    const on = { branch: (req.query as { branch?: string }).branch }
+    const sid = bareSid(raw)
     if (!gated(id, 'service.remove', reply)) return reply
     try {
-      if (sid.startsWith('cp-')) await engine.removeComputeService(id, sid.slice(3))
-      else await engine.removeManagedService(id, sid)
-      return {}
+      const teardown = sid.startsWith('cp-') ? await engine.removeComputeService(id, raw, on)
+        : sid.startsWith('pg-') ? await engine.removeDbService(id, raw, on)
+        : sid.startsWith('st-') ? await engine.removeStorageService(id, raw, on)
+        : await engine.removeManagedService(id, raw, on)
+      return teardownReply(reply, teardown, `\`insta services remove ${sid}\``)
     } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })
 
@@ -675,12 +824,24 @@ export function buildServer(engine: Engine): FastifyInstance {
     return { ok: true }
   })
 
-  app.get('/projects/:id/events', async (req) => {
+  // `limit` is a page size, and `slice(-limit)` reads every other number as "all of it":
+  // `limit=0`, `limit=abc` and `limit=-5` each handed back the whole retained set, up to EVENTS_CAP
+  // rows, to a poller expecting a page. Junk is the 400 the other query parameters answer with
+  // (`component must be ...`), and a large number clamps rather than fails.
+  const EVENTS_LIMIT_MAX = 1000
+  const eventsLimit = (raw: string | undefined): number | null => {
+    if (raw === undefined || raw === '') return 50
+    const n = Number(raw)
+    return Number.isInteger(n) && n >= 1 ? Math.min(n, EVENTS_LIMIT_MAX) : null
+  }
+
+  app.get('/projects/:id/events', async (req, reply) => {
     const { id } = req.params as { id: string }
     const q = req.query as { branch?: string; limit?: string }
+    const limit = eventsLimit(q.limit)
+    if (limit === null) return reply.code(400).send({ error: `limit must be an integer from 1 to ${EVENTS_LIMIT_MAX}` })
     let events = engine.listEvents(id)
     if (q.branch) events = events.filter((e) => e.branch === q.branch)
-    const limit = q.limit ? Number(q.limit) : 50
     return { events: events.slice(-limit).map(eventOut) }
   })
 
@@ -693,15 +854,211 @@ export function buildServer(engine: Engine): FastifyInstance {
     return reply.code(201).send({ ok: true })
   })
 
+  // ---- package regions (contract 00 section 1.3): new routes go here, right before the dashboard
+  // block. The 501 stubs each region replaces were moved in by the scaffold, so the owner deletes
+  // them inside its own region. Region A = WP1, B = WP2, C = WP3, D = WP5.
+
+  // ---- region A (WP1 identity/config) ----
+  // /me and /tokens are registered by registerAuth() above: one call site mints the right pair for
+  // the run mode, so the local surface stays byte-identical and the server one is guarded.
+  // ---- end region A ----
+
+  // ---- region B (WP2 router) ----
+  // Custom domains: the cloud's four hidden routes (platform server.ts:2740-2766), rendered by
+  // `insta compute set-domain | check-domain | remove-domain`. The envelope carries NO `ssl`,
+  // `origin` or `originStatus` key: the CLI reads an `ssl` field as a cloud-plane answer, then
+  // demands an ownership TXT record and prints UNCONFIRMED (decision 25).
+  const domainQuery = (req: { query: unknown; body: unknown }): { hostname?: unknown; branch?: string; group?: string } => {
+    const q = (req.query ?? {}) as { hostname?: string; branch?: string; group?: string }
+    const b = (req.body ?? {}) as { hostname?: unknown; branch?: string; group?: string }
+    return { hostname: b.hostname ?? q.hostname, branch: b.branch ?? q.branch, group: b.group ?? q.group }
+  }
+  // The engine throws with a `status`, so one mapper serves all four routes.
+  const domainFail = (e: unknown, reply: FastifyReply) => {
+    const status = (e as { status?: number }).status
+    const message = e instanceof Error ? e.message : String(e)
+    return reply.code(typeof status === 'number' ? status : 400).send({ error: message })
+  }
+
+  app.post('/projects/:id/compute/domain', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'deploy', reply)) return reply
+    try { return await engine.setComputeDomain(id, domainQuery(req)) } catch (e) { return domainFail(e, reply) }
+  })
+
+  app.get('/projects/:id/compute/domain', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    try { return await engine.computeDomainStatus(id, domainQuery(req)) } catch (e) { return domainFail(e, reply) }
+  })
+
+  app.get('/projects/:id/compute/domains', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const q = (req.query ?? {}) as { branch?: string; group?: string }
+    try { return { items: await engine.listComputeDomains(id, q) } } catch (e) { return domainFail(e, reply) }
+  })
+
+  app.delete('/projects/:id/compute/domain', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'deploy', reply)) return reply
+    try { return engine.removeComputeDomain(id, domainQuery(req)) } catch (e) { return domainFail(e, reply) }
+  })
+  // ---- end region B ----
+
+  // ---- region C (WP3 scheduler) ----
+  // The two service knobs the scheduler makes real: the cgroup ceiling (`insta compute limits`) and
+  // the opt-out from sleep (`insta compute always-on`). Both resolve the branch from a qualified sid
+  // first (decision 49) and then act on the BARE service id, because limits and always-on are
+  // project-level settings that apply to the service on every branch.
+  const sidOf = (req: { params: unknown; query: unknown }): string => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    return engine.resolveSid(id, sid, (req.query as { branch?: string }).branch).serviceId
+  }
+  /** A limits failure's status: the engine attaches 502 to a partial resize; the rest is the usual
+   *  404-or-400 split. */
+  const limitsFail = (e: unknown, reply: FastifyReply): FastifyReply => {
+    const m = e instanceof Error ? e.message : String(e)
+    const status = (e as { status?: number }).status
+    return reply.code(typeof status === 'number' ? status : errCode(m)).send({ error: m })
+  }
+
+  app.get('/projects/:id/services/:sid/limits', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    try { return engine.serviceLimits(id, sidOf(req)) } catch (e) { return limitsFail(e, reply) }
+  })
+
+  // Gated `service.upgrade`, like the cloud (it changes what the machine costs to run).
+  app.put('/projects/:id/services/:sid/limits', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'service.upgrade', reply)) return reply
+    const body = (req.body ?? {}) as { memoryMb?: unknown; cpu?: unknown }
+    if (typeof body.memoryMb !== 'number') return reply.code(400).send({ error: 'memoryMb required (MB, a multiple of 256)' })
+    if (body.cpu !== undefined && typeof body.cpu !== 'number') return reply.code(400).send({ error: 'cpu must be a number of vCPU' })
+    try {
+      const { service, limits, cap } = await engine.setServiceLimits(id, sidOf(req), { memoryMb: body.memoryMb, cpu: body.cpu })
+      return { service, limits, cap }
+    } catch (e) { return limitsFail(e, reply) }
+  })
+
+  app.put('/projects/:id/services/:sid/always-on', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    const { enabled } = (req.body ?? {}) as { enabled?: unknown }
+    if (typeof enabled !== 'boolean') return reply.code(400).send({ error: 'enabled must be a boolean' })
+    try { return await engine.setAlwaysOn(id, sidOf(req), enabled) } catch (e) { return limitsFail(e, reply) }
+  })
+  // ---- end region C ----
+
+  // ---- region D (WP5 templates/parity) ----
+  // The bundled template registry and the deployment routes, plus per-service credentials.
+
+  /** A branch-qualified service id (`<branchId>:pg-db`, decision 49) stripped to its bare id. The
+   *  engine resolves the branch from the SAME qualifier, so a route that needs only the id (a
+   *  project-level remove or rename) takes this and nothing else. */
+  const bareSid = (sid: string): string => (parseServiceId(sid)?.serviceId ?? sid)
+
+  /** A provisioning failure's status: 507 when dockerd is out of network subnets (the message the
+   *  engine rethrows), the caller's default otherwise. */
+  const provisionCode = (m: string, fallback = 400): number => (m.includes('no free network subnets') ? 507 : fallback)
+
+  // Public in server mode (cloud `security: []`, openapi.yaml:7702 and 7727), and CDN-cacheable
+  // the same way the cloud's are.
+  app.get('/templates', async (req, reply) => {
+    const q = req.query as { query?: string; category?: string }
+    reply.header('cache-control', 'public, max-age=300')
+    return engine.templates.listTemplates({ query: q.query, category: q.category })
+  })
+
+  app.get('/templates/:code', async (req, reply) => {
+    const { code } = req.params as { code: string }
+    reply.header('cache-control', 'public, max-age=300')
+    try { return engine.templates.getTemplate(code) }
+    catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : `template not found: ${code}` }) }
+  })
+
+  // Deploy a template. Gated service.add + secrets.write + deploy, and service.upgrade when the
+  // manifest declares a volume (decision 45) — the gate list is manifest-dependent, so it runs
+  // INSIDE create(), after the idempotency decision: an echo of a finished deployment must not be
+  // refusable by a policy changed since, and must never consume a single-use approval.
+  app.post('/projects/:id/template-deployments', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const b = (req.body ?? {}) as Record<string, unknown>
+    let refused = false
+    try {
+      const out = await engine.executor.create(id, {
+        templateCode: (b.templateCode ?? b.code) as string | undefined,
+        templateVersion: b.templateVersion as string | undefined,
+        manifest: b.manifest,
+        branchId: b.branchId as string | undefined,
+        branch: b.branch as string | undefined,
+        variables: b.variables as Record<string, string> | undefined,
+        deploymentId: b.deploymentId as string | undefined,
+      }, async (actions) => {
+        for (const action of actions) {
+          if (!gated(id, action, reply)) { refused = true; throw new GateRefused() }
+        }
+      })
+      return reply.code(202).send({ deploymentId: out.deployment.id, deployment: out.deployment })
+    } catch (e) {
+      // The gate already answered (403 or 202 approval_required): nothing more to send.
+      if (refused && e instanceof GateRefused) return reply
+      // The machine-readable half of "you forgot these": callers prompt from the list and retry.
+      if (e instanceof MissingTemplateVariablesError) {
+        return reply.code(400).send({ error: 'missing_variables', missing: e.missing, missingVariables: e.missing })
+      }
+      const m = e instanceof Error ? e.message : String(e)
+      const status = e instanceof TemplateError ? e.status : e instanceof ManifestError ? 400 : provisionCode(m)
+      return reply.code(status).send({ error: m })
+    }
+  })
+
+  // Unwrapped, like the cloud (platform server.ts:2721): the CLI's watcher reads the row directly.
+  app.get('/template-deployments/:did', async (req, reply) => {
+    const { did } = req.params as { did: string }
+    try { return engine.executor.get(did) }
+    catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : 'template deployment not found' }) }
+  })
+
+  // One service's credential bundle on one branch, in the host-facing lane form. The branch comes
+  // from a qualified sid FIRST, then ?branch, then the default (decision 49): the CLI lists
+  // ?branch=<b>, takes the id it is given, and calls this with no branch at all.
+  app.get('/projects/:id/services/:sid/credentials', async (req, reply) => {
+    const { id, sid } = req.params as { id: string; sid: string }
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    if (!gated(id, 'secrets.read', reply)) return reply
+    try {
+      const credentials = engine.credentials(id, sid, (req.query as { branch?: string }).branch)
+      engine.emit(id, null, 'govern', 'secrets.read', { service: bareSid(sid) })
+      return { credentials }
+    } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
+  })
+  // ---- end region D ----
+
   // ---- local dashboard: serve ui/dist when built (same origin as the API — localhost trust,
   // no CORS, no auth). API routes above always win; unknown non-API GETs fall back to the SPA.
-  const uiDist = process.env.INSTA_OSS_UI_DIST ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'ui', 'dist')
-  const isApiPath = (url: string): boolean =>
-    ['/projects', '/orgs', '/me', '/tokens', '/healthz', '/regions', '/images', '/invitations', '/github'].some((p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`))
+  const uiDist = cfg.uiDist
   if (existsSync(join(uiDist, 'index.html'))) {
-    app.register(fastifyStatic, { root: uiDist, wildcard: false })
+    // index: false, so fastifyStatic never serves index.html raw: every shell response is injected.
+    app.register(fastifyStatic, { root: uiDist, wildcard: false, index: false })
+    const shellHtml = readFileSync(join(uiDist, 'index.html'), 'utf8')
+    const sendShell = (reply: FastifyReply): FastifyReply => {
+      // setupRequired is read per request: it flips to false the moment the admin is created.
+      const boot = JSON.stringify({
+        mode: cfg.mode,
+        setupRequired: cfg.auth.enabled && !loadState().identity?.admin,
+        apiUrl: cfg.apiUrl,
+        consoleUrl: cfg.consoleUrl,
+      }).replace(/</g, '\\u003c')
+      const script = `<script>window.__INSTA_OSS__=${boot}</script>`
+      const html = shellHtml.includes('</head>') ? shellHtml.replace('</head>', `${script}</head>`) : script + shellHtml
+      return reply.type('text/html; charset=utf-8').send(html)
+    }
+    app.get('/', async (_req, reply) => sendShell(reply))
     app.setNotFoundHandler((req, reply) => {
-      if (req.method === 'GET' && !isApiPath(req.url)) return reply.sendFile('index.html')
+      if (req.method === 'GET' && !isApiPath(req.url)) return sendShell(reply)
       return reply.code(404).send({ error: 'not found' })
     })
   } else {

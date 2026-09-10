@@ -84,6 +84,8 @@ managed daemon the dashboard's System and Channels pages control.
 
 ## Links
 
+- Architectures: `linux/amd64` and `linux/arm64`. Upstream publishes both and this image only
+  adds an entrypoint.
 - Documentation: <https://hermes-agent.nousresearch.com/docs/>
 - Upstream: <https://github.com/NousResearch/hermes-agent>
 - Image: `docker.io/nousresearch/hermes-agent`, pinned to `v2026.8.27`

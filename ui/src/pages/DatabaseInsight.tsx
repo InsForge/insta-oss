@@ -1,4 +1,7 @@
-import { useParams } from 'react-router-dom'
+import { useMemo } from 'react'
+import { Link, useParams } from 'react-router-dom'
+import { Button, EmptyState } from '@insforge/ui'
+import { Database, Moon } from 'lucide-react'
 import { api } from '../api'
 import { usePoll } from '../hooks'
 
@@ -23,13 +26,56 @@ function Th({ children, className }: { children?: string; className?: string }) 
   return <th className={`px-4 py-3 text-left text-[13px] font-normal text-muted-foreground ${className ?? ''}`}>{children}</th>
 }
 
+/** A read that answered 503 `database is sleeping`: the daemon never wakes a database to answer a
+ *  dashboard poll (decision 48), so the page says so instead of retrying in a loop. */
+function isSleeping(e: Error | undefined): boolean {
+  if (!e) return false
+  const status = (e as Error & { status?: number }).status
+  return status === 503 && /sleeping/i.test(e.message)
+}
+
 /** Point-in-time database insight for this environment — the same SQL signals the cloud serves
  *  (pg_stat_activity / pg_stat_database / pg_stat_statements), sampled from the branch database. */
 export function DatabaseInsight() {
   const { projectId, branch } = useParams() as { projectId: string; branch: string }
-  const { data: metrics, error } = usePoll(() => api.dbMetrics(projectId, branch), [projectId, branch], 10000)
-  const { data: activity } = usePoll(() => api.dbActivity(projectId, branch), [projectId, branch], 10000)
-  const { data: stats } = usePoll(() => api.dbQueryStats(projectId, branch), [projectId, branch], 15000)
+  const { data: services } = usePoll(() => api.services(projectId, branch), [projectId, branch], 15000)
+  // Several postgres services are possible; this page reads the first one (a picker is deferred).
+  const pg = useMemo(() => (services ?? []).find((s) => s.type === 'postgres'), [services])
+  const group = pg?.name
+
+  const metricsPoll = usePoll(() => api.dbMetrics(projectId, branch, group), [projectId, branch, group], { intervalMs: 10000 })
+  const sleeping = isSleeping(metricsPoll.error)
+  const { data: metrics, error, reload } = metricsPoll
+  const { data: activity } = usePoll(() => api.dbActivity(projectId, branch, group), [projectId, branch, group], { intervalMs: 10000, enabled: !sleeping })
+  const { data: stats } = usePoll(() => api.dbQueryStats(projectId, branch, group), [projectId, branch, group], { intervalMs: 15000, enabled: !sleeping })
+
+  if (services && !pg) {
+    return (
+      <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
+        <h1 className="text-[32px] leading-12 font-bold">Database</h1>
+        <EmptyState icon={Database} title="No Postgres in this environment"
+          description="Add a postgres service on the Services page and this page fills in." />
+      </div>
+    )
+  }
+
+  if (sleeping) {
+    return (
+      <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
+        <h1 className="text-[32px] leading-12 font-bold">Database</h1>
+        <EmptyState icon={Moon} title="Postgres is sleeping"
+          description="It wakes on the next connection. Turn on Always on in the service settings to keep it warm."
+          action={{ label: 'Check again', onClick: reload }} />
+        {pg && (
+          <div className="flex justify-center">
+            <Link to={`/p/${projectId}/${branch}/services/${pg.id}`}>
+              <Button variant="secondary">Service settings</Button>
+            </Link>
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
@@ -125,7 +171,8 @@ export function DatabaseInsight() {
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Runs SQL against this environment&apos;s database on each refresh — the same signals the cloud console shows.
+        Reads run against this environment&apos;s database on each refresh and never wake it: a sleeping
+        Postgres answers with its sleeping state instead.
       </p>
     </div>
   )

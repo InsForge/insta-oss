@@ -75,6 +75,8 @@ has all of that. Both fields can be changed later from the service's variables.
 
 ## Links
 
+- Architectures: `linux/amd64` and `linux/arm64`. The node base image, the ttyd release asset
+  and the npm package are all available for both.
 - Upstream: <https://github.com/earendil-works/pi>
 - Package: [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 - ttyd: <https://github.com/tsl0922/ttyd>

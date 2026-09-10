@@ -155,6 +155,8 @@ language, and you can pin it from Settings.
 
 ## Links
 
+- Architectures: `linux/amd64` and `linux/arm64`. The node base image, bubblewrap and the
+  ripgrep the harness bundles are all available for both.
 - Upstream: <https://github.com/deepseek-ai/deepseek-harness>
 - Package: [`@deepseek-ai/dsh`](https://www.npmjs.com/package/@deepseek-ai/dsh)
 - Cordis: <https://github.com/cordiverse/cordis>

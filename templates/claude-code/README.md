@@ -69,6 +69,8 @@ has all of that. Both fields can be changed later from the service's variables.
 
 ## Links
 
+- Architectures: `linux/amd64` and `linux/arm64`. The node base image, the ttyd release asset
+  and the npm package are all available for both.
 - Documentation: <https://code.claude.com/docs>
 - Upstream: <https://github.com/anthropics/claude-code>
 - Package: [`@anthropic-ai/claude-code`](https://www.npmjs.com/package/@anthropic-ai/claude-code)

@@ -68,6 +68,8 @@ has all of that. Both fields can be changed later from the service's variables.
 
 ## Links
 
+- Architectures: `linux/amd64` and `linux/arm64`. The node base image, the ttyd release asset
+  and the npm package are all available for both.
 - Upstream: <https://github.com/openai/codex>
 - Package: [`@openai/codex`](https://www.npmjs.com/package/@openai/codex)
 - ttyd: <https://github.com/tsl0922/ttyd>
