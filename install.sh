@@ -19,7 +19,13 @@
 #   (no flag)                        INSTA_OSS_IMAGE                ghcr.io/insforge/instacloud (a tag
 #                                    here is the version: build your own with
 #                                    `docker build -t instacloud:dev .`)
-#   --tls acme|internal              INSTA_OSS_TLS                  acme (internal = Caddy's own CA)
+#   --tls acme|internal|custom       INSTA_OSS_TLS                  acme (internal = Caddy's own CA,
+#                                    custom = serve a certificate you supply, see --tls-cert)
+#   --tls-cert <path>                INSTA_OSS_TLS_CERT_FILE        with --tls custom: a certificate
+#   --tls-key <path>                 INSTA_OSS_TLS_KEY_FILE         covering *.<domain>, and its key.
+#                                    Nothing is ever issued in this mode, so no service hostname
+#                                    reaches a certificate transparency log and a public compute
+#                                    service can actually sleep.
 #   --data-img-gib <n>               INSTA_OSS_DATA_IMG_GIB         free space minus 5 GiB
 #   --data-dir <path>                INSTA_OSS_DATA_DIR             /var/lib/instacloud (the flag is
 #                                    required to CHANGE the data dir of an existing install)
@@ -98,7 +104,7 @@ usage() {
 }
 
 # ---- flags ----
-PRINT=''; F_DOMAIN=''; F_EMAIL=''; F_VERSION=''; F_TLS=''; F_IMG_GIB=''; F_DATA_DIR=''
+PRINT=''; F_DOMAIN=''; F_EMAIL=''; F_VERSION=''; F_TLS=''; F_IMG_GIB=''; F_DATA_DIR=''; F_TLS_CERT=''; F_TLS_KEY=''
 need() { if [ $# -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value"; fi; }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -106,6 +112,10 @@ while [ $# -gt 0 ]; do
     --domain=*) F_DOMAIN=${1#*=}; shift ;;
     --email) need "$@"; F_EMAIL=$2; shift 2 ;;
     --email=*) F_EMAIL=${1#*=}; shift ;;
+    --tls-cert) need "$@"; F_TLS_CERT=$2; shift 2 ;;
+    --tls-cert=*) F_TLS_CERT=${1#*=}; shift ;;
+    --tls-key) need "$@"; F_TLS_KEY=$2; shift 2 ;;
+    --tls-key=*) F_TLS_KEY=${1#*=}; shift ;;
     --version) need "$@"; F_VERSION=$2; shift 2 ;;
     --version=*) F_VERSION=${1#*=}; shift ;;
     --tls) need "$@"; F_TLS=$2; shift 2 ;;
@@ -190,7 +200,40 @@ if [ -z "$VERSION" ] && [ -z "$PRINT" ]; then VERSION=$(latest_release || true);
 [ -n "$VERSION" ] || VERSION=latest
 
 TLS=$(resolve INSTA_OSS_TLS "$F_TLS" acme)
-case $TLS in acme|internal) ;; *) die "--tls must be acme or internal (got '$TLS')" ;; esac
+case $TLS in acme|internal|custom) ;; *) die "--tls must be acme, internal or custom (got '$TLS')" ;; esac
+
+# `custom` is the mode that buys the cloud's property. `acme` and `internal` both issue a
+# certificate PER HOSTNAME on demand, so deploying a service publishes its exact hostname: with an
+# ACME issuer it lands in the public certificate transparency logs within minutes, and measured on
+# a live box, credential scanners then arrive every 1 to 3 minutes against a 300 s idle timer, so
+# the compute service never sleeps. A certificate the operator supplies for `*.<domain>` is served
+# for every name under it, nothing is ever issued, and no hostname is ever published.
+TLS_CERT=$(resolve INSTA_OSS_TLS_CERT_FILE "$F_TLS_CERT" '')
+TLS_KEY=$(resolve INSTA_OSS_TLS_KEY_FILE "$F_TLS_KEY" '')
+if [ "$TLS" = custom ]; then
+  { [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ]; } ||
+    die "--tls custom needs both --tls-cert <path> and --tls-key <path> (or INSTA_OSS_TLS_CERT_FILE and INSTA_OSS_TLS_KEY_FILE): the certificate has to cover *.<your domain>, since it is served for every name under it"
+  for _f in "$TLS_CERT" "$TLS_KEY"; do
+    case $_f in /?*) ;; *) die "--tls-cert and --tls-key must be absolute paths (got '$_f')" ;; esac
+    shaped "$_f" '^/[A-Za-z0-9._/-]*$' ||
+      die "'$_f' is not a plain absolute path: it is mounted into two containers and written into compose.yml, so it may hold only letters, digits, dot, dash, underscore and /"
+    # A path that is not there yet is fine for the print modes, which render files and touch
+    # nothing; a real install refuses rather than bringing a stack up that cannot serve TLS.
+    if [ -z "$PRINT" ] && [ ! -r "$_f" ]; then die "cannot read '$_f': --tls custom serves this file, so the install stops here rather than starting an edge with no certificate"; fi
+  done
+elif [ -n "$TLS_CERT" ] || [ -n "$TLS_KEY" ]; then
+  # A flag or an environment variable is a REQUEST, and nothing in this mode would serve it, so it
+  # stops. A value that only the previous install left in instad.env is not a request: it is how a
+  # box moves BACK from custom to acme or internal, and refusing there would strand it in custom
+  # mode for good. So that case is cleared, out loud.
+  if [ -n "$F_TLS_CERT" ] || [ -n "$F_TLS_KEY" ] || [ -n "$(envval INSTA_OSS_TLS_CERT_FILE)" ] || [ -n "$(envval INSTA_OSS_TLS_KEY_FILE)" ]; then
+    die "--tls-cert and --tls-key only apply with --tls custom (this run resolved --tls $TLS); nothing would serve them"
+  fi
+  # `warn`, not `log`: `log` writes to stdout, which in a --print-* mode IS the rendered file.
+  warn "--tls $TLS: dropping the supplied certificate this install was previously using (this mode issues its own)"
+  TLS_CERT=''
+  TLS_KEY=''
+fi
 EMAIL=$(resolve INSTA_OSS_ACME_EMAIL "$F_EMAIL" '')
 # Empty is legitimate (the ACME account is then registered without a contact), so only a value
 # that IS set has to be one: it is rendered into the Caddyfile, where a malformed address fails
@@ -397,6 +440,11 @@ EOF
   log '# --- stack only (compose.yml and this script; the daemon ignores them) ---'
   emit INSTA_OSS_IMAGE "$IMAGE"
   emit INSTA_OSS_TLS "$TLS"
+  # The daemon reads these too: the database lanes present a certificate of their own, and with a
+  # supplied pair they present THAT instead of asking the edge to issue one per hostname, which
+  # would publish the name through a different door.
+  emit INSTA_OSS_TLS_CERT_FILE "$TLS_CERT"
+  emit INSTA_OSS_TLS_KEY_FILE "$TLS_KEY"
   emit INSTA_OSS_ACME_EMAIL "$EMAIL"
   emit INSTA_OSS_CA_FILE "$CA_FILE"
   emit INSTA_OSS_DATA_IMG_GIB "$(resolve INSTA_OSS_DATA_IMG_GIB "$F_IMG_GIB" '')"
@@ -442,7 +490,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # identical path on both sides: every bind mount the daemon emits is valid on the host
-      - $DATA:$DATA
+      - $DATA:$DATA$(tls_mounts)
   edge:
     image: caddy:2.11.4
     container_name: io-edge
@@ -453,7 +501,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # certificate store; the daemon reads it (INSTA_OSS_TLS_CERT_DIR) for the database lanes
       - $DATA/caddy/data:/data
-      - $DATA/caddy/config:/config
+      - $DATA/caddy/config:/config$(tls_mounts)
   garage:
     image: dxflrs/garage:v2.3.0
     container_name: io-garage
@@ -469,14 +517,31 @@ services:
 EOF
 }
 
+# The supplied certificate, mounted read-only at the SAME path on both sides, in both containers:
+# the edge serves it and the daemon presents it on the database lanes, and one path in instad.env
+# is then valid in either place, exactly as the data directory already works. Empty in every other
+# mode, so the compose file is unchanged there.
+tls_mounts() {
+  [ "$TLS" = custom ] || return 0
+  printf '\n      - %s:%s:ro\n      - %s:%s:ro' "$TLS_CERT" "$TLS_CERT" "$TLS_KEY" "$TLS_KEY"
+}
+
 # Caddyfile with concrete values (Caddy has no env placeholders for an omitted email line).
 render_caddyfile() {
   printf '{\n\tadmin off\n'
-  [ -z "$EMAIL" ] || printf '\temail %s\n' "$EMAIL"
-  printf '\ton_demand_tls {\n\t\task http://127.0.0.1:%s/tls/ask\n\t}\n}\n' "$INTERNAL_PORT"
-  printf 'https:// {\n\ttls {\n\t\ton_demand\n'
-  [ "$TLS" = internal ] || printf '\t\tissuer acme\n'
-  printf '\t\tissuer internal\n\t}\n'
+  # No email and no `on_demand_tls` block in custom mode: there is no issuer to contact and
+  # nothing to ask about. `on_demand` appearing ANYWHERE in this file is what would reopen the
+  # leak, so the mode that exists to prevent it emits none of that machinery at all.
+  if [ "$TLS" = custom ]; then
+    printf '}\n'
+    printf 'https:// {\n\ttls %s %s\n' "$TLS_CERT" "$TLS_KEY"
+  else
+    [ -z "$EMAIL" ] || printf '\temail %s\n' "$EMAIL"
+    printf '\ton_demand_tls {\n\t\task http://127.0.0.1:%s/tls/ask\n\t}\n}\n' "$INTERNAL_PORT"
+    printf 'https:// {\n\ttls {\n\t\ton_demand\n'
+    [ "$TLS" = internal ] || printf '\t\tissuer acme\n'
+    printf '\t\tissuer internal\n\t}\n'
+  fi
   printf '\tencode zstd gzip\n'
   printf '\treverse_proxy 127.0.0.1:%s {\n' "$PORT"
   printf '\t\theader_up X-Forwarded-Proto https\n\t\theader_up X-Forwarded-Host {host}\n\t\tflush_interval -1\n\t}\n}\n'
@@ -955,6 +1020,14 @@ fi
 # first, the internal CA as the fallback the Caddyfile lists after it).
 CERT_DIR=$DATA/caddy/data/caddy/certificates
 cert_present() { [ -n "$(find "$CERT_DIR" -type f -name "api.$DOMAIN.crt" 2>/dev/null | head -n 1)" ]; }
+# ...and in custom mode there is nothing to wait for: the certificate is already on disk, the edge
+# serves it for every name, and the store this polls stays empty by design. Waiting four minutes
+# for a file that will never appear, and then warning about it, would be the install telling an
+# operator something is wrong when the mode is working exactly as asked.
+if [ "$TLS" = custom ]; then
+  curl -sk --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 30 -o /dev/null "https://api.$DOMAIN/healthz" || true
+  log "serving the supplied certificate $TLS_CERT for *.$DOMAIN (nothing is issued, so no hostname is published)"
+else
 # The internal issuer is local and answers in seconds; ACME does not, and four minutes covers a
 # first issuance plus one retry. Past that the edge keeps trying on its own, so this is a warning.
 if [ "$TLS" = internal ]; then CERT_WAIT=60; else CERT_WAIT=240; fi
@@ -977,6 +1050,7 @@ if cert_present; then
   log "certificate issued for api.$DOMAIN"
 else
   warn "no certificate for api.$DOMAIN after ${CERT_WAIT}s: the edge keeps retrying, and the database lanes start presenting it the moment it lands"
+fi
 fi
 if [ "$TLS" = internal ]; then
   _root=$DATA/caddy/data/caddy/pki/authorities/local/root.crt

@@ -95,7 +95,7 @@ test('--print-env: precedence flag > environment > default; --version strips the
 })
 
 test('--print-env rejects a bad --tls, a relative --data-dir, a malformed domain and an unknown flag', () => {
-  expect(tryRun(['--print-env', '--tls', 'selfsigned'], { INSTA_OSS_DOMAIN: 'x.test' })).toMatchObject({ status: 1, stderr: expect.stringContaining('--tls must be acme or internal') })
+  expect(tryRun(['--print-env', '--tls', 'selfsigned'], { INSTA_OSS_DOMAIN: 'x.test' })).toMatchObject({ status: 1, stderr: expect.stringContaining('--tls must be acme, internal or custom') })
   expect(tryRun(['--print-env', '--data-dir', 'relative/dir'], { INSTA_OSS_DOMAIN: 'x.test' })).toMatchObject({ status: 1, stderr: expect.stringContaining('absolute path') })
   expect(tryRun(['--print-env'], { INSTA_OSS_DOMAIN: 'bad_domain!' })).toMatchObject({ status: 1, stderr: expect.stringContaining('is not a hostname') })
   expect(tryRun(['--print-env'], { INSTA_OSS_PUBLIC_IP: 'not-an-ip' })).toMatchObject({ status: 1, stderr: expect.stringContaining('INSTA_OSS_PUBLIC_IP') })
@@ -130,6 +130,102 @@ test('a domain that is not a HOSTNAME is refused before anything is written', ()
     expect(parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: good })).INSTA_OSS_DOMAIN, good).toBe(good)
   }
   expect(parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: 'Example.TEST.' })).INSTA_OSS_DOMAIN).toBe('example.test')
+})
+
+test('--tls custom serves a supplied certificate and emits NO on-demand issuance', () => {
+  // The parity break this mode exists for: `acme` and `internal` both issue a certificate per
+  // HOSTNAME on demand, so deploying a service publishes its exact hostname, and measured on a
+  // live box the credential scanners then arrive every 1 to 3 minutes against a 300 s idle
+  // timer, so a public compute service never sleeps. The cloud serves one wildcard and publishes
+  // nothing. What must therefore be true of this file is negative: no `on_demand` anywhere.
+  const args = ['--print-caddyfile', '--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/wild.crt', '--tls-key', '/etc/instacloud/tls/wild.key']
+  const caddy = run(args, { INSTA_OSS_DOMAIN: 'example.test' })
+  expect(caddy).toContain('tls /etc/instacloud/tls/wild.crt /etc/instacloud/tls/wild.key')
+  expect(caddy).not.toContain('on_demand')
+  expect(caddy).not.toContain('issuer acme')
+  expect(caddy).not.toContain('tls/ask')
+  expect(caddy).not.toContain('email')
+  // ...and the routing half is unchanged, so this is a certificate change and nothing else.
+  expect(caddy).toContain('reverse_proxy 127.0.0.1:8080')
+  expect(caddy).toContain('redir https://{host}{uri} permanent')
+
+  // The default modes keep exactly what they had.
+  for (const mode of ['acme', 'internal']) {
+    const other = run(['--print-caddyfile', '--tls', mode], { INSTA_OSS_DOMAIN: 'example.test' })
+    expect(other, mode).toContain('on_demand')
+    expect(other, mode).toContain('ask http://127.0.0.1:8081/tls/ask')
+  }
+
+  // Both containers get the pair, read-only, at the same path on both sides: the edge serves it
+  // and the daemon presents it on the database lanes, which is the other door issuance would
+  // otherwise publish a hostname through.
+  const compose = run(['--print-compose', '--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/wild.crt', '--tls-key', '/etc/instacloud/tls/wild.key'], { INSTA_OSS_DOMAIN: 'example.test' })
+  expect(compose.match(/- \/etc\/instacloud\/tls\/wild\.crt:\/etc\/instacloud\/tls\/wild\.crt:ro/g)).toHaveLength(2)
+  expect(compose.match(/- \/etc\/instacloud\/tls\/wild\.key:\/etc\/instacloud\/tls\/wild\.key:ro/g)).toHaveLength(2)
+  // No mounts at all in the other modes.
+  expect(run(['--print-compose'], { INSTA_OSS_DOMAIN: 'example.test' })).not.toContain(':ro\n      - /etc')
+
+  // ...and the daemon is told, because it is the daemon that answers the lanes.
+  const env = parseEnv(run(['--print-env', '--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/wild.crt', '--tls-key', '/etc/instacloud/tls/wild.key'], { INSTA_OSS_DOMAIN: 'example.test' }))
+  expect(env).toMatchObject({
+    INSTA_OSS_TLS: 'custom',
+    INSTA_OSS_TLS_CERT_FILE: '/etc/instacloud/tls/wild.crt',
+    INSTA_OSS_TLS_KEY_FILE: '/etc/instacloud/tls/wild.key',
+  })
+  expect(parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: 'example.test' })).INSTA_OSS_TLS_CERT_FILE).toBe('')
+})
+
+test('--tls custom refuses a half-configured pair, and the paths it cannot mount', () => {
+  const dom = { INSTA_OSS_DOMAIN: 'example.test' }
+  const cases: Array<[string[], string]> = [
+    [['--tls', 'custom'], 'needs both --tls-cert'],
+    [['--tls', 'custom', '--tls-cert', '/x/c.crt'], 'needs both --tls-cert'],
+    [['--tls', 'custom', '--tls-key', '/x/k.key'], 'needs both --tls-cert'],
+    [['--tls', 'custom', '--tls-cert', 'rel/c.crt', '--tls-key', '/x/k.key'], 'must be absolute paths'],
+    [['--tls', 'custom', '--tls-cert', '/x/c crt', '--tls-key', '/x/k.key'], 'not a plain absolute path'],
+    // A pair with nothing to serve it is a silent no-op otherwise: the operator asked for
+    // something the resolved mode does not do.
+    [['--tls-cert', '/x/c.crt', '--tls-key', '/x/k.key'], 'only apply with --tls custom'],
+    [['--tls', 'internal', '--tls-cert', '/x/c.crt', '--tls-key', '/x/k.key'], 'only apply with --tls custom'],
+    // ...and from the environment, which is the same request by another route.
+    [['--tls', 'internal'], 'only apply with --tls custom'],
+    [['--tls', 'nonsense'], '--tls must be acme, internal or custom'],
+  ]
+  for (const [args, says] of cases) {
+    // The last case is the environment form of the one above it.
+    const env = says === 'only apply with --tls custom' && args.length === 2
+      ? { ...dom, INSTA_OSS_TLS_CERT_FILE: '/x/c.crt', INSTA_OSS_TLS_KEY_FILE: '/x/k.key' }
+      : dom
+    const r = tryRun(['--print-env', ...args], env)
+    expect(r.status, args.join(' ')).toBe(1)
+    expect(r.stderr, args.join(' ')).toContain(says)
+  }
+
+  // A value that only the PREVIOUS install left in instad.env is not a request: it is how a box
+  // moves back from custom to acme or internal, and refusing there would strand it in custom
+  // mode for good. It is cleared, out loud, and the render is a plain internal one.
+  const cfg = mkdtempSync(join(tmpdir(), 'io-cfg-'))
+  try {
+    writeFileSync(join(cfg, 'instad.env'), [
+      'INSTA_OSS_DOMAIN=example.test',
+      'INSTA_OSS_TLS=custom',
+      'INSTA_OSS_TLS_CERT_FILE=/x/c.crt',
+      'INSTA_OSS_TLS_KEY_FILE=/x/k.key',
+      '',
+    ].join('\n'))
+    const back = tryRun(['--print-caddyfile', '--tls', 'internal'], { IO_CFG_DIR: cfg })
+    expect(back.status).toBe(0)
+    expect(back.stderr).toContain('dropping the supplied certificate')
+    expect(back.stdout).toContain('on_demand')
+    expect(back.stdout).not.toContain('/x/c.crt')
+    // ...and the keys are blanked in instad.env rather than left pointing at a file nothing
+    // serves.
+    const env2 = parseEnv(run(['--print-env', '--tls', 'internal'], { IO_CFG_DIR: cfg }))
+    expect(env2.INSTA_OSS_TLS_CERT_FILE).toBe('')
+    expect(env2.INSTA_OSS_TLS_KEY_FILE).toBe('')
+  } finally {
+    rmSync(cfg, { recursive: true, force: true })
+  }
 })
 
 test('an ACME email is an email, or absent', () => {
