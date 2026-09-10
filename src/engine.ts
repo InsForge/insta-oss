@@ -78,6 +78,10 @@ export const CLEANUP_FAILED = 'cleanup-failed'
 /** How many times a branch create may re-drive its acquisition over a grown key set before it
  *  gives up. Two is the converging case (the first round takes `branchOp(source)`, which every
  *  service add now needs); the third is slack for an add that lands between two rounds. */
+/** The refusal a queued operation owes when the service it resolved has moved under it. */
+const movedUnderUs = (sid: string, what: string): Error =>
+  new Error(`service "${sid}" changed while this ${what} was queued (renamed, moved to another branch, or already removed); nothing was destroyed, list the services and retry with the current id`)
+
 const CREATE_LOCK_ROUNDS = 3
 const newTeardown = (): Teardown => ({ destroyed: 0, failed: 0 })
 /** Run one teardown step and count it. */
@@ -1740,13 +1744,25 @@ export class Engine {
    *  survives one branch's copy: it retires with the LAST branch that still runs the group, which
    *  is also what makes removing a group that was never deployed anywhere unregister it. */
   async removeComputeService(projectId: string, serviceId: string, opts: { branch?: string } = {}): Promise<Teardown> {
-    const { project, branch, sid } = this.removalTarget(projectId, serviceId, opts.branch)
+    const { branch: atBranch, sid } = this.removalTarget(projectId, serviceId, opts.branch)
     const parsed = parseServiceId(sid)
     // A name no branch and no registration claims is a 404, not an empty teardown reporting the
     // successful removal of something that never existed (contract section 9).
     if (parsed?.type !== 'compute') throw new Error('service not found')
     const name = parsed.name
     if (!this.computeGroupNames(projectId).includes(name)) throw new Error('service not found')
+    // Decision 52 names "service remove" a taker and this one held nothing at all, so a deploy,
+    // a lifecycle op or a rename could run against the same container while it was being
+    // destroyed. The key, and the re-resolution every queued operation owes, together.
+    return this.withOp([this.serviceKey(atBranch, sid)], async () => {
+      const { project, branch } = this.freshRemoval(projectId, atBranch.id, sid)
+      if (!this.computeGroupNames(projectId).includes(name)) throw movedUnderUs(sid, 'removal')
+      return this.removeComputeLocked(project, branch, sid, name)
+    })
+  }
+
+  private async removeComputeLocked(project: Project, branch: Branch, sid: string, name: string): Promise<Teardown> {
+    const projectId = project.id
     const vol = project.computeVolumes?.[name]
     const t = newTeardown()
     // Only this branch's copy. A branch that carries no container for the group has nothing to
@@ -1889,6 +1905,17 @@ export class Engine {
     const m = this.managedList(projectId).find((x) => x.id === sid)
     if (!m) throw new Error('service not found')
     this.assertCarries(project, branch, m, 'managed')
+    // The key this removal never took, plus the re-resolution it owes (see `freshRemoval`).
+    return this.withOp([this.serviceKey(branch, sid)], async () => {
+      const fresh = this.freshRemoval(projectId, branch.id, sid)
+      const live = this.managedList(projectId).find((x) => x.id === sid)
+      if (!live || !this.carries(fresh.project, fresh.branch, live, 'managed')) throw movedUnderUs(sid, 'removal')
+      return this.removeManagedLocked(fresh.project, fresh.branch, sid, live)
+    })
+  }
+
+  private async removeManagedLocked(project: Project, branch: Branch, sid: string, m: { id: string; type: ManagedDbType; name: string; dataId?: string }): Promise<Teardown> {
+    const projectId = project.id
     const t = newTeardown()
     const ref = this.ref(project, branch)
     await count(t, () => this.managedDb.destroy(managedContainerName(ref, m.type, m.name)))
@@ -2291,8 +2318,13 @@ export class Engine {
     // Whole-branch keys: a delete cannot interleave with a create still building this branch, nor
     // with a deploy or a lifecycle op on one of its services.
     return this.withOp(this.branchKeys(project, b), async () => {
+      // The row as it stands INSIDE the lock, not the snapshot the keys were built from: a
+      // deploy or a create that was ahead of this in the queue has since written to it, and
+      // tearing down the snapshot would miss whatever it added (`freshRemoval`'s rule, one level
+      // up). The keys are the snapshot's, which is the gap the docstring above records.
+      const { project: live, branch: row } = this.freshRemoval(projectId, branchId, branchId, 'branch delete')
       const t = newTeardown()
-      await this.teardownBranch(project, b, t)
+      await this.teardownBranch(live, row, t)
       mutate((s) => { delete s.branches[branchId] })
       this.router.invalidate()
       this.emit(projectId, b.name, 'resource', 'branch.deleted', { teardown: t })
@@ -3037,6 +3069,22 @@ export class Engine {
     } catch {
       return []
     }
+  }
+
+  /** The project and branch as they stand INSIDE the lock, for an operation that had to resolve
+   *  them BEFORE it (every removal does: the key is derived from them).
+   *
+   *  The rule this enforces, after three bugs of one shape: no operation may ACT on a service
+   *  identity it resolved before acquiring its lock. A removal can wait behind a rename, which
+   *  now takes the lock, and the rename moves the id; acting on the snapshot then deleted the
+   *  RENAMED database's data directory while leaving its row and its registration in place, and
+   *  reported success. Re-read, compare, and refuse if anything moved: a removal that destroys
+   *  nothing and says why is always better than one that destroys the wrong thing. */
+  private freshRemoval(projectId: string, branchId: string, sid: string, what = 'removal'): { project: Project; branch: Branch } {
+    const project = this.getProject(projectId)
+    const branch = loadState().branches[branchId]
+    if (!project || !branch || branch.projectId !== projectId) throw movedUnderUs(sid, what)
+    return { project, branch }
   }
 
   /** What a service RENAME holds: every branch's branch key and its key for this service.
@@ -3885,11 +3933,17 @@ export class Engine {
    *  `0022_branch_scoped_services.sql`). Destroying every branch's copy meant a `services remove`
    *  run on `feat` also destroyed main's database and its bytes. */
   async removeDbService(projectId: string, serviceId: string, opts: { branch?: string } = {}): Promise<Teardown> {
-    const { project, branch, sid } = this.removalTarget(projectId, serviceId, opts.branch)
-    const reg = this.dbList(projectId).find((d) => d.id === sid)
-    if (!reg) throw new Error('service not found')
-    this.assertCarries(project, branch, reg, 'postgres')
-    return this.withOp([this.serviceKey(branch, sid)], async () => {
+    const { project: at, branch: atBranch, sid } = this.removalTarget(projectId, serviceId, opts.branch)
+    const known = this.dbList(projectId).find((d) => d.id === sid)
+    if (!known) throw new Error('service not found')
+    this.assertCarries(at, atBranch, known, 'postgres')
+    return this.withOp([this.serviceKey(atBranch, sid)], async () => {
+      // Everything above is a pre-queue snapshot: this may have waited behind a RENAME, which
+      // takes the lock now and moves the id. Acting on the snapshot deleted the renamed
+      // database's data directory and left its row standing (`freshRemoval`).
+      const { project, branch } = this.freshRemoval(projectId, atBranch.id, sid)
+      const reg = this.dbList(projectId).find((d) => d.id === sid)
+      if (!reg || !this.carries(project, branch, reg, 'postgres')) throw movedUnderUs(sid, 'removal')
       const t = newTeardown()
       const row = this.dbHandle(project, branch, sid)
       if (row) await count(t, () => this.db.destroy(row.container))
@@ -4013,6 +4067,17 @@ export class Engine {
     const reg = this.stList(projectId).find((s) => s.id === sid)
     if (!reg) throw new Error('service not found')
     this.assertCarries(project, branch, reg, 'storage')
+    // The key this removal never took, plus the re-resolution it owes (see `freshRemoval`).
+    return this.withOp([this.serviceKey(branch, sid)], async () => {
+      const fresh = this.freshRemoval(projectId, branch.id, sid)
+      const live = this.stList(projectId).find((x) => x.id === sid)
+      if (!live || !this.carries(fresh.project, fresh.branch, live, 'storage')) throw movedUnderUs(sid, 'removal')
+      return this.removeStorageLocked(fresh.project, fresh.branch, sid, live)
+    })
+  }
+
+  private async removeStorageLocked(project: Project, branch: Branch, sid: string, reg: { id: string; name: string; public?: boolean }): Promise<Teardown> {
+    const projectId = project.id
     const t = newTeardown()
     const row = this.bucketHandle(project, branch, sid)
     if (row) await count(t, () => this.storage.destroy(row.bucket, branch.network))

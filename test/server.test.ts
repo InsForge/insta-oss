@@ -2698,6 +2698,49 @@ test('a service rename that lands while a create is queued cannot give the clone
   }
 })
 
+test('a removal queued behind a rename refuses instead of destroying the renamed service', async () => {
+  // Third instance of one shape: an operation that resolves a service identity BEFORE its lock
+  // and acts on it afterwards. The removal waits behind the rename (they share the key now),
+  // the rename moves the id, and the snapshot the removal is holding then names a service that
+  // no longer exists. The data directory id is immutable across a rename, so acting on it
+  // deletes the RENAMED database's bytes and leaves its row and registration in place.
+  const id = await sourceWithEveryStep()
+  let enterRename!: () => void
+  let goRename!: () => void
+  const inRename = new Promise<void>((r) => { enterRename = r })
+  const renameGate = new Promise<void>((r) => { goRename = r })
+  const realRename = db.rename!.bind(db)
+  const rename = vi.spyOn(db, 'rename').mockImplementationOnce(async (container, to) => {
+    enterRename()
+    await renameGate
+    return realRename(container, to)
+  })
+
+  try {
+    const renaming = post(`/projects/${id}/services/pg-db/rename`, { name: 'db2' })
+    await inRename
+    let removed = false
+    const removal = del_(`/projects/${id}/services/pg-db`).then((r) => { removed = true; return r })
+    await settle()
+    expect(removed).toBe(false)
+
+    goRename()
+    expect((await within(10_000, renaming, 'the rename')).statusCode).toBe(200)
+    const answer = await within(10_000, removal, 'the removal')
+
+    // It refuses, naming what happened, and destroys nothing.
+    expect(answer.statusCode).toBeGreaterThanOrEqual(400)
+    expect(answer.json().error).toContain('changed while this removal was queued')
+    expect(calls.filter((c) => c.startsWith('data.remove:'))).toEqual([])
+    // The renamed service is intact: its registration, its row, and therefore its bytes.
+    const rows = (await get(`/projects/${id}/services?branch=main`)).json().services as Array<{ id: string }>
+    expect(rows.some((r) => r.id === 'pg-db2')).toBe(true)
+    expect(loadState().branches[await branchOf(id, 'main')].databases?.['pg-db2']).toBeDefined()
+  } finally {
+    rename.mockRestore()
+  }
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
