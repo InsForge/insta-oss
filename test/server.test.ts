@@ -2757,8 +2757,12 @@ test('a branch delete whose container refuses to go keeps its data and its row',
   calls.length = 0
   const destroy = vi.spyOn(db, 'destroy').mockRejectedValueOnce(new Error('container is in use'))
 
-  const del = await del_(`/projects/${id}/branches/${feat.id}`)
-  destroy.mockRestore()
+  let del
+  try {
+    del = await del_(`/projects/${id}/branches/${feat.id}`)
+  } finally {
+    destroy.mockRestore()
+  }
 
   expect(del.statusCode).toBe(200)
   expect(del.json().teardown.failed).toBeGreaterThan(0)
@@ -2839,8 +2843,12 @@ test('a network create that failed for any other reason fails the branch, it is 
     return Buffer.from('')
   })
 
-  const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  let bad
+  try {
+    bad = await post(`/projects/${id}/branches`, { name: 'feat' })
+  } finally {
+    vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  }
 
   expect(bad.statusCode).toBeGreaterThanOrEqual(400)
   expect(bad.json().error).toContain('could not create the branch network')
@@ -2858,8 +2866,12 @@ test('...and a network that dockerd CONFIRMS is already there is still reused', 
     return Buffer.from('')   // `network inspect` answers, so the network is verified present
   })
 
-  const ok = await post(`/projects/${id}/branches`, { name: 'feat' })
-  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  let ok
+  try {
+    ok = await post(`/projects/${id}/branches`, { name: 'feat' })
+  } finally {
+    vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+  }
 
   expect(ok.statusCode).toBe(201)
   expect(loadState().branches[await branchOf(id, 'feat')].databases?.['pg-db']).toBeDefined()
@@ -2875,8 +2887,12 @@ test('a volume removal that cannot delete the bytes keeps the record and says so
     if (path.includes('/vol/')) throw new Error('device or resource busy')
   })
 
-  const res = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/cp-web/volume` })
-  remove.mockRestore()
+  let res
+  try {
+    res = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/cp-web/volume` })
+  } finally {
+    remove.mockRestore()
+  }
 
   expect(res.statusCode).toBeGreaterThanOrEqual(400)
   expect(res.json().error).toContain('the volume record is kept so the removal can be retried')
@@ -2930,6 +2946,42 @@ test('a volume removal holds the keys of a branch created while it queued', asyn
     goRemove()
     paused.release()
     paused.restore()
+    remove.mockRestore()
+  }
+})
+
+test('an attach cannot land inside a volume removal, so the restore cannot lose it', async () => {
+  // The restore the removal does on failure is unconditional, which is only safe if nothing can
+  // write that record while the removal runs. `setServiceVolume` is the other half of decision
+  // 52's "volume ops" and took no key, so an attach could be lost by the restore, or survive a
+  // removal that succeeded.
+  const id = await sourceWithEveryStep()
+  let enterRemove!: () => void
+  let goRemove!: () => void
+  const inRemove = new Promise<void>((r) => { enterRemove = r })
+  const removeGate = new Promise<void>((r) => { goRemove = r })
+  const realRemove = data.remove.bind(data)
+  const remove = vi.spyOn(data, 'remove').mockImplementation(async (path: string) => {
+    if (path.includes('/vol/')) { enterRemove(); await removeGate }
+    return realRemove(path)
+  })
+
+  try {
+    const del = app.inject({ method: 'DELETE', url: `/projects/${id}/services/cp-web/volume` })
+    await within(10_000, inRemove, 'the volume removal')
+
+    let attached = false
+    const attach = put(`/projects/${id}/services/cp-web/volume`, { sizeGib: 7 }).then((r) => { attached = true; return r })
+    await settle()
+    expect(attached).toBe(false)          // it waits for the removal instead of racing its record
+
+    goRemove()
+    expect((await within(10_000, del, 'the volume removal')).statusCode).toBe(200)
+    expect((await within(10_000, attach, 'the attach')).statusCode).toBe(200)
+    // The attach ran after the removal, so it is the state that stands: one record, 7 GiB.
+    expect(loadState().projects[id].computeVolumes?.web).toMatchObject({ sizeGib: 7 })
+  } finally {
+    goRemove()
     remove.mockRestore()
   }
 })

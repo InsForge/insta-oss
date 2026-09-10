@@ -422,6 +422,45 @@ test('eviction keeps going past 32 victims: the bound is the candidate set, not 
   expect(stopped).toBeLessThan(45)
 })
 
+test('the eviction bound follows the CURRENT target count, not the one it started with', async () => {
+  // Every `sleep()` waits out a stop grace, so the loop is seconds long, and a deploy that
+  // commits in that window registers a new running service. A bound computed once at the start
+  // is then too small and the loop gives up with the floor unmet and victims still available:
+  // the same silent give-up as the old cap of 32, reached through concurrency.
+  const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '50' })
+  const waking = h.add(K)
+  h.runtime.put(waking.container, 'exited')
+  let n = 0
+  const addVictim = (): string => {
+    const key = `33333333-3333-3333-3333-333333333333:cp-v${n++}`
+    h.add(key)
+    return key
+  }
+  for (let i = 0; i < 20; i++) addVictim()                    // 21 targets: a once-computed bound of 22
+  await h.sched.sweep()                                       // seeds the runtime snapshot; mem is null, so no pressure pass
+  h.runtime.mem = { totalBytes: 20_000 * MiB, availableBytes: 100 * MiB }
+  calls.length = 0
+  vi.advanceTimersByTime(20_000)                              // past the no-recent-traffic guard
+
+  // Services keep arriving while the loop runs, exactly as a deploy registering one would
+  // (`onUp` is what a deploy calls), and time moves on with each stop grace, so each becomes
+  // eligible once it is past the wake-protection window.
+  const realStop = h.runtime.stop.bind(h.runtime)
+  h.runtime.stop = async (container: string, grace: number) => {
+    if (n < 60) h.sched.onUp(addVictim())
+    vi.advanceTimersByTime(20_000)
+    return realStop(container, grace)
+  }
+
+  await h.sched.wake(K, { door: 'traffic' })
+
+  // 100 MiB free against a 10,000 MiB floor, freeing the 256 MiB default per victim: about 40
+  // evictions, which a bound frozen at 22 cannot reach.
+  const stopped = calls.filter((c) => c.startsWith('runtime.stop:')).length
+  expect(stopped).toBeGreaterThan(22)
+  expect(calls).toContain(`runtime.start:${waking.container}`)
+})
+
 test('a wake with NO victim available still starts: no room found is not a failure', async () => {
   // The whole fail-closed change above rests on this distinction. `evictForRoom` warns and
   // returns when it can find nothing to evict, and only THROWS when making room actually broke.

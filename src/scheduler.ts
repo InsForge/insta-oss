@@ -498,15 +498,21 @@ export class Scheduler {
     // which no wake and no later loop turn calls. Without this, one pass would keep finding the same
     // pressure and sleep EVERY eligible service instead of the least recently active one.
     let freed = 0
-    // Bounded by the CANDIDATE SET, not by a magic number. Every turn adds its victim to
-    // `tried` and `isVictim` excludes those, so the pool strictly shrinks and the loop can run
-    // at most once per registered service. The old cap of 32 was below that on any box with
-    // more services than that, and it fell out SILENTLY: a large wake could start with the
-    // floor still uncleared while eligible victims remained. That is a different thing from the
-    // empty pool below, which proceeds deliberately (contract decision 52: everything left is
-    // always-on, serving or recently woken, and the kernel is the last resort).
-    const bound = this.targets().length + 1
-    for (let guard = 0; guard < bound; guard++) {
+    // Bounded by the CANDIDATE SET, not by a magic number, and RE-READ every turn. Each turn
+    // adds its victim to `tried` and `isVictim` excludes those, so the pool shrinks by one per
+    // turn from the set as it stands; but the set itself can GROW while this runs, because
+    // every `sleep()` waits out a stop grace and a deploy committing in that window registers a
+    // new running service (`targets()` is memoized on the state revision, so it sees it). A
+    // bound computed once at the start is then too small, and the loop gives up with the floor
+    // unmet and eligible victims present -- the same silent give-up the old cap of 32 caused,
+    // reached through concurrency instead. Re-reading the count each turn is what makes the
+    // bound track the thing it is bounding.
+    //
+    // This is a runaway guard and nothing more. The real terminators are the two returns above:
+    // the floor being met, and the pool being empty. An empty pool proceeds deliberately
+    // (contract decision 52: everything left is always-on, serving or recently woken, and the
+    // kernel is the last resort); reaching the bound does not, and says so.
+    for (let guard = 0; guard <= this.targets().length; guard++) {
       const mem = this.runtime.memory()
       if (!mem) return
       // Whichever is larger: what the runtime reports (authoritative once it notices a stop) or the
@@ -532,10 +538,11 @@ export class Scheduler {
         freed += this.rec(victim.key).lastRssBytes ?? DEFAULT_RSS[victim.kind]
       }
     }
-    // Falling out of the loop means the bound was reached with the floor still not met. The
-    // pool shrinks every turn, so that should be unreachable; if it happens it is a fault in
-    // this loop and not a state of the box, and it says so rather than passing for success.
-    console.warn(`memory pressure: gave up making room after ${bound} attempts with the floor still unmet; this is a bug in the eviction loop, not a full box`)
+    // Falling out of the loop means the runaway guard tripped with the floor still unmet: one
+    // turn per registered service was not enough, which takes services being registered as fast
+    // as they are evicted. It is not a full box and not an empty pool, so it is neither of the
+    // two outcomes above, and it says so rather than passing for either.
+    console.warn(`memory pressure: gave up making room after ${this.targets().length + 1} attempts with the floor still unmet; services are being registered as fast as they are evicted`)
   }
 
   private isVictim(t: ServiceTarget, now: number, exclude: Set<ServiceKey>, tried: Set<ServiceKey>): boolean {

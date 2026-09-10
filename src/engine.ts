@@ -2034,6 +2034,26 @@ export class Engine {
   }> {
     const svc = this.serviceOf(projectId, serviceId)
     if (svc.type !== 'compute') throw new Error('volumes are only supported for compute services')
+    // Decision 52 says "volume ops", plural, and this is the other one. It writes the same
+    // `computeVolumes` record `removeServiceVolume` deletes and restores, so without a key an
+    // attach landing mid-removal is either lost by the restore or survives a removal that
+    // succeeded. It takes the SAME keys, which excludes the two by construction rather than by
+    // making the restore guess whose record it is looking at.
+    //
+    // No union re-drive here, and that is not an oversight: this does no per-branch work, so
+    // its set does not have to be COMPLETE, only to overlap the removal's, and both always
+    // contain the default branch. It also acquires nothing while holding these (no deploy, no
+    // lifecycle), so it cannot be half of a cycle.
+    return this.withOp(this.listBranches(projectId).flatMap((b) => [this.branchOp(b), this.serviceKey(b, `cp-${svc.name}`)]),
+      () => this.setServiceVolumeLocked(projectId, serviceId, sizeGib))
+  }
+
+  private async setServiceVolumeLocked(projectId: string, serviceId: string, sizeGib: number): Promise<{
+    service: ServiceRow | undefined; volume: { sizeGib: number; mountPath: string }; cap: { volumeGib: number }; attached?: boolean
+  }> {
+    // Re-resolved under the lock, like every operation that had to resolve to take a key.
+    const svc = this.serviceOf(projectId, serviceId)
+    if (svc.type !== 'compute') throw new Error('volumes are only supported for compute services')
     if (!Number.isInteger(sizeGib) || sizeGib < 1) throw new Error('sizeGib must be a positive integer (whole Gi)')
     if (sizeGib > VOLUME_CAP_GIB) throw new Error(`volume exceeds the cap (${VOLUME_CAP_GIB}Gi)`)
     const vol = this.getProject(projectId)?.computeVolumes?.[svc.name]
