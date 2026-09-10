@@ -365,6 +365,39 @@ test('services remove: a compute group goes from ONE branch; main keeps its cont
   expect((await get(`/projects/${id}/services/cp-api/volume`)).statusCode).toBe(404)
 })
 
+// A branch-scoped read filters registrations with `carries()`, and a filter discriminates on the
+// MISS. `dbHandle` and `bucketHandle` asked `dbList`/`stList` before their branch-local test, and
+// both reach `getProject` -> `loadState()`, a `structuredClone` of every project, branch, event
+// and secret. That made the clone count the PRODUCT of branches and registrations: this shape,
+// at 26 branches carrying 5 databases each, took `GET /secrets/tree` into the seconds. The bound
+// below is linear in branches + registrations, so the product ordering cannot come back.
+test('GET /secrets/tree clones the state a linear number of times, not branches x registrations', async () => {
+  const engine = makeEngine()
+  const srv = buildServer(engine)
+  const { project } = await engine.createProject('demo')
+  const id = project.id
+  const branches = ['main']
+  for (let b = 1; b < 8; b++) { await engine.createBranch(id, `b${b}`, 'main'); branches.push(`b${b}`) }
+  // Each branch carries 3 of its OWN, so every other registration is a miss on every branch.
+  for (const name of branches) for (let d = 0; d < 3; d++) await engine.addDbService(id, `${name}-${d}`, { branch: name })
+  const regs = engine.getProject(id)!.dbServices!.length
+  expect([branches.length, regs]).toEqual([8, 24])
+
+  let clones = 0
+  const real = engine.getProject.bind(engine)
+  engine.getProject = (pid: string) => { clones++; return real(pid) }
+  const tree = await srv.inject({ method: 'GET', url: `/projects/${id}/secrets/tree` })
+  expect(tree.statusCode).toBe(200)
+  // The answer is still right: every branch lists exactly the three services it carries.
+  const rows = tree.json().branches as Array<{ name: string; services: Array<{ type: string; name: string }> }>
+  expect(rows).toHaveLength(8)
+  for (const b of rows) {
+    expect(b.services.filter((x) => x.type === 'postgres').map((x) => x.name).sort())
+      .toEqual([`${b.name}-0`, `${b.name}-1`, `${b.name}-2`])
+  }
+  expect(clones).toBeLessThanOrEqual(2 * (branches.length + regs))
+})
+
 test('removing ONE of two storage services leaves the shared object store on the branch network', async () => {
   const id = await createProject()
   expect((await post(`/projects/${id}/services`, { type: 'storage', name: 'blobs' })).statusCode).toBe(201)

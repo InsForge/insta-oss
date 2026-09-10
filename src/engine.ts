@@ -3131,8 +3131,17 @@ export class Engine {
   private dbHandle(project: Project, branch: Branch, serviceId: string): { url: string; container: string; dataId: string } | undefined {
     const row = branch.databases?.[serviceId]
     if (row) return row
+    // The branch-local test FIRST. `carries()` calls this once per registration per branch, and a
+    // filter discriminates on the miss, so the miss is the common path: a project's registration
+    // list is every name any branch ever registered, not what this one holds. `dbList` reaches
+    // `getProject` -> `loadState()`, which is a `structuredClone` of every project, branch, event
+    // and secret, so asking it before this line made `GET /secrets/tree` over 26 branches
+    // carrying 5 databases each clone the whole daemon state thousands of times. The fallback
+    // below can only produce a handle for a branch that still has a pre-migration `dbUrl`, so
+    // nothing needs the registration until that is known to be there.
+    if (branch.dbUrl === undefined) return undefined
     const reg = this.dbList(project.id).find((d) => d.id === serviceId)
-    if (!reg || branch.dbUrl === undefined) return undefined
+    if (!reg) return undefined
     return { url: branch.dbUrl, container: `io-${this.ref(project, branch)}-pg`, dataId: reg.dataId }
   }
 
@@ -3149,7 +3158,11 @@ export class Engine {
   private bucketHandle(project: Project, branch: Branch, serviceId: string): { bucket: string; env: Record<string, string>; public?: boolean } | undefined {
     const row = branch.buckets?.[serviceId]
     if (row) return row
-    if (!this.stList(project.id).some((s) => s.id === serviceId) || branch.bucket === undefined) return undefined
+    // Cheap branch-local test before the clone, for the reason spelled out on `dbHandle`: the
+    // `||` ran `stList` (a full `structuredClone` of the state) on every miss, and `carries()`
+    // misses once per registration per branch.
+    if (branch.bucket === undefined) return undefined
+    if (!this.stList(project.id).some((x) => x.id === serviceId)) return undefined
     return { bucket: branch.bucket, env: branch.s3 ?? {}, public: branch.storagePublic ?? false }
   }
 
