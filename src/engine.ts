@@ -989,8 +989,13 @@ export class Engine {
   }
 
   /** Structural merge (additive, no data — platform spec §6): materialize on the target branch
-   *  every compute group deployed on `from` but absent there, against the TARGET's own db/bucket.
-   *  The fixed postgres/storage pair exists on every oss branch, so it always reports as skipped. */
+   *  every service the SOURCE carries and the target does not, fresh and empty, plus every compute
+   *  group deployed on `from` and absent there, against the TARGET's own db/bucket.
+   *
+   *  Services are branch-scoped, so postgres, storage and managed databases have real work here:
+   *  a database added on `from` after the branch was cut is created on the target, with its own
+   *  lineage and no data (platform `src/provisioning/services.ts:2685`). Only what the target
+   *  already carries reports as `skipped`. */
   async mergeBranch(projectId: string, targetName: string, fromName: string): Promise<{
     created: Array<{ type: string; name: string }>
     skipped: Array<{ type: string; name: string; reason: string }>
