@@ -1039,6 +1039,9 @@ test('both wake timeouts classify as a timeout through the TEXT branch, not only
   // never have reached, while still pointing at what to do next.
   const waiting = new WakeTimeoutError(60, 'waiting').message
   expect(waiting).toContain('the wake is still running')
-  expect(waiting).toContain('insta compute status')
   expect(waiting).not.toContain('became ready')
+  // No CLI pointer: this string's audience is the daemon log and a direct caller. The lanes
+  // rewrite a `timeout` into their own one-line answer, and the api door is re-entrant and
+  // therefore never bounded, so nobody at a CLI reads it.
+  expect(waiting).not.toContain('insta compute')
 })

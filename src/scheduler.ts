@@ -66,13 +66,12 @@ export class ServiceStoppedError extends Error { constructor() { super('service 
  *  container started and never became ready, and `waiting` is this CALLER's budget running out
  *  while the wake carries on under the operation lock.
  *
- *  Each says what actually happened. `insta compute start` goes through the api door and is
- *  bound like any other caller now, so an operator can see a timeout and then find the service
- *  up a moment later; without a sentence those two look like a contradiction, and the fact that
- *  the wake continues was only ever in a daemon-side warning nobody running the CLI reads. The
- *  waiting one cannot borrow the readiness wording either: a caller can run out queued behind
- *  another operation or partway through eviction, before `wakeLocked` has reached the readiness
- *  wait at all, so "did not become ready" would name something nothing had attempted yet.
+ *  Each says what actually happened, and the waiting one cannot borrow the readiness wording:
+ *  a caller can run out queued behind another operation or partway through eviction, before
+ *  `wakeLocked` has reached the readiness wait at all, so "did not become ready" would name
+ *  something nothing had attempted yet. Its audience is the daemon log and any direct caller:
+ *  the lanes rewrite a `timeout` into their own one-line answer, and `insta compute start` is
+ *  re-entrant and therefore never bounded, so no operator at a CLI reads this string.
  *
  *  What both must keep is the token `timed out`: `classifyWakeError` matches the CLASS first and
  *  falls back to the text only when it is handed a message rather than an error, and that
@@ -81,7 +80,7 @@ export class ServiceStoppedError extends Error { constructor() { super('service 
 export class WakeTimeoutError extends Error {
   constructor(sec: number, phase: 'readiness' | 'waiting' = 'readiness') {
     super(phase === 'waiting'
-      ? `this request timed out after ${sec} s waiting for the service to wake, and the wake is still running: the service may come up shortly, so check \`insta compute status\` before retrying`
+      ? `this request timed out after ${sec} s waiting for the service to wake, and the wake is still running under its lock: the service may come up shortly`
       : `the wake timed out after ${sec} s: the container started but never became ready`)
   }
 }
@@ -739,11 +738,35 @@ export class Scheduler {
    *  singleflight instead of starting the eviction again. Its own phases are each finite:
    *  `EVICTION_CEILING` turns, `DOCKER_TIMEOUT_MS` per docker call, `wakeTimeoutSec` on
    *  readiness. What ends at the deadline is the CALLER's wait, with `WakeTimeoutError` -- the
-   *  answer a wake that runs out of time already gives, so the lanes need no new outcome. */
+   *  answer a wake that runs out of time already gives, so the lanes need no new outcome.
+   *
+   *  ...and the bound applies ONLY where this call made the acquisition. A RE-ENTRANT wake --
+   *  `lifecycle start`, `ensureSourceRunning` inside a fork, `ensurePgAwake`, the three callers
+   *  decision 52 names -- inherits the key from an engine operation that is still on the stack.
+   *  There is no second acquisition to hold anything, so a timer there would release the caller,
+   *  unwind the OUTER op, and leave the wake starting, probing and evicting with no entry in the
+   *  lock queue at all: the container comes up under a `stopped` intent that a concurrent
+   *  lifecycle op has just written, unreachable through the traffic door and never a candidate
+   *  for eviction. Precisely the fabricated state this delta spent three rounds removing. What
+   *  the contract bounds is a HELD CLIENT CONNECTION; an internal step of a branch create is
+   *  not one, so it waits for the work it owns. */
   wake(key: ServiceKey, opts: { door: WakeDoor }): Promise<void> {
     const t = this.targetOf(key)
     if (!t) return Promise.reject(new NoTargetError())
     if (this.refuses(t, opts.door)) return Promise.reject(new ServiceStoppedError())
+    if (this.owned.getStore()?.has(key)) {
+      // Under the caller's own acquisition, so `withOp` would add nothing: run the work here.
+      // It also must not JOIN another wake found in the map -- that one is queued behind the
+      // very operation this call is inside, so awaiting it could never return.
+      const inline = this.wakeLocked(key, opts.door)
+      if (!this.wakes.has(key)) {
+        // Reported as `starting` while it runs, like any other wake.
+        this.wakes.set(key, inline)
+        void inline.catch(() => { /* the caller awaits it; this is only the map's copy */ })
+          .finally(() => { if (this.wakes.get(key) === inline) this.wakes.delete(key) })
+      }
+      return inline
+    }
     let work = this.wakes.get(key)
     if (!work) {
       work = this.withOp([key], () => this.wakeLocked(key, opts.door))

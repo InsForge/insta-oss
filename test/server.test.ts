@@ -6,7 +6,13 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-vi.mock('../src/docker', () => ({ docker: vi.fn((args: string[] = []) => fakeDocker(args)) }))
+// `dockerCall` is the same seam with a handle on the child: the scheduler's runtime verbs go
+// through it so a timed-out call can be killed and waited for. A factory that returns only
+// `docker` leaves it undefined for every importer, so it is mocked here too, over the same fake.
+vi.mock('../src/docker', () => ({
+  docker: vi.fn((args: string[] = []) => fakeDocker(args)),
+  dockerCall: (args: string[] = []) => ({ done: fakeDocker(args), kill: () => {} }),
+}))
 
 /** The docker seam these tests run on. It answers nothing for almost everything, with ONE
  *  fidelity the fakes need: a `docker rm` really removes the container from `FakeRuntime`, which
@@ -847,34 +853,51 @@ test('a volume delete on a SUSPENDED service succeeds, and leaves it suspended',
   expect((await get(`/projects/${id}/services/cp-web/volume`)).json().volume).toBeNull()
 })
 
-test('a start that outruns its bound tells the operator the wake is still running', async () => {
-  // `insta compute start` goes through the api door, and that door is bounded like any other
-  // caller now: the wake keeps the operation lock and carries on, so an operator can see a
-  // timeout and then find the service running a moment later. Those two only look like a
-  // contradiction if nothing says so, and the daemon-side warning is not something the person
-  // at the CLI reads. The route puts the engine's message in `error`, which is the field every
-  // other refusal on these routes uses and the one the CLI prints, so this asserts the sentence
-  // survives the whole way out rather than trusting that it does.
+test('a RE-ENTRANT wake is not bounded: the lock is held until the wake finishes', async () => {
+  // `wake()` bounds its caller so a held connection cannot wait for ever. That bound belongs to
+  // the ACQUISITION, not to the call: `insta compute start` reaches the wake from inside
+  // `lifecycleLocked`, which already owns the key, so `withOp` makes no second acquisition and
+  // the only real one belongs to the engine op on the stack. Releasing that caller on a timer
+  // unwinds the outer op and leaves the wake starting, probing and evicting with nothing in the
+  // lock queue: a concurrent stop then writes `stopped` and the orphaned wake starts the
+  // container anyway -- running, intent stopped, refused at the traffic door and never a
+  // candidate for eviction. What the contract bounds is a held client connection, and an api
+  // start is not one.
   const cfg = testConfig({ INSTA_OSS_WAKE_TIMEOUT_SEC: '1' })
-  const quick = makeEngine(cfg)
-  const quickApp = buildServer(quick, cfg)
-  const { project } = await quick.createProject('demo')
-  await quick.deploy(project.id, 'main', { image: 'app:1', port: 3000, group: 'web' })
-  await quick.lifecycle(project.id, 'cp-web', 'stop')
+  const slow = makeEngine(cfg)
+  const slowApp = buildServer(slow, cfg)
+  const { project } = await slow.createProject('demo')
+  await slow.deploy(project.id, 'main', { image: 'app:1', port: 3000, group: 'web' })
+  const container = 'io-demo-main-app-web'
+  await slow.lifecycle(project.id, 'cp-web', 'stop')
 
-  // The adapter's start is a hint that does nothing here, and the scheduler's own start never
-  // returns: the wake is stuck before readiness, which is the window the bound exists for.
+  let release!: () => void
+  const gate = new Promise<void>((r) => { release = () => { r() } })
+  const realStart = runtime.start.bind(runtime)
+  const started = vi.spyOn(runtime, 'start').mockImplementation(async (c: string) => { await gate; await realStart(c) })
+  // The adapter's start is the hint; the scheduler's is the one that hangs.
   const adapterStart = vi.spyOn(compute, 'start').mockResolvedValue(undefined)
-  const runtimeStart = vi.spyOn(runtime, 'start').mockImplementation(() => new Promise<void>(() => { /* never */ }))
   try {
-    const r = await quickApp.inject({ method: 'POST', url: `/projects/${project.id}/services/cp-web/start` })
-    expect(r.statusCode).toBe(400)
-    const { error } = r.json() as { error: string }
-    expect(error).toContain('this request timed out')
-    expect(error).toContain('the wake is still running')
-    expect(error).toContain('insta compute status')
+    const starting = slowApp.inject({ method: 'POST', url: `/projects/${project.id}/services/cp-web/start` })
+    // Well past the bound this call would have had.
+    await new Promise((r) => setTimeout(r, 1200))
+
+    // The key is still held, so nothing else can touch this service.
+    let stopped = false
+    const stopping = slowApp.inject({ method: 'POST', url: `/projects/${project.id}/services/cp-web/stop` }).then((r) => { stopped = true; return r })
+    await settle()
+    expect(stopped).toBe(false)
+
+    release()
+    expect((await starting).statusCode).toBe(200)
+    expect((await stopping).statusCode).toBe(200)
+    // ...and the two ran in order, so the end state is one thing and not two: the intent and the
+    // container agree.
+    expect((await slowApp.inject({ method: 'GET', url: `/projects/${project.id}/services/cp-web/state` })).json())
+      .toMatchObject({ desiredState: 'stopped' })
+    expect(runtime.stateOfContainer(container)).toBe('exited')
   } finally {
-    runtimeStart.mockRestore()
+    started.mockRestore()
     adapterStart.mockRestore()
   }
 })
