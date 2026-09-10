@@ -267,6 +267,51 @@ test('--print-firewall lists the docker0 and inbound rules; the script gates the
   expect(out).not.toMatch(/OpenSSH|allow 22\b/)
 })
 
+test('the firewall rules follow the RESOLVED lane ports, and never the displaced defaults', () => {
+  // The rules were written with 5432, 6379, 27017 and 20000-20999 hardcoded while the lanes
+  // themselves are configurable. A moved lane was unreachable behind an active firewall, and
+  // worse: moving the Postgres lane BECAUSE something else holds 5432 meant the installer
+  // skipped its own port check on 5432 and then opened it publicly, publishing a stranger's
+  // service. The negative half of this test is the half that catches that.
+  const moved = run(['--print-firewall'], {
+    INSTA_OSS_LANE_PG_PORT: '15432',
+    INSTA_OSS_LANE_REDIS_PORT: '16379',
+    INSTA_OSS_LANE_MONGO_PORT: '17017',
+    INSTA_OSS_LANE_PORT_RANGE: '30000-30099',
+  })
+  expect(moved).toContain('ufw allow in on docker0 to any port 443,15432,16379,17017 proto tcp')
+  expect(moved).toContain('ufw allow in on docker0 to any port 30000:30099 proto tcp')
+  expect(moved).toContain('ufw allow 80,443,15432/tcp')
+  expect(moved).toContain('--zone=docker --add-port=443/tcp --add-port=15432/tcp --add-port=16379/tcp --add-port=17017/tcp --add-port=30000-30099/tcp')
+  expect(moved).toContain('--zone=public --add-port=80/tcp --add-port=443/tcp --add-port=15432/tcp')
+  // THE DISPLACED DEFAULTS ARE NOT OPENED. Whatever is on 5432 now is not ours to publish.
+  for (const displaced of ['5432', '6379', '27017', '20000:20999', '20000-20999']) {
+    // as a whole number, so `15432` does not count as `5432`
+    expect(moved, displaced).not.toMatch(new RegExp(`(^|[^0-9])${displaced.replace('-', '\\-')}([^0-9]|$)`, 'm'))
+  }
+  // ...and the resolved values are what instad.env carries, so the daemon binds what is opened.
+  const env = parseEnv(run(['--print-env'], {
+    INSTA_OSS_DOMAIN: 'example.test', INSTA_OSS_LANE_PG_PORT: '15432', INSTA_OSS_LANE_PORT_RANGE: '30000-30099',
+  }))
+  expect(env.INSTA_OSS_LANE_PG_PORT).toBe('15432')
+  expect(env.INSTA_OSS_LANE_PORT_RANGE).toBe('30000-30099')
+})
+
+test('a lane port or range that is not one is refused before any rule is written', () => {
+  // `run_rules` EVALS what these renderers produce. Their input was script-internal until the
+  // rules started following the resolved values; a lane port is operator input now.
+  for (const bad of ['0', '70000', 'abc', '5432; rm -rf /']) {
+    const r = tryRun(['--print-firewall'], { INSTA_OSS_LANE_PG_PORT: bad })
+    expect(r.status, bad).toBe(1)
+    expect(r.stderr, bad).toContain('INSTA_OSS_LANE_PG_PORT')
+  }
+  for (const bad of ['20000', '30000-', 'a-b', '30099-30000']) {
+    const r = tryRun(['--print-firewall'], { INSTA_OSS_LANE_PORT_RANGE: bad })
+    expect(r.status, bad).toBe(1)
+    expect(r.stderr, bad).toContain('INSTA_OSS_LANE_PORT_RANGE')
+  }
+})
+
 test('the ssh advisory names every port sshd listens on, before the enable', () => {
   // The advisory is the only place SSH is mentioned, and it is advice, not a rule. Every test
   // here injects the detection, so none of them reads the HOST's sshd or ufw: the previous
@@ -314,8 +359,9 @@ test('the run path: every port the daemon binds is refused, readiness on /health
   expect(script).toContain('INSTA_OSS_LANE_REDIS_PORT to another port')
   expect(script).not.toContain('for _p in 6379 3306 27017; do')
   expect(script).toContain('[ "$PORTS_BUSY" = 0 ] || die')
-  // the lanes are checked where they are configured, not where they default to
-  expect(script).toContain("LANE_PG=$(resolve INSTA_OSS_LANE_PG_PORT '' 5432)")
+  // the lanes are checked where they are configured, not where they default to, and the same
+  // resolved value reaches the firewall rules (see the rule test above)
+  expect(script).toContain('LANE_PG=$(lane_port INSTA_OSS_LANE_PG_PORT 5432)')
   expect(script).toContain('emit INSTA_OSS_LANE_REDIS_PORT "$LANE_REDIS"')
   expect(script).toContain('curl -fsSL https://get.docker.com | sh')
   expect(script).toContain('docker compose version')

@@ -171,10 +171,36 @@ case $TLS in acme|internal) ;; *) die "--tls must be acme or internal (got '$TLS
 EMAIL=$(resolve INSTA_OSS_ACME_EMAIL "$F_EMAIL" '')
 PORT=$(resolve INSTA_OSS_PORT '' 8080)
 INTERNAL_PORT=$(resolve INSTA_OSS_INTERNAL_PORT '' 8081)
-# The database lanes the daemon binds on the host; the port check and instad.env share these.
-LANE_PG=$(resolve INSTA_OSS_LANE_PG_PORT '' 5432)
-LANE_REDIS=$(resolve INSTA_OSS_LANE_REDIS_PORT '' 6379)
-LANE_MONGO=$(resolve INSTA_OSS_LANE_MONGO_PORT '' 27017)
+# The database lanes the daemon binds on the host. The port CHECK, instad.env and the FIREWALL
+# rules all read these same resolved values: the rules used to be written with the defaults
+# hardcoded, which made a moved lane unreachable behind an active firewall and, worse, opened the
+# default port anyway -- so moving the Postgres lane because something else already held 5432
+# meant the installer skipped its own check on 5432 and then published a stranger's service.
+#
+# They are validated HERE, once, because they reach `run_rules`, which evals what it is given.
+# Until now its input was script-internal; a lane port is operator input.
+valid_port() {
+  case $1 in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+lane_port() {   # lane_port KEY DEFAULT -> the resolved, validated port
+  _lp=$(resolve "$1" '' "$2")
+  valid_port "$_lp" || die "$1 must be a port between 1 and 65535 (got '$_lp')"
+  printf '%s' "$_lp"
+}
+LANE_PG=$(lane_port INSTA_OSS_LANE_PG_PORT 5432)
+LANE_REDIS=$(lane_port INSTA_OSS_LANE_REDIS_PORT 6379)
+LANE_MONGO=$(lane_port INSTA_OSS_LANE_MONGO_PORT 27017)
+# The per-service lane range (server-mode MySQL). Validated as a RANGE, not as a port.
+LANE_RANGE=$(resolve INSTA_OSS_LANE_PORT_RANGE '' 20000-20999)
+LANE_RANGE_LO=${LANE_RANGE%%-*}
+LANE_RANGE_HI=${LANE_RANGE##*-}
+case $LANE_RANGE in
+  *-*) ;;
+  *) die "INSTA_OSS_LANE_PORT_RANGE must be <low>-<high> (got '$LANE_RANGE')" ;;
+esac
+{ valid_port "$LANE_RANGE_LO" && valid_port "$LANE_RANGE_HI" && [ "$LANE_RANGE_LO" -le "$LANE_RANGE_HI" ]; } ||
+  die "INSTA_OSS_LANE_PORT_RANGE must be <low>-<high> with 1 <= low <= high <= 65535 (got '$LANE_RANGE')"
 
 # route_src: the address this box uses to reach the internet (its own, even behind NAT)
 route_src() {
@@ -285,7 +311,7 @@ EOF
   emit INSTA_OSS_LANE_PG_PORT "$LANE_PG"
   emit INSTA_OSS_LANE_REDIS_PORT "$LANE_REDIS"
   emit INSTA_OSS_LANE_MONGO_PORT "$LANE_MONGO"
-  ek INSTA_OSS_LANE_PORT_RANGE 20000-20999
+  emit INSTA_OSS_LANE_PORT_RANGE "$LANE_RANGE"
   ek INSTA_OSS_LANE_IDLE_SEC 900
   ek INSTA_OSS_PROBE_WINDOW_MS 8000
   ek INSTA_OSS_READY_WINDOW_MS 30000
@@ -479,18 +505,31 @@ ssh_advice() {
 # rule here: SSH policy belongs to the operator, and an installer that edits it either skips a
 # rule the box needed or widens one the operator narrowed on purpose. The advisory above tells
 # them what to allow; this only opens what insta-oss itself needs.
-fw_ufw() {
-  for _b in $POOL_BASES; do
-    log "ufw allow from $_b to any port 443,5432,6379,27017 proto tcp"
-    log "ufw allow from $_b to any port 20000:20999 proto tcp"
+# Every rule below is generated from the RESOLVED lane values, never from the defaults, and each
+# one is re-checked on the way out: `run_rules` evals these lines, so nothing that failed
+# validation may reach it even if a later edit sets these variables somewhere else.
+lane_ports() {   # the container-facing set: the edge plus the three database lanes
+  for _p in 443 "$LANE_PG" "$LANE_REDIS" "$LANE_MONGO"; do
+    valid_port "$_p" || die "refusing to write a firewall rule for '$_p': not a port"
   done
-  log 'ufw allow in on docker0 to any port 443,5432,6379,27017 proto tcp'
-  log 'ufw allow in on docker0 to any port 20000:20999 proto tcp'
-  log 'ufw allow 80,443,5432/tcp'
+  printf '443,%s,%s,%s' "$LANE_PG" "$LANE_REDIS" "$LANE_MONGO"
+}
+fw_ufw() {
+  _lanes=$(lane_ports)
+  _range=$(printf '%s' "$LANE_RANGE" | tr '-' ':')   # ufw spells a range low:high
+  for _b in $POOL_BASES; do
+    log "ufw allow from $_b to any port $_lanes proto tcp"
+    log "ufw allow from $_b to any port $_range proto tcp"
+  done
+  log "ufw allow in on docker0 to any port $_lanes proto tcp"
+  log "ufw allow in on docker0 to any port $_range proto tcp"
+  # The only PUBLIC rule: the edge and the Postgres lane, on the port that lane actually uses.
+  log "ufw allow 80,443,$LANE_PG/tcp"
 }
 fw_firewalld() {
-  log 'firewall-cmd --permanent --zone=docker --add-port=443/tcp --add-port=5432/tcp --add-port=6379/tcp --add-port=27017/tcp --add-port=20000-20999/tcp'
-  log 'firewall-cmd --permanent --zone=public --add-port=80/tcp --add-port=443/tcp --add-port=5432/tcp'
+  lane_ports >/dev/null   # validate before either zone is written
+  log "firewall-cmd --permanent --zone=docker --add-port=443/tcp --add-port=$LANE_PG/tcp --add-port=$LANE_REDIS/tcp --add-port=$LANE_MONGO/tcp --add-port=$LANE_RANGE/tcp"
+  log "firewall-cmd --permanent --zone=public --add-port=80/tcp --add-port=443/tcp --add-port=$LANE_PG/tcp"
   log 'firewall-cmd --reload'
 }
 render_firewall() {
