@@ -408,12 +408,20 @@ OK "a never-seen hostname is served without issuing anything"
 # hostname through: the daemon triggers issuance by handshaking the edge with the wanted
 # servername, so a wildcard at the edge alone would not have closed this.
 PGHOST_NAME=pg-db-$SLUG-main.$DOMAIN
-LANE_SERIAL=$(openssl s_client -connect "127.0.0.1:5432" -starttls postgres -servername "$PGHOST_NAME" </dev/null 2>/dev/null \
-  | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2)
-[ "$LANE_SERIAL" = "$OURS" ] || FAIL "the pg lane presented '$LANE_SERIAL', not the supplied certificate '$OURS'"
-AFTER=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
-[ "$AFTER" = "$BEFORE" ] || FAIL "the pg lane handshake made something issue a certificate"
-OK "the database lane presents the supplied certificate and issues nothing"
+# `-starttls postgres` is how the lane's TLS is reached without a client library. It needs
+# OpenSSL 1.1.1 or newer; where it is missing the check is SKIPPED loudly rather than passing
+# quietly, because a silent skip of exactly this check is how the leak would come back.
+if openssl s_client -help 2>&1 | grep -q 'starttls'; then
+  LANE_SERIAL=$(openssl s_client -connect "127.0.0.1:5432" -starttls postgres -servername "$PGHOST_NAME" </dev/null 2>/dev/null \
+    | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2)
+  [ -n "$LANE_SERIAL" ] || FAIL "the pg lane did not complete a TLS handshake for $PGHOST_NAME"
+  [ "$LANE_SERIAL" = "$OURS" ] || FAIL "the pg lane presented '$LANE_SERIAL', not the supplied certificate '$OURS'"
+  AFTER=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$AFTER" = "$BEFORE" ] || FAIL "the pg lane handshake made something issue a certificate"
+  OK "the database lane presents the supplied certificate and issues nothing"
+else
+  printf 'SKIP %s\n' "openssl has no -starttls: the database lane certificate check did not run" 1>&2
+fi
 
 # ...and back, because a box has to be able to leave this mode: the leftover paths in instad.env
 # are not a request nothing can serve, they are the previous install.
