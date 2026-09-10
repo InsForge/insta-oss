@@ -3296,8 +3296,19 @@ export class Engine {
     return { hostPath }
   }
   /** Reflink (or plain-copy) every /data volume of the source branch onto the target. Runs BEFORE
-   *  the clone's redeploy loop, so the new containers start on their own copy. The source app keeps
-   *  running: the copy is crash-consistent, exactly like the database clone. */
+   *  the clone's redeploy loop, so the new containers start on their own copy.
+   *
+   *  The source app keeps RUNNING through the walk, and that is a deliberate divergence from the
+   *  Postgres fork, which refuses to walk a live data directory and streams a `pg_basebackup`
+   *  instead. The difference is that Postgres HAS a consistent alternative, and that a torn
+   *  database does not survive its own recovery. A `/data` volume has neither: there is no
+   *  protocol that streams an arbitrary application's files consistently, so the only choices
+   *  here are copying a live tree or refusing every branch create of an app that is awake. What
+   *  the copy holds is what the app would find after a power cut, each file as it stood when the
+   *  walk reached it, which is a state an app with data it cares about already has to tolerate;
+   *  failing the create instead would be the worse answer by a distance. Stated as a divergence
+   *  in COMPATIBILITY and in the branching docs, and a caller who wants a quiescent copy stops
+   *  the group first (`insta compute stop <group>`, or let the idle sweep put it to sleep). */
   async forkVolumes(project: Project, source: Branch, target: Branch): Promise<Array<{ group: string; method: 'reflink' | 'copy'; ms: number }>> {
     const out: Array<{ group: string; method: 'reflink' | 'copy'; ms: number }> = []
     const srcRef = this.ref(project, source)

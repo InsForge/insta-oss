@@ -65,6 +65,15 @@ safety rule is not something a setting turns off, so stop the source or let it s
 Every compute volume is reflink-copied along with the database, so a branch starts with the files
 its source had.
 
+Unlike the database, a volume is copied whether or not its app is running. The database has a
+consistent alternative for the live case (`pg_basebackup` streams it), and an inconsistent copy of
+a database does not survive its own crash recovery. A volume has neither: nothing can stream an
+arbitrary application's files consistently, so the choice is between copying a live directory and
+failing every branch create of an app that is awake. insta-oss copies. What the branch gets is the
+state the app would find after a power cut, each file as it stood when the copy reached it. If a
+group writes data that cannot take that, stop it first with `insta compute stop <group>`, or let
+the idle sweep put it to sleep, and then create the branch.
+
 <Note>
 This is a difference from the hosted platform, where a new branch gets an empty volume. Here the
 volume is forked, because forking files is what the local filesystem is good at.

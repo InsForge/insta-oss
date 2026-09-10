@@ -17,7 +17,7 @@ A branch is a full, isolated clone of your environment. Every project starts on 
 | Compute `/data` volume | Same size, empty (self-hosted insta-oss forks the volume files instead) |
 
 <Note>
-On self-hosted insta-oss, a branch is a fork on disk: the Postgres data directory and every compute volume are reflink-copied, so `branch create` returns in about a second whatever a sleeping database weighs, and the bucket objects are synced. A database that is awake is streamed with `pg_basebackup` instead, in time proportional to its size, because a file-level copy of a live server is not consistent.
+On self-hosted insta-oss, a branch is a fork on disk: the Postgres data directory and every compute volume are reflink-copied, so `branch create` returns in about a second whatever a sleeping database weighs, and the bucket objects are synced. A database that is awake is streamed with `pg_basebackup` instead, in time proportional to its size, because a file-level copy of a live server is not consistent. Compute volumes have no such streaming path, so they are copied whether the app is running or not: stop the group first if you need a quiescent copy.
 </Note>
 
 ## Creating and switching
