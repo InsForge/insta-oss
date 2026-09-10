@@ -97,10 +97,52 @@ test('--print-env: precedence flag > environment > default; --version strips the
 test('--print-env rejects a bad --tls, a relative --data-dir, a malformed domain and an unknown flag', () => {
   expect(tryRun(['--print-env', '--tls', 'selfsigned'], { INSTA_OSS_DOMAIN: 'x.test' })).toMatchObject({ status: 1, stderr: expect.stringContaining('--tls must be acme or internal') })
   expect(tryRun(['--print-env', '--data-dir', 'relative/dir'], { INSTA_OSS_DOMAIN: 'x.test' })).toMatchObject({ status: 1, stderr: expect.stringContaining('absolute path') })
-  expect(tryRun(['--print-env'], { INSTA_OSS_DOMAIN: 'bad_domain!' })).toMatchObject({ status: 1, stderr: expect.stringContaining('domain must match') })
+  expect(tryRun(['--print-env'], { INSTA_OSS_DOMAIN: 'bad_domain!' })).toMatchObject({ status: 1, stderr: expect.stringContaining('is not a hostname') })
   expect(tryRun(['--print-env'], { INSTA_OSS_PUBLIC_IP: 'not-an-ip' })).toMatchObject({ status: 1, stderr: expect.stringContaining('INSTA_OSS_PUBLIC_IP') })
   expect(tryRun(['--nope'])).toMatchObject({ status: 1, stderr: expect.stringContaining('unknown flag --nope') })
   expect(tryRun(['--help']).status).toBe(0)
+})
+
+test('a domain that is not a HOSTNAME is refused before anything is written', () => {
+  // Measured on a real box: an automation whose IP lookup returned empty passed
+  // `--domain .sslip.io`, the old check (`[a-z0-9.-]+`) accepted it, and the installer wrote it
+  // into instad.env, compose.yml and the Caddyfile, brought the stack up, spent four minutes
+  // failing to get a certificate for `api..sslip.io`, and printed "InstaCloud is running" with
+  // console and API URLs that can never resolve. Exit 0.
+  const bad: Array<[string, string]> = [
+    ['.sslip.io', 'a leading dot: the empty first label is the automation case'],
+    ['a..b.test', 'an empty label in the middle'],
+    ['-lead.test', 'a label starting with a hyphen'],
+    ['trail-.test', 'a label ending with a hyphen'],
+    ['singlelabel', 'one label: `api.<domain>` would not be a name'],
+    ['.', 'a bare dot, which the trailing-dot strip reduces to nothing'],
+    [`${'x'.repeat(64)}.test`, 'a label over 63 characters'],
+  ]
+  for (const [value, why] of bad) {
+    const r = tryRun(['--print-env'], { INSTA_OSS_DOMAIN: value })
+    expect(r.status, why).toBe(1)
+    expect(r.stderr, why).toMatch(/is not a hostname|resolved to nothing/)
+    expect(r.stdout, why).not.toContain('INSTA_OSS_DOMAIN=')
+  }
+  // ...and the shapes that are hostnames still are, including the derived sslip.io one and a
+  // trailing dot, which is stripped rather than refused.
+  for (const good of ['example.test', 'a-b.c-d.example.test', '203-0-113-7.sslip.io', 'x1.io']) {
+    expect(parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: good })).INSTA_OSS_DOMAIN, good).toBe(good)
+  }
+  expect(parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: 'Example.TEST.' })).INSTA_OSS_DOMAIN).toBe('example.test')
+})
+
+test('an ACME email is an email, or absent', () => {
+  // Same ending as the domain: it is rendered into the Caddyfile and a malformed address is
+  // rejected by the CA after the install rather than before it. Empty stays legitimate.
+  for (const bad of ['not-an-email', 'a@b', 'a@.b.test', '@example.test', 'a b@example.test']) {
+    const r = tryRun(['--print-env', '--email', bad], { INSTA_OSS_DOMAIN: 'example.test' })
+    expect(r.status, bad).toBe(1)
+    expect(r.stderr, bad).toContain('is not an email address')
+  }
+  expect(parseEnv(run(['--print-env', '--email', 'ops@example.test'], { INSTA_OSS_DOMAIN: 'example.test' })).INSTA_OSS_ACME_EMAIL)
+    .toBe('ops@example.test')
+  expect(parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: 'example.test' })).INSTA_OSS_ACME_EMAIL).toBe('')
 })
 
 test('INSTA_OSS_PUBLIC_IP=203.0.113.7 --print-env yields INSTA_OSS_DOMAIN=203-0-113-7.sslip.io', () => {
@@ -449,7 +491,7 @@ test('an embedded NEWLINE is refused in every operator value that is checked by 
     { key: 'INSTA_OSS_LANE_PORT_RANGE', value: '20000-20999\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_LANE_PORT_RANGE' },
     { key: 'INSTA_OSS_DATA_DIR', value: '/var/lib/instacloud\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_DATA_DIR' },
     { key: 'INSTA_OSS_IMAGE', value: 'ghcr.io/insforge/instacloud\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_IMAGE' },
-    { key: 'INSTA_OSS_DOMAIN', value: 'example.test\nINSTA_OSS_MODE=local', says: 'domain must match' },
+    { key: 'INSTA_OSS_DOMAIN', value: 'example.test\nINSTA_OSS_MODE=local', says: 'is not a hostname' },
     { key: 'INSTA_OSS_PUBLIC_IP', value: '1.2.3.4\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_PUBLIC_IP' },
     // Its own `shaped` check only runs on the install path, so what refuses it in the print
     // modes is the write itself. It was missing from this list, which is how a value quietly

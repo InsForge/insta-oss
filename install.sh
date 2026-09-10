@@ -192,6 +192,13 @@ if [ -z "$VERSION" ] && [ -z "$PRINT" ]; then VERSION=$(latest_release || true);
 TLS=$(resolve INSTA_OSS_TLS "$F_TLS" acme)
 case $TLS in acme|internal) ;; *) die "--tls must be acme or internal (got '$TLS')" ;; esac
 EMAIL=$(resolve INSTA_OSS_ACME_EMAIL "$F_EMAIL" '')
+# Empty is legitimate (the ACME account is then registered without a contact), so only a value
+# that IS set has to be one: it is rendered into the Caddyfile, where a malformed address fails
+# at the CA rather than here, which is the same "configured, up, and never gets a certificate"
+# ending the domain had.
+[ -z "$EMAIL" ] ||
+  shaped "$EMAIL" '^[A-Za-z0-9._%+-]+@[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$' ||
+  die "'$EMAIL' is not an email address; --email is the ACME contact and Let's Encrypt rejects a malformed one after the install rather than before it (leave it empty for no contact)"
 PORT=$(resolve INSTA_OSS_PORT '' 8080)
 INTERNAL_PORT=$(resolve INSTA_OSS_INTERNAL_PORT '' 8081)
 # The database lanes the daemon binds on the host. The port CHECK, instad.env and the FIREWALL
@@ -260,7 +267,16 @@ if [ -z "$DOMAIN" ]; then
   fi
 fi
 DOMAIN=$(printf '%s' "$DOMAIN" | tr '[:upper:]' '[:lower:]' | sed 's/\.$//')
-shaped "$DOMAIN" '^[a-z0-9.-]+$' || die "domain must match [a-z0-9.-] (got '$DOMAIN')"
+# The SHAPE, not just the character set. `[a-z0-9.-]+` accepted `.sslip.io`, `a..b` and (after
+# the trailing-dot strip) `.` reduced to nothing, and every one of those was written into
+# instad.env, compose.yml and the Caddyfile, brought the stack up, spent four minutes failing to
+# get a certificate for `api..sslip.io`, and then printed "InstaCloud is running" with console
+# and API URLs that can never resolve. Measured on a real box, from an automation whose IP
+# lookup returned empty. A hostname is labels of letters and digits with inner hyphens, 1 to 63
+# characters each, joined by single dots, at least two of them.
+[ -n "$DOMAIN" ] || die "the domain resolved to nothing: pass --domain <name>, set INSTA_OSS_DOMAIN, or let the installer derive one from the public IPv4 address (an empty value usually means the variable your automation passed was unset)"
+shaped "$DOMAIN" '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$' ||
+  die "'$DOMAIN' is not a hostname: it must be dot-separated labels of a-z, 0-9 and inner hyphens, 1-63 characters each, with at least two labels and no empty label (a leading dot, a double dot or a bare name all fail here rather than after the install)"
 DOMAIN_CHANGED=0
 [ -n "$OLD_DOMAIN" ] && [ "$OLD_DOMAIN" != "$DOMAIN" ] && DOMAIN_CHANGED=1
 
