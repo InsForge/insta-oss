@@ -40,6 +40,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *  error starts with this text: a restart says nothing about the template. */
 export const RESTART_ABANDONED = 'the daemon restarted while the template deployment was running - retry with the same deploymentId to resume'
 
+/** What a deployment row carries INSTEAD of a log tail when the run could not build a complete
+ *  redaction list. It is what the operator reads, so it says what to do next. */
+const WITHHELD_TAIL = '(log tail withheld: this run could not read every secret it wrote, so it cannot show that the tail is redacted. Read the container logs directly with `insta logs`.)'
+
 /** Thrown by a gate callback that has already answered the request (403 or 202). */
 export class GateRefused extends Error {
   constructor() { super('template deploy refused by policy'); this.name = 'GateRefused' }
@@ -449,12 +453,22 @@ export class TemplateExecutor {
       }
       // Everything this run writes as a secret: the redaction list for any log tail it captures.
       const writtenSecrets = [...Object.values(values), ...Object.values(generators)]
+      // A read that could not answer is not "there were no credentials to mask". This catch used
+      // to swallow the failure and carry on with a SHORT list, and the tail is then persisted on
+      // the deployment row and served by `GET /template-deployments/:id` with a database password
+      // in it. Same rule as everywhere else, applied to a confidentiality decision: no evidence
+      // is not evidence, so the run remembers that it cannot prove a tail is clean and withholds
+      // the tail rather than publishing one it could not fully redact.
+      let redactable = true
       for (const [name, svc] of Object.entries(manifest.services)) {
         if (svc.type !== 'postgres' || !spec[name].serviceId) continue
         try {
           const creds = this.engine.credentials(projectId, spec[name].serviceId!, branchName)
           for (const v of Object.values(creds)) writtenSecrets.push(v)
-        } catch { /* best-effort: redaction must not fail the run */ }
+        } catch (e) {
+          redactable = false
+          console.warn(`template deployment ${id}: could not read ${name}'s credentials to build the redaction list (${reasonOf(e)}); log tails are withheld for this run`)
+        }
       }
       for (const [name, svc] of Object.entries(manifest.services)) {
         if (svc.type === 'postgres') continue                     // the database's env is the daemon's
@@ -487,7 +501,7 @@ export class TemplateExecutor {
           entry.state = 'deployed'
         } catch (e) {
           entry.state = 'failed'
-          const tail = await this.captureLogTail(projectId, branchName, entry.serviceName, writtenSecrets)
+          const tail = await this.captureLogTail(projectId, branchName, entry.serviceName, writtenSecrets, redactable)
           save()
           const live = Object.values(spec).filter((x) => x.state === 'deployed' || x.state === 'healthy').length
           this.finish(id, live > 0 ? 'partial' : 'failed', `${name}: ${reasonOf(e)}`, tail, record.claimToken)
@@ -506,7 +520,7 @@ export class TemplateExecutor {
         if (verdict.healthy) { entry.state = 'healthy'; continue }
         entry.state = 'failed'
         failures.push(`${name}: ${verdict.reason}`)
-        logTail ??= await this.captureLogTail(projectId, branchName, entry.serviceName, writtenSecrets)
+        logTail ??= await this.captureLogTail(projectId, branchName, entry.serviceName, writtenSecrets, redactable)
       }
       save()
       if (failures.length) {
@@ -667,8 +681,12 @@ export class TemplateExecutor {
     }
   }
 
-  /** The failing container's last lines, with every secret this run wrote masked. */
-  private async captureLogTail(projectId: string, branchName: string, group: string, secrets: string[]): Promise<string | null> {
+  /** The failing container's last lines, with every secret this run wrote masked -- or nothing at
+   *  all when the run could not enumerate what it wrote. The tail is durable (it goes on the
+   *  deployment row and out of the API), so publishing one built from a list known to be short is
+   *  a disclosure, and "we could not read the credentials" is exactly when the list is short. */
+  private async captureLogTail(projectId: string, branchName: string, group: string, secrets: string[], redactable = true): Promise<string | null> {
+    if (!redactable) return WITHHELD_TAIL
     try {
       const out = await this.engine.runtimeLogs(projectId, { component: 'compute', branchName, group, limit: LOG_TAIL_LINES })
       const text = out.lines.map((l) => `${l.ts} ${l.message}`).join('\n')

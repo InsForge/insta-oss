@@ -582,6 +582,27 @@ test('a database docker cannot be ASKED about fails the run instead of passing t
   expect(health.services.find((x: { serviceId: string }) => x.serviceId === 'pg-store').status).toBe('healthy')
 })
 
+test('a run that cannot read its credentials WITHHOLDS the log tail rather than publishing it', async () => {
+  // The redaction list is built from what the run wrote, and a `credentials()` read that fails
+  // used to be swallowed: the list came up short and the tail was persisted on the deployment
+  // row, and served by `GET /template-deployments/:id`, with a database password in it. A tail
+  // that cannot be shown to be clean is not published.
+  const id = await project()
+  probeStatus = () => 500
+  vi.mocked((await import('../src/docker')).docker).mockImplementation(async (args: string[]) => (
+    args[0] === 'logs'
+      ? Buffer.from('2026-09-08T00:00:00Z boot failed: dsn=postgres://postgres:hunter2hunter2@io-demo-main-pg-store:5432/app')
+      : fakeDocker(args)
+  ))
+  const creds = vi.spyOn(engine, 'credentials').mockImplementation(() => { throw new Error('docker could not answer') })
+  const r = await deploy(id, { manifest: stackManifest, branch: 'main' }).finally(() => { creds.mockRestore() })
+  const view = (await get(`/template-deployments/${r.json().deploymentId}`)).json()
+  // `partial`: the database entry did come up, so the store counts as live and only the app failed.
+  expect(view.status).toBe('partial')
+  expect(view.logsTail).toContain('log tail withheld')
+  expect(view.logsTail).not.toContain('hunter2hunter2')
+})
+
 test('a database that comes up LATE is polled until it does, not failed on the first read', async () => {
   // The other half of R3 (`plans/impl/05-templates-parity.md:69`): postgres entries go healthy
   // once the container RUNS, POLLING up to the health timeout. Strictness on its own would just
