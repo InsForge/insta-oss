@@ -1475,6 +1475,108 @@ test('dashboard serving: identity and gallery routes reach the SPA shell', async
 // ---- end region WP1 ----
 
 // ---- region WP2 (router) ----
+// Hostname collisions across the ONE label space (contract 00 section 10): compute mints
+// `<group>-<ref>`, postgres `pg-<name>-<ref>` and a managed database `<type>-<name>-<ref>`, so a
+// group called `pg-db` or `redis-cache` is spelled exactly like the database beside it. buildTable
+// keeps the FIRST route on a duplicate and only logs the second, so an unchecked mint silently
+// shadows a database whose credentials still hand that hostname to every client. Every path that
+// mints one reserves it first, and a collision is a refusal with nothing created.
+import { loadState } from '../src/state'
+
+const hostReservations = (): Record<string, string> => loadState().hostReservations ?? {}
+
+test('a direct deploy whose group would mint the postgres hostname is refused and creates nothing', async () => {
+  const id = await createProject()
+  // `db` is the postgres service the fixture added: its hostname is pg-db-demo-main.localhost,
+  // which is also what a compute group called `pg-db` would mint.
+  const r = await post(`/projects/${id}/deploy`, { image: 'app:1', port: 3000, group: 'pg-db' })
+  expect(r.statusCode).toBe(400)
+  expect(r.json().error).toContain('pg-db-demo-main.localhost')
+  expect(r.json().error).toContain('pg-db')
+
+  // Nothing was created: no container, no group on the branch, no row in the services list, and
+  // no reservation left behind for the next request to trip over.
+  expect(calls.filter((c) => c.startsWith('deploy:'))).toEqual([])
+  expect(loadState().branches[await branchOf(id)].apps['pg-db']).toBeUndefined()
+  const rows = (await get(`/projects/${id}/services`)).json().services
+  expect(rows.map((s: { id: string }) => s.id)).not.toContain('cp-pg-db')
+  // ...and the database still owns the name.
+  expect(rows.find((s: { id: string }) => s.id === 'pg-db').domain).toBe('pg-db-demo-main.localhost')
+  expect(hostReservations()).toEqual({})
+})
+
+test('a direct deploy whose group would mint a managed database hostname is refused and creates nothing', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  calls.length = 0
+
+  const r = await post(`/projects/${id}/deploy`, { image: 'app:1', port: 3000, group: 'redis-cache' })
+  expect(r.statusCode).toBe(400)
+  expect(r.json().error).toContain('redis-cache-demo-main.localhost')
+
+  expect(calls.filter((c) => c.startsWith('deploy:'))).toEqual([])
+  expect(loadState().branches[await branchOf(id)].apps['redis-cache']).toBeUndefined()
+  expect(hostReservations()).toEqual({})
+  // The redis service is untouched and still answers on the name its credentials advertise.
+  const rows = (await get(`/projects/${id}/services`)).json().services
+  expect(rows.find((s: { id: string }) => s.id === 'rd-cache').domain).toBe('redis-cache-demo-main.localhost')
+})
+
+test('adding a managed database whose hostname a deployed group already holds is refused and provisions nothing', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', port: 3000, group: 'redis-cache' })
+  calls.length = 0
+
+  // The other direction: the group is there first, so the redis add is the one that must refuse.
+  const r = await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  expect(r.statusCode).toBe(409)
+  expect(r.json().error).toContain('redis-cache-demo-main.localhost')
+
+  expect(calls.filter((c) => c.startsWith('md.provision:'))).toEqual([])
+  const rows = (await get(`/projects/${id}/services`)).json().services
+  expect(rows.map((s: { id: string }) => s.id)).not.toContain('rd-cache')
+  expect(loadState().projects[id].managedServices ?? []).toEqual([])
+  expect(hostReservations()).toEqual({})
+})
+
+test('renaming a managed database onto a deployed group hostname is refused and renames nothing', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', port: 3000, group: 'redis-live' })
+  calls.length = 0
+
+  const r = await post(`/projects/${id}/services/rd-cache/rename`, { name: 'live' })
+  expect(r.statusCode).toBe(409)
+  expect(r.json().error).toContain('redis-live-demo-main.localhost')
+
+  expect(calls.filter((c) => c.startsWith('md.rename:'))).toEqual([])
+  const rows = (await get(`/projects/${id}/services`)).json().services
+  expect(rows.map((s: { id: string }) => s.id)).toContain('rd-cache')
+  expect(rows.map((s: { id: string }) => s.id)).not.toContain('rd-live')
+  expect(hostReservations()).toEqual({})
+})
+
+test('a group name that is not lower-kebab is refused on the deploy that would mint it', async () => {
+  const id = await createProject()
+  const r = await post(`/projects/${id}/deploy`, { image: 'app:1', port: 3000, group: 'Web_1' })
+  expect(r.statusCode).toBe(400)
+  expect(r.json().error).toBe('service name must be lower-kebab (a-z, 0-9, -)')
+  expect(calls.filter((c) => c.startsWith('deploy:'))).toEqual([])
+})
+
+test('a redeploy re-checks nothing it already owns: the second deploy of a group still lands', async () => {
+  const id = await createProject()
+  expect((await post(`/projects/${id}/deploy`, { image: 'app:1', port: 3000, group: 'web' })).statusCode).toBe(200)
+  const again = await post(`/projects/${id}/deploy`, { image: 'app:2', port: 3000, group: 'web' })
+  expect(again.statusCode).toBe(200)
+  expect(calls.filter((c) => c.startsWith('deploy:demo-main:web:'))).toHaveLength(2)
+  expect(hostReservations()).toEqual({})
+})
+
+/** The default branch's id (host reservations and app rows are keyed by it). */
+async function branchOf(id: string, name = 'main'): Promise<string> {
+  return (await get(`/projects/${id}/branches`)).json().branches.find((b: { name: string }) => b.name === name).id
+}
 // ---- end region WP2 ----
 
 // ---- region WP3 (scheduler) ----

@@ -487,6 +487,17 @@ export class Engine {
     // re-assert just preserved. The brief run is the cost of suspend being a pause.
     const standing = b.apps[group]?.desiredState
     const key = this.serviceKey(b, `cp-${group}`)
+    // A group materialises on its first deploy — `insta deploy --group <name>` needs no prior
+    // `services add` — so this IS the compute registration for a direct deploy, and it gets the
+    // same treatment: the name is validated, and the hostname it will mint is checked against
+    // every label on the box and reserved before anything is created (decision 51). Without it a
+    // group named `pg-db` mints the postgres service `db`'s hostname and shadows it in the table.
+    const label = this.labelFor('compute', group, this.ref(project, b))
+    const minting = b.apps[group]?.host === undefined
+    if (minting) {
+      this.assertServiceName(group)
+      this.reserveHosts([label], key)
+    }
     const hostPort = this.localHostPort(b, group, { hostPort: opts.hostPort, port })
     const started = standing !== 'stopped' && !opts.startAsleep
     let adapterUrl: string
@@ -504,8 +515,10 @@ export class Engine {
       }))
     } catch (e) {
       // The row write below is what turns the reservation into ownership; a deploy that never gets
-      // there must give the port back instead of leaking one out of the lane range every time.
+      // there must give the port back instead of leaking one out of the lane range every time —
+      // and the same holds for the hostname it reserved.
       if (hostPort !== undefined && b.apps[group]?.hostPort !== hostPort) this.releaseHostPort(hostPort)
+      if (minting) this.releaseHosts(key)
       throw e
     }
     // The recorded URL is the serviceUrl hook's (WP2: the router URL, deterministic before deploy);
@@ -520,6 +533,8 @@ export class Engine {
       s.branches[b.id].apps[group] = { ...s.branches[b.id].apps[group], image: opts.image, port, hostPort, url, ...(host !== undefined ? { host } : {}), updatedAt: Date.now() }
       // The row now owns the port, exactly as `laneFor` retires a branch-create reservation.
       if (hostPort !== undefined) delete s.laneReservations?.[String(hostPort)]
+      // ...and the row now owns the hostname, so the reservation retires with it.
+      if (s.hostReservations?.[label] === key) delete s.hostReservations[label]
     })
     // ...and the container has to HONOUR that intent, or preserving it just makes the row lie:
     // DockerCompute.deploy always `docker run`s the replacement, so a service the user stopped would
@@ -1253,9 +1268,17 @@ export class Engine {
     // WP4: an immutable directory key, minted once and stored, so a rename never detaches the data
     // (decision 16). The directory is `md/<ref>/<prefix>-<dataId>` on every branch.
     const entry = { id: managedServiceId(type, name), type, name, createdAt: Date.now(), dataId: randomUUID().slice(0, 8) }
+    const branches = this.listBranches(projectId)
+    // Every hostname this service will mint, checked against ALL service labels and reserved in
+    // ONE synchronous mutate before the first provisioning await (decision 51) — the same rule the
+    // postgres and compute registrations follow. `<type>-<name>-<ref>` shares its label space with
+    // compute's `<group>-<ref>`, so a redis called `cache` collides with a group called
+    // `redis-cache`; minting it unchecked would shadow one of them in the route table.
+    const owner = `${projectId}:${entry.id}`
+    this.reserveHosts(branches.map((b) => this.labelFor(type, name, this.ref(project, b))), owner)
     const provisioned: Array<{ branch: Branch; password: string; container: string; dataDir: string }> = []
     try {
-      for (const b of this.listBranches(projectId)) {
+      for (const b of branches) {
         const password = randomBytes(32).toString('base64url')
         const ref = this.ref(project, b)
         const container = managedContainerName(ref, type, name)
@@ -1269,12 +1292,19 @@ export class Engine {
     } catch (e) {
       for (const p of provisioned) await this.managedDb.destroy(p.container).catch(() => {})
       for (const p of provisioned) await this.data.remove(p.dataDir).catch(() => {})                       // WP4
+      this.releaseHosts(owner)
       throw e
     }
     mutate((st) => {
       const pr = st.projects[projectId]
       pr.managedServices = [...(pr.managedServices ?? []), entry]
-      for (const p of provisioned) (st.branches[p.branch.id].managed ??= {})[entry.id] = { password: p.password }
+      for (const p of provisioned) {
+        // Record the minted hostname on the row, like `provisionBranch` does: the row is what the
+        // route table and the credentials bundle read, and it retires the reservation.
+        const label = this.labelFor(type, name, this.ref(project, p.branch))
+        ;(st.branches[p.branch.id].managed ??= {})[entry.id] = { password: p.password, host: `${label}.${this.cfg.domain}` }
+        if (st.hostReservations?.[label] === owner) delete st.hostReservations[label]
+      }
     })
     this.scheduler.register(provisioned.map((p) => this.serviceKey(p.branch, entry.id))) // WP3
     this.emit(projectId, null, 'resource', 'service.added', { type, name })
@@ -1324,19 +1354,32 @@ export class Engine {
     if (newName === m.name) return this.managedRow(m)
     if (this.managedList(projectId).some((x) => x.type === m.type && x.name === newName)) throw new Error(`${m.type} service "${newName}" already exists`)
     const newId = managedServiceId(m.type, newName)
-    for (const b of this.listBranches(projectId)) {
-      if (!b.managed?.[serviceId]) continue
-      const ref = this.ref(project, b)
-      await this.managedDb.rename(managedContainerName(ref, m.type, m.name), managedContainerName(ref, m.type, newName))
-      this.scheduler.rekey(this.serviceKey(b, serviceId), this.serviceKey(b, newId)) // WP3
+    // The rename mints a new hostname on every branch that carries the service (postgres rename
+    // does the same), so it reserves them first: unchecked, `insta services rename cache redis-x`
+    // could land on the label a compute group already answers on.
+    const carriers = this.listBranches(projectId).filter((b) => b.managed?.[serviceId])
+    const owner = `${projectId}:${serviceId}->${newId}`
+    const newLabel = new Map(carriers.map((b) => [b.id, this.labelFor(m.type, newName, this.ref(project, b))]))
+    this.reserveHosts([...newLabel.values()], owner)
+    try {
+      for (const b of carriers) {
+        const ref = this.ref(project, b)
+        await this.managedDb.rename(managedContainerName(ref, m.type, m.name), managedContainerName(ref, m.type, newName))
+        this.scheduler.rekey(this.serviceKey(b, serviceId), this.serviceKey(b, newId)) // WP3
+      }
+    } catch (e) {
+      this.releaseHosts(owner)
+      throw e
     }
     mutate((st) => {
       const pr = st.projects[projectId]
       pr.managedServices = (pr.managedServices ?? []).map((x) => (x.id === serviceId ? { ...x, id: newId, name: newName } : x))
       for (const b of Object.values(st.branches)) {
         if (b.projectId !== projectId || !b.managed?.[serviceId]) continue
-        b.managed[newId] = b.managed[serviceId]
+        const label = newLabel.get(b.id)
+        b.managed[newId] = { ...b.managed[serviceId], ...(label !== undefined ? { host: `${label}.${this.cfg.domain}` } : {}) }
         delete b.managed[serviceId]
+        if (label !== undefined && st.hostReservations?.[label] === owner) delete st.hostReservations[label]
       }
       for (const u of st.userSecrets[projectId] ?? []) {
         if (u.service === `${m.type}/${m.name}`) u.service = `${m.type}/${newName}`
@@ -1942,13 +1985,58 @@ export class Engine {
   }
 
   /** 409 when a label is reserved or already minted. Runs inside the reservation mutate, under the
-   *  engine-wide provision chain, so check-then-act cannot interleave (decision 51). */
-  assertHostFree(label: string): void {
+   *  engine-wide provision chain, so check-then-act cannot interleave (decision 51).
+   *
+   *  Every kind shares ONE label space (compute `<group>-<ref>`, postgres `pg-<name>-<ref>`, managed
+   *  `<type>-<name>-<ref>`), so a compute group called `pg-db` collides with the postgres service
+   *  `db` and a group called `redis-cache` with the redis service `cache`. `buildTable` keeps the
+   *  first route on a duplicate, which would silently shadow the database while its credentials
+   *  still advertise that hostname — hence a refusal here rather than a warning later.
+   *
+   *  `own` is the operation re-checking a label it already holds (a redeploy of a group whose row
+   *  predates recorded hostnames): its own route and its own reservation are not a conflict. */
+  assertHostFree(label: string, own?: string): void {
     const host = `${label}.${this.cfg.domain}`
     if (RESERVED_LABELS.has(label)) throw new Error(`hostname ${host} is reserved by the daemon`)
-    if (buildTable(loadState(), this.cfg, () => { /* quiet: this is a check, not a rebuild */ }).hosts().has(host)) {
-      throw new Error(`hostname ${host} already exists on this daemon`)
+    const s = loadState()
+    const holder = s.hostReservations?.[label]
+    if (holder !== undefined && holder !== own) {
+      throw new Error(`hostname ${host} is already being created by ${holder}`)
     }
+    const table = buildTable(s, this.cfg, () => { /* quiet: this is a check, not a rebuild */ })
+    if (!table.hosts().has(host)) return
+    // Name the conflict: the operator's next question is always "taken by what?".
+    const owner = table.routes().find((r) => r.host === host || r.aliases.includes(host))
+    if (own !== undefined && owner?.key === own) return
+    const by = owner?.serviceId ?? owner?.key
+    throw new Error(`hostname ${host} already exists on this daemon${by !== undefined ? ` (${by})` : ''}`)
+  }
+
+  /** Check and reserve every label an operation is about to mint, in ONE synchronous mutate before
+   *  its first await (decision 51), so two concurrent requests cannot both pass the check. The
+   *  reservation is released by the operation's compensation path and superseded by the row that
+   *  records the hostname, exactly as `laneReservations` is by `branch.lanes`. */
+  private reserveHosts(labels: string[], owner: string): void {
+    if (!labels.length) return
+    mutate((s) => {
+      const seen = new Set<string>()
+      for (const label of labels) {
+        // Two branches of one project never share a ref, so a repeat inside one request is a
+        // request that would mint the same hostname twice.
+        if (seen.has(label)) throw new Error(`hostname ${label}.${this.cfg.domain} would be minted twice by this request`)
+        this.assertHostFree(label, owner)
+        seen.add(label)
+      }
+      s.hostReservations = s.hostReservations ?? {}
+      for (const label of labels) s.hostReservations[label] = owner
+    })
+  }
+
+  /** Compensation path: drop the host reservations a failed operation took. */
+  private releaseHosts(owner: string): void {
+    const held = Object.entries(loadState().hostReservations ?? {}).filter(([, o]) => o === owner)
+    if (!held.length) return
+    mutate((s) => { for (const [label] of held) delete s.hostReservations?.[label] })
   }
 
   /** Where a client dials one database service. Server mode: the minted hostname on the shared lane
