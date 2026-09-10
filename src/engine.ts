@@ -379,16 +379,26 @@ export class Engine {
     this.reserveBranchRef(project, name, ref, branchId)
     const network = this.net(project, name)
     try { await docker(['network', 'create', network]) } catch (e) {
-      // Stock dockerd hands out only 31 user-defined networks from its default pools and every
-      // branch is one, so this is the failure a busy box hits first. Anything else here is the
-      // network already existing, and the reservation above is what makes reusing it safe: no
-      // branch row and no other operation holds this ref, so the leftover is an interrupted
-      // create of OUR branch and not a live one's network.
       const m = e instanceof Error ? e.message : String(e)
+      // Stock dockerd hands out only 31 user-defined networks from its default pools and every
+      // branch is one, so this is the failure a busy box hits first.
       if (/non-overlapping IPv4 address pool/i.test(m)) {
         this.releaseBranchRef(ref, branchId)
         throw new Error('docker has no free network subnets; see docs/self-hosting/install (default-address-pools)')
       }
+      // Everything else used to be treated as "it already exists". It is not: a permission
+      // error, a daemon that is not answering and an invalid configuration all failed the
+      // create and all read as success, and since a project now starts EMPTY, a create could
+      // commit a READY default branch with no network at all and surface the truth much later,
+      // on some unrelated service operation. So the already-exists case has to be VERIFIED,
+      // by asking dockerd for the network rather than by reading its error text. Reusing a
+      // verified leftover is still safe for the reason the reservation gives: no branch row and
+      // no other operation holds this ref, so it is an interrupted create of OUR branch.
+      if ((await networkState(network)) !== 'present') {
+        this.releaseBranchRef(ref, branchId)
+        throw new Error(`could not create the branch network ${network}: ${m}`)
+      }
+      console.warn(`reusing the existing network ${network}: it is a leftover of an interrupted create of this branch`)
     }
     // A clone materialises exactly what its SOURCE carries, never every registration the project
     // has ever made: services are branch-scoped, so a postgres added to `main` after `feat` was cut
@@ -2061,23 +2071,79 @@ export class Engine {
   }> {
     const svc = this.serviceOf(projectId, serviceId)
     if (svc.type !== 'compute') throw new Error('volumes are only supported for compute services')
+    // The last taker on decision 52's list ("volume ops"). It is a MULTI-BRANCH operation: it
+    // redeploys the group on every branch that runs it and deletes each branch's bytes, and it
+    // held no key at all, so a create could fork this very volume onto a new branch after the
+    // loop took its snapshot and leave a freshly cloned directory nothing ever visits. The keys
+    // are taken up front, which also makes the nested `deploy` and `lifecycle` calls re-entrant
+    // instead of second acquisitions, and the set is re-driven over the union exactly as
+    // `createBranch` and `destroyProject` do it when a branch appears under it.
+    const keysFor = (b: Branch): ServiceKey[] => [this.branchOp(b), this.serviceKey(b, `cp-${svc.name}`)]
+    let keys = this.listBranches(projectId).flatMap(keysFor)
+    for (let round = 1; ; round++) {
+      const settled = new Set(keys)
+      const out = await this.withOp([...settled], async (): Promise<{ done: { service: ServiceRow | undefined; volume: null; cap: { volumeGib: number }; removed: true } } | { union: ServiceKey[] }> => {
+        const live = this.listBranches(projectId)
+        const needed = live.flatMap(keysFor)
+        if (!needed.every((k) => settled.has(k))) return { union: [...new Set([...settled, ...needed])] }
+        return { done: await this.removeServiceVolumeLocked(projectId, serviceId, live) }
+      })
+      if ('done' in out) return out.done
+      if (round >= CREATE_LOCK_ROUNDS) {
+        throw new Error(`volume removal could not settle its lock set after ${CREATE_LOCK_ROUNDS} rounds: branches are being created or changed concurrently, retry it`)
+      }
+      keys = out.union
+    }
+  }
+
+  private async removeServiceVolumeLocked(projectId: string, serviceId: string, branches: Branch[]): Promise<{
+    service: ServiceRow | undefined; volume: null; cap: { volumeGib: number }; removed: true
+  }> {
+    // Re-resolved under the lock, like every other operation that had to resolve to take a key.
+    const svc = this.serviceOf(projectId, serviceId)
+    if (svc.type !== 'compute') throw new Error('volumes are only supported for compute services')
     const project = this.getProject(projectId)
     const vol = project?.computeVolumes?.[svc.name]
-    if (!vol) throw new Error('this service has no volume')
+    if (!project || !vol) throw new Error('this service has no volume')
+    // The record goes first because `deploy()` READS it to decide the mount, so it cannot be
+    // deferred. What can be fixed is what a failure leaves behind: it is put BACK below if any
+    // part of this fails, so the operation is retryable instead of leaving bytes on disk with
+    // no registration left to reach them through.
     mutate((st) => { delete st.projects[projectId].computeVolumes![svc.name] })
-    for (const b of this.listBranches(projectId)) {
-      const app = b.apps[svc.name]
+    const failures: string[] = []
+    for (const b of branches) {
+      const app = loadState().branches[b.id]?.apps[svc.name]
       if (!app) continue
-      await this.deploy(projectId, b.name, { image: app.image, port: app.port, hostPort: app.hostPort, group: svc.name })
-      // Restore the EXACT recorded intent, not a coarser one: unlike the cloud (where a volume
-      // forbids suspend), oss allows a suspended volume-bearing service, so delete-from-suspended
-      // must land back on 'suspend' — mapping it to 'stop' would silently rewrite desiredState
-      // (r2d2 finding on this PR).
-      if (app.desiredState === 'stopped' || app.desiredState === 'suspended') {
-        await this.lifecycle(projectId, serviceId, app.desiredState === 'suspended' ? 'suspend' : 'stop', b.name).catch(() => {})
+      try {
+        await this.deploy(projectId, b.name, { image: app.image, port: app.port, hostPort: app.hostPort, group: svc.name })
+        // Restore the EXACT recorded intent, not a coarser one: unlike the cloud (where a volume
+        // forbids suspend), oss allows a suspended volume-bearing service, so delete-from-suspended
+        // must land back on 'suspend' -- mapping it to 'stop' would silently rewrite desiredState
+        // (r2d2 finding on this PR). A failure here is COUNTED and no longer swallowed: the
+        // container is the thing that was holding the bytes.
+        if (app.desiredState === 'stopped' || app.desiredState === 'suspended') {
+          await this.lifecycle(projectId, serviceId, app.desiredState === 'suspended' ? 'suspend' : 'stop', b.name)
+        }
+      } catch (e) {
+        failures.push(`${b.name}: ${e instanceof Error ? e.message : String(e)}`)
+        continue   // the mount may still be attached: its bytes are not ours to delete
       }
-      // WP4: the redeploy above dropped the mount; now the bytes go too.
-      await this.data.remove(this.layout().vol(this.ref(project!, b), vol.id)).catch(() => {})
+      // WP4: the redeploy above dropped the mount; now the bytes go too -- and the PROBE after
+      // the removal is the evidence, not the call, the same rule the container teardowns use.
+      const dir = this.layout().vol(this.ref(project, b), vol.id)
+      try {
+        await this.data.remove(dir)
+        if (!(await this.data.isEmptyOrMissing(dir))) throw new Error('it is still there after the remove')
+      } catch (e) {
+        failures.push(`${b.name}: ${dir}: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+    if (failures.length) {
+      // Put the record back, with its stable id, so the bytes still have a registration naming
+      // them and `insta compute volume rm` retries exactly this. Reporting `removed: true` over
+      // a directory that is still on disk is the failure this method used to have.
+      mutate((st) => { (st.projects[projectId].computeVolumes ??= {})[svc.name] = vol })
+      throw new Error(`could not remove the /data volume of "${svc.name}" on ${failures.length} branch(es) (${failures.join('; ')}); the volume record is kept so the removal can be retried`)
     }
     this.emit(projectId, null, 'resource', 'service.volume', { service: serviceId, sizeGib: null, removed: true })
     const service = (await this.services(projectId)).find((s) => s.id === serviceId)

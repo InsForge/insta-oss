@@ -2826,6 +2826,114 @@ test('a project delete holds the keys of a branch that committed while it queued
   }
 })
 
+test('a network create that failed for any other reason fails the branch, it is not "already exists"', async () => {
+  // Everything but subnet exhaustion used to be read as "the network is already there", so a
+  // permission error, a daemon that is not answering or an invalid configuration all reported
+  // success. A project starts EMPTY now, so that could commit a READY default branch with no
+  // network at all, and the truth would surface much later on an unrelated service operation.
+  const id = await sourceWithEveryStep()
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) => {
+    if (args[0] === 'network' && args[1] === 'create') throw new Error('Error response from daemon: permission denied')
+    // ...and the verification cannot answer either, which is not evidence that it exists.
+    if (args[0] === 'network' && args[1] === 'inspect') throw new Error('Cannot connect to the Docker daemon')
+    return Buffer.from('')
+  })
+
+  const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+
+  expect(bad.statusCode).toBeGreaterThanOrEqual(400)
+  expect(bad.json().error).toContain('could not create the branch network')
+  // No half-made branch, and the ref claim is back so the retry is an ordinary create.
+  expect(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual(['main'])
+  expect(branchReservations()).toEqual({})
+})
+
+test('...and a network that dockerd CONFIRMS is already there is still reused', async () => {
+  // The interrupted-create case the old catch existed for: the create fails because the network
+  // is there, dockerd says so when asked, and the branch is built on it rather than refused.
+  const id = await sourceWithEveryStep()
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) => {
+    if (args[0] === 'network' && args[1] === 'create') throw new Error('Error response from daemon: network with name io-demo-feat already exists')
+    return Buffer.from('')   // `network inspect` answers, so the network is verified present
+  })
+
+  const ok = await post(`/projects/${id}/branches`, { name: 'feat' })
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+
+  expect(ok.statusCode).toBe(201)
+  expect(loadState().branches[await branchOf(id, 'feat')].databases?.['pg-db']).toBeDefined()
+})
+
+test('a volume removal that cannot delete the bytes keeps the record and says so', async () => {
+  // It deleted the registration FIRST (deploy reads it to drop the mount), then suppressed the
+  // errors of the redeploy and of the directory removal, then reported `removed: true`. A
+  // failed `data.remove` therefore left bytes on disk with no registration left to retry
+  // through, and the API called it a success.
+  const id = await sourceWithEveryStep()
+  const remove = vi.spyOn(data, 'remove').mockImplementation(async (path: string) => {
+    if (path.includes('/vol/')) throw new Error('device or resource busy')
+  })
+
+  const res = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/cp-web/volume` })
+  remove.mockRestore()
+
+  expect(res.statusCode).toBeGreaterThanOrEqual(400)
+  expect(res.json().error).toContain('the volume record is kept so the removal can be retried')
+  // The record is back, with its stable id, so the bytes are still named by something.
+  const vols = loadState().projects[id].computeVolumes
+  expect(vols?.web).toBeDefined()
+  // ...and the service still reports its volume, which is what a retry resolves through.
+  expect((await get(`/projects/${id}/services/cp-web/volume`)).json().volume).toMatchObject({ mountPath: '/data' })
+})
+
+test('a volume removal holds the keys of a branch created while it queued', async () => {
+  // It took no key at all, so a create could fork this very volume onto a new branch after the
+  // loop took its snapshot: a freshly cloned directory the removal never visits, and a nested
+  // `deploy` on a branch whose keys are not held.
+  const id = await sourceWithEveryStep()
+  const paused = pauseBeforeCommit()
+  const create = post(`/projects/${id}/branches`, { name: 'feat' })
+  await paused.entered
+
+  // Pause the removal inside main's directory delete, so it is mid-flight and holding keys.
+  let enterRemove!: () => void
+  let goRemove!: () => void
+  const inRemove = new Promise<void>((r) => { enterRemove = r })
+  const removeGate = new Promise<void>((r) => { goRemove = r })
+  const realRemove = data.remove.bind(data)
+  const remove = vi.spyOn(data, 'remove').mockImplementation(async (path: string) => {
+    if (path.includes('/vol/demo-main/')) { enterRemove(); await removeGate }
+    return realRemove(path)
+  })
+
+  try {
+    const del = app.inject({ method: 'DELETE', url: `/projects/${id}/services/cp-web/volume` })
+    paused.release()
+    expect((await within(10_000, create, 'the branch create')).statusCode).toBe(201)
+    await within(10_000, inRemove, 'the volume removal')
+
+    let deployed = false
+    const deploy = post(`/projects/${id}/deploy`, { image: 'app:3', port: 3000, group: 'web', branch: 'feat' })
+      .then((r) => { deployed = true; return r })
+    await settle()
+    // feat's keys are held by the removal now, so this waits instead of redeploying the group
+    // the removal is in the middle of rebuilding.
+    expect(deployed).toBe(false)
+
+    goRemove()
+    expect((await within(10_000, del, 'the volume removal')).statusCode).toBe(200)
+    await within(10_000, deploy, 'the deploy')
+    // ...and the clone's copy of the volume was visited too, not left behind.
+    expect(calls.some((c) => c.startsWith('data.remove:') && c.includes('/vol/demo-feat/'))).toBe(true)
+  } finally {
+    goRemove()
+    paused.release()
+    paused.restore()
+    remove.mockRestore()
+  }
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
