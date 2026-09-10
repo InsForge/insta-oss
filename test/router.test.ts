@@ -1310,6 +1310,20 @@ test('a REPLACED certificate is judged on its own merits, not silenced by the la
     // ...and the new one then earns its own quiet, which is what the limiter is for.
     for (let i = 1; i <= 240; i++) { watch.refresh(at + i * 30_000); expect(watch.maybeWarn(at + i * 30_000)).toBe(false) }
     expect(said).toHaveLength(2)
+
+    // The other side of it: the SAME certificate rewritten in place -- a config manager that
+    // reinstalls it every few minutes, a sync that copies rather than compares -- moves the
+    // stamp and must not earn a new warning each time, or the limiter is defeated by another
+    // door. So the reset is keyed on the expiry, not on the file having changed.
+    const flap = at + 241 * 30_000
+    const bytes = readFileSync(live)
+    for (let i = 1; i <= 20; i++) {
+      writeFileSync(join(dir, 'copy.crt'), bytes)
+      renameSync(join(dir, 'copy.crt'), live)
+      watch.refresh(flap + i * 30_000)
+      expect(watch.maybeWarn(flap + i * 30_000), `rewrite ${i}`).toBe(false)
+    }
+    expect(said).toHaveLength(2)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
