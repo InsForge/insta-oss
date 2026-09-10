@@ -220,16 +220,28 @@ async function migrateVolumes(deps: MigrateDeps, project: Project, branch: Branc
     // being non-empty: a `/data` that was legitimately EMPTY copies to an empty destination, and a
     // `volume rm` that failed once ("still referenced") would then bring this pass back every boot
     // to copy the empty source over whatever the live app had written since.
-    if (!(await hasMount(appContainerName(ref, group), target))) {
-      // A destination that exists is a whole copy of the volume (`copyIntoPlace` promotes with one
-      // rename); a partial one from an interrupted run is discarded and recopied from the volume,
-      // which is still there because the `volume rm` below is the last step.
-      if (await deps.data.isEmptyOrMissing(target)) {
-        await copyIntoPlace(deps, { volume: legacy }, '/src', target, 0o777)
-      }
+    const mounts = await mountsOf(appContainerName(ref, group))
+    if (mounts === null || !mountsInclude(mounts, target)) {
+      // The app is NOT on the bind mount, so it is still reading the legacy volume and the volume
+      // is the only complete copy. Anything already at the target is therefore at best an
+      // interrupted copy from a build that predates the staging discipline, and skipping the copy
+      // because it is "not empty" is what loses the files it never got to: the `volume rm` below
+      // then takes the source away. Recopy. `copyIntoPlace` stages the whole thing beside the
+      // target and promotes with one rename, so the partial destination is replaced only once the
+      // new copy is complete.
+      //
+      // The one case that is NOT recopied is a target with something in it and no app container at
+      // all. Then neither side can be shown to be the newer one: it may be a partial copy, or it
+      // may be what a finished migration left and a since-removed app wrote to. Copying would
+      // destroy live data and skipping the removal below cannot, so nothing is copied and the
+      // legacy volume is KEPT for the operator rather than deleted on a guess.
+      const ambiguous = mounts === null && !(await deps.data.isEmptyOrMissing(target))
+      if (!ambiguous) await copyIntoPlace(deps, { volume: legacy }, '/src', target, 0o777)
+      else console.warn(`keeping docker volume ${legacy}: ${target} already has data and no container names either, so neither can be shown to be the newer copy`)
       // Recreate the container on the bind mount. `deploy` re-asserts the recorded lifecycle intent,
       // so a service the developer had stopped stays stopped.
       await deps.redeploy(branch.projectId, branch.name, group, { image: app.image, port: app.port, hostPort: app.hostPort })
+      if (ambiguous) { touched = true; continue }
     }
     await docker(['volume', 'rm', legacy]).catch(() => { /* still referenced; the next boot retries */ })
     touched = true
@@ -268,11 +280,15 @@ async function migrateManaged(deps: MigrateDeps, project: Project, branch: Branc
       wasRunning = (await inspect(container, '{{.State.Running}}')) === 'true'
       await docker(['stop', container]).catch(() => {})
       for (const p of dataPaths(m.type)) {
-        const target = join(dir, p.sub)
-        // Again the destination exists only when its copy finished: `/data/configdb` and a redis
-        // `/data` with no dump.rdb are legitimately EMPTY, so "non-empty" cannot mean "copied".
-        if (!(await deps.data.isEmptyOrMissing(target))) continue
-        await copyIntoPlace(deps, { container }, p.containerPath, target, 0o700)
+        // Unconditionally: this block runs only when the container EXISTS and is not on the bind
+        // mount, so the container is still the authority on these bytes and anything already at
+        // the target is at best an interrupted copy from a build that predates staging. Skipping
+        // it because the directory was "not empty" left those missing files behind and the
+        // `docker rm -f -v` below then took the source away. (The reverse reading is not available
+        // either: `/data/configdb` and a redis `/data` with no dump.rdb are legitimately empty, so
+        // non-empty never meant copied. `copyIntoPlace` stages and promotes with one rename, so
+        // the target is replaced only once the new copy is whole.)
+        await copyIntoPlace(deps, { container }, p.containerPath, join(dir, p.sub), 0o700)
       }
       await docker(['rm', '-f', '-v', container]).catch(() => {})
     }
@@ -288,12 +304,23 @@ async function migrateManaged(deps: MigrateDeps, project: Project, branch: Branc
   return touched
 }
 
+/** The container's bind sources, or null when the container is not there at all. The difference
+ *  matters: "not mounted here" and "no container to ask" are different pieces of evidence about
+ *  which copy of a directory is the live one. */
+async function mountsOf(container: string): Promise<string[] | null> {
+  const out = await inspect(container, '{{range .Mounts}}{{.Source}} {{end}}')
+  return out === null ? null : out.split(' ').filter(Boolean)
+}
+
+const mountsInclude = (mounts: readonly string[], dir: string): boolean =>
+  mounts.some((s) => s === dir || s.startsWith(`${dir}/`))
+
 /** Whether the container already binds this data directory: the case where an earlier run finished
  *  the copy and the re-create, so there is nothing left to do. A container that is not there at all
  *  answers false. */
 async function hasMount(container: string, dir: string): Promise<boolean> {
-  const out = await inspect(container, '{{range .Mounts}}{{.Source}} {{end}}')
-  return out !== null && out.split(' ').some((s) => s === dir || s.startsWith(`${dir}/`))
+  const mounts = await mountsOf(container)
+  return mounts !== null && mountsInclude(mounts, dir)
 }
 
 async function inspect(nameOrId: string, format: string): Promise<string | null> {

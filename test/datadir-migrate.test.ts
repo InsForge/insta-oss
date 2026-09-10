@@ -477,6 +477,56 @@ test('a redis whose /data holds nothing is still migrated, and only once', async
   expect(await boot()).toEqual({ migrated: [], skipped: [REF], failed: [] })
 })
 
+// ---- a PARTIAL destination in the other two lanes ----
+//
+// The same class as the PGDATA case below, in the lanes it survived in. A build that predates the
+// staging discipline copied straight into the destination, so an install migrated by one and
+// interrupted has a target with SOME of the files in it. Reading "not empty" as "already copied"
+// skips the recopy, and the step after it removes the source.
+
+test('a PARTIAL /data target is recopied rather than taken for a finished one', async () => {
+  // One of the volume's two entries is at the destination: an interrupted direct copy.
+  world.add(`${volDir()}/keep.txt`)
+
+  const out = await boot()
+  expect(out).toEqual({ migrated: [REF], skipped: [], failed: [] })
+  // Everything, not just the entry that happened to be there first.
+  expect(contentsOf(volDir())).toEqual(['keep.txt', 'nested', 'nested/deep.bin'])
+  expect(world.log.filter((l) => l.startsWith(`copy:volume:${LEGACY_VOL}`))).toHaveLength(1)
+  expect(world.containers.get(APP)?.mounts).toEqual([volDir()])
+  // ...and only then is the volume that held the missing entry taken away.
+  const order = world.log
+  expect(order.indexOf(`rename:${stagingOf(volDir())}->${volDir()}`)).toBeLessThan(order.indexOf(`volume rm:${LEGACY_VOL}`))
+})
+
+test('a PARTIAL managed data path is recopied rather than taken for a finished one', async () => {
+  writeLegacyState({ managed: true })
+  world.containers.set(MD_REDIS, { running: true, mounts: [] })
+  world.sources.set(MD_REDIS, REDIS_FILES)
+  world.add(`${mdDir()}/data/dump.rdb`)   // half of an interrupted direct copy
+
+  expect(await boot()).toEqual({ migrated: [REF], skipped: [], failed: [] })
+  expect(contentsOf(`${mdDir()}/data`)).toEqual(['appendonly.aof', 'dump.rdb'])
+  expect(world.containers.get(MD_REDIS)?.mounts).toEqual([mdDir()])
+})
+
+test('a non-empty target with NO app container is left alone, and its volume is kept', async () => {
+  // The other reading of the same evidence, and the reason the recopy is not unconditional: with
+  // no container naming either copy, the target may be what a finished migration left and a
+  // since-removed app wrote to. Copying the volume over it would be the same data loss in the
+  // other direction, so nothing is copied and nothing is deleted.
+  world.containers.delete(APP)
+  world.add(`${volDir()}/written-after-the-migration`)
+
+  expect((await boot()).failed).toEqual([])
+  expect(contentsOf(volDir())).toEqual(['written-after-the-migration'])
+  expect(world.log.filter((l) => l.startsWith(`copy:volume:${LEGACY_VOL}`))).toEqual([])
+  // The source is KEPT for the operator rather than removed on a guess...
+  expect(world.volumes.has(LEGACY_VOL)).toBe(true)
+  // ...and the service is back on the bind mount either way.
+  expect(world.containers.get(APP)?.mounts).toEqual([volDir()])
+})
+
 // ---- the destination check itself ----
 
 test('a PGDATA holding only PG_VERSION is not a migrated PGDATA', async () => {
