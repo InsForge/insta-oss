@@ -254,6 +254,38 @@ if [ "$TLS" = custom ]; then
   TLS_KEY_REAL=$(resolve_link "$TLS_KEY")
   TLS_CERT_REAL_DIR=$(dirname "$TLS_CERT_REAL")
   TLS_KEY_REAL_DIR=$(dirname "$TLS_KEY_REAL")
+  # ...and WHERE they live decides whether the stack can start at all, because each of these
+  # directories becomes a bind mount at the same path inside both containers.
+  #
+  # Two shapes break it. A pair kept inside the data directory puts a read-only mount inside the
+  # read-write one the daemon owns (or, one level up, a mount of `/var/lib` ON TOP of the mount
+  # of `/var/lib/instacloud`, which hides the data the daemon is being started to serve). And a
+  # directory that the images themselves own -- `/etc`, `/usr`, `/var` and the rest -- replaces
+  # that directory inside the container with the host's, so the edge loses its own `/etc` and
+  # Caddy never starts.
+  #
+  # REFUSED rather than worked around. Mounting these at some other destination inside the
+  # container is the alternative, and it would cost the property that makes this simple: one
+  # path, in instad.env, valid on the host and identically valid in both containers, which is
+  # how the daemon reads the same file for the database lanes that the edge serves. Translating
+  # paths per container to accommodate a certificate stored in the one directory a data
+  # migration moves wholesale is a worse trade than saying so here, with the fix in the message.
+  for _d in "$TLS_CERT_DIR" "$TLS_KEY_DIR" "$TLS_CERT_REAL_DIR" "$TLS_KEY_REAL_DIR"; do
+    _why=''
+    case $_d in
+      /) _why='is the filesystem root, which would be mounted over the whole container' ;;
+      "$DATA"|"$DATA"/*) _why="is inside the data directory $DATA, which is already mounted read-write into the daemon" ;;
+    esac
+    # An ancestor of the data directory (`/var/lib` for the default `/var/lib/instacloud`) masks
+    # that mount instead of overlapping it: same defect, other direction.
+    case $DATA in "$_d"/*) _why="contains the data directory $DATA, so mounting it would hide the data mount inside the container" ;; esac
+    case $_d in
+      /bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
+        _why="is a system directory the container images own, and mounting it would replace theirs" ;;
+    esac
+    [ -z "$_why" ] ||
+      die "the TLS directory '$_d' $_why. Keep the pair in a directory of its own outside $DATA, for example /etc/instacloud/tls, and pass those paths to --tls-cert and --tls-key"
+  done
 elif [ -n "$TLS_CERT" ] || [ -n "$TLS_KEY" ]; then
   # A flag or an environment variable is a REQUEST, and nothing in this mode would serve it, so it
   # stops. A value that only the previous install left in instad.env is not a request: it is how a

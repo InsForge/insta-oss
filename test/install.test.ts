@@ -198,6 +198,16 @@ test('--tls custom refuses a half-configured pair, and the paths it cannot mount
     // ...and from the environment, which is the same request by another route.
     [['--tls', 'internal'], 'only apply with --tls custom'],
     [['--tls', 'nonsense'], '--tls must be acme, internal or custom'],
+    // WHERE the pair lives decides whether the stack can start, because each directory becomes a
+    // bind mount at the same path inside both containers. Inside the data directory it lands
+    // inside the read-write mount the daemon owns; one level up it lands ON TOP of it and hides
+    // the data the daemon was started to serve; a system directory replaces the container's own.
+    [['--tls', 'custom', '--tls-cert', '/var/lib/instacloud/tls/c.crt', '--tls-key', '/var/lib/instacloud/tls/k.key'], 'is inside the data directory'],
+    [['--tls', 'custom', '--tls-cert', '/var/lib/c.crt', '--tls-key', '/var/lib/k.key'], 'contains the data directory'],
+    [['--tls', 'custom', '--tls-cert', '/c.crt', '--tls-key', '/k.key'], 'is the filesystem root'],
+    [['--tls', 'custom', '--tls-cert', '/etc/c.crt', '--tls-key', '/etc/k.key'], 'is a system directory'],
+    // ...and the key alone is enough to fail it: both directories are mounted, so both are checked.
+    [['--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/c.crt', '--tls-key', '/var/lib/instacloud/k.key'], 'is inside the data directory'],
   ]
   for (const [args, says] of cases) {
     // The last case is the environment form of the one above it.
@@ -208,6 +218,9 @@ test('--tls custom refuses a half-configured pair, and the paths it cannot mount
     expect(r.status, args.join(' ')).toBe(1)
     expect(r.stderr, args.join(' ')).toContain(says)
   }
+
+  // ...and the directory the docs recommend is not refused, which is the other half of the check.
+  expect(tryRun(['--print-compose', '--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/c.crt', '--tls-key', '/etc/instacloud/tls/k.key'], dom).status).toBe(0)
 
   // A value that only the PREVIOUS install left in instad.env is not a request: it is how a box
   // moves back from custom to acme or internal, and refusing there would strand it in custom
