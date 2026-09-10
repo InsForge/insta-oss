@@ -576,13 +576,29 @@ export class Engine {
     }
     this.forkResults.delete(b.id)
     mutate((s) => {
+      // Every name this branch has answered to: the one the create minted, the one it carried into
+      // the teardown, and the one it has RIGHT NOW (a rename can land during the teardown too).
+      const names = [b.name, row.name, s.branches[b.id]?.name].filter((n): n is string => typeof n === 'string')
       delete s.branches[b.id]
       // The clone inherits the source's branch-scoped secrets BY NAME, so the copies it made are
       // exactly the rows naming a branch that is about to stop existing. Only drop them when that
       // step actually ran: a failure before it has nothing of its own to clean.
+      //
+      // BOTH names, because `renameBranch` is synchronous state work that takes no operation lock
+      // (it moves no container), so it can land at any await this create makes -- and when it does
+      // it carries the branch's secret rows to the new name with it. Matching only the name the
+      // create started with then left every inherited copy behind under the new one. A branch id
+      // on the rows would be the better key, but `UserSecret` is `{name, value, branch, service}`
+      // with the branch as a NAME (that is what `userSecretsFor`, the CLI's `--branch` and the
+      // rename itself all read), so keying by id means migrating every stored row and every
+      // reader; two names is the fix that fits the shape the data actually has.
       if (secretsCloned) {
         const list = s.userSecrets[b.projectId]
-        if (list) s.userSecrets[b.projectId] = list.filter((u) => u.branch !== b.name)
+        // ...but never a name some OTHER branch holds now: a rename frees the old name, and if a
+        // branch created since owns it, its secrets are not ours to delete.
+        const taken = new Set(Object.values(s.branches).filter((x) => x.projectId === b.projectId).map((x) => x.name))
+        const ours = new Set(names.filter((n) => !taken.has(n)))
+        if (list) s.userSecrets[b.projectId] = list.filter((u) => u.branch === null || !ours.has(u.branch))
       }
       // The row superseded the ref claim on commit; if anything re-took it, it is not ours.
       if (s.branchReservations?.[ref] === b.id) delete s.branchReservations[ref]

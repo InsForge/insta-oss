@@ -2056,6 +2056,56 @@ test('post-commit step 4 (the last one, after the secrets are cloned) fails: the
   await assertRetryWorks(id)
 })
 
+/** The id of the half-built clone, read out of state from inside a failing post-commit step. */
+function featId(projectId: string): string {
+  return Object.values(loadState().branches).find((b) => b.projectId === projectId && b.name === 'feat')!.id
+}
+
+test('a branch RENAMED mid-create still has its inherited secret copies unwound', async () => {
+  const id = await sourceWithEveryStep()
+  // `renameBranch` moves no container, so it takes no operation lock and is free to land at any
+  // await the create makes. It carries the branch's secret rows to the new name with it, and the
+  // compensation used to look for the OLD name only: the copies survived under the new one, and
+  // the retry then inherited a second set on top of them.
+  const sleep = vi.spyOn(engine, 'sleepNewBranch').mockImplementationOnce(async () => {
+    engine.renameBranch(id, featId(id), 'feat-renamed')
+    throw new Error('sleep boom')
+  })
+  const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
+  expect(bad.statusCode).toBeGreaterThanOrEqual(400)
+  expect(bad.json().error).toContain('sleep boom')
+
+  const st = loadState()
+  expect(Object.values(st.branches).filter((b) => b.projectId === id && b.name !== 'main')).toEqual([])
+  // Under NEITHER name, and the source's own row is untouched.
+  expect((st.userSecrets[id] ?? []).filter((u) => u.branch !== 'main')).toEqual([])
+  expect((st.userSecrets[id] ?? []).map((u) => `${u.name}@${u.branch}`)).toEqual(['API_KEY@main'])
+  sleep.mockRestore()
+  await assertRetryWorks(id)
+})
+
+test('the unwind never takes the secrets of a branch that now owns the freed name', async () => {
+  const id = await sourceWithEveryStep()
+  const sleep = vi.spyOn(engine, 'sleepNewBranch').mockImplementationOnce(async () => {
+    const clone = featId(id)
+    engine.renameBranch(id, clone, 'feat-renamed')
+    // Someone else takes the name the rename freed, with a secret of their own. (Written straight
+    // into state: a real create here would queue on the locks this operation holds.)
+    mutate((st) => {
+      st.branches['other-branch'] = { ...st.branches[clone], id: 'other-branch', name: 'feat', ref: 'demo-feat-other' }
+      st.userSecrets[id] = [...(st.userSecrets[id] ?? []), { name: 'THEIRS', value: 'v', branch: 'feat' }]
+    })
+    throw new Error('sleep boom')
+  })
+  await post(`/projects/${id}/branches`, { name: 'feat' })
+  sleep.mockRestore()
+
+  const st = loadState()
+  // The failed create's own copies are gone; the other branch's row keeps its secret.
+  expect((st.userSecrets[id] ?? []).map((u) => `${u.name}@${u.branch}`).sort()).toEqual(['API_KEY@main', 'THEIRS@feat'])
+  expect(Object.keys(st.branches)).toContain('other-branch')
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
