@@ -425,14 +425,51 @@ render_daemon_json() { printf '%s\n' "$POOL_JSON"; }
 
 # Apps reach the router at the host through --add-host ...:host-gateway; that traffic arrives on the
 # branch bridge and traverses the host INPUT chain, which a default-deny firewall drops silently.
+# The port(s) sshd actually listens on, empty when nothing could be established. `sshd -T` prints
+# the EFFECTIVE configuration (defaults included) and is authoritative where it runs; `ss` is the
+# fallback for a box where sshd is not on this PATH. Never guesses: a guess is what put a
+# hardcoded 22 in advice aimed at hardened boxes, which are exactly the ones that moved it.
+# IO_SSH_PORTS is a test hook, never set in production.
+ssh_ports() {
+  if [ -n "${IO_SSH_PORTS:-}" ]; then
+    printf '%s\n' "$IO_SSH_PORTS" | tr -s ', ' '\n' | grep -E '^[0-9]+$' | sort -un
+    return 0
+  fi
+  _sp=$( { sshd -T 2>/dev/null || /usr/sbin/sshd -T 2>/dev/null; } | awk '/^port /{print $2}' )
+  [ -n "$_sp" ] || _sp=$(ss -tlnp 2>/dev/null | awk '/sshd/{n=split($4,a,":"); print a[n]}')
+  printf '%s\n' "$_sp" | grep -E '^[0-9]+$' | sort -un
+}
+# ...and what to act on when nothing could be established: the distro default, which is right far
+# more often than not, and which the rules below still gate on ufw's existing policy.
+ssh_ports_or_default() {
+  _spd=$(ssh_ports)
+  [ -n "$_spd" ] || _spd=22
+  printf '%s\n' "$_spd"
+}
+# Does ufw ALREADY permit this port? Adding a rule when one exists can WIDEN a policy an operator
+# deliberately limited to trusted CIDRs, so a rule is only ever added where there is none. The
+# OpenSSH app profile counts for the default port. IO_UFW_STATUS is a test hook.
+ufw_permits() {
+  _st=${IO_UFW_STATUS-$(ufw status 2>/dev/null || true)}
+  if [ "$1" = 22 ] && printf '%s\n' "$_st" | grep -qi 'openssh'; then return 0; fi
+  printf '%s\n' "$_st" | grep -qE "(^|[^0-9.])$1(/tcp)?([^0-9]|$)"
+}
 fw_ufw() {
   # SSH FIRST, always. Ubuntu's /etc/default/ufw ships DEFAULT_INPUT_POLICY="DROP", so a rule set
-  # that does not name 22 locks the operator out of the box the moment ufw is enabled. It does
-  # not look like it at the time: ufw accepts RELATED,ESTABLISHED, so the session that ran this
+  # that does not name the SSH port locks the operator out the moment ufw is enabled. It does not
+  # look like it at the time: ufw accepts RELATED,ESTABLISHED, so the session that ran this
   # survives and the lockout appears on the next reconnect or the next reboot. These rules are
-  # only applied to an ALREADY ACTIVE ufw, where SSH is normally allowed already and this is a
-  # no-op; it is here so that a re-run heals a box whose ufw was enabled without it.
-  log 'ufw allow 22/tcp'
+  # only applied to an ALREADY ACTIVE ufw, so this is normally a no-op; it is here so a re-run
+  # heals a box whose ufw was enabled without one.
+  for _s in $(ssh_ports_or_default); do
+    if ufw_permits "$_s"; then
+      log "# ufw already permits ssh on $_s: leaving that rule alone (never widen it)"
+    elif [ "$_s" = 22 ]; then
+      log 'ufw allow OpenSSH'
+    else
+      log "ufw allow $_s/tcp"
+    fi
+  done
   for _b in $POOL_BASES; do
     log "ufw allow from $_b to any port 443,5432,6379,27017 proto tcp"
     log "ufw allow from $_b to any port 20000:20999 proto tcp"
@@ -638,7 +675,12 @@ else
   warn "no active ufw or firewalld found, so nothing here restricts the database lanes"
   warn "  the redis (6379) and mongodb (27017) lanes listen on all interfaces and are NOT meant to be public"
   warn "  restrict them at your cloud security group, or enable ufw yourself:"
-  warn "    ufw allow 22/tcp            # your SSH port FIRST, or enabling ufw locks you out"
+  _sshadvice=$(ssh_ports | head -1)
+  if [ -n "$_sshadvice" ]; then
+    warn "    ufw allow $_sshadvice/tcp          # sshd is listening on $_sshadvice: allow it FIRST or ufw locks you out"
+  else
+    warn "    ufw allow OpenSSH           # or your own SSH port: allow it FIRST or ufw locks you out"
+  fi
   warn "    ufw allow 80,443,5432/tcp   # the edge and the postgres lane"
   warn "    ufw enable"
   warn "  then re-run the installer the same way you installed it, so it adds the container rules"

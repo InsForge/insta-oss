@@ -64,7 +64,7 @@ script. The build needs about 1 GiB of free memory and a minute on a 2 vCPU box.
 4. Checks the sizing: the vCPU count, `MemTotal`, and the free space on the filesystem that will
    hold the data directory. See [Requirements](#requirements) for what is fatal and what is a
    warning.
-5. Opens the firewall, but only when one is active. Under `ufw`: 22 first (see below), then
+5. Opens the firewall, but only when one is active. Under `ufw`: SSH first (see below), then
    inbound 80, 443 and 5432, plus 443, 5432, 6379, 27017 and 20000 to 20999 from `docker0` and
    from every Docker address pool.
    Under `firewalld`: the same container ports in the `docker` zone and 80, 443 and 5432 in the
@@ -74,9 +74,14 @@ script. The build needs about 1 GiB of free memory and a minute on a 2 vCPU box.
    The SSH rule is there because Ubuntu's `ufw` defaults its input policy to `DROP`: a rule set
    that does not name your SSH port cuts you off the moment `ufw` is enabled, and it does it
    quietly, because established connections keep working and the lockout only shows on the next
-   reconnect or reboot. If your SSH is not on 22, allow that port yourself before enabling `ufw`.
-   Where `ufw` is already active this rule is a no-op, and it is emitted so that re-running the
-   installer repairs a box that was enabled without one.
+   reconnect or reboot. The port is not assumed: the installer reads it from `sshd -T`, falls
+   back to what is listening in `ss -tlnp`, and only then to the distro default, so a box with
+   SSH on 2222 gets a rule for 2222. It uses the `OpenSSH` app profile for the default port.
+
+   It also never WIDENS what you already have: if `ufw status` shows anything permitting that
+   port, no rule is added at all, so an SSH rule you limited to a trusted CIDR stays limited.
+   The rule exists so that re-running the installer repairs a box whose `ufw` was enabled
+   without one; on a box that already allows SSH it is a no-op.
 6. Installs Docker when missing, enables it, requires `docker compose version`, and starts the
    daemon when it is installed but not answering.
 7. Writes `/etc/docker/daemon.json` with `default-address-pools` and restarts Docker, on a fresh

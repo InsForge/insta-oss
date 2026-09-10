@@ -267,10 +267,38 @@ test('--print-firewall lists the docker0 and inbound rules; the script gates the
   const recipe = script.slice(script.indexOf('no active ufw or firewalld found'))
   const enable = recipe.indexOf('ufw enable')
   expect(enable).toBeGreaterThan(0)
-  expect(recipe.slice(0, enable)).toMatch(/ufw allow 22\/tcp/)     // SSH before the enable
-  // And the applied rule set carries it too, so re-running heals a box already enabled without it.
-  expect(out).toContain('ufw allow 22/tcp')
-  expect(out.indexOf('ufw allow 22/tcp')).toBeLessThan(out.indexOf('ufw allow 80,443,5432/tcp'))
+  const before = recipe.slice(0, enable)
+  // The DETECTED port, never a hardcoded 22: this paragraph is aimed at hardened boxes, which
+  // are exactly the ones that moved SSH, and `ufw enable` with the wrong port is the same
+  // lockout by another route. The literal is only the app-profile fallback for a box where
+  // nothing could be detected, and it names the substitution.
+  expect(before).toMatch(/ufw allow \$_sshadvice\/tcp/)
+  expect(before).toMatch(/ufw allow OpenSSH\s+# or your own SSH port/)
+  expect(before).not.toMatch(/ufw allow 22\/tcp/)
+  // And the applied rule set opens SSH before the public ports, so re-running heals a box that
+  // was enabled without it.
+  const ssh = out.search(/^ufw allow (OpenSSH|\d+\/tcp)$/m)
+  expect(ssh).toBeGreaterThanOrEqual(0)
+  expect(ssh).toBeLessThan(out.indexOf('ufw allow 80,443,5432/tcp'))
+})
+
+test('the ssh rule follows sshd, and never widens a policy that already covers it', () => {
+  // A detected non-default port is what gets allowed, not the distro default.
+  const moved = run(['--print-firewall'], { IO_SSH_PORTS: '2222' })
+  expect(moved).toContain('ufw allow 2222/tcp')
+  expect(moved).not.toContain('ufw allow OpenSSH')
+  // Several ports, all of them.
+  const both = run(['--print-firewall'], { IO_SSH_PORTS: '22, 2222' })
+  expect(both).toContain('ufw allow OpenSSH')   // the profile, for the default port
+  expect(both).toContain('ufw allow 2222/tcp')
+  // ...and where ufw ALREADY permits the port, no rule is added: an operator who limited SSH to
+  // a trusted CIDR must not have it widened to Anywhere by an install or an upgrade.
+  const limited = run(['--print-firewall'], { IO_SSH_PORTS: '2222', IO_UFW_STATUS: '2222/tcp   ALLOW   10.0.0.0/8' })
+  expect(limited).not.toContain('ufw allow 2222/tcp')
+  expect(limited).toContain('# ufw already permits ssh on 2222')
+  const profiled = run(['--print-firewall'], { IO_SSH_PORTS: '22', IO_UFW_STATUS: 'OpenSSH   ALLOW   10.0.0.0/8' })
+  expect(profiled).not.toContain('ufw allow OpenSSH')
+  expect(profiled).toContain('# ufw already permits ssh on 22')
 })
 
 test('the run path: every port the daemon binds is refused, readiness on /healthz, the final lines', () => {
