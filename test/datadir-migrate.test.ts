@@ -50,6 +50,9 @@ const APP = `io-${REF}-app-web`
 const VOL_ID = 'v0lume01'
 const LEGACY_VOL = `io-${REF}-data-${VOL_ID}`
 const MD_REDIS = `io-${REF}-rd-cache`
+const BRANCH2_ID = 'b2'
+const REF2 = 'demo-feat'
+const MD_REDIS_2 = `io-${REF2}-rd-cache`
 const PROJECT_ID = 'p1'
 const BRANCH_ID = 'b1'
 const PG_PASSWORD = 'kept'
@@ -200,15 +203,19 @@ function makeData(): DataDirOps {
   }
 }
 
-/** state.json exactly as a pre-scaffold daemon wrote it: `dbUrl` and no `databases`, no `dataId`
- *  anywhere and no `dataVersion`. */
-function writeLegacyState(opts: { managed?: boolean } = {}): void {
+/** state.json exactly as a pre-scaffold daemon wrote it: `dbUrl` and no `databases`, no
+ *  `dataVersion`, and no `dataId` on the managed registration -- which is the point of that
+ *  field being absent here rather than set to a convenient constant. It carried
+ *  `dataId: 'cache'` while the comment claimed there was none anywhere, and that is why a
+ *  per-branch mint of the missing id survived: nothing in this file ever exercised the mint.
+ *  `secondBranch` is what makes the id's PROJECT scope observable at all. */
+function writeLegacyState(opts: { managed?: boolean; secondBranch?: boolean } = {}): void {
   writeFileSync(cfg.statePath, JSON.stringify({
     projects: {
       [PROJECT_ID]: {
         id: PROJECT_ID, name: 'demo', status: 'ready', createdAt: 1, refSlug: 'demo',
         computeGroups: ['web'], computeVolumes: { web: { id: VOL_ID, sizeGib: 1 } },
-        ...(opts.managed ? { managedServices: [{ id: 'md-cache', type: 'redis', name: 'cache', dataId: 'cache' }] } : {}),
+        ...(opts.managed ? { managedServices: [{ id: 'md-cache', type: 'redis', name: 'cache' }] } : {}),
       },
     },
     branches: {
@@ -219,6 +226,17 @@ function writeLegacyState(opts: { managed?: boolean } = {}): void {
         apps: { web: { image: 'nginx:alpine', port: 80, hostPort: 18201 } },
         ...(opts.managed ? { managed: { 'md-cache': { password: 'redis-pw' } } } : {}),
       },
+      // A second branch of the same project: it carries the same managed service, on its own
+      // ref, which is the only way the project-level `dataId` can be seen to be one id.
+      ...(opts.secondBranch ? {
+        [BRANCH2_ID]: {
+          id: BRANCH2_ID, projectId: PROJECT_ID, name: 'feat', isDefault: false, status: 'ready',
+          ref: REF2, network: `io-${REF2}`, cloneOf: BRANCH_ID, createdAt: 2,
+          dbUrl: `postgres://postgres:${PG_PASSWORD}@io-${REF2}-pg:5432/app`,
+          apps: {},
+          ...(opts.managed ? { managed: { 'md-cache': { password: 'redis-pw' } } } : {}),
+        },
+      } : {}),
     },
     policies: {}, approvals: [], events: [], userSecrets: {},
     rev: 1, auditRev: 0, customDomains: {}, templateDeployments: {},
@@ -235,7 +253,12 @@ const stagingOf = (target: string): string => {
 const layout = (): ReturnType<typeof dataLayout> => dataLayout(cfg.dataDir)
 const pgDir = (): string => layout().pg(REF, 'db')
 const volDir = (): string => layout().vol(REF, VOL_ID)
-const mdDir = (): string => layout().md(REF, 'redis', 'cache')
+/** The managed data id as PERSISTED state carries it. Legacy state has none and the migration
+ *  mints one, so a test that hardcoded it was asserting against a fixture, not against the
+ *  registration every later engine operation reads. The placeholder is deliberately an id no
+ *  directory can have, so calling this before a boot fails loudly instead of quietly matching. */
+const managedDataId = (): string => loadState().projects[PROJECT_ID].managedServices?.[0]?.dataId ?? 'not-minted-yet'
+const mdDir = (ref = REF): string => layout().md(ref, 'redis', managedDataId())
 const branchRow = (): Record<string, unknown> => loadState().branches[BRANCH_ID] as unknown as Record<string, unknown>
 const dbRow = (): { container?: string; url?: string; dataId?: string } =>
   (loadState().branches[BRANCH_ID].databases?.['pg-db'] ?? {}) as { container?: string; url?: string; dataId?: string }
@@ -281,7 +304,7 @@ beforeEach(() => {
   deps = {
     cfg, data,
     layout,
-    ref: () => REF,
+    ref: (b) => b.ref,
     query: async () => '',
     provisionManaged: async (t) => { world.run(t.container, [t.dataDir]) },
     redeploy: async (_p, _b, group) => {
@@ -538,6 +561,44 @@ test('F: killed between removing the managed container and re-creating it, the n
   // record that this migration had started.
   expect(world.containers.get(MD_REDIS)?.mounts).toEqual([mdDir()])
   expect(contentsOf(`${mdDir()}/data`)).toEqual(['appendonly.aof', 'dump.rdb'])
+})
+
+test('a legacy managed service gets ONE data id, and every branch is copied under it', async () => {
+  // `dataId` is PROJECT level: every branch's directory is `md/<ref>/<prefix>-<dataId>`. A
+  // pre-scaffold registration has none, and it was minted inside the per-branch loop, from a
+  // project object loaded ONCE before that loop: the mint wrote to persisted state and left the
+  // in-memory row untouched, so the next branch saw no id and minted another. Each branch's
+  // files landed under its own id, the registration kept only the last, and every later engine
+  // operation derives every branch's path from that one -- so the earlier branches' directories
+  // were unreferenced, and gone with the next container recreate. Silent: the migration reports
+  // success and the data is simply not where anything looks for it.
+  writeLegacyState({ managed: true, secondBranch: true })
+  for (const c of [MD_REDIS, MD_REDIS_2]) {
+    world.containers.set(c, { running: true, mounts: [] })
+    world.sources.set(c, REDIS_FILES)
+  }
+
+  const out = await boot()
+  expect(out.failed).toEqual([])
+  expect(out.migrated.sort()).toEqual([REF, REF2].sort())
+
+  // The lookup every later operation performs, AFTER a state reload: one id, read back off the
+  // registration, and both branches' bytes under it.
+  const id = managedDataId()
+  expect(id).not.toBe('not-minted-yet')
+  for (const ref of [REF, REF2]) {
+    const dir = layout().md(ref, 'redis', id)
+    expect(contentsOf(`${dir}/data`), ref).toEqual(['appendonly.aof', 'dump.rdb'])
+    expect(world.containers.get(`io-${ref}-rd-cache`)?.mounts, ref).toEqual([dir])
+  }
+
+  // ...and nothing landed under a SECOND id: one directory name across both branches.
+  const mdRoot = join(cfg.dataDir, 'md')
+  const dirIds = new Set([...world.paths]
+    .filter((x) => x.startsWith(`${mdRoot}/`))
+    .map((x) => x.slice(mdRoot.length + 1).split('/')[1])
+    .filter(Boolean))
+  expect([...dirIds]).toEqual([`rd-${id}`])
 })
 
 test('a redis whose /data holds nothing is still migrated, and only once', async () => {

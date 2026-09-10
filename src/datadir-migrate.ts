@@ -49,6 +49,16 @@ export interface MigrateResult { migrated: string[]; skipped: string[]; failed: 
 export async function migrateLegacyData(deps: MigrateDeps): Promise<MigrateResult> {
   const out: MigrateResult = { migrated: [], skipped: [], failed: [] }
   if (!deps.cfg.data.migrate) return out
+  // BEFORE the snapshot, and before any branch: a managed service's `dataId` is PROJECT-level
+  // (every branch's directory is `md/<ref>/<prefix>-<dataId>`), and a pre-scaffold registration
+  // has none. Minting it inside the per-branch loop minted a DIFFERENT id per branch, wrote each
+  // one to persisted state and left the in-memory registration this loop iterates untouched, so
+  // the next branch saw no id and minted again. Every branch copied its files under its own id
+  // while the registration kept only the last, and every later engine operation derives every
+  // branch's path from that one id: the earlier branches' directories were unreferenced, and
+  // gone as soon as a container was recreated. One id, minted once, persisted before the
+  // snapshot below is taken, so the object this loop reads and the row on disk are the same.
+  backfillManagedDataIds()
   const s = loadState()
   for (const branch of Object.values(s.branches)) {
     const project = s.projects[branch.projectId]
@@ -75,6 +85,17 @@ export async function migrateLegacyData(deps: MigrateDeps): Promise<MigrateResul
     for (const f of out.failed) console.warn(`data migration failed for ${f.ref}: ${f.error}`)
   }
   return out
+}
+
+/** Give every managed registration that predates `dataId` a stable one, in ONE mutate over the
+ *  whole state. Idempotent: a row that already has an id keeps it, so a boot after a partial
+ *  migration reuses the id its directories were copied under. */
+function backfillManagedDataIds(): void {
+  mutate((st) => {
+    for (const p of Object.values(st.projects)) {
+      for (const m of p.managedServices ?? []) if (!m.dataId) m.dataId = randomUUID().slice(0, 8)
+    }
+  })
 }
 
 /** True when this branch actually had something to move. */
@@ -272,13 +293,13 @@ async function migrateManaged(deps: MigrateDeps, project: Project, branch: Branc
   const ref = deps.ref(branch)
   let touched = false
   for (const m of project.managedServices ?? []) {
-    const dataId = m.dataId ?? randomUUID().slice(0, 8)
-    if (!m.dataId) {
-      mutate((st) => {
-        const list = st.projects[project.id]?.managedServices
-        const row = list?.find((x) => x.id === m.id)
-        if (row) row.dataId = dataId
-      })
+    // Never minted here: `backfillManagedDataIds` ran before the state this iterates was read,
+    // so an id is missing only if a registration appeared between the two, and inventing one for
+    // it per branch is the defect this line used to be. Nothing to migrate for such a row.
+    const dataId = m.dataId
+    if (!dataId) {
+      console.warn(`skipping managed service ${m.id} on ${ref}: it has no dataId (registered while the boot migration was running)`)
+      continue
     }
     const container = managedContainerName(ref, m.type, m.name)
     const dir = deps.layout().md(ref, m.type, dataId)
