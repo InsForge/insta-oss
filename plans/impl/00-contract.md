@@ -671,7 +671,7 @@ export interface Runtime {
   probe(t: ServiceTarget): Promise<boolean>                             // postgres: docker exec pg_isready -h 127.0.0.1; else upstream.dial
 }
 export class ServiceStoppedError extends Error {}   // 'service is stopped'
-export class WakeTimeoutError extends Error {}      // 'service did not become ready within <n> s'
+export class WakeTimeoutError extends Error {}      // 'the wake timed out after <n> s: ...' (readiness) | 'this request timed out after <n> s waiting ...' (a caller's own bound; the wake continues). Both carry `timed out`, which is what `classifyWakeError` falls back to
 export class NoContainerError extends Error {}      // 'service has no container (deploy in progress or removed)' (router: 503)
 export class Scheduler {
   constructor(runtime: Runtime, cfg: Config, targets: () => ServiceTarget[], hooks: { markSlept(key, at: number | null): void; emit(key, kind, payload): void }, upstream: UpstreamLike)

@@ -16,6 +16,8 @@ import { createSniLane } from '../src/router/tls'
 import { buildTable, type Route } from '../src/router/table'
 import { probePg, resolveOrWake, SSL_REQUEST, startupMessage } from '../src/router/wake'
 import { engineRouterDeps } from '../src/router/deps'
+import { classifyWakeError } from '../src/router/wake'
+import { WakeTimeoutError } from '../src/scheduler'
 import type { ServiceState, UpstreamAddr, UpstreamLike } from '../src/router/deps'
 import type { Config } from '../src/config'
 import type { State } from '../src/state'
@@ -270,7 +272,7 @@ test('wake failures map to the cloud-shaped statuses', async () => {
   for (const [name, status, error] of cases) {
     const h = await harness(testConfig(), state, {
       onWake: async () => {
-        const e = new Error(name === 'WakeTimeoutError' ? 'service did not become ready within 60 s' : name === 'ServiceStoppedError' ? 'service is stopped' : name === 'NoContainerError' ? 'service has no container (deploy in progress or removed)' : 'boom')
+        const e = new Error(name === 'WakeTimeoutError' ? new WakeTimeoutError(60).message : name === 'ServiceStoppedError' ? 'service is stopped' : name === 'NoContainerError' ? 'service has no container (deploy in progress or removed)' : 'boom')
         Object.defineProperty(e.constructor, 'name', { value: name })
         throw e
       },
@@ -1019,4 +1021,24 @@ test('a pg handshake that answers an ErrorResponse IS ready: the server is talki
   } finally {
     await new Promise<void>((r) => srv.close(() => r()))
   }
+})
+
+
+test('both wake timeouts classify as a timeout through the TEXT branch, not only by class', () => {
+  // `classifyWakeError` matches the class name first and falls back to the message only when it
+  // is handed a string. That fallback is the fragile half: it is a promise the two error
+  // messages make to the lanes, kept in a different file, and nothing pinned it. Both variants
+  // carry `timed out` and nothing else in them is load-bearing, which is what lets them say
+  // different and accurate things.
+  for (const phase of ['readiness', 'waiting'] as const) {
+    const e = new WakeTimeoutError(60, phase)
+    expect(classifyWakeError(e), phase).toBe('timeout')            // by class
+    expect(classifyWakeError(e.message), phase).toBe('timeout')    // by text, the fallback path
+  }
+  // ...and the waiting one describes the caller's wait rather than a readiness wait it may
+  // never have reached, while still pointing at what to do next.
+  const waiting = new WakeTimeoutError(60, 'waiting').message
+  expect(waiting).toContain('the wake is still running')
+  expect(waiting).toContain('insta compute status')
+  expect(waiting).not.toContain('became ready')
 })

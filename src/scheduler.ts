@@ -66,17 +66,23 @@ export class ServiceStoppedError extends Error { constructor() { super('service 
  *  container started and never became ready, and `waiting` is this CALLER's budget running out
  *  while the wake carries on under the operation lock.
  *
- *  The second one has to SAY that. `insta compute start` goes through the api door and is bound
- *  like any other caller now, so an operator can see a timeout and then find the service up a
- *  moment later; without the sentence those two look like a contradiction, and the fact that the
- *  wake continues was only ever in a daemon-side warning nobody running the CLI reads. Both
- *  keep the words `did not become ready`, which is `classifyWakeError`'s fallback when it gets a
- *  message rather than the error object. */
+ *  Each says what actually happened. `insta compute start` goes through the api door and is
+ *  bound like any other caller now, so an operator can see a timeout and then find the service
+ *  up a moment later; without a sentence those two look like a contradiction, and the fact that
+ *  the wake continues was only ever in a daemon-side warning nobody running the CLI reads. The
+ *  waiting one cannot borrow the readiness wording either: a caller can run out queued behind
+ *  another operation or partway through eviction, before `wakeLocked` has reached the readiness
+ *  wait at all, so "did not become ready" would name something nothing had attempted yet.
+ *
+ *  What both must keep is the token `timed out`: `classifyWakeError` matches the CLASS first and
+ *  falls back to the text only when it is handed a message rather than an error, and that
+ *  fallback keys on those two words. They are the contract between these strings and the lanes,
+ *  and `test/router.test.ts` pins it so a future rewording reds there rather than in production. */
 export class WakeTimeoutError extends Error {
   constructor(sec: number, phase: 'readiness' | 'waiting' = 'readiness') {
     super(phase === 'waiting'
-      ? `service did not become ready within ${sec} s, so this request stopped waiting. The wake is still running: the service may come up shortly, so check \`insta compute status\` before retrying`
-      : `service did not become ready within ${sec} s`)
+      ? `this request timed out after ${sec} s waiting for the service to wake, and the wake is still running: the service may come up shortly, so check \`insta compute status\` before retrying`
+      : `the wake timed out after ${sec} s: the container started but never became ready`)
   }
 }
 /** The lock was taken and the container is not there: a deploy is between `rm -f` and `create`, or

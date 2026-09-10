@@ -712,8 +712,8 @@ test('a start that outruns its bound tells the operator the wake is still runnin
     const r = await quickApp.inject({ method: 'POST', url: `/projects/${project.id}/services/cp-web/start` })
     expect(r.statusCode).toBe(400)
     const { error } = r.json() as { error: string }
-    expect(error).toContain('this request stopped waiting')
-    expect(error).toContain('The wake is still running')
+    expect(error).toContain('this request timed out')
+    expect(error).toContain('the wake is still running')
     expect(error).toContain('insta compute status')
   } finally {
     runtimeStart.mockRestore()

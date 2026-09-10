@@ -27,7 +27,11 @@ export function classifyWakeError(e: unknown): WakeFailure {
   if (e instanceof ShuttingDownError) return 'shutdown'
   const name = e instanceof Error ? (e.constructor?.name ?? e.name) : ''
   const msg = e instanceof Error ? e.message : String(e)
-  if (name === 'WakeTimeoutError' || /did not become ready|timed out/i.test(msg)) return 'timeout'
+  // The class first; the text only when this was handed a message rather than an error. Both of
+  // `WakeTimeoutError`'s messages carry `timed out` and neither says "did not become ready" any
+  // more, because a caller whose budget runs out while it is queued or evicting has not reached
+  // the readiness wait at all.
+  if (name === 'WakeTimeoutError' || /timed out/i.test(msg)) return 'timeout'
   if (name === 'ServiceStoppedError' || /service is stopped/i.test(msg)) return 'stopped'
   if (name === 'NoContainerError' || /has no container/i.test(msg)) return 'nocontainer'
   return 'other'
