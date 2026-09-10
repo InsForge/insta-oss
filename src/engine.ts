@@ -80,25 +80,41 @@ const newTeardown = (): Teardown => ({ destroyed: 0, failed: 0 })
 async function count(t: Teardown, fn: () => Promise<unknown>): Promise<void> {
   try { await fn(); t.destroyed++ } catch { t.failed++ }
 }
+/** Docker's own "there is no such network", in both spellings the CLI has used: dockerd's
+ *  `Error response from daemon: network <name> not found` (Docker 27, measured on the box) and
+ *  the older client-side `Error: No such network: <name>`. Nothing else counts as absence. */
+const NO_SUCH_NETWORK = /network [^\s]+ not found|no such network/i
+const saysMissing = (e: unknown): boolean => NO_SUCH_NETWORK.test(e instanceof Error ? e.message : String(e))
+
 /** `docker network rm`, where ALREADY GONE is the ordinary outcome and not a failure: a create
  *  that never got as far as making one, a delete retried after a partial teardown, a network an
  *  operator removed by hand. A network that is STILL THERE after the attempt is the failure that
- *  matters -- dockerd refuses while a container is attached -- and that is the one the caller has
- *  to count, so the two are told apart by asking dockerd rather than by matching its wording. */
+ *  matters (dockerd refuses while a container is attached), and it is the one the caller counts.
+ *
+ *  Absence therefore has to be ESTABLISHED, never inferred from a probe that itself failed. A
+ *  `network inspect` can fail for reasons that say nothing about whether the network exists (a
+ *  daemon that is not answering, a template error, a permission failure), and reading any of
+ *  those as "gone" hands back a clean verdict and deletes the branch row over a network that is
+ *  still standing, which is the exact outcome this counting exists to prevent. So the removal's
+ *  own error is classified first, the probe only confirms, and an inconclusive probe fails
+ *  CLOSED: the original error stands and the step counts as failed. */
 async function removeNetwork(network: string): Promise<void> {
   try {
     await docker(['network', 'rm', network])
   } catch (e) {
-    if (await networkExists(network)) throw e
+    if (saysMissing(e) || (await networkState(network)) === 'missing') return
+    throw e
   }
 }
 
-async function networkExists(network: string): Promise<boolean> {
+/** `missing` only when dockerd says so. A probe that cannot answer is `unknown`, which every
+ *  caller must treat as "it may still be there". */
+async function networkState(network: string): Promise<'present' | 'missing' | 'unknown'> {
   try {
     await docker(['network', 'inspect', '-f', '{{.Id}}', network])
-    return true
-  } catch {
-    return false
+    return 'present'
+  } catch (e) {
+    return saysMissing(e) ? 'missing' : 'unknown'
   }
 }
 

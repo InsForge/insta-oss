@@ -2199,6 +2199,29 @@ test('a network that refuses to go is a FAILED teardown, so the row is kept rath
   expect((ev[0].payload as { teardown: { failed: number } }).teardown.failed).toBe(1)
 })
 
+test('a probe that cannot answer is not evidence the network is gone', async () => {
+  const id = await sourceWithEveryStep()
+  const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
+  // The removal fails, and the probe that would say whether the network survived cannot answer
+  // either: a daemon that is not talking, a template error, a permission failure. None of those
+  // is absence. Treating them as absence reports a clean demolition and deletes the row over a
+  // network that may still be standing, which is the whole point of counting these steps.
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) => {
+    if (args[0] === 'network' && (args[1] === 'rm' || args[1] === 'inspect')) {
+      throw new Error('docker network rm io-demo-feat -> exit 1: Cannot connect to the Docker daemon at unix:///var/run/docker.sock')
+    }
+    return Buffer.from('')
+  })
+
+  const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
+  cloneInto.mockRestore()
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+
+  expect(bad.statusCode).toBeGreaterThanOrEqual(400)
+  const row = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')
+  expect(row?.status).toBe('cleanup-failed')
+})
+
 test('a network that was already gone is not counted as a failure', async () => {
   const id = await sourceWithEveryStep()
   // `network rm` fails because there is nothing to remove, which is the ordinary outcome of a
