@@ -351,7 +351,78 @@ docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$PGC" \
   | grep -q '/var/lib/instacloud/pg/' || FAIL "postgres is not on a data-dir bind mount"
 OK "upgrade is idempotent and data survived"
 
-STEP "11. teardown"
+STEP "11. tls custom: one supplied certificate, and no per-host issuance"
+# The parity break this mode closes. `acme` and `internal` both issue a certificate PER HOSTNAME
+# on demand, so deploying a service publishes its exact hostname; measured on a live box, an ACME
+# issuance put the hostname into the public certificate transparency logs and credential scanners
+# arrived within minutes and kept arriving every 1 to 3 minutes, against a 300 s idle timer, so
+# the compute service never slept. The cloud serves one wildcard and publishes nothing. What has
+# to be true here is negative -- nothing issued, nothing published -- so this step asserts the
+# absence of issuance rather than the presence of a certificate.
+E2E_TLS_DIR=/etc/instacloud/e2e-tls
+CADDYFILE=/etc/instacloud/Caddyfile
+CERT_STORE=/var/lib/instacloud/caddy/data/caddy/certificates
+mkdir -p "$E2E_TLS_DIR"
+openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
+  -keyout "$E2E_TLS_DIR/wild.key" -out "$E2E_TLS_DIR/wild.crt" \
+  -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
+  || FAIL "could not mint a wildcard certificate for *.$DOMAIN"
+chmod 600 "$E2E_TLS_DIR/wild.key"
+OURS=$(openssl x509 -in "$E2E_TLS_DIR/wild.crt" -noout -serial | cut -d= -f2)
+BEFORE=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
+
+curl_k_ok() { curl -sS -k -o /dev/null -f "$1"; }
+served_serial() {
+  openssl s_client -connect "127.0.0.1:443" -servername "$1" </dev/null 2>/dev/null \
+    | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2
+}
+
+( cd "$ROOT" && INSTA_OSS_TLS=custom sh install.sh -y \
+    --tls-cert "$E2E_TLS_DIR/wild.crt" --tls-key "$E2E_TLS_DIR/wild.key" ) 2>&1 | tee -a "$INSTALL_LOG"
+grep -q "tls $E2E_TLS_DIR/wild.crt $E2E_TLS_DIR/wild.key" "$CADDYFILE" \
+  || FAIL "the Caddyfile does not serve the supplied certificate"
+if grep -q on_demand "$CADDYFILE"; then FAIL "the Caddyfile still configures on-demand issuance"; fi
+for c in io-instad io-edge; do
+  [ "$(cstate $c)" = "running" ] || FAIL "$c is not running after the custom-tls install, state $(cstate $c)"
+done
+wait_for 120 curl_k_ok "https://api.$DOMAIN/healthz" || FAIL "the edge did not answer api.$DOMAIN after the custom-tls install"
+OK "the stack came up serving the supplied certificate"
+
+# The two names an operator is handed, and a service hostname, all answer with OUR certificate.
+for host in "api.$DOMAIN" "console.$DOMAIN" "$(url_host "$URL")"; do
+  [ "$(served_serial "$host")" = "$OURS" ] || FAIL "$host is not served the supplied certificate"
+done
+# ...and a hostname that has NEVER existed on this box: served the same certificate, and the
+# store Caddy writes issued certificates into gains nothing. That is the whole property.
+NEVER="zz-never-$RUN.$DOMAIN"
+[ "$(served_serial "$NEVER")" = "$OURS" ] || FAIL "$NEVER is not served the supplied certificate"
+sleep 5
+AFTER=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
+[ "$AFTER" = "$BEFORE" ] || FAIL "the certificate store grew from $BEFORE to $AFTER: something was issued"
+if docker logs io-edge 2>&1 | tail -200 | grep -q "certificate obtained successfully"; then
+  FAIL "the edge obtained a certificate in custom mode"
+fi
+OK "a never-seen hostname is served without issuing anything"
+
+# The database lane presents a certificate too, and it is the other door issuance would publish a
+# hostname through: the daemon triggers issuance by handshaking the edge with the wanted
+# servername, so a wildcard at the edge alone would not have closed this.
+PGHOST_NAME=pg-db-$SLUG-main.$DOMAIN
+LANE_SERIAL=$(openssl s_client -connect "127.0.0.1:5432" -starttls postgres -servername "$PGHOST_NAME" </dev/null 2>/dev/null \
+  | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2)
+[ "$LANE_SERIAL" = "$OURS" ] || FAIL "the pg lane presented '$LANE_SERIAL', not the supplied certificate '$OURS'"
+AFTER=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
+[ "$AFTER" = "$BEFORE" ] || FAIL "the pg lane handshake made something issue a certificate"
+OK "the database lane presents the supplied certificate and issues nothing"
+
+# ...and back, because a box has to be able to leave this mode: the leftover paths in instad.env
+# are not a request nothing can serve, they are the previous install.
+( cd "$ROOT" && sh install.sh -y ) 2>&1 | tee -a "$INSTALL_LOG"
+grep -q on_demand "$CADDYFILE" || FAIL "on-demand issuance did not come back with --tls $TLS"
+wait_for 120 curl_healthz || FAIL "the daemon did not come back after leaving custom mode"
+OK "the install moves back out of custom mode"
+
+STEP "12. teardown"
 allow_delete || FAIL "could not set project.delete to allow"
 insta project delete --yes >/dev/null 2>&1 || insta project delete >/dev/null \
   || FAIL "project delete failed"
