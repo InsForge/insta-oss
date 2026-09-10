@@ -294,7 +294,18 @@ fi
 
 # ---- renderers ----
 EMITTED=''
-emit() { EMITTED="$EMITTED $1"; printf '%s=%s\n' "$1" "$2"; }
+# The one choke point every instad.env key goes through, validated or not: the pass-through
+# writes any INSTA_OSS_* the environment or an edited instad.env carries, and those have no
+# shape check of their own. A newline in one of them injects a SECOND key, and both
+# `docker compose env_file` and `docker run --env-file` take the last duplicate, so a value
+# nobody validates could rewrite one that was. Refused here rather than per key, because the
+# list of keys that reach this file is open-ended by design.
+emit() {
+  case $2 in
+    *"$NL"*) die "refusing to write $1 into instad.env: its value contains a newline, which would inject a second key (the last duplicate wins)" ;;
+  esac
+  EMITTED="$EMITTED $1"; printf '%s=%s\n' "$1" "$2"
+}
 ek() { emit "$1" "$(resolve "$1" '' "$2")"; }   # env, then existing, then default
 emitted() { case " $EMITTED " in *" $1 "*) return 0 ;; esac; return 1; }
 
@@ -745,13 +756,15 @@ ensure_pools
 
 # ---- 3b. firewall ----
 # The LAST line of defence, on the final rendered rule rather than on any of the parts it was
-# built from. `run_rules` reads its input a LINE at a time, so a value that smuggled a newline
-# past its own check would arrive here as two separate lines and each would be allowlisted
-# independently before its eval -- this layer never sees a multi-line string. It is `shaped`
-# anyway, so the two layers cannot disagree about what a whole value is. Every rule this script emits is machine-generated from validated values, so a
+# built from. Every rule this script emits is machine-generated from validated values, so a
 # strict allowlist on the rendered line costs nothing and holds whatever upstream validation
 # misses or a future edit introduces: a line carrying a shell metacharacter never reaches
 # `eval`, and the install stops rather than running it as root.
+#
+# It is `shaped` like every other check, though it can never be the layer a newline defeats:
+# `run_rules` reads its input a LINE at a time, so a value that smuggled one past its own check
+# arrives here as two rules and each is allowlisted on its own. Same function, so the two layers
+# cannot disagree about what a whole value is.
 rule_ok() { shaped "$1" '^[A-Za-z0-9][A-Za-z0-9 ,:./=_-]*$'; }
 run_rules() {
   while read -r _l; do

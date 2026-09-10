@@ -442,15 +442,26 @@ test('an embedded NEWLINE is refused in every operator value that is checked by 
   // the LAST duplicate of a key, into /etc/fstab as a second entry, and into the firewall lines
   // `run_rules` evals as root. Every shape check goes through `shaped` now, which refuses a
   // newline before it looks at anything else.
-  const cases: Array<{ key: string; value: string; says: string }> = [
+  // `modes` says where each value is refused: one with a validator of its own is refused while
+  // it is resolved, in every mode; one whose only gate is the WRITE is refused by the mode that
+  // renders instad.env, and is not read at all by the others.
+  const cases: Array<{ key: string; value: string; says: string; modes?: string[] }> = [
     { key: 'INSTA_OSS_LANE_PORT_RANGE', value: '20000-20999\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_LANE_PORT_RANGE' },
     { key: 'INSTA_OSS_DATA_DIR', value: '/var/lib/instacloud\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_DATA_DIR' },
     { key: 'INSTA_OSS_IMAGE', value: 'ghcr.io/insforge/instacloud\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_IMAGE' },
     { key: 'INSTA_OSS_DOMAIN', value: 'example.test\nINSTA_OSS_MODE=local', says: 'domain must match' },
     { key: 'INSTA_OSS_PUBLIC_IP', value: '1.2.3.4\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_PUBLIC_IP' },
+    // Its own `shaped` check only runs on the install path, so what refuses it in the print
+    // modes is the write itself. It was missing from this list, which is how a value quietly
+    // stops being tested.
+    { key: 'INSTA_OSS_DATA_IMG_GIB', value: '20\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_DATA_IMG_GIB', modes: ['--print-env'] },
+    // ...and the family is closed at the write rather than key by key: a pass-through key has
+    // no validator of its own, and instad.env takes the LAST duplicate of a key, so an
+    // unvalidated value could otherwise rewrite a validated one.
+    { key: 'INSTA_OSS_SOMETHING_ELSE', value: 'x\nINSTA_OSS_MODE=local', says: 'INSTA_OSS_SOMETHING_ELSE', modes: ['--print-env'] },
   ]
-  for (const { key, value, says } of cases) {
-    for (const mode of ['--print-env', '--print-firewall']) {
+  for (const { key, value, says, modes } of cases) {
+    for (const mode of modes ?? ['--print-env', '--print-firewall']) {
       const r = tryRun([mode], { INSTA_OSS_DOMAIN: 'example.test', [key]: value })
       expect(r.status, `${mode} ${key}`).toBe(1)
       expect(r.stderr, `${mode} ${key}`).toContain(says)
