@@ -46,6 +46,7 @@ domain. See [self-hosting](https://docs.instacloud.com/self-hosting/overview).
 | `storage list/get/delete` | object listing (prefix and cursor paging), presigned GET download, single delete; gated `storage.read` and `storage.delete`. Presigned-POST upload and bulk delete serve the console file browser |
 | `regions` | the single `local` region (this machine) |
 | `services scale` / `services upgrade` | `501`: machine scaling and instance specs are cloud pricing concepts |
+| `compute repo` / `compute connect-repo` / `compute disconnect-repo` (and the console's Source tab) | `501`: connecting a GitHub repo needs the GitHub App and a public webhook URL, both cloud-only. Deploy a directory with `insta deploy ./dir` instead. `compute repo` itself still answers, because a local service always runs an image |
 | `usage` / `billing` | `501`: metering is cloud-only by design. Local visibility is `manifest` plus docker-backed `metrics` and `logs` |
 | `org create` | `501`: single-tenant |
 

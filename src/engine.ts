@@ -63,7 +63,7 @@ export interface ServiceRow {
   volume_gib?: number | null
   port?: number
   always_on?: boolean
-  image?: string
+  image?: string | null
   pg_version?: number
   template_deployment_id?: string
   template_code?: string
@@ -767,10 +767,12 @@ export class Engine {
         const cfgd = settings(`cp-${g}`)
         return {
           id: id(`cp-${g}`), type: 'compute', name: g, status: 'ready', machine_count: 1,
+          // Always present, null when the group has never deployed: `GET .../source` reports
+          // what a local service runs, and an absent key would read as "no answer".
+          image: app?.image ?? null,
           volume_gib: project.computeVolumes?.[g]?.sizeGib ?? null, // platform Service.volume_gib (compute only)
           desired_state: app?.desiredState ?? 'running',
           always_on: branch ? this.effectiveAlwaysOn(project, branch, `cp-${g}`) : undefined,
-          ...(app?.image !== undefined ? { image: app.image } : {}),
           ...(app?.port ?? cfgd.port ? { port: app?.port ?? cfgd.port } : {}),
           ...(cfgd.templateDeploymentId ? { template_deployment_id: cfgd.templateDeploymentId } : {}),
           ...(cfgd.templateCode ? { template_code: cfgd.templateCode } : {}),

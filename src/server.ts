@@ -28,7 +28,7 @@ const eventOut = (e: AuditEvent) => ({
 /** Path prefixes the API owns: a GET outside them falls back to the dashboard shell (SPA routing).
  *  Each package appends its prefixes on its marked line (contract 00 section 1.1). */
 export const API_PREFIXES: string[] = [
-  '/projects', '/orgs', '/me', '/tokens', '/healthz', '/regions', '/images', '/invitations',
+  '/projects', '/orgs', '/me', '/tokens', '/healthz', '/regions', '/images', '/invitations', '/github',
   '/api', '/auth', '/tls',
   '/templates', '/template-deployments',
 ]
@@ -561,6 +561,37 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   app.get('/projects/:id/backups', async (_req, reply) => notCloud(reply, 'managed backups (locally: pg_dump with the DATABASE_URL from `insta secrets`)'))
   app.delete('/projects/:id/backups/:bid', async (_req, reply) => notCloud(reply, 'managed backups'))
   app.post('/projects/:id/backups/:bid/restore', async (_req, reply) => notCloud(reply, 'managed backups'))
+  // GitHub repo connect needs the GitHub App, a public webhook URL and the remote build gateway.
+  app.post('/orgs/:id/github/setup', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/orgs/:id/github/setup/complete', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/github/installations', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/github/installations/:iid/repos', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/projects/:id/github/detect', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/projects/:id/github/public-repo/resolve', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/projects/:id/github/repo-binding', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/projects/:id/github/repo-binding', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.delete('/projects/:id/github/repo-binding', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/projects/:id/github/builds', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.put('/projects/:id/services/:sid/source', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.patch('/projects/:id/services/:sid/source', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.delete('/projects/:id/services/:sid/source', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.post('/projects/:id/services/:sid/source/deploy', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  app.get('/projects/:id/services/:sid/source/builds', async (_req, reply) => notCloud(reply, 'GitHub repo connect'))
+  // A local compute service always runs an image, so its source is a real answer, not a 501.
+  // Branch-aware like every other `/services/:sid/*` route (decision 49): a qualified sid picks the
+  // branch first, then `?branch`, then the default; rows off the default branch carry a qualified
+  // id, so the row is matched on its bare service id.
+  app.get('/projects/:id/services/:sid/source', async (req, reply) => {
+    const { id, sid: raw } = req.params as { id: string; sid: string }
+    try {
+      const { branch, serviceId } = engine.resolveSid(id, raw, (req.query as { branch?: string }).branch)
+      const rows = await engine.services(id, branch.name)
+      const svc = rows.find((s) => (parseServiceId(s.id)?.serviceId ?? s.id) === serviceId)
+      if (!svc) return reply.code(404).send({ error: 'service not found' })
+      if (svc.type !== 'compute') return reply.code(400).send({ error: 'only a compute service has a source' })
+      return { source: { type: 'image', image: svc.image ?? null } }
+    } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : 'project not found' }) }
+  })
   // Not-yet surfaces (real local answers exist meanwhile):
   app.get('/projects/:id/deploy-events', async (_req, reply) => notYet(reply, 'the deploy-event feed', 'use `insta events` and `insta logs`'))
   // Aliasing one credential onto an env name of your choosing. The credentials themselves are
