@@ -142,10 +142,20 @@ test('INSTA_OSS_FORK=auto records the method the probe chose, and the clone is a
   // allowed to copy: a live postmaster keeps writing all the way through the walk.
   await sleepSource(src.container)
 
-  const out = await pg.fork(src, dst)
+  // The wake door the ENGINE hands to every fork (`engine.ts` passes `ensureSourceRunning`, a
+  // `wake` on the source's ServiceKey, because moving a container from inside the adapter would
+  // go behind the scheduler's back). The reflink path never opens it -- a source at rest is
+  // precisely what that path wants -- and the stream cannot read a stopped server without it.
+  // Handing it over is what makes this case honest on BOTH filesystems: where the data dir can
+  // clone, the sleeping directory is cloned and the door stays shut; where it cannot (an ext4
+  // runner), the parent is woken and streamed, exactly as a real `branch create` would.
+  let doors = 0
+  const out = await pg.fork(src, dst, { ensureSourceRunning: async () => { doors++; await wakeSource(src.container) } })
 
   // 1. the recorded method IS the mode's method on this box
   expect(out.method).toBe(expectedAuto)
+  // The door is the difference between the two paths, so it is asserted rather than just offered.
+  expect(doors).toBe(expectedAuto === 'reflink' ? 0 : 1)
   await wakeSource(src.container)
   expect(out.ms).toBeGreaterThanOrEqual(0)
   // A file-level fork inherits the source's password: only the host moves (decision 18).

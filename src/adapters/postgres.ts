@@ -215,6 +215,18 @@ export class LocalPostgres implements DatabaseAdapter {
   private async forkByBasebackup(src: PgTarget & { url: string }, dst: PgTarget, opts: ForkOpts): Promise<void> {
     await this.clearOrphan(dst, opts)
     await opts.ensureSourceRunning?.()
+    // A source at rest is the ORDINARY state of a branch's parent here, and this path is where a
+    // box without reflinks sends every fork, so the stream meets a stopped container constantly.
+    // The door is how it comes up: the engine hands one in (`wake`, decision 52), and starting the
+    // container from inside the adapter instead would move a container behind the scheduler's
+    // back. Without a door there is nothing to wait for, and `waitReady` on a stopped container
+    // reports `exited before it became ready`, which reads like a broken database rather than a
+    // caller that skipped the wake.
+    const status = await containerStatus(src.container, this.exec)
+    if (status === null || status === 'exited' || status === 'created' || status === 'dead') {
+      throw new Error(`pg_basebackup needs the source running: ${src.container} is ${status ?? 'gone'}`
+        + (opts.ensureSourceRunning ? ' after its wake door was opened' : ' and the caller passed no wake door'))
+    }
     await this.waitReady(src.container)
     await this.ensureHba(src.container)
     if (dst.dataDir) await this.data.ensureDir(dst.dataDir, 0o700)
