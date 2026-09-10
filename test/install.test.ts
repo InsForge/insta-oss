@@ -7,6 +7,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { X509Certificate } from 'node:crypto'
 import { CONFIG_KEYS } from '../src/config'
 
 const ROOT = join(__dirname, '..')
@@ -267,6 +268,7 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
   const wrong = join(dir, 'wrong.crt')
   const sampled = join(dir, 'sampled.crt')
   const future = join(dir, 'future.crt')
+  const noS3 = join(dir, 'no-s3.crt')
   const shouty = join(dir, 'shouty.crt')
   // Committed rather than minted: OpenSSL only grew `req -not_before/-not_after` in 3.5, and the
   // CI runner's 3.0 cannot mint an expired certificate at all. The fixture is the portable way
@@ -276,7 +278,7 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
   const mismatched = join(dir, 'mismatched.crt')
   const junk = join(dir, 'junk.crt')
   try {
-    openssl(`openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${key} -out ${wild} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:example.test' 2>/dev/null`)
+    openssl(`openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${key} -out ${wild} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:*.s3.example.test,DNS:example.test' 2>/dev/null`)
     openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${apex} -subj '/CN=example.test' -addext 'subjectAltName=DNS:example.test' 2>/dev/null`)
     openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${wrong} -subj '/CN=*.elsewhere.test' -addext 'subjectAltName=DNS:*.elsewhere.test' 2>/dev/null`)
     openssl(`openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${other} -out ${mismatched} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`)
@@ -284,10 +286,13 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
     // and nothing else. It passed, and then the first real service, on a hostname nobody had
     // enumerated, got a certificate that did not cover it.
     openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${sampled} -subj '/CN=api.example.test' -addext 'subjectAltName=DNS:api.example.test,DNS:console.example.test,DNS:web-example-main.example.test' 2>/dev/null`)
+    // One wildcard, which looks like the whole answer and is not: `*.example.test` matches ONE
+    // label, and buckets are addressed `<bucket>.s3.example.test`, which is two.
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${noS3} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:example.test' 2>/dev/null`)
     // A certificate whose SANs are capitalised. DNS names are case-insensitive (RFC 4343) and so
     // is TLS name matching, so this covers exactly the same hostnames and every client accepts
     // it; a case-sensitive comparison here refused a certificate that works.
-    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${shouty} -subj '/CN=*.Example.Test' -addext 'subjectAltName=DNS:*.Example.Test,DNS:Example.Test' 2>/dev/null`)
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${shouty} -subj '/CN=*.Example.Test' -addext 'subjectAltName=DNS:*.Example.Test,DNS:*.S3.Example.Test,DNS:Example.Test' 2>/dev/null`)
     writeFileSync(junk, 'this is not a certificate\n')
 
     const bad: Array<[string, string, string]> = [
@@ -299,6 +304,11 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
       [wrong, key, 'does not carry the SAN DNS:*.example.test'],
       // Sampling cannot establish "every hostname this box will ever deploy".
       [sampled, key, 'does not carry the SAN DNS:*.example.test'],
+      // ...and neither does one wildcard. `AWS_ENDPOINT_URL_S3=https://s3.<domain>` goes into
+      // every deployed app, the SDKs address buckets virtual-hosted by default, and under
+      // `custom` nothing is issued for those names, so a certificate without the second
+      // wildcard breaks storage for every app on the box while the install reports success.
+      [noS3, key, 'does not carry the SAN DNS:*.s3.example.test'],
     ]
     for (const [c, k, says] of bad) {
       // A --print-* run over files that EXIST checks them too, which is how this runs without
@@ -312,7 +322,7 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
     // had worked. Skipped where openssl cannot date a certificate forward (`req -not_before`
     // arrived in 3.5), rather than silently not testing it.
     const dated = spawnSync('sh', ['-c',
-      `openssl req -x509 -key ${key} -sha256 -not_before 20990101000000Z -not_after 20990201000000Z -out ${future} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>&1`,
+      `openssl req -x509 -key ${key} -sha256 -not_before 20990101000000Z -not_after 20990201000000Z -out ${future} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:*.s3.example.test' 2>&1`,
     ], { encoding: 'utf8' })
     if (dated.status === 0) {
       const r = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', future, '--tls-key', key], { INSTA_OSS_DOMAIN: 'example.test' })
@@ -321,13 +331,24 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
     } else {
       // The skip has to be able to tell "this openssl has no -not_before" (3.5 added it) from
       // "the command is broken". Sending stderr to /dev/null and then asserting it is defined
-      // could not: `stderr` was always the empty string, so it passed for a typo, a wrong path
-      // or any other failure and silently did not test the refusal at all, under a comment
-      // claiming the opposite. So the output has to say the flag is the problem, and anything
-      // else fails here.
+      // could not: it passed for a typo, a wrong flag or any other failure, and silently did not
+      // test the refusal at all, under a comment claiming the opposite. So the output has to say
+      // the flag is the problem, and anything else fails here.
       expect(dated.stdout + dated.stderr, `openssl failed for some reason OTHER than not supporting -not_before: ${dated.stdout}${dated.stderr}`)
         .toMatch(/not_before|Unrecognized flag|unknown option|unrecognized|Unknown option|invalid option/i)
     }
+
+    // WHY the second wildcard, checked the way a TLS client checks it rather than asserted. A
+    // wildcard matches exactly one label, so the certificate that carries only `*.example.test`
+    // covers every service hostname and NOT the bucket URLs this box hands to every deployed
+    // app. `AWS_ENDPOINT_URL_S3` is injected as `https://s3.<domain>` and the AWS SDKs address
+    // buckets virtual-hosted by default; under `custom` there is no on-demand issuance to cover
+    // them, by design, so the certificate is the only place this can be fixed.
+    const bucketHost = 'my-bucket.s3.example.test'
+    // `checkHost` answers with the SAN that matched, so the assertions name the entry.
+    expect(new X509Certificate(readFileSync(noS3)).checkHost(bucketHost)).toBeUndefined()
+    expect(new X509Certificate(readFileSync(noS3)).checkHost('web-shop-main.example.test')).toBe('*.example.test')
+    expect(new X509Certificate(readFileSync(wild)).checkHost(bucketHost)).toBe('*.s3.example.test')
 
     // The capitalised pair is accepted, for the same reason a browser would accept it.
     const caps = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', shouty, '--tls-key', key], { INSTA_OSS_DOMAIN: 'example.test' })
@@ -358,7 +379,7 @@ test('a symlinked certificate mounts the directory it RESOLVES to as well', () =
     // Real files behind the links: the validation above them is reachable now, and a placeholder
     // would fail as "not a PEM certificate" rather than testing the mount.
     const mint = spawnSync('sh', ['-c',
-      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${join(root, 'archive', 'example.test', 'privkey1.pem')} -out ${join(root, 'archive', 'example.test', 'fullchain1.pem')} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:example.test' 2>/dev/null`,
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${join(root, 'archive', 'example.test', 'privkey1.pem')} -out ${join(root, 'archive', 'example.test', 'fullchain1.pem')} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:*.s3.example.test,DNS:example.test' 2>/dev/null`,
     ], { encoding: 'utf8' })
     if (mint.status !== 0) throw new Error(`openssl failed: ${mint.stderr}`)
     symlinkSync('../../archive/example.test/fullchain1.pem', join(root, 'live', 'example.test', 'fullchain.pem'))

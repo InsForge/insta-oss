@@ -163,7 +163,7 @@ Postgres containers against empty directories.
 | `--version <vX.Y.Z>` | `INSTA_OSS_VERSION` | pin the image; omit for the newest release |
 | | `INSTA_OSS_IMAGE` | the daemon image, `name` or `name:tag`; a tag here is the version. Use it to run an image you built yourself |
 | `--tls acme\|internal\|custom` | `INSTA_OSS_TLS` | public certificates, an internal issuer for a private box, or one wildcard you supply. See [TLS and what your domain costs you](#tls-and-what-your-domain-costs-you) |
-| `--tls-cert <path>` | `INSTA_OSS_TLS_CERT_FILE` | with `--tls custom`: the certificate to serve, which must carry `*.<domain>` |
+| `--tls-cert <path>` | `INSTA_OSS_TLS_CERT_FILE` | with `--tls custom`: the certificate to serve, which must carry `*.<domain>` and `*.s3.<domain>` |
 | `--tls-key <path>` | `INSTA_OSS_TLS_KEY_FILE` | with `--tls custom`: its private key. Both are required together |
 | `--data-img-gib <n>` | `INSTA_OSS_DATA_IMG_GIB` | size of the loop image when one is created |
 | `--data-dir <path>` | `INSTA_OSS_DATA_DIR` | required to change the data directory of an existing install |
@@ -266,7 +266,7 @@ Three modes, and the choice decides whether scale-to-zero holds for public compu
 |---|---|---|
 | `acme` (default) | a certificate per hostname, issued on demand by Let's Encrypt | every hostname you deploy, to the public certificate transparency logs |
 | `internal` | a certificate per hostname from Caddy's own CA | nothing, but no browser trusts it without installing the root |
-| `custom` | one certificate you supply, for `*.<domain>` | nothing |
+| `custom` | one certificate you supply, for `*.<domain>` and `*.s3.<domain>` | nothing |
 
 ### The cost of the auto sslip.io domain
 
@@ -298,19 +298,34 @@ sh install.sh --domain example.com --tls custom \
   --tls-key  /etc/instacloud/tls/wildcard.key
 ```
 
-The certificate must carry `*.<domain>` as a SAN, and the installer checks that before it starts
-anything: the PEM has to parse, the key has to match the certificate, it must be inside BOTH its
-validity dates, it must carry the wildcard (sampling a few names cannot promise the arbitrary
-future hostnames this mode exists to serve), and it must cover `api.<domain>` and
-`console.<domain>`. A pair that cannot serve fails
-the install rather than leaving the edge crash-looping behind a success message. The
-post-install probe is part of that: the edge has to answer with **that** certificate before this
-prints anything reassuring.
+The certificate must carry **two** SANs, `*.<domain>` and `*.s3.<domain>`, because a wildcard
+matches exactly one label and this box serves two depths. Every service name is one label
+(`api.<domain>`, `console.<domain>`, `web-<ref>.<domain>`, `pg-db-<ref>.<domain>`,
+`s3.<domain>`), and every bucket is two: `<bucket>.s3.<domain>`, which is how the AWS SDKs
+address a bucket by default and what `AWS_ENDPOINT_URL_S3` resolves to inside every deployed
+app. In the other two modes those names get a certificate of their own on demand. This mode
+issues nothing, deliberately, so one certificate has to cover them. Ask your CA for both on the
+same certificate:
+
+```
+subjectAltName = DNS:*.example.com, DNS:*.s3.example.com, DNS:example.com
+```
+
+The installer checks all of it before it starts anything: the PEM has to parse, the key has to
+match the certificate, it must be inside BOTH its validity dates, it must carry both wildcards
+(sampling a few names cannot promise the arbitrary future hostnames this mode exists to serve),
+and it must cover `api.<domain>` and `console.<domain>`. A pair that cannot serve fails the
+install rather than leaving the edge crash-looping behind a success message. The post-install
+probe is part of that: the edge has to answer with **that** certificate before this prints
+anything reassuring.
 
 The **directory** holding the pair is mounted read-only into the edge and the daemon (the same
 path on both sides), not the two files, and the daemon presents the same certificate on the
 database lanes, so nothing anywhere asks for a per-hostname certificate. Keep the pair in a
-directory of its own: everything beside it is visible to both containers.
+directory of its own, such as `/etc/instacloud/tls`: everything beside it is visible to both
+containers. The installer refuses a directory that would collide with the stack's own mounts,
+which means the data directory, anything inside it, any directory that contains it, and the
+system directories the images own.
 
 What you take on:
 

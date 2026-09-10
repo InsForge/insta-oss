@@ -73,10 +73,11 @@ or a branch needs no certificate step. Under `acme` that also publishes the host
 certificate transparency logs, which is what keeps a public compute service awake; see [TLS and
 what your domain costs you](/self-hosting/install#tls-and-what-your-domain-costs-you).
 
-`INSTA_OSS_TLS=custom` serves one certificate you supply for `*.<domain>`, for every name under
-it, and issues nothing at all. No hostname is published, no order is placed, and renewal is yours:
-the install page has the procedure and what the daemon does to make an approaching expiry hard to
-miss.
+`INSTA_OSS_TLS=custom` serves one certificate you supply, for every name under your domain, and
+issues nothing at all. It has to carry two SANs, `*.<domain>` and `*.s3.<domain>`, because a
+wildcard matches exactly one label and bucket URLs are `<bucket>.s3.<domain>`. No hostname is
+published, no order is placed, and renewal is yours: the install page has the procedure and what
+the daemon does to make an approaching expiry hard to miss.
 
 Under `internal` the installer copies the root certificate to `/var/lib/instacloud/edge/ca.pem`,
 and clients need to trust it. The same applies under `custom` when your certificate comes from a
@@ -202,7 +203,10 @@ is a normal local Postgres.
 
 `AWS_ENDPOINT_URL_S3` is `https://s3.<domain>`. Both request styles work against it: path-style
 (`https://s3.example.com/<bucket>/<key>`) and virtual-hosted
-(`https://<bucket>.s3.example.com/<key>`), which is what most SDKs send by default. A bucket that
+(`https://<bucket>.s3.example.com/<key>`), which is what most SDKs send by default. That second
+form is two labels under your domain, so under `INSTA_OSS_TLS=custom` the certificate you supply
+has to carry `*.s3.<domain>` as well as `*.<domain>`; the installer requires both. Under `acme`
+and `internal` the bucket name gets its own certificate on demand like any other host. A bucket that
 you have made public serves anonymous GET and HEAD requests from the same host, while signed and
 non-GET requests go to the S3 API.
 

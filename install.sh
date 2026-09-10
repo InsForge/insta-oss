@@ -22,7 +22,9 @@
 #   --tls acme|internal|custom       INSTA_OSS_TLS                  acme (internal = Caddy's own CA,
 #                                    custom = serve a certificate you supply, see --tls-cert)
 #   --tls-cert <path>                INSTA_OSS_TLS_CERT_FILE        with --tls custom: a certificate
-#   --tls-key <path>                 INSTA_OSS_TLS_KEY_FILE         covering *.<domain>, and its key.
+#   --tls-key <path>                 INSTA_OSS_TLS_KEY_FILE         covering *.<domain> AND
+#                                    *.s3.<domain> (buckets are addressed
+#                                    <bucket>.s3.<domain>), and its key.
 #                                    Nothing is ever issued in this mode, so no service hostname
 #                                    reaches a certificate transparency log and a public compute
 #                                    service can actually sleep.
@@ -231,7 +233,7 @@ TLS_CERT=$(resolve INSTA_OSS_TLS_CERT_FILE "$F_TLS_CERT" '')
 TLS_KEY=$(resolve INSTA_OSS_TLS_KEY_FILE "$F_TLS_KEY" '')
 if [ "$TLS" = custom ]; then
   { [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ]; } ||
-    die "--tls custom needs both --tls-cert <path> and --tls-key <path> (or INSTA_OSS_TLS_CERT_FILE and INSTA_OSS_TLS_KEY_FILE): the certificate has to cover *.<your domain>, since it is served for every name under it"
+    die "--tls custom needs both --tls-cert <path> and --tls-key <path> (or INSTA_OSS_TLS_CERT_FILE and INSTA_OSS_TLS_KEY_FILE): the certificate has to carry *.<your domain> AND *.s3.<your domain>, since it is served for every name under them and nothing is issued"
   for _f in "$TLS_CERT" "$TLS_KEY"; do
     case $_f in /?*) ;; *) die "--tls-cert and --tls-key must be absolute paths (got '$_f')" ;; esac
     shaped "$_f" '^/[A-Za-z0-9._/-]*$' ||
@@ -435,14 +437,26 @@ if [ "$TLS" = custom ]; then
     _sans=$(openssl x509 -in "$TLS_CERT" -noout -ext subjectAltName 2>/dev/null | tr -d ' ' | tr '\n' ',')
     [ -n "$_sans" ] || _sans=$(openssl x509 -in "$TLS_CERT" -noout -text 2>/dev/null |
       grep -A1 'Subject Alternative Name' | tr -d ' ' | tr '\n' ',')
+    # TWO wildcards, because this box serves two label depths under $DOMAIN and a wildcard
+    # matches exactly ONE label. Every service name is a single label -- `web-<ref>.$DOMAIN`,
+    # `pg-db-<ref>.$DOMAIN`, `s3.$DOMAIN`, `api` and `console` -- and `*.$DOMAIN` covers all of
+    # them. Buckets are not: the object store is addressed virtual-hosted as
+    # `<bucket>.s3.$DOMAIN`, which `*.$DOMAIN` does NOT match, and `AWS_ENDPOINT_URL_S3` is
+    # injected into every deployed app while the AWS SDKs send virtual-hosted by default. Under
+    # acme those names get their own certificate on demand; here nothing is issued, by design,
+    # so a certificate without `*.s3.$DOMAIN` means storage fails hostname verification for
+    # every app on the box, with this script reporting success.
+    #
     # grep -F, not a `case` glob: the `*` in `DNS:*.` is a wildcard to `case` and would match any
     # single-label SAN, which is the opposite of the check. And -i, because DNS names are
     # case-insensitive (RFC 4343) and TLS name matching is: a certificate carrying
     # `DNS:*.Example.Com` covers exactly the same names as one carrying `DNS:*.example.com`, and
     # every client would accept it. $DOMAIN is already lower-cased by the shape check above, so
     # the case that varies is the one inside the certificate, which this install does not own.
-    printf '%s' ",$_sans," | grep -qiF ",DNS:*.$DOMAIN," ||
-      die "'$TLS_CERT' does not carry the SAN DNS:*.$DOMAIN: --tls custom serves this one certificate for every hostname this box will ever deploy, so a wildcard is what it needs (it has: $(printf '%s' "$_sans" | sed 's/,$//'))"
+    for _w in "*.$DOMAIN" "*.s3.$DOMAIN"; do
+      printf '%s' ",$_sans," | grep -qiF ",DNS:$_w," ||
+        die "'$TLS_CERT' does not carry the SAN DNS:$_w. --tls custom issues nothing, so this one certificate has to cover every name this box serves, and that is TWO wildcards: DNS:*.$DOMAIN for the api, console, compute and database hostnames, and DNS:*.s3.$DOMAIN for the bucket URLs your apps are handed (a wildcard matches one label, so *.$DOMAIN does not cover <bucket>.s3.$DOMAIN). Ask for both on the same certificate (it has: $(printf '%s' "$_sans" | sed 's/,$//'))"
+    done
     # ...and the two names an operator is handed. A wildcard covers both; this names which one is
     # missing when it does not. The OUTPUT, not the exit status: `x509 -checkhost` prints "does
     # match" or "does NOT match" in every version that has the flag, and returns 1 for a miss
@@ -1234,7 +1248,7 @@ if [ "$TLS" = custom ]; then
   else
     warn "the edge is serving your certificate, but neither the certificate itself nor this box's trust store verifies it for api.$DOMAIN: fine if it is issued by a private CA your clients trust, and a browser error if it is not"
   fi
-  log "serving the supplied certificate $TLS_CERT for *.$DOMAIN (nothing is issued, so no hostname is published)"
+  log "serving the supplied certificate $TLS_CERT for *.$DOMAIN and *.s3.$DOMAIN (nothing is issued, so no hostname is published)"
 else
 # The internal issuer is local and answers in seconds; ACME does not, and four minutes covers a
 # first issuance plus one retry. Past that the edge keeps trying on its own, so this is a warning.

@@ -208,9 +208,10 @@ sleeping either way, because their lanes are not discoverable from a transparenc
 The fix is the certificate, not the timer, and it is the same thing the managed cloud does: serve
 ONE wildcard certificate for `*.<domain>` so that deploying a service publishes nothing.
 
-- **Supply a wildcard.** `--tls custom` with a certificate for `*.<domain>` issues nothing per
-  hostname, so no name is published, nothing arrives to find it, and the idle timer runs to the
-  end. See [TLS and what your domain costs you](/self-hosting/install#tls-and-what-your-domain-costs-you),
+- **Supply a wildcard.** `--tls custom` with a certificate for `*.<domain>` and `*.s3.<domain>`
+  (buckets are addressed `<bucket>.s3.<domain>`, and a wildcard covers one label) issues nothing
+  per hostname, so no name is published, nothing arrives to find it, and the idle timer runs to
+  the end. See [TLS and what your domain costs you](/self-hosting/install#tls-and-what-your-domain-costs-you),
   which also covers what you take on: renewal is yours.
 - **Or keep the box off public certificates.** `--tls internal` uses Caddy's own CA, which
   publishes nothing; no browser trusts it without installing the root, which is fine for a box

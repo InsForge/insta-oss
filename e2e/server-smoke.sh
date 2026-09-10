@@ -363,9 +363,14 @@ E2E_TLS_DIR=/etc/instacloud/e2e-tls
 CADDYFILE=/etc/instacloud/Caddyfile
 CERT_STORE=/var/lib/instacloud/caddy/data/caddy/certificates
 mkdir -p "$E2E_TLS_DIR"
+# TWO wildcards. A wildcard matches exactly one label, and this box serves two depths: every
+# service name is `<label>.$DOMAIN`, and every bucket is `<bucket>.s3.$DOMAIN`, which
+# `*.$DOMAIN` does NOT match. `AWS_ENDPOINT_URL_S3=https://s3.$DOMAIN` is injected into every
+# deployed app and the SDKs address buckets virtual-hosted by default, so a single-wildcard
+# certificate breaks storage for every app on the box in a mode that issues nothing.
 openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
   -keyout "$E2E_TLS_DIR/wild.key" -out "$E2E_TLS_DIR/wild.crt" \
-  -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
+  -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:*.s3.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
   || FAIL "could not mint a wildcard certificate for *.$DOMAIN"
 chmod 600 "$E2E_TLS_DIR/wild.key"
 OURS=$(openssl x509 -in "$E2E_TLS_DIR/wild.crt" -noout -serial | cut -d= -f2)
@@ -396,6 +401,21 @@ healthz_matches_file() {
   [ "$_want" = "$_got" ]
 }
 
+# ...and one wildcard is refused BEFORE anything is touched, naming the SAN that is missing.
+# This is the shape that reached a live box: a certificate that looks complete, covers every
+# service hostname, and silently does not cover the bucket URLs the apps are given.
+openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
+  -keyout "$E2E_TLS_DIR/one.key" -out "$E2E_TLS_DIR/one.crt" \
+  -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
+  || FAIL "could not mint the single-wildcard certificate"
+ONE_OUT=$( ( cd "$ROOT" && INSTA_OSS_TLS=custom sh install.sh -y \
+    --tls-cert "$E2E_TLS_DIR/one.crt" --tls-key "$E2E_TLS_DIR/one.key" ) 2>&1 ) && \
+  FAIL "a certificate without DNS:*.s3.$DOMAIN was accepted: bucket URLs would fail hostname verification for every app"
+printf '%s\n' "$ONE_OUT" | grep -q "does not carry the SAN DNS:\*.s3.$DOMAIN" \
+  || FAIL "the refusal did not name the missing SAN: $ONE_OUT"
+rm -f "$E2E_TLS_DIR/one.crt" "$E2E_TLS_DIR/one.key"
+OK "a single-wildcard certificate is refused, naming DNS:*.s3.$DOMAIN"
+
 ( cd "$ROOT" && INSTA_OSS_TLS=custom sh install.sh -y \
     --tls-cert "$E2E_TLS_DIR/wild.crt" --tls-key "$E2E_TLS_DIR/wild.key" ) 2>&1 | tee -a "$INSTALL_LOG"
 grep -q "tls $E2E_TLS_DIR/wild.crt $E2E_TLS_DIR/wild.key" "$CADDYFILE" \
@@ -423,6 +443,18 @@ if docker logs io-edge 2>&1 | tail -200 | grep -q "certificate obtained successf
 fi
 OK "a never-seen hostname is served without issuing anything"
 
+# The BUCKET vhost, which is the name a single wildcard does not cover. Two labels in front of
+# the domain, addressed by every AWS SDK by default, and the reason this mode needs the second
+# wildcard. Verified, not just served: `--cacert` with the certificate itself makes curl check
+# the HOSTNAME, which is exactly what `-k` throws away and what was failing.
+BUCKET=$(printf '%s\n' "$SECRETS" | sed -n 's/^BUCKET_NAME="\(.*\)"$/\1/p')
+[ -n "$BUCKET" ] || FAIL "no BUCKET_NAME in the printed secrets"
+VHOST=$BUCKET.s3.$DOMAIN
+[ "$(served_serial "$VHOST")" = "$OURS" ] || FAIL "$VHOST is not served the supplied certificate"
+curl -sS -o /dev/null --cacert "$E2E_TLS_DIR/wild.crt" --resolve "$VHOST:443:127.0.0.1" "https://$VHOST/" \
+  || FAIL "$VHOST does not VERIFY against the supplied certificate: a bucket URL fails hostname verification"
+OK "the bucket vhost $VHOST verifies against the supplied certificate"
+
 # The database lane presents a certificate too, and it is the other door issuance would publish a
 # hostname through: the daemon triggers issuance by handshaking the edge with the wanted
 # servername, so a wildcard at the edge alone would not have closed this.
@@ -449,7 +481,7 @@ fi
 # certificate. With the DIRECTORY mounted, the name is resolved through the mount on every open.
 openssl req -x509 -newkey rsa:2048 -sha256 -days 3 -nodes \
   -keyout "$E2E_TLS_DIR/next.key" -out "$E2E_TLS_DIR/next.crt" \
-  -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
+  -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:*.s3.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
   || FAIL "could not mint the renewal certificate"
 NEXT=$(openssl x509 -in "$E2E_TLS_DIR/next.crt" -noout -serial | cut -d= -f2)
 # What `healthz` says BEFORE the rename, so the assertion after it is that the number MOVED. A
