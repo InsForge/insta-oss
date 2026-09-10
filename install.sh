@@ -24,7 +24,8 @@
 #   --data-dir <path>                INSTA_OSS_DATA_DIR             /var/lib/instacloud (the flag is
 #                                    required to CHANGE the data dir of an existing install)
 #   --print-env | --print-compose | --print-caddyfile | --print-daemon-json | --print-firewall
-#                                    render one file to stdout and exit: no root, no side effects
+#   --print-ssh-advice               render one file (or the ssh advisory) to stdout and exit:
+#                                    no root, no side effects
 #   -y                               accepted; the script never prompts
 # Every other INSTA_OSS_* variable present in the environment is written into instad.env as is.
 # Precedence for every value: flag, then environment, then the existing instad.env, then default.
@@ -100,7 +101,7 @@ while [ $# -gt 0 ]; do
     --data-img-gib=*) F_IMG_GIB=${1#*=}; shift ;;
     --data-dir) need "$@"; F_DATA_DIR=$2; shift 2 ;;
     --data-dir=*) F_DATA_DIR=${1#*=}; shift ;;
-    --print-env|--print-compose|--print-caddyfile|--print-daemon-json|--print-firewall) PRINT=${1#--print-}; shift ;;
+    --print-env|--print-compose|--print-caddyfile|--print-daemon-json|--print-firewall|--print-ssh-advice) PRINT=${1#--print-}; shift ;;
     -y|--yes) shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown flag $1 (run with --help)" ;;
@@ -439,37 +440,28 @@ ssh_ports() {
   [ -n "$_sp" ] || _sp=$(ss -tlnp 2>/dev/null | awk '/sshd/{n=split($4,a,":"); print a[n]}')
   printf '%s\n' "$_sp" | grep -E '^[0-9]+$' | sort -un
 }
-# ...and what to act on when nothing could be established: the distro default, which is right far
-# more often than not, and which the rules below still gate on ufw's existing policy.
-ssh_ports_or_default() {
-  _spd=$(ssh_ports)
-  [ -n "$_spd" ] || _spd=22
-  printf '%s\n' "$_spd"
+# The advisory the no-firewall arm prints: one allow per port sshd is ACTUALLY on, before the
+# enable, because an `ufw enable` that names the wrong port is the same lockout as one that names
+# none. Every detected port, not the first: a box can listen on several and dropping the one the
+# operator uses is the whole failure. Nothing detected means nothing is assumed, so it names the
+# app profile and spells out the substitution.
+ssh_advice() {
+  _adv=$(ssh_ports)
+  if [ -n "$_adv" ]; then
+    for _a in $_adv; do
+      printf '    ufw allow %s/tcp          # sshd is listening on %s: allow it BEFORE the enable\n' "$_a" "$_a"
+    done
+  else
+    printf '    ufw allow OpenSSH           # or your own SSH port: allow it BEFORE the enable\n'
+  fi
+  printf '    ufw allow 80,443,5432/tcp   # the edge and the postgres lane\n'
+  printf '    ufw enable\n'
 }
-# Does ufw ALREADY permit this port? Adding a rule when one exists can WIDEN a policy an operator
-# deliberately limited to trusted CIDRs, so a rule is only ever added where there is none. The
-# OpenSSH app profile counts for the default port. IO_UFW_STATUS is a test hook.
-ufw_permits() {
-  _st=${IO_UFW_STATUS-$(ufw status 2>/dev/null || true)}
-  if [ "$1" = 22 ] && printf '%s\n' "$_st" | grep -qi 'openssh'; then return 0; fi
-  printf '%s\n' "$_st" | grep -qE "(^|[^0-9.])$1(/tcp)?([^0-9]|$)"
-}
+# The rules for the services THIS script installs, and nothing else. There is deliberately no SSH
+# rule here: SSH policy belongs to the operator, and an installer that edits it either skips a
+# rule the box needed or widens one the operator narrowed on purpose. The advisory above tells
+# them what to allow; this only opens what insta-oss itself needs.
 fw_ufw() {
-  # SSH FIRST, always. Ubuntu's /etc/default/ufw ships DEFAULT_INPUT_POLICY="DROP", so a rule set
-  # that does not name the SSH port locks the operator out the moment ufw is enabled. It does not
-  # look like it at the time: ufw accepts RELATED,ESTABLISHED, so the session that ran this
-  # survives and the lockout appears on the next reconnect or the next reboot. These rules are
-  # only applied to an ALREADY ACTIVE ufw, so this is normally a no-op; it is here so a re-run
-  # heals a box whose ufw was enabled without one.
-  for _s in $(ssh_ports_or_default); do
-    if ufw_permits "$_s"; then
-      log "# ufw already permits ssh on $_s: leaving that rule alone (never widen it)"
-    elif [ "$_s" = 22 ]; then
-      log 'ufw allow OpenSSH'
-    else
-      log "ufw allow $_s/tcp"
-    fi
-  done
   for _b in $POOL_BASES; do
     log "ufw allow from $_b to any port 443,5432,6379,27017 proto tcp"
     log "ufw allow from $_b to any port 20000:20999 proto tcp"
@@ -497,6 +489,7 @@ case $PRINT in
   caddyfile) render_caddyfile; exit 0 ;;
   daemon-json) render_daemon_json; exit 0 ;;
   firewall) render_firewall; exit 0 ;;
+  ssh-advice) ssh_advice; exit 0 ;;
 esac
 
 # ---- 2. install or upgrade ----
@@ -674,15 +667,10 @@ else
   # security group instead, and refusing would break every one of those installs.
   warn "no active ufw or firewalld found, so nothing here restricts the database lanes"
   warn "  the redis (6379) and mongodb (27017) lanes listen on all interfaces and are NOT meant to be public"
-  warn "  restrict them at your cloud security group, or enable ufw yourself:"
-  _sshadvice=$(ssh_ports | head -1)
-  if [ -n "$_sshadvice" ]; then
-    warn "    ufw allow $_sshadvice/tcp          # sshd is listening on $_sshadvice: allow it FIRST or ufw locks you out"
-  else
-    warn "    ufw allow OpenSSH           # or your own SSH port: allow it FIRST or ufw locks you out"
-  fi
-  warn "    ufw allow 80,443,5432/tcp   # the edge and the postgres lane"
-  warn "    ufw enable"
+  warn "  restrict them at your cloud security group, or enable ufw yourself. Your SSH access is"
+  warn "  yours to preserve: this script adds no SSH rule, and ufw defaults to DROP, so allow"
+  warn "  every port sshd listens on BEFORE you enable it:"
+  ssh_advice | while read -r _l; do warn "$_l"; done
   warn "  then re-run the installer the same way you installed it, so it adds the container rules"
   warn "  for the database lanes (they are what lets your apps reach them)"
 fi

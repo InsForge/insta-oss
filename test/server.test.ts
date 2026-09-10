@@ -2377,21 +2377,26 @@ test('a project delete that overlaps a branch create still takes the clone with 
   // It queues: on the source branch's keys before, on the project key now.
   expect(done).toBe(false)
 
-  paused.release()
-  expect((await create).statusCode).toBe(201)
-  expect(await del).toMatchObject({ failed: 0 })
-  paused.restore()
+  try {
+    paused.release()
+    expect((await within(10_000, create, 'the branch create')).statusCode).toBe(201)
+    expect(await within(10_000, del, 'the project delete')).toMatchObject({ failed: 0 })
 
-  // Nothing of either branch survives, and the clone's resources were DESTROYED rather than
-  // abandoned: without a key covering the whole project, the delete ran on its stale list and
-  // left feat's container, bucket, network and bytes behind under a row whose project was gone.
-  const st = loadState()
-  expect(Object.values(st.branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual([])
-  expect(st.projects[id]).toBeUndefined()
-  expect(calls).toContain('db.destroy:io-demo-feat-pg-db')
-  expect(calls).toContain('st.destroy:io-demo-feat-store')
-  expect(calls).toContain('compute.destroy:demo-feat')
-  expect(calls.some((c) => c.startsWith('data.remove:') && c.includes('demo-feat'))).toBe(true)
+    // Nothing of either branch survives, and the clone's resources were DESTROYED rather than
+    // abandoned: without a key covering the whole project, the delete ran on its stale list and
+    // left feat's container, bucket, network and bytes behind under a row whose project was gone.
+    const st = loadState()
+    expect(Object.values(st.branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual([])
+    expect(st.projects[id]).toBeUndefined()
+    expect(calls).toContain('db.destroy:io-demo-feat-pg-db')
+    expect(calls).toContain('st.destroy:io-demo-feat-store')
+    expect(calls).toContain('compute.destroy:demo-feat')
+    expect(calls.some((c) => c.startsWith('data.remove:') && c.includes('demo-feat'))).toBe(true)
+  } finally {
+    // A gate released only after the assertions is a gate a failure leaves shut.
+    paused.release()
+    paused.restore()
+  }
 })
 
 test('a project delete that overlaps the CREATE OF THE PROJECT takes its default branch with it', async () => {
@@ -2781,6 +2786,8 @@ test('a project delete holds the keys of a branch that committed while it queued
   expect(deleted).toBe(false)
 
   // Pause the delete INSIDE feat's teardown, so the deploy below lands while it is running.
+  // Both gates are released in a `finally`: these tests exist to detect a wedge, so the case
+  // they are written for is the one that never reaches a cleanup line after the assertions.
   let enterTeardown!: () => void
   let goTeardown!: () => void
   const inTeardown = new Promise<void>((r) => { enterTeardown = r })
@@ -2791,27 +2798,32 @@ test('a project delete holds the keys of a branch that committed while it queued
     return realStDestroy(bucket, network)
   })
 
-  paused.release()
-  expect((await within(10_000, create, 'the branch create')).statusCode).toBe(201)
-  await within(10_000, inTeardown, 'the teardown of feat')
+  try {
+    paused.release()
+    expect((await within(10_000, create, 'the branch create')).statusCode).toBe(201)
+    await within(10_000, inTeardown, 'the teardown of feat')
 
-  let deployed = false
-  const deploy = post(`/projects/${id}/deploy`, { image: 'app:2', port: 3000, group: 'web', branch: 'feat' })
-    .then((r) => { deployed = true; return r })
-  await settle()
-  // Without the re-drive this deploy runs INSIDE the teardown, on a branch being demolished.
-  expect(deployed).toBe(false)
+    let deployed = false
+    const deploy = post(`/projects/${id}/deploy`, { image: 'app:2', port: 3000, group: 'web', branch: 'feat' })
+      .then((r) => { deployed = true; return r })
+    await settle()
+    // Without the re-drive this deploy runs INSIDE the teardown, on a branch being demolished.
+    expect(deployed).toBe(false)
 
-  goTeardown()
-  await within(10_000, del, 'the project delete')
-  const answer = await within(10_000, deploy, 'the deploy')
-  paused.restore()
-  stDestroy.mockRestore()
+    goTeardown()
+    await within(10_000, del, 'the project delete')
+    const answer = await within(10_000, deploy, 'the deploy')
 
-  // It ran after the teardown, found nothing, and built nothing.
-  expect(answer.statusCode).toBeGreaterThanOrEqual(400)
-  expect(calls.filter((c) => c.startsWith('deploy:demo-feat:web:app:2'))).toEqual([])
-  expect(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual([])
+    // It ran after the teardown, found nothing, and built nothing.
+    expect(answer.statusCode).toBeGreaterThanOrEqual(400)
+    expect(calls.filter((c) => c.startsWith('deploy:demo-feat:web:app:2'))).toEqual([])
+    expect(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual([])
+  } finally {
+    goTeardown()
+    paused.release()
+    paused.restore()
+    stDestroy.mockRestore()
+  }
 })
 
 test('a create that fails post-commit emits no branch.created event', async () => {

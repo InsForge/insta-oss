@@ -151,10 +151,11 @@ ufw enable
 Allow SSH before you enable it, every time, and allow the port sshd is ACTUALLY on: `sshd -T |
 grep '^port '` tells you, and a box with SSH moved to 2222 is locked out by an `enable` that only
 names 22. An enable without the right port looks fine from the session that ran it, because
-established connections survive, and locks you out on the next reconnect. The installer prints
-this same recipe with your detected port filled in, and when it adds firewall rules itself it
-skips the SSH rule entirely if your policy already covers that port, so a rule you limited to a
-trusted CIDR is never widened. The
+established connections survive, and locks you out on the next reconnect.
+
+The installer never touches SSH rules, in either direction: your access is yours to preserve. It
+prints this recipe with your detected ports filled in when it finds no active firewall, and the
+rules it adds itself are only for the ports insta-oss serves. The
 tighter option, and the one to ask for if you want it, is binding the redis and mongodb lanes to
 the docker bridge instead of `0.0.0.0`; today `INSTA_OSS_LANE_BIND` moves all the lanes together,
 Postgres included, so it is not a per-lane switch yet.
