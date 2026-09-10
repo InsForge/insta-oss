@@ -188,7 +188,8 @@ The dashboard shows the same thing as **Sleeping**, with a Wake button.
 
 On a box with a public domain this is the first thing that looks like a bug, and it is not one.
 
-The edge issues a certificate the first time somebody asks for a hostname over HTTPS. Every
+Unless you supplied a wildcard (`--tls custom`, in the fixes below), the edge issues a
+certificate the first time somebody asks for a hostname over HTTPS. Every
 certificate a public authority issues is published to the certificate transparency logs, and those
 logs are read continuously by scanners. Within minutes of that first request, more requests start
 arriving from hosts nobody invited. They are ordinary HTTP requests, so they count as activity, so

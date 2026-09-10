@@ -118,11 +118,15 @@ script. The build needs about 1 GiB of free memory and a minute on a 2 vCPU box.
 11. Pulls and starts the stack: `docker compose --env-file instad.env up -d --remove-orphans`.
 12. Waits on `http://127.0.0.1:8080/healthz` for up to 60 seconds. On timeout it prints the tail of
     `docker compose logs instad` and exits 1.
-13. Asks the edge for the certificate for `api.<domain>` over loopback and waits until the file
-    appears in the store, up to 4 minutes with a public CA and 60 seconds with the internal issuer.
-    A certificate that has not landed by then is a warning, not a failure: the edge keeps retrying
-    on its own, and the database lanes start presenting it the moment it lands. With
-    `INSTA_OSS_TLS=internal` the root CA is then copied to `/var/lib/instacloud/edge/ca.pem`.
+13. Checks the certificate, in the way that mode calls for. Under `acme` and `internal` it asks
+    the edge for `api.<domain>` over loopback and waits until the file appears in the store, up to
+    4 minutes with a public CA and 60 seconds with the internal issuer. A certificate that has not
+    landed by then is a warning, not a failure: the edge keeps retrying on its own, and the
+    database lanes start presenting it the moment it lands. With `INSTA_OSS_TLS=internal` the root
+    CA is then copied to `/var/lib/instacloud/edge/ca.pem`. Under `custom` there is nothing to wait
+    for, so it probes instead: the edge has to answer `api.<domain>` with the serial of the
+    certificate you supplied, and a pair the edge cannot load fails the install rather than
+    leaving it crash-looping behind a success message.
 
 Then it prints two lines you need:
 
@@ -139,7 +143,7 @@ Open the setup URL to create the admin account. See [set up access](/self-hostin
 | --- | --- |
 | `/etc/instacloud/instad.env` | every `INSTA_OSS_*` setting, mode 600 |
 | `/etc/instacloud/compose.yml` | the three services `io-instad`, `io-edge`, `io-garage` |
-| `/etc/instacloud/Caddyfile` | the edge configuration, including on-demand TLS |
+| `/etc/instacloud/Caddyfile` | the edge configuration: on-demand TLS under `acme` and `internal`, and under `custom` the supplied pair with no on-demand machinery at all |
 | `/etc/instacloud/.env` | a symlink to `instad.env`, so a plain `docker compose` in that directory interpolates the same values |
 | `/var/lib/instacloud` | all data: `state.json`, `pg/`, `vol/`, `md/`, `garage/`, `caddy/`, `edge/ca.pem` |
 | `/var/lib/instacloud.img` | the XFS loop image, only when one was needed |
@@ -155,10 +159,12 @@ Postgres containers against empty directories.
 | Flag | Env | What |
 | --- | --- | --- |
 | `--domain <host>` | `INSTA_OSS_DOMAIN` | your own apex, instead of the automatic sslip.io name |
-| `--email <addr>` | `INSTA_OSS_ACME_EMAIL` | the ACME account address |
+| `--email <addr>` | `INSTA_OSS_ACME_EMAIL` | the ACME account address (`--tls acme` only; nothing is ordered in the other two modes) |
 | `--version <vX.Y.Z>` | `INSTA_OSS_VERSION` | pin the image; omit for the newest release |
 | | `INSTA_OSS_IMAGE` | the daemon image, `name` or `name:tag`; a tag here is the version. Use it to run an image you built yourself |
-| `--tls acme\|internal` | `INSTA_OSS_TLS` | public certificates, or an internal issuer for a private box |
+| `--tls acme\|internal\|custom` | `INSTA_OSS_TLS` | public certificates, an internal issuer for a private box, or one wildcard you supply. See [TLS and what your domain costs you](#tls-and-what-your-domain-costs-you) |
+| `--tls-cert <path>` | `INSTA_OSS_TLS_CERT_FILE` | with `--tls custom`: the certificate to serve, which must carry `*.<domain>` |
+| `--tls-key <path>` | `INSTA_OSS_TLS_KEY_FILE` | with `--tls custom`: its private key. Both are required together |
 | `--data-img-gib <n>` | `INSTA_OSS_DATA_IMG_GIB` | size of the loop image when one is created |
 | `--data-dir <path>` | `INSTA_OSS_DATA_DIR` | required to change the data directory of an existing install |
 | `--print-firewall` | | print the firewall rules and exit |

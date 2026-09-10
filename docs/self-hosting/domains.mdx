@@ -56,20 +56,32 @@ insta compute remove-domain shop.example.com
 
 `set-domain` prints the DNS record to create: a `CNAME` to `api.<domain>`, or an A record to the
 address of the box. `check-domain` reports the record and whether the host is being served, and is
-the command to poll until it prints that it is serving `https://shop.example.com`. The certificate
-is issued on the first request that arrives with that name.
+the command to poll until it prints that it is serving `https://shop.example.com`. Under `acme`
+and `internal` the certificate is issued on the first request that arrives with that name. Under
+`custom` nothing is issued: a name inside your wildcard is served straight away, and one outside
+it routes but reads `pending`, since no certificate will appear for it.
 
 ## TLS
 
-The edge issues a certificate per hostname, on demand, the first time a request arrives for a
-name the daemon recognises. Nothing is pre-provisioned, so adding a service or a branch needs no
-certificate step.
+Three modes, and which one you chose decides whether anything is issued per hostname at all.
 
 `INSTA_OSS_TLS=acme` (the default) uses a public CA and needs the name to resolve to the box from
 the internet. `INSTA_OSS_TLS=internal` uses a local issuer instead, for a box on a private
-network. The installer copies the root certificate to `/var/lib/instacloud/edge/ca.pem`, and
-clients need to trust it. Each one reads its own variable, so a tool that is not told will fail
-on its own while everything else works:
+network. In both of these the edge issues a certificate per hostname, on demand, the first time a
+request arrives for a name the daemon recognises: nothing is pre-provisioned, so adding a service
+or a branch needs no certificate step. Under `acme` that also publishes the hostname to the public
+certificate transparency logs, which is what keeps a public compute service awake; see [TLS and
+what your domain costs you](/self-hosting/install#tls-and-what-your-domain-costs-you).
+
+`INSTA_OSS_TLS=custom` serves one certificate you supply for `*.<domain>`, for every name under
+it, and issues nothing at all. No hostname is published, no order is placed, and renewal is yours:
+the install page has the procedure and what the daemon does to make an approaching expiry hard to
+miss.
+
+Under `internal` the installer copies the root certificate to `/var/lib/instacloud/edge/ca.pem`,
+and clients need to trust it. The same applies under `custom` when your certificate comes from a
+private CA, with your own CA file in place of that path. Each client reads its own variable, so a
+tool that is not told will fail on its own while everything else works:
 
 ```bash
 curl --cacert /var/lib/instacloud/edge/ca.pem https://api.example.com/healthz
