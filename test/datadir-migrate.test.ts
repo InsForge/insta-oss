@@ -15,8 +15,8 @@
 //
 // At every one of them two things have to hold: the SOURCE is still there, and the next boot
 // finishes the job with the data whole.
-import { test, expect, beforeEach, vi } from 'vitest'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { test, expect, afterEach, beforeEach, vi } from 'vitest'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -227,6 +227,15 @@ const contentsOf = (dir: string): string[] => world.under(dir).map((p) => p.slic
  *  which is what the next boot has to cope with. */
 const boot = (): Promise<Awaited<ReturnType<typeof migrateLegacyData>>> => migrateLegacyData(deps)
 
+/** Every data directory this file has made, newest last: `afterEach` removes each one, and the
+ *  last case proves it (eleven of these were being left in the temp directory per run). */
+const dataRoots: string[] = []
+
+afterEach(() => {
+  const dir = dataRoots[dataRoots.length - 1]
+  if (dir) rmSync(dir, { recursive: true, force: true })
+})
+
 beforeEach(() => {
   world = new World()
   hooks.budget = Infinity
@@ -234,6 +243,7 @@ beforeEach(() => {
   hooks.appendHba = undefined
   copied = 0
   const dir = mkdtempSync(join(tmpdir(), 'io-mig-unit-'))
+  dataRoots.push(dir)
   cfg = loadConfig({ INSTA_OSS_MODE: 'local', INSTA_OSS_DATA_DIR: dir, INSTA_OSS_STATE: join(dir, 'state.json'), INSTA_OSS_SCHEDULER: '0' }, [])
   initStatePath(cfg.statePath)
   writeLegacyState()
@@ -538,4 +548,14 @@ test('a PGDATA holding only PG_VERSION is not a migrated PGDATA', async () => {
   expect(out).toEqual({ migrated: [REF], skipped: [], failed: [] })
   for (const f of PGDATA_FILES) expect(world.paths.has(`${pgDir()}/${f}`)).toBe(true)
   expect(world.log.filter((l) => l.startsWith(`copy:${LEGACY_PG}`))).toHaveLength(1)
+})
+
+// ---- the suite's own footprint ----
+
+test('every case cleans up its temp data directory', () => {
+  // This case's own root is still live (its `afterEach` has not run yet); every earlier one has
+  // been through `afterEach` and must be gone. The state file each of them holds is small, but
+  // eleven directories per run in the developer's temp directory is a suite that litters.
+  expect(dataRoots.slice(0, -1).filter((d) => existsSync(d))).toEqual([])
+  expect(dataRoots.length).toBeGreaterThan(10)
 })
