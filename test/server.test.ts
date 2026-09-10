@@ -995,6 +995,12 @@ test('volume delete (cloud 2026-08-08 contract): eager rebuild without the mount
   expect((await get(`/projects/${id}/services/${branchId}:cp-api/volume`)).statusCode).toBe(200)
   expect((await put(`/projects/${id}/services/${branchId}:cp-api/volume`, { sizeGib: 10 })).statusCode).toBe(200)
 
+  // A qualified id is resolved, not merely stripped: a stale or foreign branch id must 404 rather
+  // than have its qualifier discarded and the detach proceed on a project the caller never named.
+  const foreign = await del_(`/projects/${id}/services/00000000-0000-4000-8000-000000000000:cp-api/volume`)
+  expect(foreign.statusCode).toBe(404)
+  expect((await get(`/projects/${id}/services/cp-api/volume`)).json().volume).not.toBeNull()
+
   const del = await del_(`/projects/${id}/services/${branchId}:cp-api/volume`)
   expect(del.statusCode).toBe(200)
   expect(del.json()).toMatchObject({ removed: true, volume: null, service: { volume_gib: null } })

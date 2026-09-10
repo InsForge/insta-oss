@@ -23,3 +23,5 @@ ui/dist/
 .mcp-call.sh
 .wakeall.sh
 .wakemd.sh
+plans/impl/watch-review.sh
+plans/impl/shellcheck-gate.sh

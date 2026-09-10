@@ -468,7 +468,14 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     // of this route did, left a decision-49 client with no id it could send: that form is the only
     // one `GET /services?branch=` hands back off the default branch, and the contract declares it
     // opaque, so "re-send without the branch" asked the caller to parse it.
-    try { return await engine.removeServiceVolume(id, bareSid(sid)) }
+    // resolveSid, not bareSid: bareSid strips the qualifier without looking at it, so a stale or
+    // foreign branch id would be discarded in silence and the detach would go ahead on a project
+    // the caller never named. resolveSid validates the branch belongs to this project and throws
+    // 'branch not found' otherwise, which is what GET and PUT on this resource already do.
+    try {
+      const { serviceId } = engine.resolveSid(id, sid, (req.query as { branch?: string }).branch)
+      return await engine.removeServiceVolume(id, serviceId)
+    }
     catch (e) {
       const m = e instanceof Error ? e.message : String(e)
       return reply.code(m.includes('no volume') ? 404 : errCode(m)).send({ error: m })
