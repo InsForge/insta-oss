@@ -179,6 +179,7 @@ function noReflinkData(): { data: DataDirOps; restore(): void } {
     clonePostgres: () => Promise.reject(new NoReflinkError('ENOTSUP')),
     cloneTree: (s, d) => data.cloneTree(s, d),
     remove: (p) => data.remove(p),
+    rename: (src, dst) => data.rename(src, dst),
     copyFromContainerVolume: (s, c, d) => data.copyFromContainerVolume(s, c, d),
     hasPgData: (d) => data.hasPgData(d),
     isEmptyOrMissing: (d) => data.isEmptyOrMissing(d),

@@ -4,17 +4,26 @@
 // mounts and `Branch.dataVersion` is 1.
 //
 // Three properties matter more than speed here:
-//   - RESUMABLE: every step checks the destination first (`hasPgData`, `isEmptyOrMissing`), so a
-//     daemon killed mid-copy redoes only what it did not finish;
+//   - RESUMABLE: a daemon killed at ANY point redoes only what it did not finish, and never
+//     mistakes an unfinished step for a finished one. That is what `copyIntoPlace` buys: every copy
+//     lands in a sibling `.incoming-<name>` staging directory and is promoted with ONE atomic
+//     rename, so a destination that EXISTS is a destination that is whole. Asking the destination
+//     itself ("is `PG_VERSION` there?", "is this directory non-empty?") answers YES halfway through
+//     a copy -- `PG_VERSION` is a handful of bytes the walk writes early -- and the step that
+//     follows a copy is the one that DELETES the source, so the wrong answer costs the only
+//     complete copy of a user's data. The same rule orders the rest of each step: a source
+//     container or volume is removed only once its destination is known good, and the state row is
+//     the LAST thing written, so a crash before it is a crash the next boot still sees as unfinished
+//     (a container that exists but that no row names is not a migration that happened);
 //   - NON-BLOCKING: a branch that cannot be migrated is logged and skipped, the daemon still boots,
 //     and only `createBranch` from that branch refuses (a fork would clone an empty directory);
 //   - NO BUFFERING: the bytes move container-to-bind-mount inside the helper image
 //     (`data.copyFromContainerVolume`), never through the daemon.
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { docker } from './docker'
 import { pgAppendHba, pgRun, pgWaitReady } from './adapters/postgres'
-import { dataPaths, managedContainerName, pgContainerName } from './manageddb'
+import { appContainerName, dataPaths, managedContainerName, pgContainerName } from './manageddb'
 import { loadState, mutate } from './state'
 import type { Config } from './config'
 import type { Branch, DataDirOps, ManagedDbTarget, ManagedDbType, Project, ServiceLimits } from './types'
@@ -83,26 +92,41 @@ async function migratePostgres(deps: MigrateDeps, project: Project, branch: Bran
   const legacyExists = legacy !== fresh && (await exists(legacy))
   const freshExists = await exists(fresh)
 
-  // fully migrated already
-  if (!legacyExists && freshExists) return false
+  // Fully migrated already -- and the STATE ROW is what says so, not the container. The row is the
+  // last write of this function, so a daemon killed between `docker run` and that write leaves a
+  // `fresh` container nothing names while `branch.databases['pg-db'].container` still names a
+  // legacy container this pass then deletes. Trusting the container alone made that boot report
+  // "nothing to do", stamp `dataVersion: 1`, and leave the branch pointing at a container that no
+  // longer exists.
+  if (!legacyExists && freshExists && pgRowSettled(branch.id, fresh, dataId)) return false
 
   let wasRunning = true
   if (legacyExists) {
     wasRunning = (await inspect(legacy, '{{.State.Running}}')) === 'true'
     await docker(['stop', legacy]).catch(() => { /* already down */ })
-    if (!(await deps.data.hasPgData(target))) {
-      await deps.data.ensureDir(target, 0o700)
-      await deps.data.copyFromContainerVolume({ container: legacy }, LEGACY_PGDATA, target)
-      if (!(await deps.data.hasPgData(target))) throw new Error(`copy of ${legacy} left no PG_VERSION in ${target}`)
+    if (!(await pgDataComplete(deps, target))) {
+      // Staged, verified, promoted -- and only THEN is the legacy container (and with it the
+      // anonymous volume holding the only complete copy of these bytes) removed.
+      await copyIntoPlace(deps, { container: legacy }, LEGACY_PGDATA, target, 0o700, async (staged) => {
+        if (!(await pgDataComplete(deps, staged))) throw new Error(`copy of ${legacy} left an incomplete PGDATA in ${staged}`)
+      })
     }
     await docker(['rm', '-f', '-v', legacy]).catch(() => { /* raced away */ })
-  } else if (!(await deps.data.hasPgData(target))) {
+  } else if (!(await pgDataComplete(deps, target))) {
     // nothing to migrate and nothing migrated: a branch whose database was never provisioned
     return false
+  } else if (freshExists) {
+    // Resuming after a crash between `docker run` and the state write: the container is there but
+    // no row names it. Take its lifecycle intent back off it before it is replaced below, or a
+    // database the developer had stopped comes back running.
+    wasRunning = (await inspect(fresh, '{{.State.Running}}')) === 'true'
   }
 
   // re-create under the new name on the bind mount. The directory is non-empty, so the image skips
   // initdb and the existing password, hba and conf travel with the files: only the DSN's HOST moves.
+  // An unnamed leftover from an interrupted run is replaced rather than raced: its bytes are on the
+  // bind mount, so the container itself carries nothing worth keeping.
+  if (freshExists) await docker(['rm', '-f', fresh]).catch(() => { /* raced away */ })
   await pgRun({ container: fresh, network: branch.network, dataDir: target }, { publishLoopback: deps.cfg.mode === 'local' })
   await pgWaitReady(fresh)
   await pgAppendHba(fresh)
@@ -128,6 +152,59 @@ function legacyPgContainer(branch: Branch, ref: string): string {
   return branch.databases?.['pg-db']?.container ?? `io-${ref}-pg`
 }
 
+/** Whether the state row has already been moved onto the new container, read FRESH: the branch
+ *  snapshot this pass started from predates any write this pass made. */
+function pgRowSettled(branchId: string, fresh: string, dataId: string): boolean {
+  const row = loadState().branches[branchId]?.databases?.['pg-db']
+  return row?.container === fresh && row?.dataId === dataId
+}
+
+/** Whether `dir` holds a WHOLE PGDATA, not the first few files of one.
+ *
+ *  `PG_VERSION` is four bytes the copy walk writes as soon as it reaches that name, so it is there
+ *  long before the tree is: the old check treated an interrupted copy as a finished one and the
+ *  caller then deleted the source. A postmaster refuses to start without `global/` (pg_control) and
+ *  `base/` (every database's files), and neither is ever legitimately empty, so requiring all three
+ *  is both cheap and unambiguous. Both predicates carry the helper-container fallback, so this
+ *  reads a PGDATA the postgres image chowned 0700 to its own uid. */
+async function pgDataComplete(deps: MigrateDeps, dir: string): Promise<boolean> {
+  if (!(await deps.data.hasPgData(dir))) return false
+  for (const sub of ['global', 'base']) {
+    if (await deps.data.isEmptyOrMissing(join(dir, sub))) return false
+  }
+  return true
+}
+
+/** Where a copy is built before it is promoted: a sibling of the destination, so the promotion is a
+ *  same-filesystem rename and a leftover is obvious (and swept) on the next boot. */
+function stagingFor(target: string): string {
+  return join(dirname(target), `.incoming-${basename(target)}`)
+}
+
+/** Copy container bytes so that `target` exists ONLY when the copy that filled it finished.
+ *
+ *  Any leftover staging directory is discarded first and the copy restarts from the source, which
+ *  is still there because every caller removes its source only after this resolves. `verify` runs
+ *  on the staged copy, before anything is promoted or deleted, so a copy that ended early fails the
+ *  step instead of passing for a finished one. */
+async function copyIntoPlace(
+  deps: MigrateDeps,
+  source: { container?: string; volume?: string },
+  containerPath: string,
+  target: string,
+  mode: number,
+  verify?: (staged: string) => Promise<void>,
+): Promise<void> {
+  const staging = stagingFor(target)
+  await deps.data.remove(staging)
+  await deps.data.ensureDir(staging, mode)
+  await deps.data.copyFromContainerVolume(source, containerPath, staging)
+  if (verify) await verify(staging)
+  // A partial destination from a run that predates this one, or from an interrupted promotion.
+  await deps.data.remove(target)
+  await deps.data.rename(staging, target)
+}
+
 // ---- compute /data volumes ----
 
 async function migrateVolumes(deps: MigrateDeps, project: Project, branch: Branch): Promise<boolean> {
@@ -139,13 +216,21 @@ async function migrateVolumes(deps: MigrateDeps, project: Project, branch: Branc
     const legacy = `io-${ref}-data-${vol.id}`
     if (!(await volumeExists(legacy))) continue
     const target = deps.layout().vol(ref, vol.id)
-    if (await deps.data.isEmptyOrMissing(target)) {
-      await deps.data.ensureDir(target, 0o777)
-      await deps.data.copyFromContainerVolume({ volume: legacy }, '/src', target)
+    // The app already reading the bind mount is what says this service is done, not the directory
+    // being non-empty: a `/data` that was legitimately EMPTY copies to an empty destination, and a
+    // `volume rm` that failed once ("still referenced") would then bring this pass back every boot
+    // to copy the empty source over whatever the live app had written since.
+    if (!(await hasMount(appContainerName(ref, group), target))) {
+      // A destination that exists is a whole copy of the volume (`copyIntoPlace` promotes with one
+      // rename); a partial one from an interrupted run is discarded and recopied from the volume,
+      // which is still there because the `volume rm` below is the last step.
+      if (await deps.data.isEmptyOrMissing(target)) {
+        await copyIntoPlace(deps, { volume: legacy }, '/src', target, 0o777)
+      }
+      // Recreate the container on the bind mount. `deploy` re-asserts the recorded lifecycle intent,
+      // so a service the developer had stopped stays stopped.
+      await deps.redeploy(branch.projectId, branch.name, group, { image: app.image, port: app.port, hostPort: app.hostPort })
     }
-    // Recreate the container on the bind mount. `deploy` re-asserts the recorded lifecycle intent,
-    // so a service the developer had stopped stays stopped.
-    await deps.redeploy(branch.projectId, branch.name, group, { image: app.image, port: app.port, hostPort: app.hostPort })
     await docker(['volume', 'rm', legacy]).catch(() => { /* still referenced; the next boot retries */ })
     touched = true
   }
@@ -167,19 +252,30 @@ async function migrateManaged(deps: MigrateDeps, project: Project, branch: Branc
       })
     }
     const container = managedContainerName(ref, m.type, m.name)
-    if (!(await exists(container))) continue
     const dir = deps.layout().md(ref, m.type, dataId)
-    const mounted = await hasMount(container, dir)
-    if (mounted) continue
-    const wasRunning = (await inspect(container, '{{.State.Running}}')) === 'true'
-    await docker(['stop', container]).catch(() => {})
-    for (const p of dataPaths(m.type)) {
-      const target = join(dir, p.sub)
-      if (!(await deps.data.isEmptyOrMissing(target))) continue
-      await deps.data.ensureDir(target, 0o700)
-      await deps.data.copyFromContainerVolume({ container }, p.containerPath, target)
+    const containerExists = await exists(container)
+    if (containerExists && (await hasMount(container, dir))) continue
+    // The re-create below has to reuse the legacy container's NAME, so the removal cannot wait for
+    // it. A daemon killed in that gap leaves the bytes under `md/` with no container at all, and
+    // asking `exists(container)` alone answered "nothing here to migrate" -- the service then
+    // stayed missing for good. A data directory with something in it is the record that this
+    // migration started, so finish it.
+    if (!containerExists) {
+      if (await deps.data.isEmptyOrMissing(dir)) continue
     }
-    await docker(['rm', '-f', '-v', container]).catch(() => {})
+    let wasRunning = true
+    if (containerExists) {
+      wasRunning = (await inspect(container, '{{.State.Running}}')) === 'true'
+      await docker(['stop', container]).catch(() => {})
+      for (const p of dataPaths(m.type)) {
+        const target = join(dir, p.sub)
+        // Again the destination exists only when its copy finished: `/data/configdb` and a redis
+        // `/data` with no dump.rdb are legitimately EMPTY, so "non-empty" cannot mean "copied".
+        if (!(await deps.data.isEmptyOrMissing(target))) continue
+        await copyIntoPlace(deps, { container }, p.containerPath, target, 0o700)
+      }
+      await docker(['rm', '-f', '-v', container]).catch(() => {})
+    }
     const password = branch.managed?.[m.id]?.password
     if (password === undefined) throw new Error(`no stored password for ${m.id} on ${ref}`)
     await deps.provisionManaged(
@@ -192,8 +288,9 @@ async function migrateManaged(deps: MigrateDeps, project: Project, branch: Branc
   return touched
 }
 
-/** Whether the container already binds this data directory: the mongo/mysql/redis case where an
- *  earlier run finished the copy and the re-create, so there is nothing left to do. */
+/** Whether the container already binds this data directory: the case where an earlier run finished
+ *  the copy and the re-create, so there is nothing left to do. A container that is not there at all
+ *  answers false. */
 async function hasMount(container: string, dir: string): Promise<boolean> {
   const out = await inspect(container, '{{range .Mounts}}{{.Source}} {{end}}')
   return out !== null && out.split(' ').some((s) => s === dir || s.startsWith(`${dir}/`))

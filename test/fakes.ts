@@ -114,6 +114,7 @@ export const data: DataDirOps = {
   clonePostgres: async (src, dst) => { calls.push(`data.clone:${src}->${dst}`); return { method: 'reflink', ms: 1 } },
   cloneTree: async (src, dst) => { calls.push(`data.cloneTree:${src}->${dst}`); return { method: 'reflink', ms: 1 } },
   remove: async (path) => { calls.push(`data.remove:${path}`) },
+  rename: async (src, dst) => { calls.push(`data.rename:${src}->${dst}`) },
   copyFromContainerVolume: async (source, containerPath, dst) => { calls.push(`data.copyFrom:${source.container ?? source.volume}:${containerPath}->${dst}`) },
   hasPgData: async () => true,
   isEmptyOrMissing: async () => true,

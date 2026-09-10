@@ -12,7 +12,7 @@
 // a PGDATA the postgres image chowned to its own uid. EVERY verb has the helper fallback, including
 // the two predicates behind the provision and start guards.
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, chmodSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, chmodSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -149,18 +149,41 @@ export class DataDir implements DataDirOps {
    *  with paths built from state, and a state row with an empty ref must never delete `/`. */
   async remove(path: string): Promise<void> {
     if (!path) return
-    const root = resolve(this.cfg.dataDir)
-    const target = resolve(path)
-    if (target !== root && !target.startsWith(root + sep)) {
-      throw new Error(`refusing to remove ${target}: outside the data dir ${root}`)
-    }
-    if (target === root) throw new Error(`refusing to remove the data dir itself (${root})`)
+    const target = this.inside(path, 'remove')
     try {
       rmSync(target, { recursive: true, force: true })
     } catch (e) {
       if (!HELPER_CODES.includes(errnoOf(e))) throw e
       await this.runHelper(['rm', target])
     }
+  }
+
+  /** Promote a staged directory to its final path in ONE step. The boot migration copies into a
+   *  sibling staging directory and calls this last, so a destination that EXISTS is a destination
+   *  that is whole: a daemon killed mid-copy leaves only the staging path behind and the next boot
+   *  recopies from a source it never removed (04 section F). Both ends are inside the data dir, so
+   *  this is a same-filesystem `rename(2)`. */
+  async rename(src: string, dst: string): Promise<void> {
+    const from = this.inside(src, 'rename')
+    const to = this.inside(dst, 'rename')
+    try {
+      renameSync(from, to)
+    } catch (e) {
+      if (!HELPER_CODES.includes(errnoOf(e))) throw e
+      await this.runHelper(['mv', from, to])
+    }
+  }
+
+  /** A path this instance is allowed to destroy or move, resolved. Teardown and migration paths are
+   *  built from state, and a row with an empty ref must never name `/`. */
+  private inside(path: string, verb: string): string {
+    const root = resolve(this.cfg.dataDir)
+    const target = resolve(path)
+    if (target !== root && !target.startsWith(root + sep)) {
+      throw new Error(`refusing to ${verb} ${target}: outside the data dir ${root}`)
+    }
+    if (target === root) throw new Error(`refusing to ${verb} the data dir itself (${root})`)
+    return target
   }
 
   /** Legacy migration: copy a container's own volume (or a named volume) into the data dir without
@@ -297,6 +320,7 @@ export function lazyDataDirOps(): DataDirOps {
     clonePostgres: (src, dst) => sharedDataDir().clonePostgres(src, dst),
     cloneTree: (src, dst) => sharedDataDir().cloneTree(src, dst),
     remove: (p) => sharedDataDir().remove(p),
+    rename: (src, dst) => sharedDataDir().rename(src, dst),
     copyFromContainerVolume: (s, containerPath, dst) => sharedDataDir().copyFromContainerVolume(s, containerPath, dst),
     hasPgData: (dir) => sharedDataDir().hasPgData(dir),
     isEmptyOrMissing: (dir) => sharedDataDir().isEmptyOrMissing(dir),

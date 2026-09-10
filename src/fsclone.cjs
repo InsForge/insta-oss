@@ -14,6 +14,7 @@
 //   clone <src> <dst> [--pg] [--reflink=always|auto] [--engine=ficlone|cp-c]
 //                          -> {"files":n,"bytes":n,"ms":n,"method":"reflink"|"copy"}
 //   rm <path>              -> {"removed":true}
+//   mv <src> <dst>         -> {"moved":true}
 //   stat <dir>             -> {"exists":bool,"pgVersion":string|null}
 //   isempty <dir>          -> {"empty":bool}
 // Exit 75 means: the target filesystem cannot reflink and --reflink=always was asked for
@@ -261,6 +262,11 @@ function main(argv) {
     if (!pos[1]) throw new Error('rm needs <path>')
     fs.rmSync(pos[1], { recursive: true, force: true })
     return { removed: true }
+  }
+  if (verb === 'mv') {
+    if (!pos[1] || !pos[2]) throw new Error('mv needs <src> <dst>')
+    fs.renameSync(pos[1], pos[2])
+    return { moved: true }
   }
   if (verb === 'stat') {
     const dir = pos[1]

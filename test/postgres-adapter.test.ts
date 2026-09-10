@@ -41,6 +41,7 @@ function stubData(over: Partial<DataDirOps> = {}): { ops: string[]; data: DataDi
     clonePostgres: async (src, dst) => { ops.push(`clone:${src}->${dst}`); return { method: 'reflink', ms: 1 } },
     cloneTree: async (src, dst) => { ops.push(`cloneTree:${src}->${dst}`); return { method: 'reflink', ms: 1 } },
     remove: async (path) => { ops.push(`remove:${path}`) },
+    rename: async (src, dst) => { ops.push(`rename:${src}->${dst}`) },
     copyFromContainerVolume: async () => { ops.push('copyFromVolume') },
     hasPgData: async () => true,
     isEmptyOrMissing: async () => true,

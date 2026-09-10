@@ -171,6 +171,9 @@ export interface DataDirOps {
   clonePostgres(src: string, dst: string): Promise<{ method: 'reflink'; ms: number }>   // throws NoReflinkError
   cloneTree(src: string, dst: string): Promise<{ method: 'reflink' | 'copy'; ms: number }>
   remove(path: string): Promise<void>
+  /** Atomic promotion inside the data dir: what makes a staged copy visible in ONE step, so a
+   *  destination directory exists only when the copy that filled it finished (boot migration). */
+  rename(src: string, dst: string): Promise<void>
   copyFromContainerVolume(source: { container?: string; volume?: string }, containerPath: string, dst: string): Promise<void>
   hasPgData(dir: string): Promise<boolean>        // helper fallback on EACCES (verb `stat`)
   isEmptyOrMissing(dir: string): Promise<boolean> // helper fallback on EACCES (verb `isempty`)
