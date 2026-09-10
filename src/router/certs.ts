@@ -76,6 +76,14 @@ export function warnExpiring(cert: SuppliedCert | null, log: (m: string) => void
   return false
 }
 
+/** The operator's certificate and key, or null unless BOTH are configured. One place, because
+ *  three callers ask the same question -- the lanes (which serve it), `/healthz` (which reports
+ *  its expiry) and `domainCertOk` (which asks whether it covers a custom domain) -- and half a
+ *  configuration must not look like a supplied certificate to any of them. */
+export function suppliedFiles(cfg: Config): { crt: string; key: string } | null {
+  return cfg.tls.certFile && cfg.tls.keyFile ? { crt: cfg.tls.certFile, key: cfg.tls.keyFile } : null
+}
+
 /** The supplied certificate as `/healthz` serves it: read on a TIMER, answered from memory.
  *
  *  `/healthz` is unauthenticated and public, and load balancers, monitors, the installer's own
@@ -106,6 +114,9 @@ export class SuppliedCertWatch {
   private readonly log: (m: string) => void
 
   constructor(
+    /** The CERTIFICATE of a complete pair. Callers pass null unless both halves are configured:
+     *  with only one, the router serves no supplied certificate and issues per hostname, and a
+     *  watch reporting one would describe a box that is doing the opposite. */
     private readonly certFile: string | null,
     opts: { read?: (path: string, now: number) => SuppliedCert | null; log?: (m: string) => void } = {},
   ) {
@@ -141,9 +152,15 @@ export class SuppliedCertWatch {
     this.cached = cert ? { path: cert.path, notAfterMs: Date.parse(cert.notAfter) } : null
   }
 
-  /** What is left: one stat, the parse only when the file moved, the arithmetic always now. */
+  /** What is left, from memory: NO I/O, not even a stat.
+   *
+   *  `/healthz` is unauthenticated and a scanner can drive it as fast as it likes, so the
+   *  request path does arithmetic and nothing else -- a `statSync` per hit is smaller than a
+   *  `readFileSync` per hit and is still a syscall an anonymous caller controls the rate of.
+   *  `refresh()` is what looks at the file, on the daemon's beat, so a renewal shows up here
+   *  within one sweep interval (30 s by default) rather than instantly. That bound is the trade
+   *  for the endpoint costing nothing, and it is documented where the renewal procedure is. */
   current(now = Date.now()): SuppliedCert | null {
-    this.sync(now)
     if (!this.cached) return null
     const secondsLeft = Math.round((this.cached.notAfterMs - now) / 1000)
     return {

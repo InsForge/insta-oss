@@ -14,7 +14,7 @@ import * as observe from './observe'
 import { loadState, mutate } from './state'
 import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret, DataDirOps, PgTarget, ServiceKey, ServiceLimits, ServiceSettings } from './types'
 // ---- region WP2 (router): the router's pure modules feed the seams at the end of this class ----
-import { findCertFiles } from './router/certs'
+import { findCertFiles, suppliedFiles } from './router/certs'
 import { checkDns, domainResult, DomainError, mapLimit, normalizeHostname, notAdded, ourAddresses, systemResolver, type ComputeDomainResult, type Resolver } from './router/domains'
 import { assertHostLabel, bucketsOf, buildTable, databasesOf, hostFor as fqdnFor, hostOnly, labelFor, RESERVED_LABELS, type HostKind } from './router/table'
 import type { State } from './state'
@@ -3283,9 +3283,11 @@ export class Engine {
     // whether the operator's certificate covers this name, and the certificate answers it -- so
     // a custom domain inside their wildcard reads `ready` and one outside it reads `pending`,
     // which is the truth in a mode where no certificate will appear for it on its own.
-    const supplied = this.cfg.tls.certFile
+    // The PAIR: with only one half configured the router serves no supplied certificate and
+    // issues per hostname, so this must not answer from a file nothing is serving.
+    const supplied = suppliedFiles(this.cfg)
     if (supplied) {
-      try { return new X509Certificate(readFileSync(supplied)).checkHost(hostname) !== undefined } catch { return false }
+      try { return new X509Certificate(readFileSync(supplied.crt)).checkHost(hostname) !== undefined } catch { return false }
     }
     if (!this.cfg.tls.certDir) return false
     return findCertFiles(this.cfg.tls.certDir, hostname) !== null

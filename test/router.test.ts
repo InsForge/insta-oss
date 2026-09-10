@@ -1192,12 +1192,12 @@ test('the expiry warning is said once, then stays quiet for hours', () => {
 })
 
 
-test('a RENAMED certificate is picked up immediately, not on the next beat', () => {
+test('a RENAMED certificate is picked up by the beat, and the request path reads nothing', () => {
   // The way a renewal actually happens, and the way it was measured on a live box: write the new
-  // pair alongside, rename over the live names. A cache invalidated by TIME reports the old
-  // certificate until its beat comes round -- and it is wrong in the reassuring direction, since
-  // a renewal from 29 days to 90 keeps reading 29 on the one field that exists to warn before an
-  // expiry. Nothing here calls `refresh()`: that is the point.
+  // pair alongside, rename over the live names. The file check lives on the daemon's beat, not
+  // on the request path -- `/healthz` is unauthenticated and a scanner sets its rate, so a
+  // request must not touch the filesystem at all, not even to stat it. `refresh()` is that
+  // beat, and it is what has to notice the rename.
   const dir = mkdtempSync(join(tmpdir(), 'io-renew-'))
   const mint = (out: string, days: number): void => {
     const r = spawnSync('sh', ['-c',
@@ -1215,6 +1215,9 @@ test('a RENAMED certificate is picked up immediately, not on the next beat', () 
 
     mint(next, 90)
     renameSync(next, live)                                    // atomic, over the live name
+    // Not yet: no request looks at the file.
+    expect(watch.current()!.notAfter).toBe(before.notAfter)
+    watch.refresh()                                           // ...the beat does
     const after = watch.current()!
     expect(after.notAfter).not.toBe(before.notAfter)
     expect(after.daysLeft).toBeGreaterThan(before.daysLeft + 55)
@@ -1225,11 +1228,13 @@ test('a RENAMED certificate is picked up immediately, not on the next beat', () 
     expect(w2.maybeWarn()).toBe(false)                        // 90 days: nothing to say
     mint(next, 10)
     renameSync(next, live)
+    w2.refresh()                                              // the same beat feeds both
     expect(w2.maybeWarn()).toBe(true)                         // 10 days: said, from the new file
     expect(said[0]).toMatch(/expires in (9|10) days/)
 
     // A file that goes away is absent again, cache or no cache.
     rmSync(live)
+    watch.refresh()
     expect(watch.current()).toBeNull()
   } finally {
     rmSync(dir, { recursive: true, force: true })

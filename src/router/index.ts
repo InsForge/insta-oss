@@ -11,7 +11,7 @@ import type { SecureContext, Server as TlsServer } from 'node:tls'
 import { isDaemonHost, type Config } from '../config'
 import { loadState, mutate, onSave, stateRev } from '../state'
 import type { ManagedDbType, ServiceKey } from '../types'
-import { Certs, triggerIssuance } from './certs'
+import { Certs, suppliedFiles, triggerIssuance } from './certs'
 import type { ServiceState, UpstreamLike } from './deps'
 import { HttpLane, sendJson } from './http'
 import { createInternalServer } from './internal'
@@ -97,9 +97,7 @@ export class Router {
     this.apiHandler = deps.apiHandler
     // `--tls custom`: the operator's pair is what every lane presents, and nothing is ever
     // issued. The `issue` seam is still passed for the acme and internal modes.
-    const supplied = this.cfg.tls.certFile && this.cfg.tls.keyFile
-      ? { crt: this.cfg.tls.certFile, key: this.cfg.tls.keyFile }
-      : null
+    const supplied = suppliedFiles(this.cfg)
     this.certs = deps.certs ?? new Certs({ certDir: this.cfg.tls.certDir, supplied, issue: triggerIssuance(this.cfg), log: this.log })
     this.http = new HttpLane({
       cfg: this.cfg, upstream: deps.upstream, stateOf: deps.stateOf, wake: deps.wake,

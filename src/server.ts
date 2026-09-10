@@ -9,7 +9,7 @@ import fastifyStatic from '@fastify/static'
 import { registerAuth } from './auth'
 import { loadConfig, type Config } from './config'
 import { LifecycleFailedError } from './engine'
-import { SuppliedCertWatch } from './router/certs'
+import { SuppliedCertWatch, suppliedFiles } from './router/certs'
 import type { Engine, Teardown } from './engine'
 import * as govern from './govern'
 import { isManagedDbType, parseServiceId } from './manageddb'
@@ -52,7 +52,7 @@ export function buildServer(
   // main.ts passes the watch it refreshes on the daemon's beat; a server built without one (local
   // mode, tests) reads once at construction and answers from that. Either way `/healthz` does no
   // file I/O per request, which is what matters for a public unauthenticated endpoint.
-  const certWatch = opts.certWatch ?? new SuppliedCertWatch(cfg.tls.certFile)
+  const certWatch = opts.certWatch ?? new SuppliedCertWatch(suppliedFiles(cfg)?.crt ?? null)
   // 'loopback', not `true`. The only proxy in front of the daemon is the edge, on 127.0.0.1, and it
   // APPENDS the peer to X-Forwarded-For. `trustProxy: true` trusts the whole chain and takes its
   // LEFTMOST entry, which is whatever the remote client wrote, so `req.ip` was forgeable from

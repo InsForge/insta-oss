@@ -87,6 +87,20 @@ export interface Config {
 }
 
 /** Every INSTA_OSS_* key loadConfig reads (test/install.test.ts asserts install.sh writes each). */
+/** A supplied certificate is the PAIR or nothing. Half of one is refused rather than ignored:
+ *  with only the certificate set, the router would go on issuing per-hostname certificates while
+ *  `/healthz` reported a supplied one, so the endpoint would assert the very property the box
+ *  was not providing. The installer refuses the same combination; this catches a hand-edited
+ *  `instad.env`, at boot, with a legible message rather than at a browser. */
+function suppliedPair(certFile: string, keyFile: string): { certFile: string | null; keyFile: string | null } {
+  if (certFile && keyFile) return { certFile, keyFile }
+  if (certFile || keyFile) {
+    const missing = certFile ? 'INSTA_OSS_TLS_KEY_FILE' : 'INSTA_OSS_TLS_CERT_FILE'
+    throw new Error(`${missing} is required when the other is set: a supplied certificate is the pair or nothing (see --tls custom)`)
+  }
+  return { certFile: null, keyFile: null }
+}
+
 export const CONFIG_KEYS: readonly string[] = [
   'INSTA_OSS_MODE', 'INSTA_OSS_VERSION', 'INSTA_OSS_LISTEN_HOST', 'INSTA_OSS_PORT', 'INSTA_OSS_DATA_DIR', 'INSTA_OSS_STATE',
   'INSTA_OSS_GARAGE_CONFIG', 'INSTA_OSS_S3_HOST_ENDPOINT', 'INSTA_OSS_UI_DIST', 'INSTA_OSS_TEMPLATES_DIR', 'INSTA_OSS_DOMAIN',
@@ -238,8 +252,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, argv: readonly 
     tls: {
       certDir: str(env, 'INSTA_OSS_TLS_CERT_DIR', '') || (server ? join(dataDir, 'caddy', 'data', 'caddy', 'certificates') : null),
       edgePort: int(env, 'INSTA_OSS_EDGE_PORT', 443, 1, 65535),
-      certFile: str(env, 'INSTA_OSS_TLS_CERT_FILE', '') || null,
-      keyFile: str(env, 'INSTA_OSS_TLS_KEY_FILE', '') || null,
+      ...suppliedPair(str(env, 'INSTA_OSS_TLS_CERT_FILE', ''), str(env, 'INSTA_OSS_TLS_KEY_FILE', '')),
     },
     sleep: {
       enabled: bool(env, 'INSTA_OSS_SCHEDULER', true),

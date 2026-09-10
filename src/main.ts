@@ -28,7 +28,7 @@ import { TemplateCatalog } from './templates/catalog'
 // ---- end region WP5 ----
 // ---- region WP2 (router) ----
 import { laneReallocator, Router } from './router'
-import { SuppliedCertWatch } from './router/certs'
+import { SuppliedCertWatch, suppliedFiles } from './router/certs'
 import { engineRouterDeps, routerUpstream } from './router/deps'
 import { buildTable } from './router/table'
 // ---- end region WP2 ----
@@ -176,7 +176,7 @@ async function main(): Promise<void> {
 
   // One watch: `/healthz` answers from it and the beat below refreshes it, so the public
   // endpoint never reads the file itself.
-  const certWatch = new SuppliedCertWatch(cfg.tls.certFile)
+  const certWatch = new SuppliedCertWatch(suppliedFiles(cfg)?.crt ?? null)
   const app = buildServer(engine, cfg, { certWatch, serverFactory: (handler) => { router.attach(handler); return router.httpServer } })
   await app.listen({ host: cfg.listenHost, port: cfg.port })
 
@@ -196,8 +196,11 @@ async function main(): Promise<void> {
   // renews, so it is the one whose expiry would otherwise be announced by a browser. Said at
   // boot and then on the sweep's own beat, and only when it is close: the number itself is on
   // `healthz` unconditionally for a monitor to read. This starts nothing and changes nothing.
-  if (cfg.tls.certFile) {
+  if (suppliedFiles(cfg)) {
     certWatch.maybeWarn()
+    // This beat is also what `/healthz` answers from: the request path reads no file and makes
+    // no syscall, so an unauthenticated poll costs nothing however fast it comes, and the
+    // reported certificate follows a renewal within one interval.
     const timer = setInterval(() => { certWatch.refresh(); certWatch.maybeWarn() }, cfg.sleep.sweepSec * 1000)
     timer.unref?.()
   }

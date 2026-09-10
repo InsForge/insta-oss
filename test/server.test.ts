@@ -880,7 +880,10 @@ test('healthz follows a RENEWED certificate, the way a renewal actually happens'
     mint(live, 30)
     const base = testConfig()
     const cfg = { ...base, tls: { ...base.tls, certFile: live, keyFile: join(dir, 'k.pem') } }
-    const app2 = buildServer(makeEngine(cfg), cfg)
+    // The watch the daemon refreshes on its beat. The request path reads nothing, so the test
+    // drives the beat the way main.ts's timer does.
+    const watch = new SuppliedCertWatch(live)
+    const app2 = buildServer(makeEngine(cfg), cfg, { certWatch: watch })
     const read = async (): Promise<{ notAfter: string; daysLeft: number }> =>
       ((await app2.inject({ method: 'GET', url: '/healthz' })).json() as { certificate: { notAfter: string; daysLeft: number } }).certificate
 
@@ -892,6 +895,7 @@ test('healthz follows a RENEWED certificate, the way a renewal actually happens'
 
     mint(join(dir, 'next.crt'), 90)
     renameSync(join(dir, 'next.crt'), live)
+    watch.refresh()
 
     const after = await read()
     expect(after.notAfter).not.toBe(before.notAfter)          // it MOVED
@@ -900,6 +904,7 @@ test('healthz follows a RENEWED certificate, the way a renewal actually happens'
     // ...and a certificate that goes away takes the field with it rather than leaving the last
     // good number in place.
     rmSync(live)
+    watch.refresh()
     expect((await app2.inject({ method: 'GET', url: '/healthz' })).json()).toEqual({ ok: true })
   } finally {
     rmSync(dir, { recursive: true, force: true })
