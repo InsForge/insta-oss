@@ -3101,7 +3101,18 @@ export class Engine {
    *  Project-wide because a rename is: it re-mints a hostname on every branch that carries the
    *  service and renames each container. Taken `withOp` OUTER and `serialize('provision')` inner,
    *  the order every other taker uses, so the engine-wide invariant holds: keys are acquired
-   *  before the provision chain, never after it, and no path can close a cycle between them. */
+   *  before the provision chain, never after it, and no path can close a cycle between them.
+   *
+   *  KNOWN GAP, stated rather than claimed away: this list is itself a SNAPSHOT, taken before
+   *  the acquisition, while `rename*Locked` re-reads the branches under the lock. A branch born
+   *  in that window is therefore renamed with none of ITS keys held. The reachable ordering is a
+   *  branch create that commits its row while a rename queues; the rename then renames that
+   *  branch's container and updates its row, and a fork still in flight for it finds the
+   *  container gone under the name it was using. That fails LOUDLY (`No such container`) and
+   *  the create unwinds itself, which is why this is left rather than closed: the alternative is
+   *  the union re-drive `createBranch` runs, and adding a second re-driving acquisition to a
+   *  path that also holds the provision chain is a change to make deliberately, not at the end
+   *  of a round. `destroyProject` carries the same shape and the same note. */
   private renameKeys(projectId: string, serviceId: string): ServiceKey[] {
     return this.listBranches(projectId).flatMap((b) => [this.branchOp(b), this.serviceKey(b, serviceId)])
   }
