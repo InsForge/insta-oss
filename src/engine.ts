@@ -2213,8 +2213,8 @@ export class Engine {
   /** Delete a compute service's /data volume — the 2026-08-08 cloud contract (DELETE …/volume):
    *  the only way off the volume path (there is still no detach), destroying the data. EAGER like
    *  the platform: every branch where the group is deployed is rebuilt WITHOUT the mount now (the
-   *  record goes first — deploy() reads it), the branch's named volume is removed, and a stopped
-   *  service is re-stopped after its rebuild — the same lifecycle-preserving rule the platform
+   *  record goes first — deploy() reads it), the branch's named volume is removed, and the
+   *  recorded intent is re-asserted by deploy() itself — the same lifecycle-preserving rule the platform
    *  keeps with skip_launch. Docker cleanup is best-effort like removeComputeService's: oss has
    *  no billing, and branch teardown sweeps any stragglers. Non-transactional like the engine's
    *  other multi-branch sweeps: a rebuild that throws mid-loop leaves LATER branches still
@@ -2269,15 +2269,16 @@ export class Engine {
       const app = loadState().branches[b.id]?.apps[svc.name]
       if (!app) continue
       try {
+        // `deploy()` re-asserts the recorded intent on the replacement itself, with the EXACT
+        // verb (oss allows a suspended volume-bearing service, so this must land back on
+        // `suspend` and never be coarsened to `stop`), so this loop must NOT do it a second
+        // time. It used to, harmlessly, while the re-assert swallowed its own failures: making
+        // that fail-closed turned the duplicate into a deterministic break, because
+        // `docker pause` on an already-paused container exits 1 while `docker stop` on an
+        // exited one exits 0 -- so the `stopped` arm never showed it and the `suspended` arm
+        // failed every `volume delete`. The lesson is the general one: making an error
+        // propagate surfaces latent DUPLICATE calls, not just real failures.
         await this.deploy(projectId, b.name, { image: app.image, port: app.port, hostPort: app.hostPort, group: svc.name })
-        // Restore the EXACT recorded intent, not a coarser one: unlike the cloud (where a volume
-        // forbids suspend), oss allows a suspended volume-bearing service, so delete-from-suspended
-        // must land back on 'suspend' -- mapping it to 'stop' would silently rewrite desiredState
-        // (r2d2 finding on this PR). A failure here is COUNTED and no longer swallowed: the
-        // container is the thing that was holding the bytes.
-        if (app.desiredState === 'stopped' || app.desiredState === 'suspended') {
-          await this.lifecycle(projectId, serviceId, app.desiredState === 'suspended' ? 'suspend' : 'stop', b.name)
-        }
       } catch (e) {
         failures.push(`${b.name}: ${e instanceof Error ? e.message : String(e)}`)
         continue   // the mount may still be attached: its bytes are not ours to delete

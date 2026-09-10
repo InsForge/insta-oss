@@ -689,6 +689,32 @@ test('compute restart REDEPLOYS the recorded image (fresh env), and refuses a st
 // puts `exited`/`paused` into the snapshot the idle sweep and the eviction pass reason from: not
 // a missing error but a fabricated runtime fact, on a box that rations RAM by that snapshot.
 
+test('a volume delete on a SUSPENDED service succeeds, and leaves it suspended', async () => {
+  // `removeServiceVolumeLocked` redeployed each branch without the mount and then re-asserted
+  // the recorded intent itself -- but `deploy()` already re-asserts it, with the exact verb, on
+  // the replacement container. Two pauses. That was harmless while the re-assert swallowed its
+  // failures, and making it fail-closed turned it into a deterministic break of every
+  // `volume delete` on a suspended service, because `docker pause` on an already-paused
+  // container exits 1 (`docker stop` on an exited one exits 0, which is why the stopped arm
+  // never showed it).
+  const id = await createProject()
+  expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'web', volumeGib: 1 })).statusCode).toBe(201)
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'web' })
+  expect((await post(`/projects/${id}/services/cp-web/suspend`)).statusCode).toBe(200)
+  calls.length = 0
+
+  const r = await del_(`/projects/${id}/services/cp-web/volume`)
+  expect(r.statusCode).toBe(200)
+  expect(r.json()).toMatchObject({ removed: true })
+  // Exactly ONE re-assert, and it is the deploy's.
+  expect(calls.filter((c) => c === 'compute.suspend:demo-main:web')).toHaveLength(1)
+  // ...and the service came out the way it went in: suspended, on a paused container, with the
+  // volume gone.
+  expect((await get(`/projects/${id}/services/cp-web/state`)).json().desiredState).toBe('suspended')
+  expect(runtime.stateOfContainer('io-demo-main-app-web')).toBe('paused')
+  expect((await get(`/projects/${id}/services/cp-web/volume`)).json().volume).toBeNull()
+})
+
 test('a start that outruns its bound tells the operator the wake is still running', async () => {
   // `insta compute start` goes through the api door, and that door is bounded like any other
   // caller now: the wake keeps the operation lock and carries on, so an operator can see a

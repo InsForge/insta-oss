@@ -74,7 +74,18 @@ export const compute: ComputeAdapter = {
     if (opts?.graceSec !== undefined) calls.push(`compute.stop.grace:${ref}:${group}:${opts.graceSec}`)
     runtime.put(appContainerName(ref, group), 'exited')
   },
-  suspend: async (ref, group) => { calls.push(`compute.suspend:${ref}:${group}`); runtime.put(appContainerName(ref, group), 'paused') },
+  // Real docker, measured on 25.0.14: `docker pause` on an ALREADY-PAUSED container exits 1,
+  // while `docker stop` on an exited one exits 0. That asymmetry is why a duplicate re-assert of
+  // a standing intent broke only the suspended arm, and a fake that pauses twice happily is a
+  // fake that hides it.
+  suspend: async (ref, group) => {
+    const c = appContainerName(ref, group)
+    if (runtime.stateOfContainer(c) === 'paused') {
+      throw new Error(`Error response from daemon: Container ${c} is already paused`)
+    }
+    calls.push(`compute.suspend:${ref}:${group}`)
+    runtime.put(c, 'paused')
+  },
   rename: async (ref, from_, to) => { calls.push(`compute.rename:${ref}:${from_}->${to}`); runtime.move(appContainerName(ref, from_), appContainerName(ref, to)) },
 }
 
