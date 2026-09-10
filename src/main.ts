@@ -15,7 +15,7 @@ import { resetAdmin } from './auth'
 import { loadConfig, type Config } from './config'
 import { mkdirSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { acquireLock, initStatePath, loadState, releaseLock } from './state'
+import { acquireLock, initStatePath, loadState, reclaimAbandonedReservations, releaseLock } from './state'
 // ---- region WP4 (data dir) ----
 import { capabilitiesLine, sharedDataDir } from './datadir'
 // ---- end region WP4 ----
@@ -84,6 +84,16 @@ async function main(): Promise<void> {
   // 60 s so a compose restart whose predecessor was SIGKILLed still boots)
   acquireLock(cfg.dataDir)
   process.on('exit', releaseLock)
+  // Holding the lock means no other daemon is running, so any reservation still standing belongs to
+  // a create this process's predecessor was killed in the middle of. Drop those before serving:
+  // otherwise the claim outlives its creator and every retry of that branch name, lane port or
+  // hostname refuses as a duplicate for the life of the install.
+  const reclaimed = reclaimAbandonedReservations()
+  const reclaimedTotal = reclaimed.branches.length + reclaimed.lanes.length + reclaimed.hosts.length
+  if (reclaimedTotal > 0) {
+    console.warn(`warning: released ${reclaimedTotal} reservation(s) left by an interrupted create` +
+      `${reclaimed.branches.length ? ` (branches: ${reclaimed.branches.join(', ')})` : ''}`)
+  }
   // docker check. The same probe reads the daemon's architecture, which decides whether a
   // template's image can run here at all: dockerd is what pulls, so its answer is the authority,
   // not this process's. Appended to the existing format string rather than a second `docker`

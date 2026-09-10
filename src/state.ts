@@ -244,6 +244,40 @@ export function flushTouchLater(): void {
   mutate((s) => { for (const f of fns) f(s) }, { audit: true })
 }
 
+/**
+ * Release every reservation whose owner never committed a row (decision 51, boot recovery).
+ *
+ * The three reservation maps are claims held ACROSS an await by an operation still in flight, and
+ * each is released by its own compensation. A daemon killed between the claim and the row that
+ * supersedes it leaves the claim behind with no one to release it, and because the claim is what
+ * makes a second attempt refuse, every retry of that name then fails as a duplicate forever. The
+ * data directory lock means only one daemon runs at a time, so at boot there is BY DEFINITION no
+ * operation in flight: any claim still standing is abandoned, and the safe thing is to drop it.
+ *
+ * Ownership is what decides, not age: a branch claim survives only while its branch row exists,
+ * and a lane or host claim only while some branch or service still names that owner. Anything
+ * else is the residue of an interrupted create. Returns what it released so boot can say so.
+ */
+export function reclaimAbandonedReservations(): { branches: string[]; lanes: string[]; hosts: string[] } {
+  return mutate((s) => {
+    const liveBranch = new Set(Object.keys(s.branches ?? {}))
+    const released = { branches: [] as string[], lanes: [] as string[], hosts: [] as string[] }
+
+    for (const [ref, owner] of Object.entries(s.branchReservations ?? {})) {
+      if (!liveBranch.has(owner)) { delete s.branchReservations![ref]; released.branches.push(ref) }
+    }
+    for (const [port, owner] of Object.entries(s.laneReservations ?? {})) {
+      if (!liveBranch.has(owner)) { delete s.laneReservations![port]; released.lanes.push(port) }
+    }
+    // A host claim is owned by a ServiceKey (`<branchId>:<serviceId>`) or by a branchId, so the
+    // branch half is what has to still exist either way.
+    for (const [label, owner] of Object.entries(s.hostReservations ?? {})) {
+      if (!liveBranch.has(owner.split(':')[0]!)) { delete s.hostReservations![label]; released.hosts.push(label) }
+    }
+    return released
+  })
+}
+
 // ---- region WP5 (templates/parity) ----
 /** Present a pre-multi-service document as the registration model, in memory, on every parse
  *  (contract 00 section 5, plan 05 §9). Pure and idempotent: a project with a branch and no

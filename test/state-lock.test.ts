@@ -172,3 +172,39 @@ test('state.json is written 0600: it holds every database password, S3 key and o
   st.saveState(st.loadState())
   expect(statSync(file).mode & 0o777).toBe(0o600)
 })
+
+// ---- boot recovery of abandoned reservations (decision 51) -------------------------------------
+
+test('a reservation whose creator never committed is released at boot, so a retry is not refused forever', () => {
+  // The shape a daemon killed mid-provision leaves behind: the claims are written synchronously
+  // before the first await and the branch row only at the end, so a crash in between keeps the
+  // claims with nobody left to release them. `ghost` is that dead creator.
+  st.mutate((s) => {
+    s.branches = { live: { id: 'live', projectId: 'p1', name: 'main' } as never }
+    s.branchReservations = { 'demo-feat': 'ghost', 'demo-main': 'live' }
+    s.laneReservations = { '20000': 'ghost', '20002': 'live' }
+    s.hostReservations = { 'web-demo-feat': 'ghost:cp-web', 'web-demo-main': 'live:cp-web' }
+  })
+
+  const released = st.reclaimAbandonedReservations()
+
+  // Only the dead creator's claims go. Ownership decides, not age: a claim held by a branch that
+  // really exists is still load-bearing, and dropping it would let a second create collide with it.
+  expect(released.branches).toEqual(['demo-feat'])
+  expect(released.lanes).toEqual(['20000'])
+  expect(released.hosts).toEqual(['web-demo-feat'])
+  const after = st.loadState()
+  expect(after.branchReservations).toEqual({ 'demo-main': 'live' })
+  expect(after.laneReservations).toEqual({ '20002': 'live' })
+  expect(after.hostReservations).toEqual({ 'web-demo-main': 'live:cp-web' })
+})
+
+test('boot recovery is idempotent, and silent when nothing was abandoned', () => {
+  st.mutate((s) => {
+    s.branches = { live: { id: 'live', projectId: 'p1', name: 'main' } as never }
+    s.branchReservations = { 'demo-main': 'live' }
+  })
+  expect(st.reclaimAbandonedReservations()).toEqual({ branches: [], lanes: [], hosts: [] })
+  expect(st.reclaimAbandonedReservations()).toEqual({ branches: [], lanes: [], hosts: [] })
+  expect(st.loadState().branchReservations).toEqual({ 'demo-main': 'live' })
+})
