@@ -204,6 +204,12 @@ test('memory pressure evicts the least recently active service, with a synthetic
     emit: (_key, kind, payload) => { events.push({ kind, payload }) },
   }, upstream)
 
+  // State the precondition instead of inheriting it from whatever ran before: the app is the only
+  // running candidate, so it is unambiguously the least recently active one when the pass runs.
+  // Without this the victim depends on the database's state, which earlier cases leave differently
+  // depending on timing, and the case fails for a reason that has nothing to do with eviction.
+  await sched.sleep(PG_KEY, 'test-precondition').catch(() => {})
+  expect(await state(PG)).toBe('exited')
   await sched.wake(APP_KEY, { door: 'api' })
   expect(await state(APP)).toBe('running')
   // The daemon runs ONE scheduler whose ledger has seen every service; this second one exists only
