@@ -2577,6 +2577,74 @@ test('a service added inside a queued create window cannot wedge the provision c
   expect((await within(10_000, post('/orgs/local/projects', { name: 'unrelated' }), 'an unrelated project create')).statusCode).toBe(201)
 })
 
+test('a service add ALREADY IN FLIGHT when the create snapshots cannot wedge the chain either', async () => {
+  // The other ordering, and the one the branch key on the adds does NOT cover: the add is
+  // already holding `branchOp(main)` when `createBranch` takes its pre-lock snapshot, so the
+  // create records the OLD service list, queues on that key, and the add then materialises the
+  // service before it lets go. Under the lock the create re-reads a longer list and would fork a
+  // service its acquisition never named, whose wake is then a second acquisition.
+  const id = await sourceWithEveryStep()
+  let enterAdd!: () => void
+  let goAdd!: () => void
+  const inAdd = new Promise<void>((r) => { enterAdd = r })
+  const addGate = new Promise<void>((r) => { goAdd = r })
+  // Gated, then handed to the real fake: it registers the container with `FakeRuntime`, which is
+  // what a later wake of that service resolves through.
+  const realProvision = db.provision.bind(db)
+  const provision = vi.spyOn(db, 'provision').mockImplementationOnce(async (t, opts) => {
+    enterAdd()
+    await addGate
+    return realProvision(t, opts)
+  })
+  let enterFork!: () => void
+  let goFork!: () => void
+  const inFork = new Promise<void>((r) => { enterFork = r })
+  const forkGate = new Promise<void>((r) => { goFork = r })
+  let forks = 0
+  const fork = vi.spyOn(db, 'fork').mockImplementation(async (src, dst, opts) => {
+    calls.push(`db.fork:${src.container}->${dst.container}`)
+    if (forks++ === 0) { enterFork(); await forkGate }
+    await opts?.ensureSourceRunning?.()
+    return { url: src.url.replace(src.container, dst.container), method: 'basebackup', ms: 1 }
+  })
+
+  try {
+    // 1. The add is IN FLIGHT, holding main's branch key.
+    const add = post(`/projects/${id}/services`, { type: 'postgres', name: 'db2', branch: 'main' })
+    await inAdd
+
+    // 2. The create snapshots now: `{main:pg-db}`, with nothing for a service that is being
+    //    created as it looks.
+    let created = false
+    const create = post(`/projects/${id}/branches`, { name: 'feat' }).then((r) => { created = true; return r })
+    await settle()
+    expect(created).toBe(false)
+
+    // 3. The add finishes and db2 exists. The create acquires, re-reads a longer list, and has
+    //    to widen its acquisition before it forks anything.
+    goAdd()
+    expect((await within(10_000, add, 'the service add')).statusCode).toBe(201)
+
+    // 4. A second create from the same parent lands mid-fork and takes main:pg-db2's chain if
+    //    the first create never acquired it. That is the circular wait.
+    await inFork
+    const create2 = post(`/projects/${id}/branches`, { name: 'feat2', from: 'main' })
+    await settle()
+    goFork()
+
+    expect((await within(10_000, create, 'the first branch create')).statusCode).toBe(201)
+    expect((await within(10_000, create2, 'the second branch create')).statusCode).toBe(201)
+    // The clone really did carry both databases, so the widened acquisition forked them.
+    const feat = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')!
+    expect(Object.keys(feat.databases ?? {}).sort()).toEqual(['pg-db', 'pg-db2'])
+    // ...and the engine-wide provision chain is still alive for everyone else.
+    expect((await within(10_000, post('/orgs/local/projects', { name: 'unrelated2' }), 'an unrelated project create')).statusCode).toBe(201)
+  } finally {
+    provision.mockRestore()
+    fork.mockRestore()
+  }
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))

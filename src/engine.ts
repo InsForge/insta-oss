@@ -75,6 +75,10 @@ export interface Teardown { destroyed: number; failed: number }
 /** The status of a branch whose teardown did not finish: the row is kept so the resources it names
  *  can be found and the demolition retried (`unwindBranch`). */
 export const CLEANUP_FAILED = 'cleanup-failed'
+/** How many times a branch create may re-drive its acquisition over a grown key set before it
+ *  gives up. Two is the converging case (the first round takes `branchOp(source)`, which every
+ *  service add now needs); the third is slack for an add that lands between two rounds. */
+const CREATE_LOCK_ROUNDS = 3
 const newTeardown = (): Teardown => ({ destroyed: 0, failed: 0 })
 /** Run one teardown step and count it. */
 async function count(t: Teardown, fn: () => Promise<unknown>): Promise<void> {
@@ -549,10 +553,53 @@ export class Engine {
     // no second acquisition anywhere in the create, since every nested `deploy`, `wake` and
     // `sleep` re-enters a key this already owns.
     const branchId = randomUUID()
-    // What the SOURCE carries is exactly what the clone will carry, so one list keys both sides.
+    //
+    // The key set is computed from the source row as it stands BEFORE the lock, and the row can
+    // grow before the lock is granted: an `add*Service` already in flight when this snapshot is
+    // taken holds `branchOp(source)` (which is why the create waits) and materialises its
+    // service before it lets go. `createBranchLocked` then re-reads and forks a service this
+    // acquisition never named, and that fork's `ensureSourceRunning` would take its key as a
+    // SECOND acquisition while these are held, which is the circular wait decision 52 forbids.
+    //
+    // So the set is checked against the row under the lock and, when it has grown, the whole
+    // acquisition is RE-DRIVEN over the union: released first, then taken again in one sorted
+    // acquisition. Never a nested one, so deadlock freedom is the same single-acquisition
+    // argument as before, and nothing has been provisioned at that point (the check runs before
+    // `createBranchLocked`), so a re-drive costs only the queueing. It converges: the union only
+    // grows, and from the first round on this holds `branchOp(source)`, which every add now
+    // needs, so a second divergence would take an add landing in the gap between two rounds.
+    // Bounded anyway, and a create that cannot settle says so rather than spinning.
+    let keys = this.createBranchKeys(project, source, branchId)
+    for (let round = 1; ; round++) {
+      const settled = new Set(keys)
+      const out = await this.withOp([...settled], async (): Promise<{ branch: Branch } | { union: ServiceKey[] }> => {
+        // Same order as `createBranchLocked`'s own re-read, so a project that went while this
+        // queued still answers `project not found` rather than reporting its branch missing.
+        if (!this.getProject(projectId)) throw new Error('project not found')
+        const live = loadState().branches[source.id]
+        if (!live) throw new Error(`source branch "${source.name}" not found`)
+        const needed = this.createBranchKeys(project, live, branchId)
+        if (needed.every((k) => settled.has(k))) {
+          return { branch: await this.createBranchLocked(project, name, live, branchId) }
+        }
+        return { union: [...new Set([...settled, ...needed])] }
+      })
+      if ('branch' in out) return out.branch
+      if (round >= CREATE_LOCK_ROUNDS) {
+        throw new Error(`branch create could not settle its lock set after ${CREATE_LOCK_ROUNDS} rounds: services on "${source.name}" are being added or removed concurrently, retry the create`)
+      }
+      keys = out.union
+    }
+  }
+
+  /** Every ServiceKey a create of `branchId` from `source` touches: the project, both branch
+   *  keys, and the source's carried services and compute groups on BOTH sides (what the source
+   *  carries is exactly what the clone will carry, so one list keys both). Recomputed under the
+   *  lock from the re-read row, which is what makes the union check above meaningful. */
+  private createBranchKeys(project: Project, source: Branch, branchId: string): ServiceKey[] {
     const ids = this.carriedServiceIds(project, source)
-    const groups = Object.keys(source.apps)
-    const keys = [
+    const groups = Object.keys(source.apps ?? {})
+    return [
       // The project key too: until the row is committed there is no branch key a project delete
       // could collide with, so this is what keeps the clone out of the gap in its branch list.
       this.projectOp(project),
@@ -563,7 +610,6 @@ export class Engine {
       ...ids.map((sid) => `${branchId}:${sid}`),
       ...groups.map((g) => `${branchId}:cp-${g}`),
     ]
-    return this.withOp(keys, () => this.createBranchLocked(project, name, source, branchId))
   }
 
   private async createBranchLocked(projectAtCall: Project, name: string, sourceAtCall: Branch, branchId: string): Promise<Branch> {
