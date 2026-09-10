@@ -1501,6 +1501,7 @@ test('dashboard serving: identity and gallery routes reach the SPA shell', async
 // shadows a database whose credentials still hand that hostname to every client. Every path that
 // mints one reserves it first, and a collision is a refusal with nothing created.
 import { loadState } from '../src/state'
+import { buildTable } from '../src/router/table'
 
 const hostReservations = (): Record<string, string> => loadState().hostReservations ?? {}
 
@@ -1572,6 +1573,50 @@ test('renaming a managed database onto a deployed group hostname is refused and 
   const rows = (await get(`/projects/${id}/services`)).json().services
   expect(rows.map((s: { id: string }) => s.id)).toContain('rd-cache')
   expect(rows.map((s: { id: string }) => s.id)).not.toContain('rd-live')
+  expect(hostReservations()).toEqual({})
+})
+
+// A rename changes the name the label is built from, so it has to re-mint the hostname. Moving
+// `apps[old]` to `apps[new]` and leaving its recorded `host` alone left the group answering on the
+// OLD name (buildTable reads `app.host` first) while `<new-group>-<ref>` resolved nowhere at all.
+// Only mode, domain and port are read off this config, and they match the engine's.
+const tableNow = (): ReturnType<typeof buildTable> => buildTable(loadState(), testConfig(), () => { /* quiet */ })
+
+test('renaming a compute group re-mints its hostname: the new name routes, the old one stops', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', port: 3000, group: 'api' })
+  const bid = await branchOf(id)
+  expect(tableNow().byHost('api-demo-main.localhost')?.key).toBe(`${bid}:cp-api`)
+
+  expect((await post(`/projects/${id}/services/cp-api/rename`, { name: 'gateway' })).statusCode).toBe(200)
+
+  // The services list reports the NEW domain and endpoint, not the name it was created under.
+  const row = (await get(`/projects/${id}/services`)).json().services.find((s: { id: string }) => s.id === 'cp-gateway')
+  expect(row.domain).toBe('gateway-demo-main.localhost')
+  expect(row.endpoint).toBe('gateway-demo-main.localhost:8080')
+  // ...because the row itself was re-minted, url included.
+  const app = loadState().branches[bid].apps.gateway
+  expect(app.host).toBe('gateway-demo-main.localhost')
+  expect(app.url).toBe('http://gateway-demo-main.localhost:8080')
+
+  // Host dispatch reaches the container on the new hostname...
+  const t = tableNow()
+  expect(t.byHost('gateway-demo-main.localhost')).toMatchObject({ key: `${bid}:cp-gateway`, container: 'io-demo-main-app-gateway', port: 3000 })
+  // ...and the old hostname routes nowhere, rather than at a container docker has already renamed.
+  expect(t.byHost('api-demo-main.localhost')).toBeUndefined()
+  expect(hostReservations()).toEqual({})
+})
+
+test('a compute rename onto a hostname another service holds is refused and renames nothing', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', port: 3000, group: 'api' })
+  calls.length = 0
+  // `pg-db` is the postgres service's label, so the group must not be allowed to take it.
+  const r = await post(`/projects/${id}/services/cp-api/rename`, { name: 'pg-db' })
+  expect(r.statusCode).toBe(409)
+  expect(r.json().error).toContain('pg-db-demo-main.localhost')
+  expect(calls.filter((c) => c.startsWith('compute.rename:'))).toEqual([])
+  expect(tableNow().byHost('api-demo-main.localhost')?.key).toBe(`${await branchOf(id)}:cp-api`)
   expect(hostReservations()).toEqual({})
 })
 

@@ -1206,42 +1206,94 @@ export class Engine {
   }
 
   /** Rename a compute group everywhere it appears: registration, every branch's deployment
-   *  (runtime artifact included, via the adapter), and service-bound user secrets. insta-oss
-   *  mints no per-service secret names for compute, so there is nothing to re-key. */
+   *  (runtime artifact included, via the adapter), the minted hostname each branch answers on, and
+   *  service-bound user secrets. insta-oss mints no per-service secret names for compute, so there
+   *  is nothing to re-key there.
+   *
+   *  The hostname is RE-MINTED, exactly as the postgres and managed renames do it. Moving the row
+   *  from `apps[old]` to `apps[new]` while leaving its recorded `host` alone left the group
+   *  answering on its OLD hostname (the route table reads `app.host` and only falls back to
+   *  deriving one) while `<new-group>-<ref>` resolved nowhere, and the services list kept
+   *  advertising the stale domain and endpoint. */
   async renameComputeService(projectId: string, oldName: string, newName: string): Promise<ServiceRow | undefined> {
-    const project = this.getProject(projectId)
-    if (!project) throw new Error('project not found')
-    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(newName)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
-    const groups = this.computeGroupNames(projectId)
-    if (!groups.includes(oldName)) throw new Error('service not found')
-    const current = async (): Promise<ServiceRow | undefined> =>
-      (await this.services(projectId)).find((s) => s.id === `cp-${newName}`)
-    if (newName === oldName) return current()
-    if (groups.includes(newName)) throw new Error(`compute service "${newName}" already exists`)
-    const branches = this.listBranches(projectId)
-    const deployed = branches.filter((b) => b.apps[oldName])
-    if (deployed.length && !this.compute.rename) throw new Error('rename is not supported by this compute adapter')
-    for (const b of deployed) await this.compute.rename!(this.ref(project, b), oldName, newName)
-    mutate((st) => {
-      const pr = st.projects[projectId]
-      pr.computeGroups = (pr.computeGroups ?? []).map((g) => (g === oldName ? newName : g))
-      // the /data volume record follows the rename; its stable id keeps the docker volume attached
-      if (pr.computeVolumes?.[oldName]) {
-        pr.computeVolumes[newName] = pr.computeVolumes[oldName]
-        delete pr.computeVolumes[oldName]
-      }
+    return this.serialize('provision', async () => {
+      const project = this.getProject(projectId)
+      if (!project) throw new Error('project not found')
+      if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(newName)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+      const groups = this.computeGroupNames(projectId)
+      if (!groups.includes(oldName)) throw new Error('service not found')
+      const current = async (): Promise<ServiceRow | undefined> =>
+        (await this.services(projectId)).find((s) => s.id === `cp-${newName}`)
+      if (newName === oldName) return current()
+      if (groups.includes(newName)) throw new Error(`compute service "${newName}" already exists`)
+      const branches = this.listBranches(projectId)
+      const deployed = branches.filter((b) => b.apps[oldName])
+      if (deployed.length && !this.compute.rename) throw new Error('rename is not supported by this compute adapter')
+      // What each carrier will answer on afterwards, computed before the first await so the state
+      // write below is pure bookkeeping.
+      const minted = new Map(deployed.map((b) => {
+        const ref = this.ref(project, b)
+        const host = this.hostFor('compute', newName, ref)
+        return [b.id, {
+          host,
+          url: this.serviceUrl(project, { ...b, apps: { ...b.apps, [newName]: { ...b.apps[oldName], host } } }, newName),
+          oldLabel: this.labelFor('compute', oldName, ref),
+          newLabel: this.labelFor('compute', newName, ref),
+        }]
+      }))
+      // A branch with no deployment mints nothing today, but its next deploy will, so the new name
+      // has to be free there too — the check `addComputeService` makes for the same reason. Only
+      // the carriers get a RESERVATION: a reservation is retired by the row that supersedes it, and
+      // a branch that writes no row would leak one for ever.
       for (const b of branches) {
-        const app = st.branches[b.id].apps[oldName]
-        if (!app) continue
-        st.branches[b.id].apps[newName] = app
-        delete st.branches[b.id].apps[oldName]
+        if (minted.has(b.id)) continue
+        this.assertHostFree(this.labelFor('compute', newName, this.ref(project, b)))
       }
-      for (const u of st.userSecrets[projectId] ?? []) {
-        if (u.service === `compute/${oldName}`) u.service = `compute/${newName}`
+      const owner = `${projectId}:cp-${oldName}->cp-${newName}`
+      this.reserveHosts([...minted.values()].map((m) => m.newLabel), owner)
+      try {
+        for (const b of deployed) await this.compute.rename!(this.ref(project, b), oldName, newName)
+      } catch (e) {
+        this.releaseHosts(owner)
+        throw e
       }
+      mutate((st) => {
+        const pr = st.projects[projectId]
+        pr.computeGroups = (pr.computeGroups ?? []).map((g) => (g === oldName ? newName : g))
+        // the /data volume record follows the rename; its stable id keeps the docker volume attached
+        if (pr.computeVolumes?.[oldName]) {
+          pr.computeVolumes[newName] = pr.computeVolumes[oldName]
+          delete pr.computeVolumes[oldName]
+        }
+        // always-on, limits, the recorded port and the template provenance are keyed by service id,
+        // and the id embeds the name: without this the rename silently reset them to the defaults.
+        if (pr.serviceSettings?.[`cp-${oldName}`]) {
+          pr.serviceSettings[`cp-${newName}`] = pr.serviceSettings[`cp-${oldName}`]
+          delete pr.serviceSettings[`cp-${oldName}`]
+        }
+        for (const b of branches) {
+          const app = st.branches[b.id].apps[oldName]
+          if (!app) continue
+          const m = minted.get(b.id)!
+          st.branches[b.id].apps[newName] = { ...app, host: m.host, url: m.url }
+          delete st.branches[b.id].apps[oldName]
+          // The old hostname is this group's no longer: drop any reservation still standing on it
+          // (a deploy that took one and never wrote its row), and retire the one just taken, which
+          // the row above now supersedes.
+          if (st.hostReservations?.[m.oldLabel] !== undefined) delete st.hostReservations[m.oldLabel]
+          if (st.hostReservations?.[m.newLabel] === owner) delete st.hostReservations[m.newLabel]
+        }
+        for (const u of st.userSecrets[projectId] ?? []) {
+          if (u.service === `compute/${oldName}`) u.service = `compute/${newName}`
+        }
+      })
+      // The ServiceKey embeds the id, so the scheduler's ledger has to follow or the renamed group
+      // is tracked under a key nothing resolves any more (and its wake would never fire).
+      for (const b of deployed) this.scheduler.rekey(this.serviceKey(b, `cp-${oldName}`), this.serviceKey(b, `cp-${newName}`))
+      this.router.invalidate()
+      this.emit(projectId, null, 'resource', 'service.rename', { type: 'compute', from: oldName, to: newName })
+      return current()
     })
-    this.emit(projectId, null, 'resource', 'service.rename', { type: 'compute', from: oldName, to: newName })
-    return current()
   }
 
   /** Remove a compute group: destroy its containers (and /data volumes) on every branch, unregister. */
@@ -1905,8 +1957,10 @@ export class Engine {
 
   // ---- region WP2 (router) ----
   /** The FQDN a service answers on: the bounded label (decision 55) plus the run mode's domain. Minted
-   *  ONCE and recorded on the row (`apps[g].host`, `databases[id].host`, `managed[id].host`); every
-   *  later read takes the row's value, so a rename or a config change never moves a live hostname. */
+   *  when the service is created and recorded on the row (`apps[g].host`, `databases[id].host`,
+   *  `managed[id].host`); every later READ takes the row's value, so a config change never moves a
+   *  live hostname. A rename is the one write that re-mints it — the name is in the label — and each
+   *  rename records the new value on the row in the same mutate that moves the row. */
   hostFor(kind: HostKind, name: string, ref: string): string { return fqdnFor(kind, name, ref, this.cfg.domain) }
   /** The bare label only: what `assertHostFree` compares and what the 63-char bound applies to. */
   labelFor(kind: HostKind, name: string, ref: string): string { return labelFor(kind, name, ref) }
