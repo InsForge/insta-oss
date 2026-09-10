@@ -2384,6 +2384,43 @@ test('a project delete that overlaps a branch create still takes the clone with 
   expect(calls.some((c) => c.startsWith('data.remove:') && c.includes('demo-feat'))).toBe(true)
 })
 
+test('a project delete that overlaps the CREATE OF THE PROJECT takes its default branch with it', async () => {
+  // The case where the project key is the ONLY thing standing between the two: a project with no
+  // source branch yet. The two tests around this one create a CLONE, and a clone's key set
+  // already carries the source branch's keys, which the delete acquires too, so they queue with
+  // or without `projectOp` and cannot grade it. Here the project row exists and its default
+  // branch row does not, so the delete's pre-lock branch list is empty and its key set with it.
+  let enter!: () => void
+  let go!: () => void
+  const entered = new Promise<void>((r) => { enter = r })
+  const gate = new Promise<void>((r) => { go = r })
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) => {
+    if (args[0] === 'network' && args[1] === 'create') { enter(); await gate }
+    return Buffer.from('')
+  })
+
+  const create = engine.createProject('demo2')
+  await entered
+  const pid = Object.values(loadState().projects).find((p) => p.name === 'demo2')!.id
+  // The project is visible; its default branch is committed nowhere, so a delete's
+  // pre-lock branch list is empty and its key set with it.
+  expect(Object.values(loadState().branches).filter((b) => b.projectId === pid)).toEqual([])
+
+  let done = false
+  const del = engine.destroyProject(pid).then((t) => { done = true; return t })
+  await settle()
+  expect(done).toBe(false)          // must QUEUE behind the create, on the project key
+
+  go()
+  await create
+  await del
+  vi.mocked(dockerFn).mockImplementation(async () => Buffer.from(''))
+
+  // No branch row may outlive the project it points at.
+  expect(loadState().projects[pid]).toBeUndefined()
+  expect(Object.values(loadState().branches).filter((b) => b.projectId === pid)).toEqual([])
+})
+
 test('...and the other order: a create that queued behind a project delete builds nothing', async () => {
   const id = await sourceWithEveryStep()
   // The delete is held mid-demolition, so the create arrives while the project row still exists
@@ -2472,6 +2509,72 @@ test('a source renamed DURING the provisioning window still hands its secrets to
   const ev = loadState().events.filter((e) => e.kind === 'branch.created' && e.branch === 'feat')
   expect(ev).toHaveLength(1)
   expect((ev[0].payload as { from: string }).from).toBe('beta')
+})
+
+/** Bound a promise, so a wedged chain fails the test with a legible message instead of running
+ *  out the runner's clock. */
+async function within<T>(ms: number, p: Promise<T>, what: string): Promise<T> {
+  let t!: ReturnType<typeof setTimeout>
+  try {
+    return await Promise.race([p, new Promise<never>((_, rej) => { t = setTimeout(() => rej(new Error(`${what} did not finish within ${ms}ms: the provision chain is wedged`)), ms) })])
+  } finally {
+    clearTimeout(t)
+  }
+}
+
+test('a service added inside a queued create window cannot wedge the provision chain', async () => {
+  const id = await sourceWithEveryStep()
+  const mainRow = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'main')!
+  // The fork opens the wake door the way the real adapter does: `forkByBasebackup` calls
+  // `ensureSourceRunning` unconditionally, and under this PR's own at-rest rule a fork of a live
+  // parent ALWAYS streams, so this is the common path and not a corner. The first fork also
+  // parks, so the third call below lands while the create is mid-provision.
+  let enterFork!: () => void
+  let goFork!: () => void
+  const inFork = new Promise<void>((r) => { enterFork = r })
+  const forkGate = new Promise<void>((r) => { goFork = r })
+  let forks = 0
+  const fork = vi.spyOn(db, 'fork').mockImplementation(async (src, dst, opts) => {
+    calls.push(`db.fork:${src.container}->${dst.container}`)
+    if (forks++ === 0) { enterFork(); await forkGate }
+    await opts?.ensureSourceRunning?.()
+    return { url: src.url.replace(src.container, dst.container), method: 'basebackup', ms: 1 }
+  })
+
+  // 1. Something is in flight on main, so the create QUEUES with its key set already enqueued
+  //    from the pre-lock snapshot: {main:pg-db}, and no key for a service that does not exist yet.
+  let release!: () => void
+  const held = new Promise<void>((r) => { release = () => { r() } })
+  const holder = engine.withOp([engine.branchOp(mainRow)], () => held)
+  let created = false
+  const create = post(`/projects/${id}/branches`, { name: 'feat' }).then((r) => { created = true; return r })
+  await settle()
+  expect(created).toBe(false)
+
+  // 2. A second postgres is added to main INSIDE that window. With no operation key of its own it
+  //    slips in, and the create's re-read then forks a service whose key it never acquired.
+  const add = post(`/projects/${id}/services`, { type: 'postgres', name: 'db2', branch: 'main' })
+  await settle()
+  release()
+  await holder
+
+  // 3. A second create from the same parent arrives while the first is mid-fork. Its key set is
+  //    read NOW, so it contains main:pg-db2, which nothing is ahead of: it takes that chain and
+  //    then waits on the branch key the first create holds. The first create's fork of db2 then
+  //    wakes main:pg-db2 and queues behind it. Circular wait, inside the engine-wide provision
+  //    chain, which has no timeout anywhere.
+  await inFork
+  const create2 = post(`/projects/${id}/branches`, { name: 'feat2', from: 'main' })
+  await settle()
+  goFork()
+
+  expect((await within(10_000, create, 'the first branch create')).statusCode).toBe(201)
+  expect((await within(10_000, add, 'the service add')).statusCode).toBe(201)
+  expect((await within(10_000, create2, 'the second branch create')).statusCode).toBe(201)
+  fork.mockRestore()
+  // ...and the chain is not wedged for the rest of the daemon either: `serialize('provision')` is
+  // engine-wide, so a project create in an UNRELATED project is the honest liveness check.
+  expect((await within(10_000, post('/orgs/local/projects', { name: 'unrelated' }), 'an unrelated project create')).statusCode).toBe(201)
 })
 
 test('a create that fails post-commit emits no branch.created event', async () => {

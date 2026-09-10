@@ -1752,6 +1752,13 @@ export class Engine {
    *  Branch-scoped for the reason spelled out on `addDbService`: fanning out meant an agent adding
    *  a redis on its own branch also got one, with its own credentials, on `main`. */
   async addManagedService(projectId: string, type: ManagedDbType, name: string, opts: { branch?: string } = {}): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
+    // The branch key outside the provision chain, the order every other taker uses (decision 52,
+    // `addKeys`): an add that runs inside a queued branch create's window changes what that
+    // create will fork, out from under the key set it already enqueued.
+    return this.withOp(this.addKeys(projectId, opts.branch), () => this.addManagedServiceLocked(projectId, type, name, opts))
+  }
+
+  private async addManagedServiceLocked(projectId: string, type: ManagedDbType, name: string, opts: { branch?: string } = {}): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
     // Inside the engine-wide provision chain, exactly like its postgres and storage siblings.
     // Without it the `existing` check and the append that follows it were check-then-act across
     // every provisioning await: two concurrent first adds of the same managed service, on two
@@ -2941,6 +2948,30 @@ export class Engine {
    *  sweep never sees it. */
   projectOp(project: Project | string): ServiceKey { return `${typeof project === 'string' ? project : project.id}:*project` }
 
+  /** The branch key a service ADD resolves to, or nothing when the target cannot be resolved.
+   *
+   *  Decision 52 names "service add" among the takers of the operation lock and the three adds
+   *  took none: only `serialize('provision')`, which a QUEUED `createBranch` has not entered yet.
+   *  An add could therefore land inside a create's queue window, and since the create's key set
+   *  was enqueued from the pre-lock snapshot while `provisionBranch` forks what the row says
+   *  NOW, the create would fork a service whose key it never acquired. That fork's
+   *  `ensureSourceRunning` takes `withOp([key])`, a second acquisition while other keys are held,
+   *  which is the circular wait decision 52 exists to make impossible; and because it happens
+   *  inside the engine-wide `serialize('provision')` with no timeout in the queue, every
+   *  provisioning call in the daemon wedges behind it until a restart. With the branch key held
+   *  by the add, the two sets cannot diverge.
+   *
+   *  It resolves WITHOUT throwing: the body inside the chain re-resolves the branch and raises
+   *  the real error, and pre-empting that here would change which error an invalid request gets.
+   *  `withOp([])` runs the body directly, so an unresolvable target behaves exactly as before. */
+  private addKeys(projectId: string, branchName?: string): ServiceKey[] {
+    try {
+      return [this.branchOp(this.targetBranch(projectId, branchName))]
+    } catch {
+      return []
+    }
+  }
+
   /** What a WHOLE-branch operation holds: the branch key plus every service key on the branch. */
   private branchKeys(project: Project, b: Branch): ServiceKey[] {
     return [
@@ -3703,6 +3734,10 @@ export class Engine {
    *  MATERIALISED here rather than refused, which is what the cloud does too (it creates a fresh
    *  row with its own lineage and no data). A name this branch already carries is the conflict. */
   async addDbService(projectId: string, name: string, opts: { templateDeploymentId?: string; branch?: string } = {}): Promise<ServiceRow> {
+    return this.withOp(this.addKeys(projectId, opts.branch), () => this.addDbServiceLocked(projectId, name, opts))
+  }
+
+  private async addDbServiceLocked(projectId: string, name: string, opts: { templateDeploymentId?: string; branch?: string } = {}): Promise<ServiceRow> {
     return this.serialize('provision', async () => {
       const project = this.getProject(projectId)
       if (!project) throw new Error('project not found')
@@ -3832,6 +3867,10 @@ export class Engine {
   /** Add a storage service to ONE branch: `opts.branch`, else the project's default branch. Same
    *  branch scoping, and the same reason for it, as `addDbService`. */
   async addStorageService(projectId: string, name: string, opts: { public?: boolean; branch?: string } = {}): Promise<ServiceRow> {
+    return this.withOp(this.addKeys(projectId, opts.branch), () => this.addStorageServiceLocked(projectId, name, opts))
+  }
+
+  private async addStorageServiceLocked(projectId: string, name: string, opts: { public?: boolean; branch?: string } = {}): Promise<ServiceRow> {
     return this.serialize('provision', async () => {
       const project = this.getProject(projectId)
       if (!project) throw new Error('project not found')
