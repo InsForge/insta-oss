@@ -3532,6 +3532,41 @@ test('a SUCCESSFUL create whose destination is renamed mid-flight does not leak 
   expect((await get(`/projects/${id}/secrets?branch=feat`)).json().secrets.API_KEY).toBe('from-main')
 })
 
+test('each cleanup-failed event of a project delete reports THAT branch, not the shared counter', async () => {
+  // `destroyProject` runs every branch through ONE `Teardown`. The row, the scheduler keys and
+  // the domains moved to the per-branch delta; this event did not, so the second failing branch
+  // reported the FIRST one's container as the thing that refused to go, plus a failure count and
+  // a destroyed count that were the call's, not the branch's.
+  const id = await sourceWithEveryStep()
+  for (const name of ['feat-a', 'feat-b']) {
+    expect((await post(`/projects/${id}/branches`, { name })).statusCode).toBe(201)
+  }
+  const realDestroy = db.destroy.bind(db)
+  const destroy = vi.spyOn(db, 'destroy').mockImplementation(async (container: string) => {
+    if (container.includes('demo-feat-')) throw new Error('container is in use')
+    return realDestroy(container)
+  })
+  try {
+    await engine.destroyProject(id)
+  } finally {
+    destroy.mockRestore()
+  }
+
+  const failed = engine.listEvents(id).filter((e) => e.kind === 'branch.cleanupFailed')
+  expect(failed.map((e) => e.branch)).toEqual(['feat-a', 'feat-b'])
+  for (const e of failed) {
+    const teardown = (e.payload as { teardown: { destroyed: number; failed: number; reasons?: string[] } }).teardown
+    // One failure, and the container it names is this branch's own.
+    expect(teardown.failed).toBe(1)
+    expect(teardown.reasons).toHaveLength(1)
+    expect(teardown.reasons![0]).toContain(`demo-${e.branch}-`)
+  }
+  // Two branches of the same shape did the same amount of demolition, and neither of them counts
+  // what `main` (torn down first, cleanly) took with it.
+  const counts = failed.map((e) => (e.payload as { teardown: { destroyed: number } }).teardown.destroyed)
+  expect(counts[0]).toBe(counts[1])
+})
+
 test('a successful branch delete takes the branch-scoped secrets with it', async () => {
   // A user secret is keyed by branch NAME and a create inherits by name, so rows a delete left
   // behind are resurrected by the next branch of that name -- shadowing the project-wide value,

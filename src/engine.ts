@@ -94,6 +94,17 @@ const CREATE_LOCK_ROUNDS = 3
  *  trip with its own timeout, and the box this runs on is a single node. */
 const DOMAIN_CHECK_CONCURRENCY = 8
 const newTeardown = (): Teardown => ({ destroyed: 0, failed: 0 })
+/** A mark on a SHARED counter, and the slice one branch's demolition added to it. `destroyProject`
+ *  runs every branch through one `Teardown`, so a per-branch event carrying the whole thing told
+ *  the operator that a container belonging to a DIFFERENT branch is what refused to go, and
+ *  reported that branch's counts as this one's. Same scope rule as the row, the scheduler keys and
+ *  the domains: what this branch did, not what the call has done so far. */
+const teardownMark = (t: Teardown): { destroyed: number; failed: number; reasons: number } =>
+  ({ destroyed: t.destroyed, failed: t.failed, reasons: t.reasons?.length ?? 0 })
+const teardownSince = (t: Teardown, mark: { destroyed: number; failed: number; reasons: number }): Teardown => {
+  const reasons = (t.reasons ?? []).slice(mark.reasons)
+  return { destroyed: t.destroyed - mark.destroyed, failed: t.failed - mark.failed, ...(reasons.length ? { reasons } : {}) }
+}
 /** Run one teardown step and count it. `what` names the thing for the operator's message. */
 async function count(t: Teardown, fn: () => Promise<unknown>, what?: string): Promise<void> {
   try { await fn(); t.destroyed++ } catch (e) {
@@ -2668,15 +2679,18 @@ export class Engine {
         const t = newTeardown()
         let kept = false
         for (const b of live) {
-          const before = t.failed
+          const mark = teardownMark(t)
           await this.teardownBranch(project, b, t)
           // Same rule as `destroyBranch`: a row goes only when its demolition all went, so a
           // container or a directory that refused is still named by something.
-          if (t.failed === before) mutate((s) => { delete s.branches[b.id] })
+          const mine = teardownSince(t, mark)
+          if (mine.failed === 0) mutate((s) => { delete s.branches[b.id] })
           else {
             kept = true
             mutate((s) => { if (s.branches[b.id]) s.branches[b.id].status = CLEANUP_FAILED })
-            this.emit(projectId, b.name, 'resource', 'branch.cleanupFailed', { teardown: t })
+            // The branch's OWN slice: the shared counter names every branch's failures, so this
+            // event used to tell the operator that another branch's container is what refused.
+            this.emit(projectId, b.name, 'resource', 'branch.cleanupFailed', { teardown: mine })
           }
         }
         // ...and the project row outlives a branch row that outlived its teardown, or the branch
