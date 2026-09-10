@@ -482,17 +482,27 @@ export class Engine {
 
     // The new branch's id is minted FIRST, so its ServiceKeys exist before any container op
     // (decision 51). The lock covers the source's services (the fork reads them, and a sleeping one
-    // is woken) and the clone's databases (provision, then sleep). The clone's COMPUTE keys are
-    // deliberately not held here: the redeploy loop below acquires each one itself, and those
-    // containers do not exist yet, so there is nothing for this lock to exclude — while holding
-    // them would mean the nested deploy has to re-enter the same key.
+    // is woken) and the clone's own, and BOTH branch keys (`branchOp`), which is what makes the
+    // window between the row's commit and the last post-commit step private: a deploy to the clone
+    // or a delete of it queues instead of racing the create, and the compensation runs inside the
+    // same acquisition, so it can only ever tear down what this operation built.
+    //
+    // The clone's COMPUTE keys are held here too, rather than left to the redeploy loop. It is one
+    // sorted acquisition either way, and a key taken later, while others are held, is the shape
+    // that can deadlock against a multi-key operation going the other way; taken up front there is
+    // no second acquisition anywhere in the create, since every nested `deploy`, `wake` and
+    // `sleep` re-enters a key this already owns.
     const branchId = randomUUID()
     // What the SOURCE carries is exactly what the clone will carry, so one list keys both sides.
     const ids = this.carriedServiceIds(project, source)
+    const groups = Object.keys(source.apps)
     const keys = [
+      this.branchOp(source),
       ...ids.map((sid) => `${source.id}:${sid}`),
-      ...Object.keys(source.apps).map((g) => `${source.id}:cp-${g}`),
+      ...groups.map((g) => `${source.id}:cp-${g}`),
+      this.branchOp(branchId),
       ...ids.map((sid) => `${branchId}:${sid}`),
+      ...groups.map((g) => `${branchId}:cp-${g}`),
     ]
     return this.withOp(keys, () => this.createBranchLocked(project, name, source, branchId))
   }
@@ -696,7 +706,9 @@ export class Engine {
     const b = this.getBranchByName(projectId, branchName)
     if (!b) throw new Error(`branch "${branchName}" not found`)
     const group = opts.group ?? 'default'
-    return this.withOp([this.serviceKey(b, `cp-${group}`)], () => this.deployLocked(projectId, b.id, group, opts))
+    // The branch key with the service key, in ONE acquisition: a deploy must not land inside a
+    // branch create that has committed the row but is still building the branch.
+    return this.withOp([this.branchOp(b), this.serviceKey(b, `cp-${group}`)], () => this.deployLocked(projectId, b.id, group, opts))
   }
 
   // Takes a branch ID, not a Branch: anything read before the chain is a pre-queue snapshot, and an
@@ -1189,7 +1201,7 @@ export class Engine {
     service: ServiceRow | undefined; state: string
   }> {
     const t = this.computeTarget(projectId, serviceId, branchName)
-    return this.withOp([this.serviceKey(t.branch, `cp-${t.group}`)], () => this.lifecycleLocked(projectId, verb, t.branch.id, t.group))
+    return this.withOp([this.branchOp(t.branch), this.serviceKey(t.branch, `cp-${t.group}`)], () => this.lifecycleLocked(projectId, verb, t.branch.id, t.group))
   }
 
   // Branch ID, not a Branch — same reason as deployLocked: a snapshot taken before the chain is one
@@ -1247,7 +1259,7 @@ export class Engine {
     service: ServiceRow | undefined; state: string
   }> {
     const t = this.computeTarget(projectId, serviceId, branchName)
-    return this.withOp([this.serviceKey(t.branch, `cp-${t.group}`)], () => this.restartLocked(projectId, t.branch.id, t.group))
+    return this.withOp([this.branchOp(t.branch), this.serviceKey(t.branch, `cp-${t.group}`)], () => this.restartLocked(projectId, t.branch.id, t.group))
   }
 
   private async restartLocked(projectId: string, branchId: string, group: string): Promise<{
@@ -2105,25 +2117,34 @@ export class Engine {
     const b = loadState().branches[branchId]
     if (!project || !b || b.projectId !== projectId) throw new Error('branch not found')
     if (b.isDefault) throw new Error('cannot delete the default branch')
-    const t = newTeardown()
-    await this.teardownBranch(project, b, t)
-    mutate((s) => { delete s.branches[branchId] })
-    this.router.invalidate()
-    this.emit(projectId, b.name, 'resource', 'branch.deleted', { teardown: t })
-    return t
+    // Whole-branch keys: a delete cannot interleave with a create still building this branch, nor
+    // with a deploy or a lifecycle op on one of its services.
+    return this.withOp(this.branchKeys(project, b), async () => {
+      const t = newTeardown()
+      await this.teardownBranch(project, b, t)
+      mutate((s) => { delete s.branches[branchId] })
+      this.router.invalidate()
+      this.emit(projectId, b.name, 'resource', 'branch.deleted', { teardown: t })
+      return t
+    })
   }
 
   async destroyProject(projectId: string): Promise<Teardown> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
-    const t = newTeardown()
-    for (const b of this.listBranches(projectId)) {
-      await this.teardownBranch(project, b, t)
-      mutate((s) => { delete s.branches[b.id] })
-    }
-    mutate((s) => { delete s.projects[projectId] })
-    this.router.invalidate()
-    return t
+    const branches = this.listBranches(projectId)
+    // Every branch's keys, in one sorted acquisition (never one branch at a time: that is the
+    // ordering a concurrent multi-branch operation can deadlock against).
+    return this.withOp(branches.flatMap((b) => this.branchKeys(project, b)), async () => {
+      const t = newTeardown()
+      for (const b of branches) {
+        await this.teardownBranch(project, b, t)
+        mutate((s) => { delete s.branches[b.id] })
+      }
+      mutate((s) => { delete s.projects[projectId] })
+      this.router.invalidate()
+      return t
+    })
   }
 
   // ---- observability (docker + SQL backed; cloud response shapes) ----
@@ -2764,6 +2785,32 @@ export class Engine {
    *  limits, and the scheduler's own wake. Re-entrant inside the acquiring async context, so a
    *  nested `wake` (lifecycle start, a fork waking its source) takes no second acquisition. */
   withOp<T>(keys: ServiceKey[], fn: () => Promise<T>): Promise<T> { return this.scheduler.withOp(keys, fn) }
+
+  /** The same lock, one level up: a key that names the BRANCH instead of one of its services.
+   *
+   *  A branch create COMMITS its row before the volume forks, the bucket copies, the compute
+   *  deploys and the inherited secrets have run, and from that moment every request resolves the
+   *  branch by name. Another deploy to it, or a delete of it, could land in that window, and if a
+   *  later step of the create then failed, `unwindBranch` tore down whatever was there BY THEN --
+   *  including the concurrent operation's own containers. Holding this key across the post-commit
+   *  steps and the compensation closes the window: the create owns the branch until it is whole
+   *  or gone.
+   *
+   *  It is the existing `withOp` and nothing else (decision 52), so re-entrancy, sorted
+   *  acquisition and release-on-every-path all come for free: an operation takes this key IN THE
+   *  SAME acquisition as its service keys, and a nested step of the create re-enters both without
+   *  a second acquisition. `*branch` cannot collide with a service id (`cp-`, `pg-`, `st-`,
+   *  `rd-`, `my-`, `mo-`) and names no `ServiceTarget`, so the sweep never sees it. */
+  branchOp(branch: Branch | string): ServiceKey { return `${typeof branch === 'string' ? branch : branch.id}:*branch` }
+
+  /** What a WHOLE-branch operation holds: the branch key plus every service key on the branch. */
+  private branchKeys(project: Project, b: Branch): ServiceKey[] {
+    return [
+      this.branchOp(b),
+      ...this.carriedServiceIds(project, b).map((sid) => this.serviceKey(b, sid)),
+      ...Object.keys(b.apps ?? {}).map((g) => this.serviceKey(b, `cp-${g}`)),
+    ]
+  }
 
   /** Start a sleeping service and wait until it accepts connections. `traffic` refuses a service
    *  the developer stopped; `api` and `deploy` are explicit and never refused. */

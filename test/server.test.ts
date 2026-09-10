@@ -2147,6 +2147,96 @@ test('a create whose CLEANUP fails keeps a row naming the resources, and the del
   await assertRetryWorks(id)
 })
 
+/** Let queued microtasks and timers run, so anything that COULD proceed already has. */
+const settle = async (): Promise<void> => { for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0)) }
+
+/** A create paused inside a post-commit step: the row is committed and the branch resolves by
+ *  name, but the volume forks, bucket copies, deploys and secrets are not done. */
+function pauseInPostCommit(): { entered: Promise<void>; release(): void; restore(): void; fail(): void } {
+  let enter!: () => void
+  let go!: () => void
+  let failing = false
+  const entered = new Promise<void>((r) => { enter = r })
+  const gate = new Promise<void>((r) => { go = r })
+  const spy = vi.spyOn(storage, 'cloneInto').mockImplementationOnce(async () => {
+    enter()
+    await gate
+    if (failing) throw new Error('bucket boom')
+  })
+  return { entered, release: () => { go() }, restore: () => { spy.mockRestore() }, fail: () => { failing = true } }
+}
+
+test('the branch a create has committed is private until the create finishes: a deploy queues', async () => {
+  const id = await sourceWithEveryStep()
+  const paused = pauseInPostCommit()
+
+  const create = post(`/projects/${id}/branches`, { name: 'feat' })
+  await paused.entered
+  // The row IS committed and resolvable by name at this point: that is the window.
+  expect(Object.values(loadState().branches).some((b) => b.projectId === id && b.name === 'feat')).toBe(true)
+
+  let done = false
+  const deploy = post(`/projects/${id}/deploy`, { image: 'app:2', port: 3000, group: 'web', branch: 'feat' }).then((r) => { done = true; return r })
+  await settle()
+  // Without the branch key this deploy runs INSIDE the create, on a branch that is half built.
+  expect(done).toBe(false)
+  expect(calls.filter((c) => c.startsWith('deploy:demo-feat:web:app:2'))).toEqual([])
+
+  paused.release()
+  expect((await create).statusCode).toBe(201)
+  expect((await deploy).statusCode).toBe(200)
+  paused.restore()
+  // ...and it landed AFTER the create's own redeploy of that group, not on top of it.
+  const order = calls.filter((c) => c.startsWith('deploy:demo-feat:web:'))
+  expect(order.map((c) => c.split(':')[3])).toEqual(['app', 'app'])
+  expect(order[0]).toContain('app:1')
+  expect(order[1]).toContain('app:2')
+})
+
+test('a delete of the branch being created queues behind it and then runs, with no deadlock', async () => {
+  const id = await sourceWithEveryStep()
+  const paused = pauseInPostCommit()
+
+  const create = post(`/projects/${id}/branches`, { name: 'feat' })
+  await paused.entered
+  const bid = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')!.id
+
+  let done = false
+  const del = app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${bid}` }).then((r) => { done = true; return r })
+  await settle()
+  expect(done).toBe(false)
+  // The create is not blocked BY the delete either: releasing it finishes both, in order.
+  paused.release()
+  expect((await create).statusCode).toBe(201)
+  expect((await del).statusCode).toBe(200)
+  paused.restore()
+  expect(Object.values(loadState().branches).filter((b) => b.projectId === id && b.name === 'feat')).toEqual([])
+})
+
+test('a concurrent deploy is not torn down by the compensation of the create it raced', async () => {
+  const id = await sourceWithEveryStep()
+  const paused = pauseInPostCommit()
+
+  const create = post(`/projects/${id}/branches`, { name: 'feat' })
+  await paused.entered
+  const deploy = post(`/projects/${id}/deploy`, { image: 'app:2', port: 3000, group: 'web', branch: 'feat' })
+  await settle()
+
+  // The create now fails, so its compensation tears the branch down. Held behind the branch key,
+  // the deploy has built nothing for that compensation to destroy; it runs afterwards and finds
+  // no branch. Unheld, it built a container inside the window and `unwindBranch` destroyed it.
+  paused.fail()
+  paused.release()
+  expect((await create).statusCode).toBeGreaterThanOrEqual(400)
+  const answer = await deploy
+  paused.restore()
+  expect(answer.statusCode).toBe(400)
+  expect(answer.json().error).toContain('not found')
+  expect(calls.filter((c) => c.startsWith('deploy:demo-feat:web:app:2'))).toEqual([])
+  assertNothingOfFeatSurvives(id)
+  await assertRetryWorks(id)
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
