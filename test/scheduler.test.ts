@@ -366,7 +366,7 @@ test('the api door unpauses a paused container; traffic gets the suspended error
   expect(calls).toContain(`runtime.unpause:${t.container}`)
 })
 
-test('a wake needing room evicts and starts CONCURRENTLY: the start is issued before the victim stop resolves', async () => {
+test('a wake needing room evicts BEFORE it starts: the victim is down before the container comes up', async () => {
   const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '50' })
   const victim = h.add(K2)
   const waking = h.add(K)
@@ -382,10 +382,32 @@ test('a wake needing room evicts and starts CONCURRENTLY: the start is issued be
   const p = h.sched.wake(K, { door: 'traffic' })
   await vi.advanceTimersByTimeAsync(50)
   expect(calls).toContain(`stop.enter:${victim.container}`)
-  expect(calls).toContain(`runtime.start:${waking.container}`)          // did NOT wait for the stop
+  // The whole point of the floor: the victim's memory is released before the waking container
+  // claims any. Started concurrently, both are resident at once, which is the overshoot the
+  // floor exists to prevent.
+  expect(calls).not.toContain(`runtime.start:${waking.container}`)
   releaseStop()
   await vi.advanceTimersByTimeAsync(50)
   await p
+  expect(calls).toContain(`runtime.start:${waking.container}`)
+  expect(calls.findIndex((c) => c.startsWith(`runtime.stop:${victim.container}`)))
+    .toBeLessThan(calls.indexOf(`runtime.start:${waking.container}`))
+})
+
+test('a wake whose eviction FAILS does not start the container anyway', async () => {
+  const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '50' })
+  const victim = h.add(K2)
+  const waking = h.add(K)
+  h.runtime.put(waking.container, 'exited')
+  h.runtime.mem = { totalBytes: 1000 * MiB, availableBytes: 100 * MiB }
+  await h.sched.sweep()
+  calls.length = 0
+  vi.advanceTimersByTime(20_000)
+  h.runtime.stop = async (container: string) => { calls.push(`stop.enter:${container}`); throw new Error('docker stop failed') }
+
+  await expect(h.sched.wake(K, { door: 'traffic' })).rejects.toThrow(/could not make room to wake/)
+  expect(calls).toContain(`stop.enter:${victim.container}`)
+  expect(calls).not.toContain(`runtime.start:${waking.container}`)
 })
 
 test('a wake that arrives during a sleep queues behind the stop and then starts the container', async () => {

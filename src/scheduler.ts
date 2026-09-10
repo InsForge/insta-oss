@@ -570,12 +570,24 @@ export class Scheduler {
       await this.runtime.unpause(t.container)
     } else if (live.state !== 'restarting') {
       const need = this.rec(key).lastRssBytes ?? (t.limits ? t.limits.memoryMb * MiB : DEFAULT_RSS[t.kind])
-      // Concurrently, so the victim's stop grace does not add to the caller's hold; the eviction
-      // itself never blocks on a held key (tryWithOp per victim).
-      await Promise.all([
-        this.evictForRoom(need, new Set([key])).catch(() => undefined),
-        this.runtime.start(t.container),
-      ])
+      // Room FIRST, then the start. These used to run concurrently, to keep the victim's stop
+      // grace off the caller's hold, but that puts the victim and the waking container in memory
+      // at the same moment, which is precisely the overshoot the RAM floor exists to prevent
+      // (spec section 4: evict the LRU candidate, THEN start). The latency argument does not
+      // survive contact with `evictForRoom`: it returns before it reads anything when the floor
+      // is off, and before it sleeps anything when there is already room, so awaiting it costs
+      // NOTHING on the common path and costs one stop grace exactly when the floor is at risk,
+      // which is when that is the right price. A slow wake beats a box that needs a reboot.
+      //
+      // The failure is not swallowed either. `evictForRoom` returns quietly when it cannot find
+      // a victim (it warns), so a throw here is a real fault in making room, and starting anyway
+      // is how the floor gets crossed.
+      try {
+        await this.evictForRoom(need, new Set([key]))
+      } catch (e) {
+        throw new Error(`could not make room to wake ${t.container}: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      await this.runtime.start(t.container)
     }
     await this.awaitReady(t)
     this.onUp(key)
