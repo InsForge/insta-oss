@@ -91,6 +91,10 @@ const DEFAULT_RSS: Record<ServiceKind, number> = { compute: 256 * MiB, postgres:
 /** A runaway ceiling for the eviction loop, sampled from nothing and high enough that no real
  *  box reaches it: the loop's real terminators are the floor being met and the candidate pool
  *  being empty, and `tried` makes it provably unable to revisit a service. */
+/** The floor under `maxStateAgeMs`: with a very short sweep interval an observation would
+ *  otherwise be stale before the pass that took it finished. */
+const MIN_STATE_AGE_MS = 30_000
+
 export const EVICTION_CEILING = 10_000
 /** How many idle services the sweep stops at once. */
 const SLEEP_CONCURRENCY = 4
@@ -109,8 +113,13 @@ export class Scheduler {
   private wakes = new Map<ServiceKey, Promise<void>>()
   private sleeping = new Set<ServiceKey>()
   private holdCounts = new Map<ServiceKey, number>()
-  /** The last `docker ps -a` snapshot, keyed by container name: what `stateOf` answers from. */
-  private stateCache = new Map<string, { state: ContainerState; id: string }>()
+  /** The last `docker ps -a` snapshot, keyed by container name: what `stateOf` answers from.
+   *  `at` is WHEN that fact was observed, because a failed read used to be indistinguishable
+   *  from a fresh one and the two decisions below act on `running`. */
+  private stateCache = new Map<string, { state: ContainerState; id: string; at: number }>()
+  /** Whether the last `runtime.containers()` read answered, so a persistent failure is said once
+   *  rather than every sweep. */
+  private statesReadable = true
   private timer: ReturnType<typeof setInterval> | undefined
   private sweepInFlight: Promise<void> | undefined
   private stopped = false
@@ -190,7 +199,7 @@ export class Scheduler {
   private setCached(key: ServiceKey, state: ContainerState): void {
     const t = this.targetOf(key)
     if (!t) return
-    this.stateCache.set(t.container, { state, id: this.stateCache.get(t.container)?.id ?? '' })
+    this.stateCache.set(t.container, { state, id: this.stateCache.get(t.container)?.id ?? '', at: Date.now() })
   }
 
   private forgetAddress(key: ServiceKey): void {
@@ -333,12 +342,57 @@ export class Scheduler {
   runtimeUpdate(container: string, limits: ServiceLimits): Promise<void> { return this.runtime.update(container, limits) }
 
   /** Fill the snapshot `stateOf` answers from (ONE docker read), and let the upstream cache drop
-   *  addresses of containers that restarted underneath it. */
+   *  addresses of containers that restarted underneath it.
+   *
+   *  A read that fails leaves the previous snapshot in place, which is what makes each entry's
+   *  `at` load-bearing: without it a stale observation is indistinguishable from a fresh one,
+   *  and the two decisions that act on `running` (the idle sweep and the eviction pass) would
+   *  keep acting on facts that may be minutes old -- on a box under memory pressure, which is
+   *  exactly when a docker read fails. Nothing is discarded here (a fact does not become false
+   *  because it could not be re-read); it stops being ACTED on, in `observedRunning`. */
   async refreshStates(): Promise<void> {
     let containers: Map<string, { state: ContainerState; id: string }>
-    try { containers = await this.runtime.containers() } catch { return }
-    this.stateCache = containers
+    try {
+      containers = await this.runtime.containers()
+    } catch (e) {
+      if (this.statesReadable) {
+        this.statesReadable = false
+        console.warn(`warn: could not read container states (${e instanceof Error ? e.message : String(e)}); the idle sweep and the eviction pass act on nothing older than ${Math.round(this.maxStateAgeMs() / 1000)}s`)
+      }
+      return
+    }
+    this.statesReadable = true
+    const at = Date.now()
+    this.stateCache = new Map([...containers].map(([name, c]) => [name, { ...c, at }]))
     for (const [name, { id }] of containers) if (id) this.upstream.forgetIfChanged(name, id)
+  }
+
+  /** How old an observation may be and still be acted on: ONE missed read, never two. Derived
+   *  from the sweep interval rather than fixed, because that is the rate these facts are
+   *  refreshed at; a floor keeps a very short interval from making every fact stale by the time
+   *  it is used. */
+  private maxStateAgeMs(): number {
+    return Math.max(2 * this.cfg.sleep.sweepSec * 1000, MIN_STATE_AGE_MS)
+  }
+
+  /** Docker OBSERVED this container running, recently enough to act on. The freshness is per
+   *  fact, not global: a wake or a sleep this scheduler just performed re-stamps its own
+   *  container, so those stay authoritative through an unreadable sweep.
+   *
+   *  Deliberately NOT applied to `stateOf`: that answers reads and the router's wake decision,
+   *  where a stale `running` costs one dial that the lane already retries with `forceWake`,
+   *  and where reporting `none` for every service during a docker hiccup would be a worse
+   *  answer than a slightly old one. It is applied where being wrong STOPS a container. */
+  private observedRunning(container: string, now: number): boolean {
+    const live = this.stateCache.get(container)
+    return live?.state === 'running' && now - live.at <= this.maxStateAgeMs()
+  }
+
+  /** True when nothing in the snapshot is fresh enough to act on, i.e. the last read failed (or
+   *  never happened) long enough ago that this scheduler cannot say what is running. */
+  private statesStale(now: number): boolean {
+    for (const live of this.stateCache.values()) if (now - live.at <= this.maxStateAgeMs()) return false
+    return true
   }
 
   // ---- lifecycle --------------------------------------------------------------------------------
@@ -436,7 +490,7 @@ export class Scheduler {
 
   /** Every condition of the cloud's idle rule, each able to veto on its own (contract section 13). */
   private isIdleCandidate(t: ServiceTarget, now: number): boolean {
-    if (this.stateCache.get(t.container)?.state !== 'running') return false
+    if (!this.observedRunning(t.container, now)) return false
     if (t.alwaysOn) return false
     if (t.desiredState !== 'running') return false
     if (t.idleSec <= 0) return false
@@ -465,7 +519,7 @@ export class Scheduler {
         const live = entry?.state
         // The re-read under the lock is also the freshest truth there is: keep the snapshot in step,
         // so a container that has gone away is not reported running until the next sweep.
-        if (entry) this.stateCache.set(t.container, entry)
+        if (entry) this.stateCache.set(t.container, { ...entry, at: Date.now() })
         else this.stateCache.delete(t.container)
         if (live === 'paused') return false
         if (live === undefined) return false
@@ -535,9 +589,22 @@ export class Scheduler {
       const now = Date.now()
       const pool = this.targets().filter((t) => this.isVictim(t, now, exclude, tried))
       if (!pool.length) {
+        // "No service can be evicted" and "this daemon cannot tell what is running" are
+        // different answers and they get different words, because they send an operator to
+        // different places. Both return: stopping containers on facts that may be minutes old
+        // is how the wrong service gets stopped.
+        //
+        // Skipping cannot leave the floor unenforced indefinitely, and this is why: the thing
+        // that GROWS memory here is a wake, and `wakeLocked` reads `runtime.containers()` itself
+        // before it reaches this function. A docker that cannot answer therefore fails the wake
+        // outright, before anything starts. The pass is only inert for as long as nothing can
+        // start either, and the first read that succeeds re-stamps the snapshot and makes the
+        // next tick's pass whole again.
         if (!this.evictionLogged) {
           this.evictionLogged = true
-          console.warn(`memory pressure: ${Math.round(available / MiB)} MiB free is under the ${this.cfg.sleep.ramFloorPct}% floor and no service can be evicted`)
+          console.warn(this.statesStale(now)
+            ? `memory pressure: ${Math.round(available / MiB)} MiB free is under the ${this.cfg.sleep.ramFloorPct}% floor and this daemon cannot tell what is running (docker has not reported container states for more than ${Math.round(this.maxStateAgeMs() / 1000)}s), so nothing is evicted`
+            : `memory pressure: ${Math.round(available / MiB)} MiB free is under the ${this.cfg.sleep.ramFloorPct}% floor and no service can be evicted`)
         }
         return
       }
@@ -560,7 +627,7 @@ export class Scheduler {
 
   private isVictim(t: ServiceTarget, now: number, exclude: Set<ServiceKey>, tried: Set<ServiceKey>): boolean {
     if (exclude.has(t.key) || tried.has(t.key)) return false
-    if (this.stateCache.get(t.container)?.state !== 'running') return false
+    if (!this.observedRunning(t.container, now)) return false
     if (t.alwaysOn || t.desiredState !== 'running') return false
     if (this.busy(t.key)) return false
     if (this.holds(t.key) > 0) return false
@@ -601,7 +668,7 @@ export class Scheduler {
     if (this.refuses(t, door)) throw new ServiceStoppedError()
     const live = (await this.runtime.containers()).get(t.container)
     if (!live) throw new NoContainerError()
-    this.stateCache.set(t.container, live)
+    this.stateCache.set(t.container, { ...live, at: Date.now() })
     if (live.state === 'running') {
       // A deploy that ended in `onUp` makes this wake a no-op: stamp and go.
       if (await this.runtime.probe(t)) {

@@ -366,6 +366,57 @@ test('the api door unpauses a paused container; traffic gets the suspended error
   expect(calls).toContain(`runtime.unpause:${t.container}`)
 })
 
+test('a sweep whose docker read FAILS stops nothing on the snapshot it already had', async () => {
+  // `refreshStates` returns on a failed read and leaves the previous snapshot in place, so
+  // `running` was indistinguishable from `running as of some time ago`. The sweep and the
+  // eviction pass are the two decisions that act on it, and both act by STOPPING a container.
+  const h = harness()
+  const t = h.add(K)
+  vi.advanceTimersByTime(301_000)
+  await h.sched.sweep()
+  expect(calls).toContain(`runtime.stop:${t.container}:10`)   // the readable baseline
+
+  // Now docker stops answering. The snapshot still says what it said one read ago, and the
+  // service is idle, so the pass used to pick it as a candidate and go on to `sleep()` it.
+  const fresh = harness()
+  const t2 = fresh.add(K)
+  await fresh.sched.sweep()                                    // seed: running, and stamped now
+  let reads = 0
+  fresh.runtime.containers = async () => { reads++; throw new Error('Cannot connect to the Docker daemon') }
+  calls.length = 0
+  vi.advanceTimersByTime(301_000)                              // idle, and the snapshot is old
+  await fresh.sched.sweep()
+
+  // ONE read: the refresh. A second one means the pass took the stale `running` as a candidate
+  // and went into `sleep()`, whose own re-read under the lock is what caught it there -- a
+  // backstop, not a decision. The decision is not taken on a fact this daemon cannot vouch for.
+  expect(reads).toBe(1)
+  expect(calls.filter((c) => c.startsWith('runtime.stop:'))).toEqual([])
+  expect(t2.sleptAt ?? null).toBeNull()
+})
+
+test('nothing can START while the floor cannot be enforced, so skipping the pass is bounded', async () => {
+  // The question skipping the pass raises: can the RAM floor go unenforced indefinitely? No,
+  // and this is the reason. The thing that grows memory is a wake, and `wakeLocked` reads
+  // `runtime.containers()` itself before it evicts or starts anything, so the same unreadable
+  // docker that makes the pass inert also fails the wake outright. The pass is only inert for
+  // as long as nothing can start either.
+  const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '50' })
+  h.add(K2)
+  const waking = h.add(K)
+  h.runtime.put(waking.container, 'exited')
+  h.runtime.mem = { totalBytes: 1000 * MiB, availableBytes: 100 * MiB }
+  await h.sched.sweep()                                        // seed the snapshot
+  vi.advanceTimersByTime(301_000)                              // ...and let it go stale
+  h.runtime.containers = async () => { throw new Error('Cannot connect to the Docker daemon') }
+  calls.length = 0
+
+  await expect(h.sched.wake(K, { door: 'traffic' })).rejects.toThrow(/Cannot connect to the Docker daemon/)
+  expect(calls.filter((c) => c.startsWith('runtime.start:'))).toEqual([])
+  // ...and the stale snapshot evicted nobody on the way past.
+  expect(calls.filter((c) => c.startsWith('runtime.stop:'))).toEqual([])
+})
+
 test('a wake needing room evicts BEFORE it starts: the victim is down before the container comes up', async () => {
   const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '50' })
   const victim = h.add(K2)
