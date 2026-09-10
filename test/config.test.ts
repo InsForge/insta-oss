@@ -23,7 +23,8 @@ test('local defaults: 127.0.0.1:8080, ~/.insta-oss, no auth, localhost domain, s
   expect(cfg.trustProxy).toBe(false)
   expect(cfg.auth).toMatchObject({ enabled: false, secret: '', sessionTtlSec: 604800, sessionUpdateAgeSec: 86400, cookieSecure: false, cookieName: 'better-auth.session_token' })
   expect(cfg.lanes).toEqual({ bind: '127.0.0.1', pgPort: 5432, redisPort: 6379, mongoPort: 27017, portRange: [20000, 20999], idleSec: 900, probeWindowMs: 8000, readyWindowMs: 30000, touchDebounceMs: 5000 })
-  expect(cfg.tls).toEqual({ certDir: null, edgePort: 443 })
+  // No supplied certificate unless `--tls custom` set one: local mode terminates no TLS.
+  expect(cfg.tls).toEqual({ certDir: null, edgePort: 443, certFile: null, keyFile: null })
   expect(cfg.sleep).toEqual({ enabled: true, idleComputeSec: 300, idleDbSec: 600, sweepSec: 30, createGraceSec: 600, stopGraceSec: 10, stopGraceDbSec: 30, wakeTimeoutSec: 60, wakeProtectSec: 60, ramFloorPct: 15, memBudgetMb: null, alwaysOnDefault: false })
   expect(cfg.data).toEqual({ helperImage: 'node:22-alpine', fork: 'auto', migrate: true, sweepOrphans: false })
   expect(cfg.services).toEqual({ maxPerType: 5 })

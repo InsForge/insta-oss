@@ -1045,3 +1045,36 @@ test('both wake timeouts classify as a timeout through the TEXT branch, not only
   // therefore never bounded, so nobody at a CLI reads it.
   expect(waiting).not.toContain('insta compute')
 })
+
+
+// ---- a supplied certificate (--tls custom) ------------------------------------------------------
+
+test('a SUPPLIED certificate is served for every host, and nothing is ever issued', async () => {
+  // The database lanes are the other door. `certFor` triggers issuance for a host the store does
+  // not hold, and triggering issuance IS a TLS handshake to the edge with that servername --
+  // which is exactly what publishes the hostname to certificate transparency. So a wildcard at
+  // the edge alone would not have closed the leak: a psql connection with SNI
+  // `pg-db-demo-main.<domain>` would have reopened it.
+  const crt = join('test', 'fixtures', 'local', 'router.test', 'router.test.crt')
+  const key = join('test', 'fixtures', 'local', 'router.test', 'router.test.key')
+  let issued = 0
+  const certs = new Certs({ certDir: null, supplied: { crt, key }, issue: async () => { issued++ } })
+  expect(await certs.certFor('api.router.test')).not.toBeNull()
+  // A hostname that has never existed on this box: served, and still nothing asked for.
+  expect(await certs.certFor('web-demo-feat.router.test')).not.toBeNull()
+  expect(certs.certExists('anything.router.test')).toBe(true)
+  expect(certs.materialFor('anything.router.test')).not.toBeNull()
+  expect(issued).toBe(0)
+
+  // Without a supplied pair, the store-and-issue behaviour is exactly as before.
+  const store = new Certs({ certDir: mkdtempSync(join(tmpdir(), 'io-certs-')), issue: async () => { issued++ } })
+  expect(await store.certFor('web-demo-feat.router.test')).toBeNull()
+  expect(issued).toBe(1)
+
+  // ...and a supplied pair that cannot be read answers "no certificate" rather than falling back
+  // to issuing one, because issuing is the thing this mode exists to prevent.
+  const gone = new Certs({ certDir: null, supplied: { crt: '/nope/x.crt', key: '/nope/x.key' }, issue: async () => { issued++ }, log: () => { /* quiet */ } })
+  expect(await gone.certFor('api.router.test')).toBeNull()
+  expect(gone.certExists('api.router.test')).toBe(false)
+  expect(issued).toBe(1)
+})

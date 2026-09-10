@@ -46,25 +46,42 @@ const CACHE_MAX = 256
 export class Certs {
   private cache = new Map<string, { ctx: SecureContext; mtimeMs: number; crt: string }>()
   private readonly certDir: string | null
+  private readonly supplied: CertFiles | null
   private readonly issue: (host: string) => Promise<void>
   private readonly log: (msg: string) => void
 
-  constructor(opts: { certDir: string | null; issue?: (host: string) => Promise<void>; log?: (msg: string) => void }) {
+  constructor(opts: {
+    certDir: string | null
+    /** `--tls custom`: one operator-supplied pair, served for every SNI. */
+    supplied?: { crt: string; key: string } | null
+    issue?: (host: string) => Promise<void>
+    log?: (msg: string) => void
+  }) {
     this.certDir = opts.certDir
+    this.supplied = opts.supplied ? { ...opts.supplied, mtimeMs: 0 } : null
     this.issue = opts.issue ?? (async () => { /* no issuer: tests and local mode */ })
     this.log = opts.log ?? ((m) => console.warn(m))
   }
 
-  /** True when the store holds a certificate for `host` (no issuance attempt). */
+  /** The supplied pair, re-stat'ed so a replaced file is picked up without a restart. Null when
+   *  no pair was supplied, or when what was supplied cannot be read: an unreadable file is not a
+   *  reason to fall back to ISSUING one, which is the thing `--tls custom` exists to prevent, so
+   *  the caller answers no certificate and the lane says so. */
+  private suppliedFiles(): CertFiles | null {
+    if (!this.supplied) return null
+    try { return { ...this.supplied, mtimeMs: statSync(this.supplied.crt).mtimeMs } } catch { return null }
+  }
+
+  /** True when a certificate for `host` is available (no issuance attempt). */
   certExists(host: string): boolean {
+    if (this.supplied) return this.suppliedFiles() !== null
     return this.certDir !== null && findCertFiles(this.certDir, host) !== null
   }
 
-  /** The bytes behind a stored certificate, for `tls.Server.setSecureContext` on a lane that is
-   *  already listening. No issuance attempt: the caller has just had one from `certFor`. */
+  /** The bytes behind a certificate, for `tls.Server.setSecureContext` on a lane that is already
+   *  listening. No issuance attempt: the caller has just had one from `certFor`. */
   materialFor(host: string): { cert: Buffer; key: Buffer } | null {
-    if (!this.certDir) return null
-    const files = findCertFiles(this.certDir, host)
+    const files = this.supplied ? this.suppliedFiles() : (this.certDir ? findCertFiles(this.certDir, host) : null)
     if (!files) return null
     try { return { cert: readFileSync(files.crt), key: readFileSync(files.key) } } catch { return null }
   }
@@ -73,13 +90,30 @@ export class Certs {
    *  still missing -> null (the lane then falls back to the default context so the client completes
    *  the handshake and receives a readable error instead of an alert). */
   async certFor(host: string): Promise<SecureContext | null> {
-    if (!this.certDir || !isHostname(host)) return null
+    if (!isHostname(host)) return null
+    // A supplied pair is the whole answer: it covers `*.<domain>`, it is what the edge serves,
+    // and asking for issuance would be the leak this mode removes. `triggerIssuance` is a
+    // handshake to the edge with the wanted servername, which is exactly what publishes a
+    // hostname to certificate transparency -- so on this path the lanes were a second door to
+    // the same problem, independent of what the edge was configured to do.
+    if (this.supplied) {
+      const files = this.suppliedFiles()
+      if (!files) { this.log(`router: the supplied certificate ${this.supplied.crt} cannot be read; the lanes have no certificate to present`); return null }
+      return this.contextFor(host, files)
+    }
+    if (!this.certDir) return null
     let files = findCertFiles(this.certDir, host)
     if (!files) {
       try { await this.issue(host) } catch (e) { this.log(`router: certificate issuance for ${host} failed: ${e instanceof Error ? e.message : String(e)}`) }
       files = findCertFiles(this.certDir, host)
     }
     if (!files) return null
+    return this.contextFor(host, files)
+  }
+
+  /** One loaded context per host, cached by the .crt's mtime so a renewal or a replaced file is
+   *  picked up on the next handshake. */
+  private contextFor(host: string, files: CertFiles): SecureContext | null {
     const hit = this.cache.get(host)
     if (hit && hit.mtimeMs === files.mtimeMs && hit.crt === files.crt) return hit.ctx
     try {

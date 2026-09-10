@@ -95,7 +95,12 @@ export class Router {
     this.cfg = deps.cfg
     this.log = deps.log ?? ((m) => console.warn(m))
     this.apiHandler = deps.apiHandler
-    this.certs = deps.certs ?? new Certs({ certDir: this.cfg.tls.certDir, issue: triggerIssuance(this.cfg), log: this.log })
+    // `--tls custom`: the operator's pair is what every lane presents, and nothing is ever
+    // issued. The `issue` seam is still passed for the acme and internal modes.
+    const supplied = this.cfg.tls.certFile && this.cfg.tls.keyFile
+      ? { crt: this.cfg.tls.certFile, key: this.cfg.tls.keyFile }
+      : null
+    this.certs = deps.certs ?? new Certs({ certDir: this.cfg.tls.certDir, supplied, issue: triggerIssuance(this.cfg), log: this.log })
     this.http = new HttpLane({
       cfg: this.cfg, upstream: deps.upstream, stateOf: deps.stateOf, wake: deps.wake,
       touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),

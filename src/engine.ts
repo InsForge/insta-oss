@@ -1,8 +1,8 @@
 // Project/branch lifecycle over local containers. Mirrors the platform model:
 // project → branches (main = default); branch create = provision new stack + copy data +
 // redeploy the same app image(s); compute = the user's custom image(s), one per group.
-import { randomBytes, randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { randomBytes, randomUUID, X509Certificate } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
 import { cpus, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { loadConfig, type Config } from './config'
@@ -3279,6 +3279,14 @@ export class Engine {
    *  is the safe direction for this question. */
   private domainCertOk(hostname: string): boolean {
     if (this.cfg.mode !== 'server') return true
+    // `--tls custom`: there is no store to walk, because nothing is issued. The question is
+    // whether the operator's certificate covers this name, and the certificate answers it -- so
+    // a custom domain inside their wildcard reads `ready` and one outside it reads `pending`,
+    // which is the truth in a mode where no certificate will appear for it on its own.
+    const supplied = this.cfg.tls.certFile
+    if (supplied) {
+      try { return new X509Certificate(readFileSync(supplied)).checkHost(hostname) !== undefined } catch { return false }
+    }
     if (!this.cfg.tls.certDir) return false
     return findCertFiles(this.cfg.tls.certDir, hostname) !== null
   }
