@@ -601,6 +601,9 @@ export class Engine {
     // further along, and it would put a half-built branch in front of every list, route and
     // deploy that resolves a branch by name.
     let secretsCloned = false
+    // The parent's name as the secret copy below actually found it, so the event reports the
+    // branch this fork came from rather than a name that moved while it was being built.
+    let sourceName = source.name
     try {
       // WP4 hook: /data volumes fork BEFORE the redeploy loop, so each new container starts on its
       // own copy rather than sharing the source's bytes.
@@ -617,13 +620,28 @@ export class Engine {
       }
       // platform parity: the parent branch's user-defined (branch-scoped) secrets clone onto the new
       // branch, and so do its bindings (a template's platform credential renames must survive a fork).
+      //
+      // The parent is read from the state this mutate is ALREADY HOLDING, never from the row this
+      // method re-read on the way in. Re-reading under the lock closed the window before the
+      // provisioning; the window after it is the long one, and it is still open: the provision
+      // chain, the volume forks, the bucket clones and the whole redeploy loop are seconds of
+      // awaits, and `renameBranch` takes no operation lock (it moves no container), so it lands
+      // anywhere in there. These rows are keyed by branch NAME, so a name captured before that
+      // window matches nothing afterwards and the clone silently inherits NONE of its parent's
+      // secrets. A synchronous read inside the same mutate has no window at all. A parent row
+      // that is somehow gone by now falls back to the name the create started with, which is the
+      // best evidence left.
       mutate((st) => {
+        const parent = st.branches[source.id]
+        sourceName = parent?.name ?? source.name
         const list = st.userSecrets[projectId] ?? []
-        const inherited = list.filter((u) => u.branch === source.name).map((u) => ({ ...u, branch: name }))
+        const inherited = list.filter((u) => u.branch === sourceName).map((u) => ({ ...u, branch: name }))
         st.userSecrets[projectId] = [...list, ...inherited]
-        if (source.bindings?.length) st.branches[b.id].bindings = source.bindings.map((x) => ({ ...x }))
+        const bindings = parent?.bindings ?? source.bindings
+        if (bindings?.length) st.branches[b.id].bindings = bindings.map((x) => ({ ...x }))
         // the DB volume-size setting travels with the clone (it describes the copied database)
-        if (source.dbVolumeGib !== undefined) st.branches[b.id].dbVolumeGib = source.dbVolumeGib
+        const dbVolumeGib = parent?.dbVolumeGib ?? source.dbVolumeGib
+        if (dbVolumeGib !== undefined) st.branches[b.id].dbVolumeGib = dbVolumeGib
       })
       secretsCloned = true
       // WP3 hook: the clone's databases sleep until first use (no-op until the scheduler lands).
@@ -632,7 +650,7 @@ export class Engine {
       // shows whether the box reflinked or fell back to streaming and copying.
       const db = this.forkResults.get(b.id)
       this.forkResults.delete(b.id)
-      this.emit(projectId, name, 'resource', 'branch.created', { from: source.name, ...(db ? { db } : {}), volumes })
+      this.emit(projectId, name, 'resource', 'branch.created', { from: sourceName, ...(db ? { db } : {}), volumes })
       return b
     } catch (e) {
       const undone = await this.unwindBranch(project, b, secretsCloned)

@@ -2448,6 +2448,32 @@ test('a source renamed while the create waited is read again, not remembered by 
   expect((ev[0].payload as { from: string }).from).toBe('beta')
 })
 
+test('a source renamed DURING the provisioning window still hands its secrets to the clone', async () => {
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/branches`, { name: 'alpha' })).statusCode).toBe(201)
+  const alpha = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'alpha')!
+  expect((await get(`/projects/${id}/secrets?branch=alpha`)).json().secrets.API_KEY).toBe('from-main')
+
+  // Paused inside a post-commit step: PAST the re-read at the top of `createBranchLocked` and
+  // before the secret copy, with the provision chain, the volume forks and the bucket clones
+  // already behind it. That is the long window, and `renameBranch` needs no lock to land in it.
+  const paused = pauseInPostCommit()
+  const create = post(`/projects/${id}/branches`, { name: 'feat', from: 'alpha' })
+  await paused.entered
+  expect((await app.inject({ method: 'PATCH', url: `/projects/${id}/branches/${alpha.id}`, payload: { name: 'beta' } })).statusCode).toBe(200)
+  paused.release()
+  expect((await create).statusCode).toBe(201)
+  paused.restore()
+
+  // The clone still inherits: the copy reads the parent's name from the state it is holding, so
+  // there is no window between the read and the filter that uses it.
+  expect((await get(`/projects/${id}/secrets?branch=feat`)).json().secrets.API_KEY).toBe('from-main')
+  // ...and the event names the branch as it stands now, not as the create first saw it.
+  const ev = loadState().events.filter((e) => e.kind === 'branch.created' && e.branch === 'feat')
+  expect(ev).toHaveLength(1)
+  expect((ev[0].payload as { from: string }).from).toBe('beta')
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
