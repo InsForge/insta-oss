@@ -16,7 +16,7 @@
 //   - the password is minted per instance (decision 18): a lane on a public interface must never
 //     carry a constant.
 import { randomBytes } from 'node:crypto'
-import { docker, destroyContainer, NO_SUCH_CONTAINER } from '../docker'
+import { docker, destroyContainer, inspectField, UNREADABLE, UnreadableProbeError } from '../docker'
 import { forkMethod, probedCapabilities, sharedDataDir } from '../datadir'
 import { loadConfig } from '../config'
 import { NoReflinkError } from '../types'
@@ -328,11 +328,6 @@ class TornCopyError extends Error {}
  *  streams instead (and `INSTA_OSS_FORK=reflink` refuses rather than producing a torn copy). */
 class RunningSourceError extends Error {}
 
-/** Raised when docker could not report the DESTINATION's state, so the orphan sweep could not
- *  run. Deliberately not one of the three the fork's fallback catches: there is no other copy
- *  method to try against a destination nobody could clear, so this fails the operation. */
-class UnreadableProbeError extends Error {}
-
 const sourceIsLive = (container: string, state: string): string =>
   `${container} is ${state}: a file-level clone of a live Postgres data directory is not crash-consistent`
 
@@ -399,22 +394,6 @@ export async function pgAppendHba(container: string, exec: DockerExec = docker):
 function limitArgs(limits?: ServiceLimits): string[] {
   if (!limits) return []
   return ['--cpus', String(limits.cpu), '--memory', `${limits.memoryMb}m`, '--memory-swap', `${limits.memoryMb}m`]
-}
-
-/** A probe that could not answer at all: a daemon that is not talking, a template error, a
- *  permission failure. It is NOT `gone`, and no caller may read it as "there is no writer". */
-const UNREADABLE = 'unreadable'
-
-/** One `docker inspect -f`, CLASSIFIED. `null` means dockerd said the container is not there;
- *  `UNREADABLE` means the probe failed for a reason that says nothing about the container.
- *  Failing open here would be the same mistake `networkState` makes impossible next door: a
- *  daemon that cannot answer would read as "no writer" and a live PGDATA would be walked. */
-async function inspectField(container: string, format: string, exec: DockerExec): Promise<string | null> {
-  try {
-    return (await exec(['inspect', '-f', format, container])).toString().trim()
-  } catch (e) {
-    return NO_SUCH_CONTAINER.test(e instanceof Error ? e.message : String(e)) ? null : UNREADABLE
-  }
 }
 
 function containerStatus(container: string, exec: DockerExec = docker): Promise<string | null> {

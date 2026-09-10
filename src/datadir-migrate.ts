@@ -21,7 +21,7 @@
 //     (`data.copyFromContainerVolume`), never through the daemon.
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
-import { docker } from './docker'
+import { docker, inspectField, UNREADABLE, UnreadableProbeError } from './docker'
 import { pgAppendHba, pgRun, pgWaitReady } from './adapters/postgres'
 import { appContainerName, dataPaths, managedContainerName, pgContainerName } from './manageddb'
 import { loadState, mutate } from './state'
@@ -56,6 +56,12 @@ export async function migrateLegacyData(deps: MigrateDeps): Promise<MigrateResul
     const ref = deps.ref(branch)
     if (branch.dataVersion === 1) { out.skipped.push(ref); continue }
     try {
+      // `dataVersion: 1` is the one irreversible write in this file: `assertMigrated` is
+      // fail-closed against it, nothing ever re-runs a stamped branch, and a branch stamped
+      // without having been migrated is a branch whose bytes are still in a docker volume that
+      // `docker rm -v` can take. So it is written only on a POSITIVE answer -- every probe below
+      // either answers or raises `UnreadableProbeError`, and a raise lands in `failed` with the
+      // row untouched, so the next boot sees the branch exactly as this one found it.
       const touched = await migrateBranch(deps, project, branch)
       mutate((st) => { const b = st.branches[branch.id]; if (b) b.dataVersion = 1 })
       if (touched) out.migrated.push(ref)
@@ -100,9 +106,14 @@ async function migratePostgres(deps: MigrateDeps, project: Project, branch: Bran
   // longer exists.
   if (!legacyExists && freshExists && pgRowSettled(branch.id, fresh, dataId)) return false
 
+  // The safe default, and only an EXPLICIT `false` may overturn it: this decides whether the
+  // re-created database is left running, and stopping one that was up is a silent outage on the
+  // boot path. A container that vanished between the two reads answers null, which is not an
+  // answer about intent, so the default stands. (An unreadable probe no longer reaches here at
+  // all: `inspect` raises and the branch is retried next boot.)
   let wasRunning = true
   if (legacyExists) {
-    wasRunning = (await inspect(legacy, '{{.State.Running}}')) === 'true'
+    wasRunning = (await inspect(legacy, '{{.State.Running}}')) !== 'false'
     await docker(['stop', legacy]).catch(() => { /* already down */ })
     if (!(await pgDataComplete(deps, target))) {
       // Staged, verified, promoted -- and only THEN is the legacy container (and with it the
@@ -119,7 +130,7 @@ async function migratePostgres(deps: MigrateDeps, project: Project, branch: Bran
     // Resuming after a crash between `docker run` and the state write: the container is there but
     // no row names it. Take its lifecycle intent back off it before it is replaced below, or a
     // database the developer had stopped comes back running.
-    wasRunning = (await inspect(fresh, '{{.State.Running}}')) === 'true'
+    wasRunning = (await inspect(fresh, '{{.State.Running}}')) !== 'false'
   }
 
   // re-create under the new name on the bind mount. The directory is non-empty, so the image skips
@@ -243,7 +254,13 @@ async function migrateVolumes(deps: MigrateDeps, project: Project, branch: Branc
       await deps.redeploy(branch.projectId, branch.name, group, { image: app.image, port: app.port, hostPort: app.hostPort })
       if (ambiguous) { touched = true; continue }
     }
-    await docker(['volume', 'rm', legacy]).catch(() => { /* still referenced; the next boot retries */ })
+    // The bytes are already promoted and the app is on the bind mount, so a removal that fails
+    // costs disk and not data. It is NOT retried, whatever the old comment here said: this
+    // branch is about to be stamped `dataVersion: 1` and no later boot looks at it again, so say
+    // so and leave the operator something to act on rather than a silent leftover.
+    await docker(['volume', 'rm', legacy]).catch((e: unknown) => {
+      console.warn(`could not remove legacy docker volume ${legacy} (${e instanceof Error ? e.message : String(e)}); the data is migrated and this volume is now unused, remove it with \`docker volume rm ${legacy}\``)
+    })
     touched = true
   }
   return touched
@@ -275,9 +292,11 @@ async function migrateManaged(deps: MigrateDeps, project: Project, branch: Branc
     if (!containerExists) {
       if (await deps.data.isEmptyOrMissing(dir)) continue
     }
+    // Same rule as the postgres arm: the safe default is running, and only an explicit `false`
+    // overturns it.
     let wasRunning = true
     if (containerExists) {
-      wasRunning = (await inspect(container, '{{.State.Running}}')) === 'true'
+      wasRunning = (await inspect(container, '{{.State.Running}}')) !== 'false'
       await docker(['stop', container]).catch(() => {})
       for (const p of dataPaths(m.type)) {
         // Unconditionally: this block runs only when the container EXISTS and is not on the bind
@@ -304,9 +323,10 @@ async function migrateManaged(deps: MigrateDeps, project: Project, branch: Branc
   return touched
 }
 
-/** The container's bind sources, or null when the container is not there at all. The difference
- *  matters: "not mounted here" and "no container to ask" are different pieces of evidence about
- *  which copy of a directory is the live one. */
+/** The container's bind sources, or null when dockerd says the container is not there at all.
+ *  The difference matters: "not mounted here" and "no container to ask" are different pieces of
+ *  evidence about which copy of a directory is the live one -- and "could not ask" is a third
+ *  thing, which `inspect` raises rather than folding into the null. */
 async function mountsOf(container: string): Promise<string[] | null> {
   const out = await inspect(container, '{{range .Mounts}}{{.Source}} {{end}}')
   return out === null ? null : out.split(' ').filter(Boolean)
@@ -316,27 +336,58 @@ const mountsInclude = (mounts: readonly string[], dir: string): boolean =>
   mounts.some((s) => s === dir || s.startsWith(`${dir}/`))
 
 /** Whether the container already binds this data directory: the case where an earlier run finished
- *  the copy and the re-create, so there is nothing left to do. A container that is not there at all
- *  answers false. */
+ *  the copy and the re-create, so there is nothing left to do. A container dockerd says is not
+ *  there answers false; a probe that could not answer raises, because "there is nothing left to
+ *  do" is the one conclusion an unanswered probe must not produce here. */
 async function hasMount(container: string, dir: string): Promise<boolean> {
   const mounts = await mountsOf(container)
   return mounts !== null && mountsInclude(mounts, dir)
 }
 
+/** One `docker inspect -f`, three ways, with the third one RAISED rather than returned.
+ *
+ *  This whole file used to collapse "dockerd says there is no such container" and "the probe
+ *  could not answer" into one `null`, and every predicate below inherited it: `exists` read an
+ *  unreadable daemon as "not there", `hasMount` as "not on the bind mount", `wasRunning` as "it
+ *  was stopped". Each of those routes an unknown into the ACCEPTING branch, and the accepting
+ *  branch here means "nothing to migrate" -- after which `migrateLegacyData` stamps
+ *  `dataVersion: 1` and the branch is never looked at again, while `assertMigrated`, which is
+ *  fail-closed against exactly that flag, is satisfied by a flag set on no evidence.
+ *
+ *  Raising is the right shape for this file specifically: `migrateLegacyData` already catches
+ *  per branch, records the failure and DOES NOT stamp the row, so an unreadable docker at boot
+ *  now leaves the branch unmigrated and retried on the next boot, which is what it always
+ *  claimed to do. */
 async function inspect(nameOrId: string, format: string): Promise<string | null> {
-  try {
-    return (await docker(['inspect', '-f', format, nameOrId])).toString().trim()
-  } catch {
-    return null
+  // The seam is passed EXPLICITLY: `inspectField`'s own default binds the real CLI, and this
+  // file's docker is the one its callers inject.
+  const out = await inspectField(nameOrId, format, docker)
+  if (out === UNREADABLE) {
+    throw new UnreadableProbeError(`docker could not report ${format} for ${nameOrId}: this branch is left unmigrated and the next boot retries it`)
   }
+  return out
 }
 
+/** Docker says the container is there. An unreadable probe raises rather than answering `false`. */
 async function exists(container: string): Promise<boolean> {
   return (await inspect(container, '{{.Id}}')) !== null
 }
 
+/** Docker's own "there is no such volume", in both spellings (`docker volume inspect` answers the
+ *  client-side `No such object` on some versions and dockerd's `No such volume` on others). */
+const NO_SUCH_VOLUME = /no such (?:object|volume)/i
+
+/** The same three ways for a named volume. `false` used to swallow an unreadable daemon, and the
+ *  caller reads `false` as "no legacy volume, nothing to copy" and then stamps the branch. */
 async function volumeExists(volume: string): Promise<boolean> {
-  try { await docker(['volume', 'inspect', volume]); return true } catch { return false }
+  try {
+    await docker(['volume', 'inspect', volume])
+    return true
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e)
+    if (NO_SUCH_VOLUME.test(m)) return false
+    throw new UnreadableProbeError(`docker could not report whether volume ${volume} exists (${m}): this branch is left unmigrated and the next boot retries it`)
+  }
 }
 
 /** Only the DSN's host changes: a re-created container keeps the same files, roles and password. */

@@ -20,7 +20,15 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-vi.mock('../src/docker', () => ({ docker: vi.fn(async (argv: string[]) => world.docker(argv)) }))
+// Only the SEAM is faked. `inspectField` and the two symbols beside it are the shipped
+// classification (present | gone | unknown), and this file's whole point is which of those three
+// the migration acts on, so a hand-written stand-in for it would be the test grading its own
+// homework. The migration passes this `docker` into `inspectField` explicitly, so the real
+// classifier runs against the fake daemon.
+vi.mock('../src/docker', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/docker')>()),
+  docker: vi.fn(async (argv: string[]) => world.docker(argv)),
+}))
 vi.mock('../src/adapters/postgres', () => ({
   pgRun: vi.fn(async (t: { container: string; dataDir: string }) => world.run(t.container, [t.dataDir])),
   pgWaitReady: vi.fn(async () => undefined),
@@ -55,7 +63,15 @@ const REDIS_FILES = ['dump.rdb', 'appendonly.aof']
 /** How many entries this BOOT may copy before it is interrupted, counted across every copy it
  *  makes; `Infinity` lets it finish. `onRename` and `appendHba` kill it at the two boundaries a
  *  byte budget cannot reach. */
-const hooks: { budget: number; onRename?: () => void; appendHba?: () => void } = { budget: Infinity }
+const hooks: {
+  budget: number
+  onRename?: () => void
+  appendHba?: () => void
+  /** A docker that cannot ANSWER, for the calls this predicate names. Not "no such container",
+   *  which is an answer: a daemon that is not talking, and the whole point of the three-way
+   *  classification is that the two are different evidence. */
+  unreadable?: (argv: string[]) => boolean
+} = { budget: Infinity }
 let copied = 0
 
 /** Something a kill -9 stands in for. Nothing catches it but the per-branch guard in
@@ -82,6 +98,9 @@ class World {
 
   async docker(argv: string[]): Promise<Buffer> {
     const [verb] = argv
+    if (hooks.unreadable?.(argv)) {
+      throw new Error('Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?')
+    }
     if (verb === 'inspect') {
       const fmt = argv[2]
       const name = argv[3]
@@ -241,6 +260,7 @@ beforeEach(() => {
   hooks.budget = Infinity
   hooks.onRename = undefined
   hooks.appendHba = undefined
+  hooks.unreadable = undefined
   copied = 0
   const dir = mkdtempSync(join(tmpdir(), 'io-mig-unit-'))
   dataRoots.push(dir)
@@ -269,6 +289,49 @@ beforeEach(() => {
       world.run(appContainer(group), [layout().vol(REF, VOL_ID)])
     },
   }
+})
+
+// ---- G/H. a docker that cannot answer ----
+
+test('G: a probe that cannot ANSWER leaves the branch unmigrated, and stops nothing', async () => {
+  // The stamp is the irreversible write: `assertMigrated` is fail-closed against `dataVersion`,
+  // and nothing ever re-runs a stamped branch, so a branch stamped on a non-answer keeps its
+  // bytes in a docker volume that a `docker rm -v` can take, for good. `{{.State.Running}}` is
+  // the sharpest of these: the container IS there (`{{.Id}}` answers), and reading a daemon
+  // that cannot answer as `false` used to stop a database that was running.
+  hooks.unreadable = (a) => a[0] === 'inspect' && a[2] === '{{.State.Running}}'
+  const out = await boot()
+  expect(out.migrated).toEqual([])
+  expect(out.failed).toHaveLength(1)
+  expect(out.failed[0].error).toContain('docker could not report')
+  expect(branchRow().dataVersion).toBeUndefined()
+  // Nothing was stopped, removed or copied on the strength of a non-answer.
+  expect(world.log.filter((l) => l.startsWith('stop:') || l.startsWith('rm:') || l.startsWith('volume rm:'))).toEqual([])
+  expect(world.containers.get(LEGACY_PG)?.running).toBe(true)
+
+  // ...and the next boot, with the daemon answering, does the whole migration.
+  hooks.unreadable = undefined
+  expect((await boot()).migrated).toEqual([REF])
+  expect(branchRow().dataVersion).toBe(1)
+  expect(contentsOf(pgDir())).toContain('global/pg_control')
+})
+
+test('H: a volume probe that cannot answer is not "there is no volume"', async () => {
+  // `volume inspect` failing used to read as "no legacy volume, nothing to copy", and the branch
+  // was stamped with the compute service's /data still in a named volume.
+  hooks.unreadable = (a) => a[0] === 'volume' && a[1] === 'inspect'
+  const out = await boot()
+  expect(out.failed).toHaveLength(1)
+  expect(out.failed[0].error).toContain(`could not report whether volume ${LEGACY_VOL} exists`)
+  expect(branchRow().dataVersion).toBeUndefined()
+  expect(world.volumes.has(LEGACY_VOL)).toBe(true)
+
+  // The postgres arm ran before it, and the retry is safe because every step is resumable.
+  hooks.unreadable = undefined
+  expect((await boot()).migrated).toEqual([REF])
+  expect(branchRow().dataVersion).toBe(1)
+  expect(contentsOf(volDir())).toEqual(['keep.txt', 'nested', 'nested/deep.bin'])
+  expect(world.volumes.has(LEGACY_VOL)).toBe(false)
 })
 
 // ---- the whole thing, uninterrupted ----

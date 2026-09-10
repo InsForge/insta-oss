@@ -112,3 +112,27 @@ export async function destroyContainer(container: string, exec: DockerExec = doc
 
 /** The docker seam both adapters inject in tests: the CLI in production, a stub in a unit test. */
 export type DockerExec = (args: string[], opts?: { input?: Buffer; mergeStderr?: boolean }) => Promise<Buffer>
+
+/** A probe that could not answer at all: a daemon that is not talking, a template error, a
+ *  permission failure. It is NOT `gone`, and no caller may read it as absence. Lives here, beside
+ *  `destroyContainer` and `NO_SUCH_CONTAINER`, because it is the same one rule and this codebase
+ *  has already paid twice for two copies of it. */
+export const UNREADABLE = 'unreadable'
+
+/** One `docker inspect -f`, CLASSIFIED three ways: the field's value, `null` when dockerd said
+ *  there is no such object, and `UNREADABLE` when the probe failed for a reason that says nothing
+ *  about the container. Collapsing the last two into `null` is the defect this constant exists to
+ *  make impossible to write by accident. */
+export async function inspectField(container: string, format: string, exec: DockerExec = docker): Promise<string | null> {
+  try {
+    return (await exec(['inspect', '-f', format, container])).toString().trim()
+  } catch (e) {
+    return NO_SUCH_CONTAINER.test(e instanceof Error ? e.message : String(e)) ? null : UNREADABLE
+  }
+}
+
+/** Raised when a docker read could not answer and the caller has no safe way to carry on. The
+ *  fork's fallback-to-stream deliberately does NOT catch it (an unanswered probe must never
+ *  become "try the other copy method"), and the boot migration lets it out of the branch so the
+ *  row stays unstamped and the next boot retries. */
+export class UnreadableProbeError extends Error {}
