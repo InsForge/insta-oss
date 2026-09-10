@@ -2,8 +2,9 @@
 // Fake adapters (test/fakes.ts) — no Docker needed. docker() is mocked (engine only uses it for
 // networks and the ps snapshots). Package regions sit at the END of this file (contract 00 §1.3).
 import { test, expect, afterEach, beforeEach, vi } from 'vitest'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, renameSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
 // `dockerCall` is the same seam with a handle on the child: the scheduler's runtime verbs go
@@ -859,6 +860,50 @@ test('healthz carries what a supplied certificate has left, and nothing when the
     expect((await polled.inject({ method: 'GET', url: '/healthz' })).statusCode).toBe(200)
   }
   expect(reads).toBe(1)
+})
+
+test('healthz follows a RENEWED certificate, the way a renewal actually happens', async () => {
+  // Measured on a live box: after writing the new pair alongside and renaming it over the live
+  // names, `/healthz` kept reporting the OLD certificate -- same notAfter, same daysLeft, only
+  // secondsLeft ticking down. A cache invalidated by time reports the certificate it read at
+  // boot, and after a renewal it is wrong in the REASSURING direction, on the one field whose
+  // purpose is to warn before an expiry. This is that procedure, end to end through the route.
+  const dir = mkdtempSync(join(tmpdir(), 'io-healthz-tls-'))
+  const mint = (out: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${join(dir, 'k.pem')} -out ${out} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  try {
+    const live = join(dir, 'live.crt')
+    mint(live, 30)
+    const base = testConfig()
+    const cfg = { ...base, tls: { ...base.tls, certFile: live, keyFile: join(dir, 'k.pem') } }
+    const app2 = buildServer(makeEngine(cfg), cfg)
+    const read = async (): Promise<{ notAfter: string; daysLeft: number }> =>
+      ((await app2.inject({ method: 'GET', url: '/healthz' })).json() as { certificate: { notAfter: string; daysLeft: number } }).certificate
+
+    const before = await read()
+    // Not an exact day count: `-days 30` lands on the boundary and a second of elapsed time
+    // decides 29 vs 30. What matters is that the number MOVES with the file.
+    expect(before.daysLeft).toBeGreaterThanOrEqual(29)
+    expect(before.daysLeft).toBeLessThanOrEqual(30)
+
+    mint(join(dir, 'next.crt'), 90)
+    renameSync(join(dir, 'next.crt'), live)
+
+    const after = await read()
+    expect(after.notAfter).not.toBe(before.notAfter)          // it MOVED
+    expect(after.daysLeft).toBeGreaterThan(before.daysLeft + 55)
+
+    // ...and a certificate that goes away takes the field with it rather than leaving the last
+    // good number in place.
+    rmSync(live)
+    expect((await app2.inject({ method: 'GET', url: '/healthz' })).json()).toEqual({ ok: true })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('a volume delete on a SUSPENDED service succeeds, and leaves it suspended', async () => {

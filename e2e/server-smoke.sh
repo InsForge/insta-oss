@@ -379,6 +379,15 @@ served_serial() {
 # `healthz` carries the supplied certificate's own notAfter, so this asks the daemon WHICH file
 # it is reading rather than trusting a log line. The renewal below has a different validity, so
 # the two dates distinguish the old certificate from the new one.
+healthz_notafter() {
+  curl -sS -k "https://api.$DOMAIN/healthz" 2>/dev/null | sed -n 's/.*"notAfter":"\([^"]*\)".*/\1/p'
+}
+healthz_moved_from() {
+  _was=$1
+  _now=$(healthz_notafter)
+  [ -n "$_now" ] || return 1
+  [ "$_now" != "$_was" ]
+}
 healthz_matches_file() {
   _na=$(curl -sS -k "https://api.$DOMAIN/healthz" 2>/dev/null | sed -n 's/.*"notAfter":"\([^"]*\)".*/\1/p')
   [ -n "$_na" ] || return 1
@@ -443,6 +452,11 @@ openssl req -x509 -newkey rsa:2048 -sha256 -days 3 -nodes \
   -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
   || FAIL "could not mint the renewal certificate"
 NEXT=$(openssl x509 -in "$E2E_TLS_DIR/next.crt" -noout -serial | cut -d= -f2)
+# What `healthz` says BEFORE the rename, so the assertion after it is that the number MOVED. A
+# check that only reads it once passes against a cache that never invalidates, which is exactly
+# what a live-box renewal caught: same notAfter, same daysLeft, only secondsLeft ticking.
+HEALTHZ_BEFORE=$(healthz_notafter)
+[ -n "$HEALTHZ_BEFORE" ] || FAIL "healthz is not reporting a certificate before the renewal"
 [ "$NEXT" != "$OURS" ] || FAIL "the renewal certificate has the same serial as the first one"
 chmod 600 "$E2E_TLS_DIR/next.key"
 mv -f "$E2E_TLS_DIR/next.crt" "$E2E_TLS_DIR/wild.crt"
@@ -456,7 +470,9 @@ if openssl s_client -help 2>&1 | grep -q 'starttls'; then
     | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2)
   [ "$LANE_AFTER" = "$NEXT" ] || FAIL "after the rename the pg lane still presents '$LANE_AFTER', not the renewed '$NEXT'"
 fi
-wait_for 90 healthz_matches_file || FAIL "healthz never reported the renewed certificate"
+wait_for 90 healthz_moved_from "$HEALTHZ_BEFORE" || FAIL "healthz still reports the certificate it read before the rename"
+healthz_matches_file || FAIL "healthz reports a notAfter that is not the file's"
+OK "healthz followed the renewal: $HEALTHZ_BEFORE -> $(healthz_notafter)"
 OK "the daemon and its lanes pick up a renamed certificate with no restart"
 
 # The EDGE needs its process restarted (Caddy loads certificates at config load and does not

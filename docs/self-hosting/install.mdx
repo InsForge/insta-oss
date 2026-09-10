@@ -317,8 +317,9 @@ What you take on:
   cd /etc/instacloud && docker compose --env-file instad.env restart edge
   ```
 
-  The daemon needs nothing: it re-reads the file on its next handshake, and `healthz` follows on
-  its own beat. The edge needs its process restarted, because Caddy loads certificates when it
+  The daemon needs nothing: its lanes re-read the file on the next handshake and `healthz`
+  reports the new certificate on the next request, because it checks whether the file has
+  changed rather than trusting a cache. Both were measured after a real rename. The edge needs its process restarted, because Caddy loads certificates when it
   loads its config and does not watch the file. Nothing needs the containers RECREATED, which is
   why the directory is what gets mounted: a bind-mounted FILE stays attached to the inode it
   resolved at mount time, so a rename over it would be invisible inside the container and the

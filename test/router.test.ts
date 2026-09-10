@@ -3,7 +3,8 @@
 // service waits for exactly one wake, the waiting keeps the service awake through ONE shared timer,
 // and every failure mode has a readable answer instead of a dropped connection.
 import { test, expect, beforeEach, afterEach, vi } from 'vitest'
-import { cpSync, mkdirSync, mkdtempSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer as createHttpServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -1188,4 +1189,49 @@ test('the expiry warning is said once, then stays quiet for hours', () => {
   expect(said[2]).toContain('EXPIRED')
   for (let i = 1; i <= 240; i++) expect(watch.maybeWarn(after + i * 30_000)).toBe(false)
   expect(said).toHaveLength(3)
+})
+
+
+test('a RENAMED certificate is picked up immediately, not on the next beat', () => {
+  // The way a renewal actually happens, and the way it was measured on a live box: write the new
+  // pair alongside, rename over the live names. A cache invalidated by TIME reports the old
+  // certificate until its beat comes round -- and it is wrong in the reassuring direction, since
+  // a renewal from 29 days to 90 keeps reading 29 on the one field that exists to warn before an
+  // expiry. Nothing here calls `refresh()`: that is the point.
+  const dir = mkdtempSync(join(tmpdir(), 'io-renew-'))
+  const mint = (out: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${join(dir, 'k.pem')} -out ${out} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  try {
+    const live = join(dir, 'live.crt')
+    const next = join(dir, 'next.crt')
+    mint(live, 30)
+    const watch = new SuppliedCertWatch(live)
+    const before = watch.current()!
+    expect(before.daysLeft).toBeGreaterThanOrEqual(29)
+
+    mint(next, 90)
+    renameSync(next, live)                                    // atomic, over the live name
+    const after = watch.current()!
+    expect(after.notAfter).not.toBe(before.notAfter)
+    expect(after.daysLeft).toBeGreaterThan(before.daysLeft + 55)
+
+    // ...and the warning reads the same source, so the log and the endpoint cannot disagree.
+    const said: string[] = []
+    const w2 = new SuppliedCertWatch(live, { log: (m) => { said.push(m) } })
+    expect(w2.maybeWarn()).toBe(false)                        // 90 days: nothing to say
+    mint(next, 10)
+    renameSync(next, live)
+    expect(w2.maybeWarn()).toBe(true)                         // 10 days: said, from the new file
+    expect(said[0]).toMatch(/expires in (9|10) days/)
+
+    // A file that goes away is absent again, cache or no cache.
+    rmSync(live)
+    expect(watch.current()).toBeNull()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

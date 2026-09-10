@@ -87,11 +87,20 @@ export function warnExpiring(cert: SuppliedCert | null, log: (m: string) => void
  *  arithmetic on a cached `notAfter`, which costs nothing per hit however fast the polling is.
  *
  *  The clock is still live: `current()` recomputes what is left every time it is asked, so a
- *  cached read never serves a stale day count. And a refresh that CANNOT read the file drops the
- *  cached value rather than keeping the last good one, because "absent when the file cannot be
- *  read" has to survive a file that was readable and stopped being readable. */
+ *  cached read never serves a stale day count. And a value is dropped whenever the file cannot
+ *  be read, because "absent when the file cannot be read" has to survive a file that was
+ *  readable and stopped being readable.
+ *
+ *  Invalidation is BY CHANGE, not by time. A cache refreshed only on a beat reports the old
+ *  certificate for as long as the beat is wide, and it is wrong in the reassuring direction: a
+ *  renewal from 29 days to 90 keeps reading 29, on the one field whose whole purpose is to warn
+ *  before an expiry. Measured on a live box after a real rename. So every read `stat`s the path
+ *  and re-parses the PEM only when the file has moved (mtime, size or inode): a stat per poll is
+ *  not the blocking read this cache exists to remove, and there is no window in which the answer
+ *  is stale. */
 export class SuppliedCertWatch {
   private cached: { path: string; notAfterMs: number } | null = null
+  private stamp: string | null = null
   private lastWarnAt = 0
   private readonly read: (path: string, now: number) => SuppliedCert | null
   private readonly log: (m: string) => void
@@ -105,17 +114,36 @@ export class SuppliedCertWatch {
     this.refresh()
   }
 
-  /** One read. Called at boot and on the daemon's beat, never from a request. */
+  /** Re-read unconditionally. The daemon's beat calls this; a request does not need it. */
   refresh(now = Date.now()): void {
-    if (!this.certFile) { this.cached = null; return }
+    this.stamp = null
+    this.sync(now)
+  }
+
+  /** One `stat`. The PEM is parsed again only when the file behind the path has changed, which
+   *  is what a renewal does: write alongside, rename over. */
+  private sync(now: number): void {
+    if (!this.certFile) { this.cached = null; this.stamp = null; return }
+    let stamp: string | null = null
+    try {
+      const st = statSync(this.certFile)
+      stamp = `${st.mtimeMs}:${st.size}:${st.ino}`
+    } catch {
+      // Gone or unreadable: the old value goes with it. A certificate nobody can read is not a
+      // certificate with 172 days left.
+      this.cached = null
+      this.stamp = null
+      return
+    }
+    if (stamp === this.stamp && this.cached) return
+    this.stamp = stamp
     const cert = this.read(this.certFile, now)
-    // Unreadable now: the old value goes with it. A certificate nobody can read is not a
-    // certificate with 172 days left.
     this.cached = cert ? { path: cert.path, notAfterMs: Date.parse(cert.notAfter) } : null
   }
 
-  /** What is left, from the cache, with the arithmetic done now. No I/O. */
+  /** What is left: one stat, the parse only when the file moved, the arithmetic always now. */
   current(now = Date.now()): SuppliedCert | null {
+    this.sync(now)
     if (!this.cached) return null
     const secondsLeft = Math.round((this.cached.notAfterMs - now) / 1000)
     return {
