@@ -312,14 +312,21 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
     // had worked. Skipped where openssl cannot date a certificate forward (`req -not_before`
     // arrived in 3.5), rather than silently not testing it.
     const dated = spawnSync('sh', ['-c',
-      `openssl req -x509 -key ${key} -sha256 -not_before 20990101000000Z -not_after 20990201000000Z -out ${future} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+      `openssl req -x509 -key ${key} -sha256 -not_before 20990101000000Z -not_after 20990201000000Z -out ${future} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>&1`,
     ], { encoding: 'utf8' })
     if (dated.status === 0) {
       const r = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', future, '--tls-key', key], { INSTA_OSS_DOMAIN: 'example.test' })
       expect(r.status).toBe(1)
       expect(r.stderr).toContain('is not valid yet')
     } else {
-      expect(dated.stderr, 'openssl cannot date a certificate forward here').toBeDefined()
+      // The skip has to be able to tell "this openssl has no -not_before" (3.5 added it) from
+      // "the command is broken". Sending stderr to /dev/null and then asserting it is defined
+      // could not: `stderr` was always the empty string, so it passed for a typo, a wrong path
+      // or any other failure and silently did not test the refusal at all, under a comment
+      // claiming the opposite. So the output has to say the flag is the problem, and anything
+      // else fails here.
+      expect(dated.stdout + dated.stderr, `openssl failed for some reason OTHER than not supporting -not_before: ${dated.stdout}${dated.stderr}`)
+        .toMatch(/not_before|Unrecognized flag|unknown option|unrecognized|Unknown option|invalid option/i)
     }
 
     // The capitalised pair is accepted, for the same reason a browser would accept it.
