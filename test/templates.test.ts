@@ -4,7 +4,26 @@
 // Docker is mocked; the health probe is injected, and one case pins what the DEFAULT probe dials.
 import { test, expect, afterEach, beforeEach, vi } from 'vitest'
 
-vi.mock('../src/docker', () => ({ docker: vi.fn(async () => Buffer.from('')) }))
+vi.mock('../src/docker', () => ({ docker: vi.fn((args: string[] = []) => fakeDocker(args)) }))
+
+/** The docker seam, with the ONE fidelity the database health gate needs: `docker ps -a` answers
+ *  from `FakeRuntime`, the single fake container store (decision 53), which the fake postgres
+ *  adapter fills when it provisions. `runtimeHealth` shells that read directly rather than going
+ *  through the runtime, so a seam that answered nothing reported every provisioned database as
+ *  `none` -- a container docker says is absent -- and a gate that requires positive evidence
+ *  would fail a template whose database is perfectly fine. A case that WANTS an absent or
+ *  unreadable database says so: `dockerPsFails` for unreadable, a `db.provision` that skips the
+ *  store for absent. */
+let dockerPsFails = false
+function fakeDocker(args: string[] = []): Promise<Buffer> {
+  if (args[0] === 'ps') {
+    if (dockerPsFails) return Promise.reject(new Error('Cannot connect to the Docker daemon'))
+    const rows = [...runtime.store.entries()].map(([name, c]) => `${name}\t${c.state}`)
+    return Promise.resolve(Buffer.from(rows.length ? `${rows.join('\n')}\n` : ''))
+  }
+  if (args[0] === 'rm') for (const a of args.slice(1)) if (!a.startsWith('-')) runtime.drop(a)
+  return Promise.resolve(Buffer.from(''))
+}
 
 import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
@@ -14,7 +33,7 @@ import {
 } from '../src/templates/manifest'
 import { loadState } from '../src/state'
 import { hostArch, initHostArch } from '../src/hostarch'
-import { calls, makeEngine, resetFakes, testConfig } from './fakes'
+import { calls, db, makeEngine, resetFakes, runtime, testConfig } from './fakes'
 
 // Every declared healthcheck answers 200 unless a case changes this.
 let probeStatus: (path: string) => number
@@ -43,6 +62,7 @@ beforeEach(() => {
   resetFakes()
   probeStatus = () => 200
   probed = []
+  dockerPsFails = false
   // Pinned, not inherited: what a template may run on is the box's architecture, and a suite whose
   // answers changed with the runner's CPU would assert nothing on one of them.
   initHostArch('amd64')
@@ -418,7 +438,7 @@ test('a health failure fails the run, names the last status and redacts the log 
   const generatedKey = (): string =>
     (loadState().userSecrets[id] ?? []).find((u) => u.name === 'N8N_ENCRYPTION_KEY')?.value ?? ''
   vi.mocked((await import('../src/docker')).docker).mockImplementation(async (args: string[]) => (
-    args[0] === 'logs' ? Buffer.from(`2026-09-08T00:00:00Z boot failed with key ${generatedKey()}`) : Buffer.from('')
+    args[0] === 'logs' ? Buffer.from(`2026-09-08T00:00:00Z boot failed with key ${generatedKey()}`) : fakeDocker(args)
   ))
   const r = await post(`/projects/${id}/template-deployments`, { templateCode: 'n8n', branch: 'main' })
   const { deploymentId } = r.json()
@@ -513,6 +533,73 @@ test('abandonStale fails a running record with the restart message', async () =>
   expect(view.error).toMatch(/^the daemon restarted while the template deployment was running/)
   // ...and a restart-abandoned row does not count against the template's success rate.
   expect((await get('/templates')).json().templates.find((t: { code: string }) => t.code === 'n8n').successRate).toBeNull()
+})
+
+/** The manifest both database-gate cases deploy: one postgres and one app that depends on it. */
+const stackManifest = {
+  code: 'stack', version: '1',
+  services: {
+    store: { type: 'postgres' },
+    app: { type: 'web', image: 'app:1', port: 8080, healthcheck: '/' },
+  },
+}
+
+test('a database docker says is ABSENT fails the run instead of passing the gate', async () => {
+  // `runtimeHealth` reports `none` for a container docker answered about and did not list. That
+  // used to pass the gate on the reasoning that the adapter had just provisioned it, so the run
+  // finished `succeeded` having never proved the database exists, and the app was deployed
+  // against it. Only `healthy` and `standby` are evidence now; `none` polls and then fails.
+  const id = await project()
+  // Provision without putting a container in the store: the adapter returns, docker says no.
+  const provision = vi.spyOn(db, 'provision').mockImplementation(async (t) => {
+    calls.push(`db.provision:${t.container}`)
+    return { url: `postgres://postgres:pw@${t.container}:5432/app` }
+  })
+  const r = await deploy(id, { manifest: stackManifest, branch: 'main' }).finally(() => { provision.mockRestore() })
+  const view = (await get(`/template-deployments/${r.json().deploymentId}`)).json()
+  expect(view.status).toBe('failed')
+  expect(view.step).toBe('deploy')
+  expect(view.error).toBe('store: not ready within 0s (last status: none)')
+  // ...and the app never went out against a database that may not be there.
+  expect(calls.filter((c) => c.startsWith('deploy:'))).toEqual([])
+})
+
+test('a database docker cannot be ASKED about fails the run instead of passing the gate', async () => {
+  // The other half of the same rule: `unknown` is what `runtimeHealth` reports when the docker
+  // read itself failed, which is the absence of evidence rather than evidence of health. The
+  // container here is genuinely fine -- the store has it running -- and the run still fails,
+  // because a deploy that cannot be checked is not a deploy that passed.
+  const id = await project()
+  dockerPsFails = true
+  const r = await deploy(id, { manifest: stackManifest, branch: 'main' })
+  const view = (await get(`/template-deployments/${r.json().deploymentId}`)).json()
+  expect(view.status).toBe('failed')
+  expect(view.error).toBe('store: not ready within 0s (last status: unknown)')
+  expect(calls.filter((c) => c.startsWith('deploy:'))).toEqual([])
+  // The database really was up: this is the probe failing, not the container.
+  dockerPsFails = false
+  const health = (await get(`/projects/${id}/runtime-health?branch=main`)).json()
+  expect(health.services.find((x: { serviceId: string }) => x.serviceId === 'pg-store').status).toBe('healthy')
+})
+
+test('a database that comes up LATE is polled until it does, not failed on the first read', async () => {
+  // The other half of R3 (`plans/impl/05-templates-parity.md:69`): postgres entries go healthy
+  // once the container RUNS, POLLING up to the health timeout. Strictness on its own would just
+  // be the opposite defect -- a database that needs a second poll would fail a deployment that
+  // is fine -- so the gate is bound in both directions.
+  build({ INSTA_OSS_TEMPLATE_HEALTH_TIMEOUT_MS: '5000' })
+  const id = await project()
+  const provision = vi.spyOn(db, 'provision').mockImplementation(async (t) => {
+    calls.push(`db.provision:${t.container}`)
+    // Not there when the gate first looks, there a few polls later.
+    setTimeout(() => { runtime.put(t.container, 'running') }, 40)
+    return { url: `postgres://postgres:pw@${t.container}:5432/app` }
+  })
+  const r = await deploy(id, { manifest: stackManifest, branch: 'main' }).finally(() => { provision.mockRestore() })
+  const view = (await get(`/template-deployments/${r.json().deploymentId}`)).json()
+  expect(view.error).toBeUndefined()
+  expect(view.status).toBe('succeeded')
+  expect(calls.some((c) => c.startsWith('deploy:'))).toBe(true)
 })
 
 test('an inline manifest with a postgres service binds its DATABASE_URL into the app', async () => {

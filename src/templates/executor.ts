@@ -590,11 +590,20 @@ export class TemplateExecutor {
 
   // ---- health gates -----------------------------------------------------------------------------
 
-  /** A managed postgres is ready once its container is up. `standby` counts (the lane wakes it on
-   *  the first connection), and so do `none` and `unknown`: the adapter has just returned from
-   *  provisioning it, so a docker read that cannot see it is a reading problem, not a database
-   *  problem, and blocking a deploy on that for the whole health budget helps nobody. Only
-   *  `crashed` is terminal. */
+  /** A managed postgres is ready once its container EXISTS and docker says so. Two statuses
+   *  prove that: `healthy` (running) and `standby` (created, then paused or slept -- the resting
+   *  state a scale-to-zero database is provisioned into, which the lane wakes on the first
+   *  connection). Nothing else is evidence.
+   *
+   *  `none` and `unknown` used to pass, on the reasoning that the adapter had just returned from
+   *  provisioning so a docker read that cannot see the container is a reading problem. That is
+   *  the rule this codebase applies everywhere else INVERTED: `runtimeHealth` reports `unknown`
+   *  precisely when docker could not answer and `none` when the container is genuinely absent,
+   *  and a probe that cannot answer is not evidence of health. Accepting them let a
+   *  database-only template finish `succeeded` without ever proving its database exists, and a
+   *  mixed template start deploying apps against a database that may not be there. Both now
+   *  POLL, exactly as `starting` does, and fail at the health deadline with the last status they
+   *  saw. `crashed` is still terminal, because it is a definite answer. */
   private async awaitDbReady(projectId: string, branchName: string, entry: Entry): Promise<{ ready: boolean; reason?: string }> {
     const deadline = Date.now() + this.engine.cfg.templates.healthTimeoutMs
     let last = 'unknown'
@@ -604,7 +613,7 @@ export class TemplateExecutor {
         const row = health.services.find((r) => r.serviceId === entry.serviceId)
         last = row?.status ?? 'unknown'
         if (last === 'crashed') return { ready: false, reason: 'the database container crashed' }
-        if (last !== 'starting') return { ready: true }
+        if (last === 'healthy' || last === 'standby') return { ready: true }
       } catch { /* transient docker read: keep polling */ }
       if (Date.now() >= deadline) return { ready: false, reason: `not ready within ${Math.round(this.engine.cfg.templates.healthTimeoutMs / 1000)}s (last status: ${last})` }
       await sleep(this.engine.cfg.templates.healthPollMs)
