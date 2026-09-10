@@ -12,7 +12,7 @@
 // a PGDATA the postgres image chowned to its own uid. EVERY verb has the helper fallback, including
 // the two predicates behind the provision and start guards.
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, chmodSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, chmodSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -175,7 +175,16 @@ export class DataDir implements DataDirOps {
   }
 
   /** A path this instance is allowed to destroy or move, resolved. Teardown and migration paths are
-   *  built from state, and a row with an empty ref must never name `/`. */
+   *  built from state, and a row with an empty ref must never name `/`.
+   *
+   *  The lexical test is not enough on its own. `resolve()` only collapses `..` in the STRING, so a
+   *  path that spells out something under the data dir can still land anywhere on the box the
+   *  moment one of its components is a symlink: `rmSync` and `renameSync` both follow directory
+   *  symlinks, and the boot migration's promotion is a rename INTO a path built from state. A
+   *  `vol/<ref>` that someone (or an earlier restore, or an unpacked archive) left as a link to
+   *  `/etc` would have had the staged copy promoted straight over it. So every component from the
+   *  data dir down is checked with `lstat`, both ends of a rename go through this, and the deepest
+   *  component that exists is resolved and re-tested against the resolved data dir. */
   private inside(path: string, verb: string): string {
     const root = resolve(this.cfg.dataDir)
     const target = resolve(path)
@@ -183,7 +192,47 @@ export class DataDir implements DataDirOps {
       throw new Error(`refusing to ${verb} ${target}: outside the data dir ${root}`)
     }
     if (target === root) throw new Error(`refusing to ${verb} the data dir itself (${root})`)
+    this.assertNoSymlinkedComponent(root, target, verb)
     return target
+  }
+
+  /** Walk `root` down to `target`, rejecting a symlink at any step, then prove the real path of the
+   *  deepest component that exists is still inside the real data dir. The walk stops at the first
+   *  component that does not exist: a rename's destination normally does not, and nothing under a
+   *  path that is not there can be a link. The data dir ITSELF may be a symlink (an operator's own
+   *  choice, and both sides are resolved through it), which is why the comparison is between
+   *  resolved paths and not a refusal to see one.
+   *
+   *  `lstat` needs only search permission on the PARENT, and every parent here is one the daemon
+   *  created (the postgres image chowns the leaf PGDATA, not the directories above it), so this
+   *  does not reach for the helper container. If it ever did fail on permissions the verb fails
+   *  loudly, which is the safe direction for a delete and a promotion. */
+  private assertNoSymlinkedComponent(root: string, target: string, verb: string): void {
+    let deepest = root
+    for (const part of target.slice(root.length + 1).split(sep)) {
+      const step = join(deepest, part)
+      let st
+      try {
+        st = lstatSync(step)
+      } catch (e) {
+        if (errnoOf(e) === 'ENOENT') return
+        throw e
+      }
+      if (st.isSymbolicLink()) throw new Error(`refusing to ${verb} ${target}: ${step} is a symlink`)
+      deepest = step
+    }
+    let real: string
+    let realRoot: string
+    try {
+      real = realpathSync(deepest)
+      realRoot = realpathSync(root)
+    } catch (e) {
+      if (errnoOf(e) === 'ENOENT') return
+      throw e
+    }
+    if (real !== realRoot && !real.startsWith(realRoot + sep)) {
+      throw new Error(`refusing to ${verb} ${target}: it resolves to ${real}, outside the data dir ${realRoot}`)
+    }
   }
 
   /** Legacy migration: copy a container's own volume (or a named volume) into the data dir without
