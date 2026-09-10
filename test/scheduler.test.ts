@@ -394,6 +394,34 @@ test('a wake needing room evicts BEFORE it starts: the victim is down before the
     .toBeLessThan(calls.indexOf(`runtime.start:${waking.container}`))
 })
 
+test('eviction keeps going past 32 victims: the bound is the candidate set, not a magic number', async () => {
+  // The loop used to give up after 32 turns and fall through in silence, so a wake on a box
+  // with more services than that could start with the floor still uncleared while eligible
+  // victims remained. Distinct from an empty pool, which proceeds on purpose.
+  const h = harness({ INSTA_OSS_RAM_FLOOR_PCT: '50' })
+  const waking = h.add(K)
+  h.runtime.put(waking.container, 'exited')
+  h.runtime.rss.set(waking.container, 5 * MiB)
+  for (let i = 0; i < 45; i++) {
+    const v = h.add(`22222222-2222-2222-2222-222222222222:cp-v${i}`)
+    h.runtime.rss.set(v.container, 10 * MiB)
+  }
+  await h.sched.sweep()                                       // seeds lastRssBytes; memory() is null, so no pressure pass
+  h.runtime.mem = { totalBytes: 1000 * MiB, availableBytes: 100 * MiB }
+  calls.length = 0
+  vi.advanceTimersByTime(20_000)                              // past the no-recent-traffic guard
+
+  await h.sched.wake(K, { door: 'traffic' })
+
+  // 100 MiB free, a 500 MiB floor and a 5 MiB waking service needs 405 MiB back at 10 MiB a
+  // victim: 41 evictions, which the old cap could not reach.
+  const stopped = calls.filter((c) => c.startsWith('runtime.stop:')).length
+  expect(stopped).toBeGreaterThanOrEqual(41)
+  expect(calls).toContain(`runtime.start:${waking.container}`)
+  // ...and it stopped when the floor was met rather than emptying the pool.
+  expect(stopped).toBeLessThan(45)
+})
+
 test('a wake with NO victim available still starts: no room found is not a failure', async () => {
   // The whole fail-closed change above rests on this distinction. `evictForRoom` warns and
   // returns when it can find nothing to evict, and only THROWS when making room actually broke.
