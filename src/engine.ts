@@ -72,6 +72,9 @@ export interface ServiceRow {
 /** What every DELETE route answers with (decision 50): how many provider objects went, and how
  *  many refused to. `failed` is not an error — a bucket already gone is still gone. */
 export interface Teardown { destroyed: number; failed: number }
+/** The status of a branch whose teardown did not finish: the row is kept so the resources it names
+ *  can be found and the demolition retried (`unwindBranch`). */
+export const CLEANUP_FAILED = 'cleanup-failed'
 const newTeardown = (): Teardown => ({ destroyed: 0, failed: 0 })
 /** Run one teardown step and count it. */
 async function count(t: Teardown, fn: () => Promise<unknown>): Promise<void> {
@@ -549,7 +552,12 @@ export class Engine {
       this.emit(projectId, name, 'resource', 'branch.created', { from: source.name, ...(db ? { db } : {}), volumes })
       return b
     } catch (e) {
-      await this.unwindBranch(project, b, secretsCloned)
+      const undone = await this.unwindBranch(project, b, secretsCloned)
+      // The user is told the name is still taken, on the error they already have: with the message
+      // amended in place the error keeps its type and any `status` a route reads off it.
+      if (!undone.complete && e instanceof Error) {
+        e.message = `${e.message} (the half-built branch could not be fully torn down, so its row is kept as "${undone.kept ?? name}" with status ${CLEANUP_FAILED} and the name stays taken; \`insta branch delete ${undone.kept ?? name}\` retries the teardown)`
+      }
       throw e
     }
   }
@@ -558,28 +566,57 @@ export class Engine {
    *
    *  `teardownBranch` is the demolition `branch delete` uses, so every provider object the create
    *  made -- containers, buckets, the network, the branch's bytes -- goes exactly the way it would
-   *  if the branch had finished and then been deleted. The ROW goes last: with it gone, the name,
-   *  the ref, the lane ports and the minted hostnames it owned are all free, and the user's retry
-   *  is an ordinary create rather than a collision.
+   *  if the branch had finished and then been deleted. When it all goes, the ROW goes last: with it
+   *  gone, the name, the ref, the lane ports and the minted hostnames it owned are all free, and
+   *  the user's retry is an ordinary create rather than a collision. That is the property this
+   *  compensation exists to provide and it is unchanged for the case that matters.
+   *
+   *  When the demolition does NOT all go, the row STAYS, marked `cleanup-failed`. Deleting it
+   *  anyway is what the teardown counters were being ignored for: a container, bucket or directory
+   *  that refused to go on with no row naming it is invisible to `insta branch list`, to project
+   *  delete and to the operator, while still holding its ports, its RAM and its disk, and nothing
+   *  will ever come back for it. A row that names it is the handle: it lists (with a status that
+   *  says what happened), `insta branch delete <name>` retries exactly this demolition, and boot's
+   *  own sweeps can see it.
+   *
+   *  The cost is stated plainly because it is real: a kept row KEEPS THE NAME, so the retry of the
+   *  create is refused with `already exists` until the delete succeeds. Between a name blocked by
+   *  a row the user can see and act on, and a name freed by abandoning resources nobody can reach,
+   *  this takes the first. Nothing is kept on the success path, which is the common one.
    *
    *  Best effort throughout. The caller is already throwing the failure the user needs to see, and
-   *  a compensation that throws its own would replace it with a worse one. */
-  private async unwindBranch(project: Project, b: Branch, secretsCloned: boolean): Promise<void> {
+   *  a compensation that throws its own would replace it with a worse one; what it reports back is
+   *  whether the name is free again. */
+  private async unwindBranch(project: Project, b: Branch, secretsCloned: boolean): Promise<{ complete: boolean; kept?: string }> {
     // The row as it stands now, not the snapshot the create started from: the deploy loop wrote
     // apps onto it, and those are what `teardownBranch` forgets from the scheduler.
     const row = loadState().branches[b.id] ?? b
     const ref = this.ref(project, b)
+    // `teardownBranch` counts each provider object it could not remove instead of throwing, so the
+    // counter is the verdict; a throw is one too (it means the rest of the demolition never ran).
+    const t = newTeardown()
+    let failure: string | undefined
     try {
-      await this.teardownBranch(project, row, newTeardown())
+      await this.teardownBranch(project, row, t)
     } catch (e) {
-      console.warn(`could not fully undo the failed create of branch "${b.name}": ${e instanceof Error ? e.message : String(e)}`)
+      failure = e instanceof Error ? e.message : String(e)
+      console.warn(`could not fully undo the failed create of branch "${b.name}": ${failure}`)
     }
+    const complete = t.failed === 0 && failure === undefined
     this.forkResults.delete(b.id)
+    let kept: string | undefined
     mutate((s) => {
       // Every name this branch has answered to: the one the create minted, the one it carried into
       // the teardown, and the one it has RIGHT NOW (a rename can land during the teardown too).
       const names = [b.name, row.name, s.branches[b.id]?.name].filter((n): n is string => typeof n === 'string')
-      delete s.branches[b.id]
+      // Names OTHER branches hold, computed before this row goes either way, so a kept row does
+      // not shield its own secret copies from the sweep below.
+      const taken = new Set(Object.values(s.branches).filter((x) => x.id !== b.id && x.projectId === b.projectId).map((x) => x.name))
+      if (complete) delete s.branches[b.id]
+      else if (s.branches[b.id]) {
+        s.branches[b.id].status = CLEANUP_FAILED
+        kept = s.branches[b.id].name
+      }
       // The clone inherits the source's branch-scoped secrets BY NAME, so the copies it made are
       // exactly the rows naming a branch that is about to stop existing. Only drop them when that
       // step actually ran: a failure before it has nothing of its own to clean.
@@ -592,19 +629,27 @@ export class Engine {
       // with the branch as a NAME (that is what `userSecretsFor`, the CLI's `--branch` and the
       // rename itself all read), so keying by id means migrating every stored row and every
       // reader; two names is the fix that fits the shape the data actually has.
+      // They go even when the row is kept: the kept row is a handle for finishing the demolition,
+      // not a usable branch, and leaving the copies would hand them to the create that follows the
+      // delete -- which is the double inheritance this sweep exists to prevent.
       if (secretsCloned) {
         const list = s.userSecrets[b.projectId]
         // ...but never a name some OTHER branch holds now: a rename frees the old name, and if a
         // branch created since owns it, its secrets are not ours to delete.
-        const taken = new Set(Object.values(s.branches).filter((x) => x.projectId === b.projectId).map((x) => x.name))
         const ours = new Set(names.filter((n) => !taken.has(n)))
         if (list) s.userSecrets[b.projectId] = list.filter((u) => u.branch === null || !ours.has(u.branch))
       }
       // The row superseded the ref claim on commit; if anything re-took it, it is not ours.
       if (s.branchReservations?.[ref] === b.id) delete s.branchReservations[ref]
     })
+    // Only stale RESERVATIONS: a kept row's own `lanes` stay claimed, because the containers that
+    // refused to go may still be listening on them.
     this.releaseLanes(b.id)
     this.router.invalidate()
+    if (!complete) {
+      this.emit(project.id, kept ?? row.name, 'resource', 'branch.cleanupFailed', { teardown: t, ...(failure ? { error: failure } : {}) })
+    }
+    return { complete, ...(kept !== undefined ? { kept } : {}) }
   }
 
   /** Rename a project — DISPLAY NAME ONLY, like the cloud: every resource keeps its original

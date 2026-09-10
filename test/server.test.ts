@@ -2106,12 +2106,55 @@ test('the unwind never takes the secrets of a branch that now owns the freed nam
   expect(Object.keys(st.branches)).toContain('other-branch')
 })
 
+test('a create whose CLEANUP fails keeps a row naming the resources, and the delete retries it', async () => {
+  const id = await sourceWithEveryStep()
+  const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
+  // The teardown that follows cannot remove the clone's database container. Dropping the row anyway
+  // would leave that container holding its port and its RAM with nothing naming it: invisible to
+  // `branch list`, to project delete and to the operator, and never retried by anything.
+  const destroy = vi.spyOn(db, 'destroy').mockRejectedValueOnce(new Error('container is in use'))
+
+  const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
+  expect(bad.statusCode).toBeGreaterThanOrEqual(400)
+  expect(bad.json().error).toContain('bucket boom')
+  // The user is told what state the name is in, on the same error.
+  expect(bad.json().error).toContain('cleanup-failed')
+  cloneInto.mockRestore()
+  destroy.mockRestore()
+
+  // The row is still there, marked, and it still names the branch's resources.
+  const row = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')!
+  expect(row.status).toBe('cleanup-failed')
+  expect(row.databases?.['pg-db']?.container).toBe('io-demo-feat-pg-db')
+  // The event says so too, with the counts.
+  const ev = loadState().events.filter((e) => e.kind === 'branch.cleanupFailed')
+  expect(ev).toHaveLength(1)
+  expect((ev[0].payload as { teardown: { failed: number } }).teardown.failed).toBe(1)
+  // The secret copies still go: the kept row is a handle for finishing the teardown, not a branch,
+  // and leaving them would hand a double set to the create that follows the delete.
+  expect((loadState().userSecrets[id] ?? []).filter((u) => u.branch === 'feat')).toEqual([])
+
+  // The tradeoff, stated: the name is NOT free while that row stands.
+  const retry = await post(`/projects/${id}/branches`, { name: 'feat' })
+  expect(retry.statusCode).toBeGreaterThanOrEqual(400)
+  expect(retry.json().error).toContain('already exists')
+
+  // ...and the handle works: the delete runs the same demolition, this time all of it, and the
+  // name comes back.
+  const del = await app.inject({ method: 'DELETE', url: `/projects/${id}/branches/${row.id}` })
+  expect(del.statusCode).toBe(200)
+  expect(del.json().teardown.failed).toBe(0)
+  await assertRetryWorks(id)
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
   await post(`/projects/${id}/branches`, { name: 'feat' })
   cloneInto.mockRestore()
-  expect(loadState().events.filter((e) => e.action === 'branch.created' && e.branch === 'feat')).toEqual([])
+  // `kind`, not `action`: an AuditEvent has no `action`, so the filter this line used to make was
+  // empty whatever happened and the test asserted nothing.
+  expect(loadState().events.filter((e) => e.kind === 'branch.created' && e.branch === 'feat')).toEqual([])
 })
 
 /** The default branch's id (host reservations and app rows are keyed by it). */
