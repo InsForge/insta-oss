@@ -78,7 +78,13 @@ Compute on InstaCloud is serverless. A service scales to zero and wakes on an in
 
 A background worker becomes a second compute service, with two adjustments. It has to listen on a port, because that is how the platform routes to it and health-checks it, and you should leave always-on enabled, because a suspended worker has no incoming traffic to wake it. A worker that does not serve HTTP today therefore needs a small change: one listener is enough.
 
-Scheduled jobs are not supported yet. A cron tick has nowhere to arrive at a service that may be asleep, so the platform will grow its own scheduling rather than have you work around it. Until then, keep the schedule outside the service: a CI schedule, an external scheduler, or your own machine, calling an endpoint the app exposes. You can also run a scheduler in-process, but only in a service you keep always-on, and note every replica fires on every tick.
+Scheduled jobs are not supported yet, and the platform will grow its own scheduling rather than have you work around it. The reason is the same serverless model: **both** compute and Postgres scale to zero by default, so a tick has nowhere to arrive.
+
+Everything you can do today therefore involves keeping something awake, or scheduling from outside:
+
+- **From outside**, and this is the one that needs nothing kept warm: a CI schedule, an external scheduler, or your own machine calling an endpoint the app exposes.
+- **`pg_cron`**, if the job is SQL. It is preloaded, so `CREATE EXTENSION pg_cron` works, but a suspended database runs nothing, so it needs `insta db always-on on`.
+- **A scheduler in-process** (node-cron, APScheduler), in a compute service you keep always-on. Note every replica fires on every tick, so two replicas run each job twice.
 
 And that is it. Every InstaCloud action your agent took is a command you can run yourself, in the [CLI reference](/reference/cli/overview); the inspection on the other side used that provider's own CLI and API.
 
