@@ -24,6 +24,9 @@ const RCLONE = 'rclone/rclone'
 const S3_PORT = 3900
 const WEB_PORT = 3902
 const ADMIN_KEY = 'io-insta-admin' // internal key for clone/teardown; granted rw per bucket
+/** A node row of `garage status`: the ID column is a long hex string, which the header line and
+ *  every banner are not. One of these is the only proof that the status was read at all. */
+const NODE_ROW = /^[0-9a-f]{8,}\b/i
 
 export interface GarageOptions {
   configPath: string    // cfg.garageConfigPath
@@ -117,13 +120,23 @@ export class LocalGarage implements StorageAdapter {
     throw new Error('shared Garage server never became ready')
   }
 
-  /** Single-node layout: assign this node a role once; later calls see a role and skip. */
+  /** Single-node layout: assign this node a role once; later calls see a role and skip.
+   *
+   *  The skip is decided on POSITIVE evidence now. `if (!status.includes('NO ROLE ASSIGNED'))
+   *  return` read every output this parser does not understand -- a changed format, a partially
+   *  written capture, an empty buffer -- as "the node already has a role", and the layout was
+   *  then never initialised, on a store the daemon reports as ready. The node rows are what says
+   *  anything at all: no rows means the status could not be read, and that raises rather than
+   *  skipping. */
   private async initLayout(): Promise<void> {
     const status = (await this.garage(['status'])).toString()
-    if (!status.includes('NO ROLE ASSIGNED')) return
-    const line = status.split('\n').find((l) => l.includes('NO ROLE ASSIGNED'))
-    const nodeId = line?.trim().split(/\s+/)[0]
-    if (!nodeId) throw new Error('could not determine Garage node id from status output')
+    const rows = status.split('\n').map((l) => l.trim()).filter((l) => NODE_ROW.test(l))
+    if (!rows.length) {
+      throw new Error(`could not read the Garage node list from \`garage status\` (got ${JSON.stringify(status.slice(0, 200))}); refusing to assume this node already has a layout role`)
+    }
+    const unassigned = rows.find((l) => l.includes('NO ROLE ASSIGNED'))
+    if (!unassigned) return
+    const nodeId = unassigned.split(/\s+/)[0]
     await this.garage(['layout', 'assign', '-z', 'dc1', '-c', '100G', nodeId])
     await this.garage(['layout', 'apply', '--version', '1']).catch(() => { /* concurrent init won */ })
   }

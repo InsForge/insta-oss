@@ -1,4 +1,5 @@
-// The managed-database and object-store adapters' removal contracts, over injected seams.
+// The managed-database and object-store adapters' removal contracts, plus the object store's
+// LAYOUT probe, over injected seams.
 //
 // `test/postgres-adapter.test.ts` pins the same three-way through `LocalPostgres.destroy`; this
 // file covers the other two implementations of it. The adapter layer is where a failed removal
@@ -109,4 +110,54 @@ test('bucket destroy: a list that cannot answer is not absence', async () => {
     return Buffer.from('')
   })
   await expect(garage().destroy('io-demo-feat-store', 'io-demo-feat')).rejects.toThrow(/could not delete bucket/)
+})
+
+
+// ---- the object store's layout probe -----------------------------------------------------------
+//
+// Same rule, a different probe: `initLayout` decided "this node already has a role" by the
+// ABSENCE of the string `NO ROLE ASSIGNED` in `garage status`, so any output it could not parse
+// -- a changed format, an empty capture, a partially written buffer -- skipped the layout
+// initialisation on a store the daemon then reports as ready.
+
+/** A `garage status` node table, in the v2 shape: a banner, a header row, then node rows. */
+const statusWith = (row: string): string => [
+  '==== HEALTHY NODES ====',
+  'ID                Hostname  Address         Tags  Zone  Capacity  DataAvail',
+  row,
+  '',
+].join('\n')
+const NODE = 'a1b2c3d4e5f60718'
+const isStatus = (a: string[]): boolean => a.includes('status')
+const isAssign = (a: string[]): boolean => a.join(' ').includes('layout assign')
+
+const withStatus = async (status: string): Promise<void> => {
+  const real = (await import('../src/docker')).docker
+  vi.mocked(real).mockImplementation(async (args: string[]) => {
+    calls.push([...args])
+    if (isStatus(args)) return Buffer.from(status)
+    return Buffer.from('')
+  })
+}
+
+test('garage layout: an UNPARSEABLE status raises instead of assuming a role is assigned', async () => {
+  reset()
+  await withStatus('')
+  await expect(garage().provision('demo-main', 'io-demo-main', 'store'))
+    .rejects.toThrow(/could not read the Garage node list/)
+  expect(calls.filter(isAssign)).toEqual([])
+})
+
+test('garage layout: a node with NO ROLE ASSIGNED is assigned one', async () => {
+  reset()
+  await withStatus(statusWith(`${NODE}  box  127.0.0.1:3901  []  NO ROLE ASSIGNED`))
+  await garage().provision('demo-main', 'io-demo-main', 'store').catch(() => { /* the rest is mocked away */ })
+  expect(calls.filter(isAssign).map((a) => a[a.length - 1])).toEqual([NODE])
+})
+
+test('garage layout: a node that already carries a role is left alone', async () => {
+  reset()
+  await withStatus(statusWith(`${NODE}  box  127.0.0.1:3901  []  dc1  100.0 GB  95.0 GB`))
+  await garage().provision('demo-main', 'io-demo-main', 'store').catch(() => { /* the rest is mocked away */ })
+  expect(calls.filter(isAssign)).toEqual([])
 })
