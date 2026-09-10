@@ -235,8 +235,14 @@ export class LocalPostgres implements DatabaseAdapter {
     // back. Without a door there is nothing to wait for, and `waitReady` on a stopped container
     // reports `exited before it became ready`, which reads like a broken database rather than a
     // caller that skipped the wake.
+    // Every state but a live server fails HERE, naming itself, rather than in a readiness poll.
+    // `paused` is the one that makes this more than a nicety: a frozen postmaster answers no
+    // probe and never exits, so `waitReady` would poll it for the full two-minute window and
+    // then report a readiness timeout on a container that was never going to answer. Only
+    // `restarting` is worth waiting on, since docker is already bringing it back, so that one
+    // falls through.
     const status = await containerStatus(src.container, this.exec)
-    if (status === null || status === 'exited' || status === 'created' || status === 'dead') {
+    if (status !== 'running' && status !== 'restarting') {
       throw new Error(`pg_basebackup needs the source running: ${src.container} is ${status ?? 'gone'}`
         + (opts.ensureSourceRunning ? ' after its wake door was opened' : ' and the caller passed no wake door'))
     }

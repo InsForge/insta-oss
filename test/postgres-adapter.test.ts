@@ -341,16 +341,42 @@ test('a PAUSED source is streamed too: an unpause and re-pause inside the walk m
   // A paused container is a live postmaster with its processes frozen, and `docker unpause`
   // followed by `docker pause` leaves the status, both run timestamps and even the pid exactly as
   // they were (measured on Docker 27). There is therefore no reading that can show a paused
-  // source held still for the walk, so it is refused up front like a running one.
-  const { calls, exec } = stubDocker({ running: ['io-demo-main-pg-db'], status: 'paused' })
+  // source held still for the walk, so it is refused up front like a running one and streamed
+  // instead. The stream then needs it live, and the engine's door is what unpauses it: the
+  // scheduler's `api` door does exactly this before it starts anything.
+  let state = 'paused'
+  const calls: string[][] = []
+  const exec: DockerExec = async (args) => {
+    calls.push([...args])
+    if (args[0] === 'inspect') {
+      if (args[args.length - 1] !== 'io-demo-main-pg-db') throw new Error('Error: No such object')
+      return Buffer.from(`${state}\n`)
+    }
+    if (args.includes('select 1')) return Buffer.from('1\n')
+    return Buffer.from('')
+  }
   const { ops, data } = stubData()
   const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
 
-  const out = await pg.fork(src(), dst())
+  const out = await pg.fork(src(), dst(), { ensureSourceRunning: async () => { state = 'running' } })
 
   expect(out.method).toBe('basebackup')
   expect(ops.filter((o) => o.startsWith('clone:'))).toEqual([])
   expect(indexOfMatch(calls, 'pg_basebackup')).toBeGreaterThanOrEqual(0)
+})
+
+test('a paused source with no door fails at once instead of polling a container that is frozen', async () => {
+  // Without a door nothing unpauses it, and a frozen postmaster answers no probe and never
+  // exits: `waitReady` would poll it for the whole two-minute readiness window and then blame
+  // readiness. The state is known here, so it is said here.
+  const { calls, exec } = stubDocker({ running: ['io-demo-main-pg-db'], status: 'paused' })
+  const { data } = stubData()
+  const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
+
+  await expect(pg.fork(src(), dst())).rejects
+    .toThrow(/needs the source running: io-demo-main-pg-db is paused and the caller passed no wake door/)
+  // ...and it never entered the poll at all.
+  expect(indexOfMatch(calls, 'pg_isready')).toBe(-1)
 })
 
 test('INSTA_OSS_FORK=reflink names the state it refused, paused included', async () => {
