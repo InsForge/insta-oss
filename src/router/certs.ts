@@ -99,13 +99,13 @@ export function suppliedFiles(cfg: Config): { crt: string; key: string } | null 
  *  be read, because "absent when the file cannot be read" has to survive a file that was
  *  readable and stopped being readable.
  *
- *  Invalidation is BY CHANGE, not by time. A cache refreshed only on a beat reports the old
- *  certificate for as long as the beat is wide, and it is wrong in the reassuring direction: a
- *  renewal from 29 days to 90 keeps reading 29, on the one field whose whole purpose is to warn
- *  before an expiry. Measured on a live box after a real rename. So every read `stat`s the path
- *  and re-parses the PEM only when the file has moved (mtime, size or inode): a stat per poll is
- *  not the blocking read this cache exists to remove, and there is no window in which the answer
- *  is stale. */
+ *  Invalidation is BY CHANGE, not by time, and the check runs on the BEAT rather than on the
+ *  request. A cache keyed on time alone reports the old certificate for as long as the beat is
+ *  wide and is wrong in the reassuring direction: a renewal from 29 days to 90 keeps reading 29,
+ *  on the one field whose whole purpose is to warn before an expiry. Measured on a live box after
+ *  a real rename. So each beat `stat`s the path and re-parses the PEM only when the file has
+ *  moved (mtime, size or inode), which is what a renewal does: write alongside, rename over. The
+ *  remaining lag is one sweep interval, and it buys a request path that makes no syscall. */
 export class SuppliedCertWatch {
   private cached: { path: string; notAfterMs: number } | null = null
   private stamp: string | null = null
@@ -125,20 +125,31 @@ export class SuppliedCertWatch {
     this.refresh()
   }
 
-  /** Re-read unconditionally. The daemon's beat calls this; a request does not need it. */
+  /** Look at the file. The daemon's beat calls this; a request does not need it.
+   *
+   *  It does NOT force a re-parse: clearing the stamp first made every beat re-read and re-parse
+   *  an unchanged certificate, which is most of the synchronous work that moving this off the
+   *  request path existed to remove, just relocated onto a timer. The stat is the check; the
+   *  parse happens when the stat says the file moved. */
   refresh(now = Date.now()): void {
-    this.stamp = null
     this.sync(now)
   }
 
-  /** One `stat`. The PEM is parsed again only when the file behind the path has changed, which
-   *  is what a renewal does: write alongside, rename over. */
+  /** One `stat` per call. The PEM is parsed again only when the file behind the path has
+   *  changed, so an unchanged certificate costs a stat and nothing else however long the daemon
+   *  runs. A path that cannot be stat'd drops the cached value along with the stamp, so the next
+   *  readable file is parsed even if it arrives with the same mtime, size and inode. */
   private sync(now: number): void {
     if (!this.certFile) { this.cached = null; this.stamp = null; return }
     let stamp: string | null = null
     try {
       const st = statSync(this.certFile)
-      stamp = `${st.mtimeMs}:${st.size}:${st.ino}`
+      // ctime and mode as well as mtime, size and inode: a file that stops being READABLE
+      // without its contents changing (a chmod, an ownership change) has to drop the cached
+      // value too, and "absent when the file cannot be read" is a property this cache is not
+      // allowed to cost. Metadata changes move ctime, so the next beat re-reads and the read
+      // failing is what clears it.
+      stamp = `${st.mtimeMs}:${st.size}:${st.ino}:${st.ctimeMs}:${st.mode}`
     } catch {
       // Gone or unreadable: the old value goes with it. A certificate nobody can read is not a
       // certificate with 172 days left.

@@ -3,7 +3,7 @@
 // service waits for exactly one wake, the waiting keeps the service awake through ONE shared timer,
 // and every failure mode has a readable answer instead of a dropped connection.
 import { test, expect, beforeEach, afterEach, vi } from 'vitest'
-import { cpSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs'
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1131,31 +1131,63 @@ test('the certificate watch reads on its own beat, not per request', () => {
   expect(reads).toBe(1)                                       // the constructor's own
   for (let i = 0; i < 50; i++) expect(watch.current()).not.toBeNull()
   expect(reads).toBe(1)                                       // ...and not one more
-  watch.refresh()
-  expect(reads).toBe(2)                                       // the beat reads
+  // The beat looks at the file; it does not re-read it. On an unchanged certificate that is a
+  // stat and nothing else, which is the whole point of a cache keyed on change rather than on
+  // time. What a moved file costs is asserted in the test below.
+  for (let i = 0; i < 100; i++) watch.refresh()
+  expect(reads).toBe(1)
 
   // The clock stays live even though the file is not re-read: what is left is computed per call.
   const far = watch.current(at - 40 * 86_400_000)!
   const near = watch.current(at - 5 * 86_400_000)!
   expect(far.daysLeft).toBe(40)
   expect(near.daysLeft).toBe(5)
-  expect(reads).toBe(2)
+  expect(reads).toBe(1)
 })
 
 test('a certificate that STOPS being readable goes absent, and does not keep its last value', () => {
-  // The property that had to survive the caching: a cached 172 days is not a certificate. This is
-  // the file being replaced badly, unmounted, or chmod'ed away between two beats.
-  const crt = join('test', 'fixtures', 'local', 'router.test', 'router.test.crt')
-  let readable = true
-  const watch = new SuppliedCertWatch(crt, { read: (path, now) => (readable ? suppliedCert(path, now) : null) })
-  expect(watch.current()).not.toBeNull()
-  readable = false
-  watch.refresh()
-  expect(watch.current()).toBeNull()
-  // ...and it comes back when the file does.
-  readable = true
-  watch.refresh()
-  expect(watch.current()).not.toBeNull()
+  // The property that had to survive the caching: a cached 172 days is not a certificate. Done
+  // to the FILE rather than to a boolean, because the cache is keyed on what the file looks
+  // like now: replaced badly, removed, and (where the process is not root) chmod'ed away, which
+  // is why the stamp carries mode and ctime and not only mtime, size and inode.
+  const src = readFileSync(join('test', 'fixtures', 'local', 'router.test', 'router.test.crt'))
+  const dir = mkdtempSync(join(tmpdir(), 'io-unreadable-'))
+  const crt = join(dir, 'live.crt')
+  try {
+    writeFileSync(crt, src)
+    const watch = new SuppliedCertWatch(crt)
+    expect(watch.current()).not.toBeNull()
+
+    // Replaced by something that is not a certificate: the daemon reports nothing, not the last
+    // good value it happens to remember.
+    writeFileSync(crt, 'this is not a certificate\n')
+    watch.refresh()
+    expect(watch.current()).toBeNull()
+
+    // ...and it comes back when the file does.
+    writeFileSync(crt, src)
+    watch.refresh()
+    expect(watch.current()).not.toBeNull()
+
+    // Unreadable without any change to the CONTENT. Skipped only where the check cannot mean
+    // anything, which is as root: root reads a 000 file, so the certificate stays readable and
+    // the assertion would be about the test environment rather than the code.
+    if (process.getuid?.() !== 0) {
+      chmodSync(crt, 0o000)
+      watch.refresh()
+      expect(watch.current()).toBeNull()
+      chmodSync(crt, 0o600)
+      watch.refresh()
+      expect(watch.current()).not.toBeNull()
+    }
+
+    // Gone entirely.
+    rmSync(crt)
+    watch.refresh()
+    expect(watch.current()).toBeNull()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('the expiry warning is said once, then stays quiet for hours', () => {
@@ -1191,6 +1223,62 @@ test('the expiry warning is said once, then stays quiet for hours', () => {
   expect(said).toHaveLength(3)
 })
 
+
+test('the beat PARSES only when the file moved: an unchanged certificate costs a stat', () => {
+  // The cache was defeating itself. `refresh()` cleared the stamp before `sync()` could compare
+  // it, so every sweep re-read and re-parsed a certificate that had not changed -- a full
+  // synchronous read and X509 parse on the event loop every 30 s, for the lifetime of the
+  // daemon, which is most of the work that moving this off the request path existed to avoid.
+  // The stat is the check; the parse is what the stat has to earn.
+  const dir = mkdtempSync(join(tmpdir(), 'io-stamp-'))
+  const mint = (out: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${join(dir, 'k.pem')} -out ${out} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  try {
+    const live = join(dir, 'live.crt')
+    const next = join(dir, 'next.crt')
+    mint(live, 30)
+    let parses = 0
+    const watch = new SuppliedCertWatch(live, { read: (path, now) => { parses++; return suppliedCert(path, now) } })
+
+    // Boot: parsed once, and the value is there.
+    expect(parses).toBe(1)
+    expect(watch.current()!.daysLeft).toBeGreaterThanOrEqual(29)
+
+    // A day of sweeps on an unchanged file: not one more parse, and the answer does not drift.
+    const at = watch.current()!.notAfter
+    for (let i = 0; i < 2880; i++) watch.refresh()
+    expect(parses).toBe(1)
+    expect(watch.current()!.notAfter).toBe(at)
+
+    // A renewal moves the file, so the next beat parses exactly once more.
+    mint(next, 90)
+    renameSync(next, live)
+    watch.refresh()
+    expect(parses).toBe(2)
+    expect(watch.current()!.notAfter).not.toBe(at)
+    for (let i = 0; i < 100; i++) watch.refresh()
+    expect(parses).toBe(2)
+
+    // Unreadable: the value goes, and no parse is attempted on a file that cannot be stat'd.
+    rmSync(live)
+    watch.refresh()
+    expect(watch.current()).toBeNull()
+    expect(parses).toBe(2)
+
+    // ...and the stamp went with it, so the file coming back is parsed even though a renamed
+    // file can carry the same mtime, size and inode as the one that was there before.
+    mint(live, 45)
+    watch.refresh()
+    expect(parses).toBe(3)
+    expect(watch.current()!.daysLeft).toBeGreaterThanOrEqual(44)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test('a RENAMED certificate is picked up by the beat, and the request path reads nothing', () => {
   // The way a renewal actually happens, and the way it was measured on a live box: write the new
