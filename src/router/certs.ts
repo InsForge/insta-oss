@@ -258,8 +258,17 @@ export function triggerIssuance(cfg: Config): (host: string) => Promise<void> {
  *  the cap only ever bites on a scan, and evicting the oldest costs one re-read. */
 const CACHE_MAX = 256
 
+/** Distinct certificate FAILURES remembered at once, for the throttle below. A handful is all
+ *  a box can really have; the cap only bounds a pathological case and evicting the oldest costs
+ *  at most one repeated line. */
+const FAIL_KEYS_MAX = 32
+
 export class Certs {
   private cache = new Map<string, { ctx: SecureContext; stamp: string; crt: string }>()
+  /** Failure key -> when it was last logged. See `logFailure`. */
+  private failures = new Map<string, number>()
+  /** Whether anything is currently failing, so recovery can be announced exactly once. */
+  private failing = false
   private readonly certDir: string | null
   private readonly supplied: CertFiles | null
   private readonly issue: (host: string) => Promise<void>
@@ -288,6 +297,45 @@ export class Certs {
     return stamp === null ? null : { ...this.supplied, stamp }
   }
 
+  /** One line per DISTINCT failure, then silence until `WARN_EVERY_MS` has passed.
+   *
+   *  The same shape as the expiry warning, and for the same measured reason: these lanes are
+   *  publicly reachable, and a single public hostname on this product's own box drew 141
+   *  scanner requests in fifteen minutes. A degraded certificate plus ordinary client retries
+   *  plus that traffic is unbounded log writes at exactly the moment the operator is already in
+   *  trouble and needs to be able to read their logs. One mechanism, two paths, one of them
+   *  hardened, is the shape this PR has now hit three times, so this is throttled the way the
+   *  warning is rather than by a second invention.
+   *
+   *  The key is the file's STAMP plus the error, so a different file, or the same file failing
+   *  differently, speaks at once. Nothing is silenced on its first occurrence. The key
+   *  deliberately does not carry the hostname: the supplied pair is ONE file behind every name
+   *  this box serves, and a key per hostname would let a scanner multiply the same failure back
+   *  into the log. The line itself still names a host, so the operator has an example to
+   *  reproduce with. */
+  private logFailure(key: string, line: string, now = Date.now()): void {
+    this.failing = true
+    const last = this.failures.get(key)
+    if (last !== undefined && now - last < WARN_EVERY_MS) return
+    this.failures.set(key, now)
+    while (this.failures.size > FAIL_KEYS_MAX) {
+      const oldest = this.failures.keys().next().value
+      if (oldest === undefined) break
+      this.failures.delete(oldest)
+    }
+    this.log(line)
+  }
+
+  /** Announced once, and only when something had actually failed: an operator watching a log go
+   *  quiet cannot tell "fixed" from "stopped being asked", and this is the line that tells
+   *  them. Clearing the keys is what lets the NEXT failure speak immediately. */
+  private logRecovered(line: string): void {
+    if (!this.failing) return
+    this.failing = false
+    this.failures.clear()
+    this.log(line)
+  }
+
   /** True when a certificate for `host` is available (no issuance attempt). */
   certExists(host: string): boolean {
     if (this.supplied) return this.suppliedFiles() !== null
@@ -314,13 +362,22 @@ export class Certs {
     // the same problem, independent of what the edge was configured to do.
     if (this.supplied) {
       const files = this.suppliedFiles()
-      if (!files) { this.log(`router: the supplied certificate ${this.supplied.crt} cannot be read; the lanes have no certificate to present`); return null }
+      if (!files) {
+        this.logFailure(`supplied\u0000${this.supplied.crt}\u0000unreadable`,
+          `router: the supplied certificate ${this.supplied.crt} cannot be read; the lanes have no certificate to present`)
+        return null
+      }
       return this.contextFor(host, files)
     }
     if (!this.certDir) return null
     let files = findCertFiles(this.certDir, host)
     if (!files) {
-      try { await this.issue(host) } catch (e) { this.log(`router: certificate issuance for ${host} failed: ${e instanceof Error ? e.message : String(e)}`) }
+      try {
+        await this.issue(host)
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e)
+        this.logFailure(`issue\u0000${why}`, `router: certificate issuance for ${host} failed: ${why}`)
+      }
       files = findCertFiles(this.certDir, host)
     }
     if (!files) return null
@@ -347,9 +404,11 @@ export class Certs {
         if (oldest === undefined) break
         this.cache.delete(oldest)
       }
+      this.logRecovered(`router: the certificate for ${host} loads again`)
       return ctx
     } catch (e) {
-      this.log(`router: unreadable certificate for ${host}: ${e instanceof Error ? e.message : String(e)}`)
+      const why = e instanceof Error ? e.message : String(e)
+      this.logFailure(`load\u0000${files.stamp}\u0000${why}`, `router: unreadable certificate for ${host}: ${why}`)
       return null
     }
   }

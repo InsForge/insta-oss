@@ -1161,6 +1161,53 @@ test('a renewal with the SAME mtime is still picked up by the lanes, and healthz
   }
 })
 
+test('a broken certificate says so ONCE, however many handshakes arrive', async () => {
+  // These lanes are publicly reachable and the traffic is not the operator's: one public
+  // hostname on a live box drew 141 scanner requests in fifteen minutes. A degraded
+  // certificate plus ordinary client retries plus that traffic is unbounded log writes at the
+  // moment the operator most needs to read their logs. The expiry warning was throttled for
+  // this exact reason; this is its failure-path twin, and it is throttled the same way rather
+  // than by a second mechanism.
+  const dir = mkdtempSync(join(tmpdir(), 'io-noisy-'))
+  try {
+    const crt = join(dir, 'wildcard.crt')
+    const key = join(dir, 'wildcard.key')
+    const said: string[] = []
+    const certs = new Certs({ certDir: null, supplied: { crt, key }, log: (m) => { said.push(m) } })
+
+    // FAILURE 1: the pair is not there at all. Two hundred handshakes, one line.
+    for (let i = 0; i < 200; i++) expect(await certs.certFor(`h${i % 7}.example.test`)).toBeNull()
+    expect(said).toHaveLength(1)
+    expect(said[0]).toContain('cannot be read')
+
+    // FAILURE 2, different: the files exist and are not a certificate. New failure, so it
+    // speaks at once -- nothing is silenced on its first occurrence -- and then goes quiet.
+    writeFileSync(crt, 'not a certificate\n')
+    writeFileSync(key, 'not a key\n')
+    for (let i = 0; i < 200; i++) expect(await certs.certFor(`h${i % 7}.example.test`)).toBeNull()
+    expect(said).toHaveLength(2)
+    expect(said[1]).toContain('unreadable certificate')
+
+    // RECOVERY, announced once: a log that simply goes quiet cannot be told from one nobody is
+    // asking any more.
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${key} -out ${crt} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+    for (let i = 0; i < 200; i++) expect(await certs.certFor(`h${i % 7}.example.test`)).not.toBeNull()
+    expect(said).toHaveLength(3)
+    expect(said[2]).toContain('loads again')
+
+    // ...and a failure AFTER a recovery is not swallowed by the keys the last one left behind.
+    rmSync(crt)
+    for (let i = 0; i < 50; i++) expect(await certs.certFor('h0.example.test')).toBeNull()
+    expect(said).toHaveLength(4)
+    expect(said[3]).toContain('cannot be read')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a supplied certificate reports what it has left, and says so under three weeks', () => {
   // The one certificate in this stack nothing renews. This cannot renew it either and does not
   // try: it makes the number visible, so the failure is not announced by a browser.
