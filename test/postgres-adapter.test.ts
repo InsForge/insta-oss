@@ -399,6 +399,23 @@ test('a sleeping source is cloned as it lies: no CHECKPOINT, and the copy still 
   expect(ops).toEqual(['clone:/data/pg/demo-main-db->/data/pg/demo-feat-db'])
 })
 
+test('a probe that cannot answer is not evidence the source is at rest', async () => {
+  // `docker inspect` failing says nothing about the container unless dockerd SAYS there is no
+  // such container. A daemon that is not talking, a template error, a permission failure: read
+  // any of those as absence and the fork walks a PGDATA that may have a live postmaster in it.
+  // The explicit no-such-object answer still means "no writer" and still clones, which the
+  // sleeping-source case above pins.
+  const { ops, data } = stubData()
+  const { exec } = stubDocker({
+    on: (args) => (args[0] === 'inspect' ? new Error('Cannot connect to the Docker daemon at unix:///var/run/docker.sock') : undefined),
+  })
+  const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
+
+  await expect(pg.fork(src(), dst())).rejects.toThrow(/could not report the state of io-demo-main-pg-db|needs the source running/)
+  // The walk never happened.
+  expect(ops.filter((o) => o.startsWith('clone:'))).toEqual([])
+})
+
 test('a clone that comes out unrecoverable is retried exactly once, cleaning up each time', async () => {
   // The source is at rest, so this is a copy the adapter is allowed to make and it still did not
   // recover: a source damaged before the fork (an interrupted earlier copy) is what is left once

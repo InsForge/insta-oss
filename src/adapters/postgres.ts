@@ -190,6 +190,9 @@ export class LocalPostgres implements DatabaseAdapter {
     // way, so a live source still costs its own side nothing.
     await this.clearOrphan(dst, opts)
     const before = await runFingerprint(src.container, this.exec)
+    if (before === UNREADABLE) {
+      throw new RunningSourceError(`docker could not report the state of ${src.container}, so it cannot be shown to be at rest`)
+    }
     if (!atRest(before)) throw new RunningSourceError(sourceIsLive(src.container, stateOf(before)))
     const t0 = Date.now()
     await this.data.clonePostgres(src.dataDir, dst.dataDir)
@@ -337,6 +340,9 @@ export async function pgWaitReady(container: string, timeoutMs = READY_TIMEOUT_M
     } catch (e) {
       last = firstLine(e)
     }
+    // A container dockerd cannot report on does NOT end the wait: `containerStatus` answers
+    // `unreadable` there, which is neither exited nor gone, so the poll keeps going to its
+    // deadline instead of blaming a container that may be perfectly healthy.
     const status = await containerStatus(container, exec)
     if (status === 'exited' || status === 'dead' || status === null) {
       const logs = await exec(['logs', '--tail', '40', container], { mergeStderr: true })
@@ -360,14 +366,32 @@ function limitArgs(limits?: ServiceLimits): string[] {
   return ['--cpus', String(limits.cpu), '--memory', `${limits.memoryMb}m`, '--memory-swap', `${limits.memoryMb}m`]
 }
 
-async function containerStatus(container: string, exec: DockerExec = docker): Promise<string | null> {
+/** Docker's own "there is no such container", in both spellings the CLI uses: the client-side
+ *  `Error: No such object: <name>` (Docker 27, measured on the box) and dockerd's
+ *  `No such container: <name>`. Nothing else is evidence of absence. */
+const NO_SUCH_CONTAINER = /no such (?:object|container)/i
+/** A probe that could not answer at all: a daemon that is not talking, a template error, a
+ *  permission failure. It is NOT `gone`, and no caller may read it as "there is no writer". */
+const UNREADABLE = 'unreadable'
+
+/** One `docker inspect -f`, CLASSIFIED. `null` means dockerd said the container is not there;
+ *  `UNREADABLE` means the probe failed for a reason that says nothing about the container.
+ *  Failing open here would be the same mistake `networkState` makes impossible next door: a
+ *  daemon that cannot answer would read as "no writer" and a live PGDATA would be walked. */
+async function inspectField(container: string, format: string, exec: DockerExec): Promise<string | null> {
   try {
-    return (await exec(['inspect', '-f', '{{.State.Status}}', container])).toString().trim()
-  } catch {
-    return null
+    return (await exec(['inspect', '-f', format, container])).toString().trim()
+  } catch (e) {
+    return NO_SUCH_CONTAINER.test(e instanceof Error ? e.message : String(e)) ? null : UNREADABLE
   }
 }
 
+function containerStatus(container: string, exec: DockerExec = docker): Promise<string | null> {
+  return inspectField(container, '{{.State.Status}}', exec)
+}
+
+/** Anything but a definite "not there" counts as still there: an orphan sweep that skipped a
+ *  container because the probe was unreadable would clone over an interrupted attempt. */
 async function containerExists(container: string, exec: DockerExec = docker): Promise<boolean> {
   return (await containerStatus(container, exec)) !== null
 }
@@ -389,16 +413,15 @@ const RUN_FMT = '{{.State.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}'
  *  already-removed source with its bytes still on disk is a clone this adapter may make. */
 const AT_REST = new Set(['exited', 'created'])
 
-async function runFingerprint(container: string, exec: DockerExec = docker): Promise<string | null> {
-  try {
-    return (await exec(['inspect', '-f', RUN_FMT, container])).toString().trim()
-  } catch {
-    return null
-  }
+function runFingerprint(container: string, exec: DockerExec = docker): Promise<string | null> {
+  return inspectField(container, RUN_FMT, exec)
 }
 
 const stateOf = (fingerprint: string | null): string => (fingerprint === null ? 'gone' : fingerprint.split('|')[0])
-const atRest = (fingerprint: string | null): boolean => fingerprint === null || AT_REST.has(stateOf(fingerprint))
+/** A container with no writer: dockerd says it is stopped, or dockerd says it is not there at
+ *  all. A probe that could not answer is neither, so it is not at rest. */
+const atRest = (fingerprint: string | null): boolean =>
+  fingerprint === null || (fingerprint !== UNREADABLE && AT_REST.has(stateOf(fingerprint)))
 
 /** The clone's DSN is the source's with the host swapped: a file-level fork inherits the source's
  *  roles and passwords (decision 18). */
