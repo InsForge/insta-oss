@@ -18,6 +18,13 @@ test('a supplied certificate is the PAIR: half of one is refused, naming the mis
     .toThrow(/INSTA_OSS_TLS_KEY_FILE is required when the other is set/)
   expect(() => loadConfig({ INSTA_OSS_TLS_KEY_FILE: '/etc/tls/key.pem' }, []))
     .toThrow(/INSTA_OSS_TLS_CERT_FILE is required when the other is set/)
+  // ...and as the same KIND of error as every other refusal in `loadConfig`. `ConfigError` is
+  // not exported, so this asserts what a caller discriminating on it would see: a bad
+  // configuration, not an unexpected crash from somewhere in the loader.
+  const kinds = ['INSTA_OSS_TLS_CERT_FILE', 'INSTA_OSS_MODE'].map((k) => {
+    try { loadConfig({ [k]: k.endsWith('FILE') ? '/etc/tls/full.pem' : 'nonsense' }, []); return 'no throw' } catch (e) { return (e as Error).constructor.name }
+  })
+  expect(kinds[0]).toBe(kinds[1])
 
   // Both halves load, and neither half is not a supplied certificate at all.
   const both = loadConfig({ INSTA_OSS_TLS_CERT_FILE: '/etc/tls/full.pem', INSTA_OSS_TLS_KEY_FILE: '/etc/tls/key.pem' }, [])

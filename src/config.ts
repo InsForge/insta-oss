@@ -95,7 +95,7 @@ function suppliedPair(certFile: string, keyFile: string): { certFile: string | n
   if (certFile && keyFile) return { certFile, keyFile }
   if (certFile || keyFile) {
     const missing = certFile ? 'INSTA_OSS_TLS_KEY_FILE' : 'INSTA_OSS_TLS_CERT_FILE'
-    throw new Error(`${missing} is required when the other is set: a supplied certificate is the pair or nothing (see --tls custom)`)
+    throw new ConfigError(`${missing} is required when the other is set: a supplied certificate is the pair or nothing (see --tls custom)`)
   }
   return { certFile: null, keyFile: null }
 }
