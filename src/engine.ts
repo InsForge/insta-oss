@@ -1457,64 +1457,75 @@ export class Engine {
    *  Branch-scoped for the reason spelled out on `addDbService`: fanning out meant an agent adding
    *  a redis on its own branch also got one, with its own credentials, on `main`. */
   async addManagedService(projectId: string, type: ManagedDbType, name: string, opts: { branch?: string } = {}): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
-    const project = this.getProject(projectId)
-    if (!project) throw new Error('project not found')
-    if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
-    const b = this.targetBranch(projectId, opts.branch)
-    const existing = this.managedList(projectId).find((m) => m.type === type && m.name === name)
-    if (existing && this.carries(project, b, existing, 'managed')) throw new Error(`${type} service "${name}" already exists`)
-    const wouldMint = this.mintedManagedNames({ type, name })
-    const clash = (loadState().userSecrets[projectId] ?? []).find((u) => wouldMint.includes(u.name))
-    if (clash) throw new Error(`service would mint secret names already used by user secrets: ${clash.name}`)
-    // WP4: an immutable directory key, minted once and stored, so a rename never detaches the data
-    // (decision 16). The directory is `md/<ref>/<prefix>-<dataId>` on every branch that carries it.
-    const entry = existing ?? { id: managedServiceId(type, name), type, name, createdAt: Date.now(), dataId: randomUUID().slice(0, 8) }
-    // The hostname this service will mint, checked against ALL service labels and reserved in ONE
-    // synchronous mutate before the first provisioning await (decision 51) — the same rule the
-    // postgres and compute registrations follow. `<type>-<name>-<ref>` shares its label space with
-    // compute's `<group>-<ref>`, so a redis called `cache` collides with a group called
-    // `redis-cache`; minting it unchecked would shadow one of them in the route table.
-    const owner = `${projectId}:${entry.id}`
-    this.reserveHosts([this.labelFor(type, name, this.ref(project, b))], owner)
-    const provisioned: Array<{ branch: Branch; password: string; container: string; dataDir: string }> = []
-    try {
-      const password = randomBytes(32).toString('base64url')
-      const ref = this.ref(project, b)
-      const container = managedContainerName(ref, type, name)
-      const dataDir = await this.ensureManagedDirs(ref, type, entry.dataId ?? name)
-      await this.managedDb.provision(
-        { container, network: b.network, type, name, password, dataDir },
-        { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, entry.id) },
-      )
-      provisioned.push({ branch: b, password, container, dataDir })
-    } catch (e) {
-      for (const p of provisioned) await this.managedDb.destroy(p.container).catch(() => {})
-      for (const p of provisioned) await this.data.remove(p.dataDir).catch(() => {})                       // WP4
-      this.releaseHosts(owner)
-      throw e
-    }
-    mutate((st) => {
-      const pr = st.projects[projectId]
-      // Only a registration this call MADE is added: one that already existed is other branches'
-      // service too, and re-appending it would duplicate the row.
-      if (!existing) pr.managedServices = [...(pr.managedServices ?? []), entry]
-      for (const p of provisioned) {
-        // Record the minted hostname on the row, like `provisionBranch` does: the row is what the
-        // route table and the credentials bundle read, and it retires the reservation.
-        const label = this.labelFor(type, name, this.ref(project, p.branch))
-        ;(st.branches[p.branch.id].managed ??= {})[entry.id] = { password: p.password, host: `${label}.${this.cfg.domain}` }
-        if (st.hostReservations?.[label] === owner) delete st.hostReservations[label]
+    // Inside the engine-wide provision chain, exactly like its postgres and storage siblings.
+    // Without it the `existing` check and the append that follows it were check-then-act across
+    // every provisioning await: two concurrent first adds of the same managed service, on two
+    // branches, both saw no registration and both appended one with the same id — a duplicate
+    // row in `managedServices` that every later read then reported twice. On ONE branch they
+    // also raced through `reserveHosts` unchallenged, because both hold the same owner string
+    // (`<projectId>:<serviceId>`), and provisioned the same container twice. The chain makes
+    // check, provision and append one operation, so the second call sees the first's
+    // registration and either materialises on its own branch or is the 409 (decision 51).
+    return this.serialize('provision', async () => {
+      const project = this.getProject(projectId)
+      if (!project) throw new Error('project not found')
+      if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+      const b = this.targetBranch(projectId, opts.branch)
+      const existing = this.managedList(projectId).find((m) => m.type === type && m.name === name)
+      if (existing && this.carries(project, b, existing, 'managed')) throw new Error(`${type} service "${name}" already exists`)
+      const wouldMint = this.mintedManagedNames({ type, name })
+      const clash = (loadState().userSecrets[projectId] ?? []).find((u) => wouldMint.includes(u.name))
+      if (clash) throw new Error(`service would mint secret names already used by user secrets: ${clash.name}`)
+      // WP4: an immutable directory key, minted once and stored, so a rename never detaches the data
+      // (decision 16). The directory is `md/<ref>/<prefix>-<dataId>` on every branch that carries it.
+      const entry = existing ?? { id: managedServiceId(type, name), type, name, createdAt: Date.now(), dataId: randomUUID().slice(0, 8) }
+      // The hostname this service will mint, checked against ALL service labels and reserved in ONE
+      // synchronous mutate before the first provisioning await (decision 51) — the same rule the
+      // postgres and compute registrations follow. `<type>-<name>-<ref>` shares its label space with
+      // compute's `<group>-<ref>`, so a redis called `cache` collides with a group called
+      // `redis-cache`; minting it unchecked would shadow one of them in the route table.
+      const owner = `${projectId}:${entry.id}`
+      this.reserveHosts([this.labelFor(type, name, this.ref(project, b))], owner)
+      const provisioned: Array<{ branch: Branch; password: string; container: string; dataDir: string }> = []
+      try {
+        const password = randomBytes(32).toString('base64url')
+        const ref = this.ref(project, b)
+        const container = managedContainerName(ref, type, name)
+        const dataDir = await this.ensureManagedDirs(ref, type, entry.dataId ?? name)
+        await this.managedDb.provision(
+          { container, network: b.network, type, name, password, dataDir },
+          { publishLoopback: this.cfg.mode === 'local', limits: this.limitsFor(project, entry.id) },
+        )
+        provisioned.push({ branch: b, password, container, dataDir })
+      } catch (e) {
+        for (const p of provisioned) await this.managedDb.destroy(p.container).catch(() => {})
+        for (const p of provisioned) await this.data.remove(p.dataDir).catch(() => {})                       // WP4
+        this.releaseHosts(owner)
+        throw e
       }
+      mutate((st) => {
+        const pr = st.projects[projectId]
+        // Only a registration this call MADE is added: one that already existed is other branches'
+        // service too, and re-appending it would duplicate the row.
+        if (!existing) pr.managedServices = [...(pr.managedServices ?? []), entry]
+        for (const p of provisioned) {
+          // Record the minted hostname on the row, like `provisionBranch` does: the row is what the
+          // route table and the credentials bundle read, and it retires the reservation.
+          const label = this.labelFor(type, name, this.ref(project, p.branch))
+          ;(st.branches[p.branch.id].managed ??= {})[entry.id] = { password: p.password, host: `${label}.${this.cfg.domain}` }
+          if (st.hostReservations?.[label] === owner) delete st.hostReservations[label]
+        }
+      })
+      this.scheduler.register(provisioned.map((p) => this.serviceKey(p.branch, entry.id))) // WP3
+      // Its postgres and storage siblings do this and managed did not. `reconcile()` is what opens a
+      // lane listener, and it runs only at `router.start()` and on invalidate, so a managed database
+      // added after boot had no lane until something unrelated invalidated. Server-mode redis and
+      // mongodb hide it behind their fixed lanes, so what it actually broke was local mode and
+      // server-mode MySQL, which take a per-service port.
+      this.router.invalidate()                                          // WP2
+      this.emit(projectId, b.name, 'resource', 'service.added', { type, name })
+      return this.managedRow(entry)
     })
-    this.scheduler.register(provisioned.map((p) => this.serviceKey(p.branch, entry.id))) // WP3
-    // Its postgres and storage siblings do this and managed did not. `reconcile()` is what opens a
-    // lane listener, and it runs only at `router.start()` and on invalidate, so a managed database
-    // added after boot had no lane until something unrelated invalidated. Server-mode redis and
-    // mongodb hide it behind their fixed lanes, so what it actually broke was local mode and
-    // server-mode MySQL, which take a per-service port.
-    this.router.invalidate()                                          // WP2
-    this.emit(projectId, b.name, 'resource', 'service.added', { type, name })
-    return this.managedRow(entry)
   }
 
   /** Remove a managed database from ONE branch (`removalTarget`): destroy THAT branch's container

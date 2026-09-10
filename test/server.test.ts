@@ -2450,6 +2450,53 @@ test('branch merge creates on the target every service the source has and it lac
   expect(calls.filter((c) => c.startsWith('db.fork:'))).toEqual([])
 })
 
+// Adding a managed database was the one registration path outside the engine-wide provision
+// chain, so its `existing` check and the append that follows it straddled every provisioning
+// await. Driven on the engine, not through inject: inject dispatches on a macrotask, so the first
+// request runs to completion in microtasks and the second never overlaps it.
+test('two concurrent first adds of one managed service on two branches: ONE registration', async () => {
+  const engine = makeEngine()
+  const { project } = await engine.createProject('demo')
+  await engine.createBranch(project.id, 'feat')
+  calls.length = 0
+
+  const settled = await Promise.allSettled([
+    engine.addManagedService(project.id, 'redis', 'cache', { branch: 'main' }),
+    engine.addManagedService(project.id, 'redis', 'cache', { branch: 'feat' }),
+  ])
+  // Both are legitimate: the same name on two branches is two services under ONE registration,
+  // because a service id has to stay stable across branches (decision 49).
+  expect(settled.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled'])
+  expect(loadState().projects[project.id].managedServices?.map((m) => m.id)).toEqual(['rd-cache'])
+  expect(calls.filter((c) => c.startsWith('md.provision:')).sort())
+    .toEqual(['md.provision:io-demo-feat-rd-cache', 'md.provision:io-demo-main-rd-cache'])
+  // One row per branch, each with its own password, and no reservation left standing.
+  const rows = engine.listBranches(project.id).map((b) => loadState().branches[b.id].managed?.['rd-cache'])
+  expect(rows.filter(Boolean)).toHaveLength(2)
+  expect(rows[0]!.password).not.toBe(rows[1]!.password)
+  expect(loadState().hostReservations ?? {}).toEqual({})
+})
+
+test('two concurrent adds of one managed service on ONE branch: one wins, the other is the conflict', async () => {
+  const engine = makeEngine()
+  const { project } = await engine.createProject('demo')
+  calls.length = 0
+
+  const settled = await Promise.allSettled([
+    engine.addManagedService(project.id, 'redis', 'kv'),
+    engine.addManagedService(project.id, 'redis', 'kv'),
+  ])
+  expect(settled.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+  const lost = settled.find((r) => r.status === 'rejected') as PromiseRejectedResult
+  expect(String(lost.reason)).toContain('redis service "kv" already exists')
+  // One registration, one container. Both calls hold the SAME host-reservation owner string
+  // (`<projectId>:<serviceId>`), so `assertHostFree` waves the loser through: the chain is what
+  // stops it, and it stops it before the loser provisions anything.
+  expect(loadState().projects[project.id].managedServices?.map((m) => m.id)).toEqual(['rd-kv'])
+  expect(calls.filter((c) => c.startsWith('md.provision:'))).toEqual(['md.provision:io-demo-main-rd-kv'])
+  expect(loadState().hostReservations ?? {}).toEqual({})
+})
+
 // A branch reserves ONE lane port per database it will actually run. Reserving one per project
 // registration eats the configured range on ports nothing will ever listen on, and leaves the
 // surplus behind as lane state no branch row supersedes.
