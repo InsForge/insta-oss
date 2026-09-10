@@ -684,6 +684,72 @@ test('compute restart REDEPLOYS the recorded image (fresh env), and refuses a st
   expect(bare.json().error).toMatch(/no machines yet/)
 })
 
+// A transition that DID NOT HAPPEN must not be recorded as one. These three used to answer 200
+// with the requested `desiredState` written and the scheduler told `onStopped`/`onPaused`, which
+// puts `exited`/`paused` into the snapshot the idle sweep and the eviction pass reason from: not
+// a missing error but a fabricated runtime fact, on a box that rations RAM by that snapshot.
+
+test('a stop the runtime refuses is not reported as a stop', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  const container = 'io-demo-main-app-default'
+  const stop = vi.spyOn(compute, 'stop').mockRejectedValueOnce(new Error('container is in use'))
+  try {
+    const r = await post(`/projects/${id}/services/cp-default/stop`)
+    expect(r.statusCode).toBe(409)
+    expect(r.json().error).toContain('could not stop default')
+  } finally {
+    stop.mockRestore()
+  }
+  // The row keeps the previous intent...
+  expect((await get(`/projects/${id}/services/cp-default/state`)).json().desiredState).toBe('running')
+  // ...and the scheduler was not told a stop happened: the container is still running, and it
+  // still reads that way through the ONE fake container store.
+  expect(runtime.stateOfContainer(container)).toBe('running')
+  expect(engine.stateOf(`${await branchOf(id)}:cp-default`)).toBe('running')
+})
+
+test('a suspend the runtime refuses is not reported as a suspend', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  const suspend = vi.spyOn(compute, 'suspend').mockRejectedValueOnce(new Error('cannot pause'))
+  try {
+    const r = await post(`/projects/${id}/services/cp-default/suspend`)
+    expect(r.statusCode).toBe(409)
+    expect(r.json().error).toContain('could not suspend default')
+  } finally {
+    suspend.mockRestore()
+  }
+  expect((await get(`/projects/${id}/services/cp-default/state`)).json().desiredState).toBe('running')
+  expect(runtime.stateOfContainer('io-demo-main-app-default')).toBe('running')
+  expect(engine.stateOf(`${await branchOf(id)}:cp-default`)).toBe('running')
+})
+
+test('a redeploy that cannot re-assert the standing intent says so instead of claiming it', async () => {
+  // The comment on that re-assert calls it the guarantee that the row does not lie. It swallowed
+  // its own failure, and `afterDeploy` then told the scheduler `onPaused` for a container that
+  // had just been started and never paused.
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  expect((await post(`/projects/${id}/services/cp-default/suspend`)).statusCode).toBe(200)
+  const suspend = vi.spyOn(compute, 'suspend').mockRejectedValueOnce(new Error('cannot pause'))
+  let r
+  try {
+    r = await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000 })
+  } finally {
+    suspend.mockRestore()
+  }
+  expect(r.statusCode).toBe(409)
+  expect(r.json().error).toContain('RUNNING against a suspended intent')
+  // The deploy DID happen, so the row keeps the new image and the standing intent...
+  const app = loadState().branches[await branchOf(id)].apps.default
+  expect(app.image).toBe('app:2')
+  expect(app.desiredState).toBe('suspended')
+  // ...and what the scheduler was told is what is true: the replacement is up, not paused.
+  expect(runtime.stateOfContainer('io-demo-main-app-default')).toBe('running')
+  expect(engine.stateOf(`${await branchOf(id)}:cp-default`)).toBe('running')
+})
+
 // A deploy must not clear the standing lifecycle intent: `stop` then a redeploy leaves the service
 // stopped on the platform, and restart makes the window reachable from an operation that just
 // checked that intent. The container has to honour it too — a preserved intent the container

@@ -79,6 +79,13 @@ export interface Teardown {
    *  every existing client already renders. */
   reasons?: string[]
 }
+/** A runtime transition the adapter refused: a `docker stop`, `suspend` or the re-assert of a
+ *  standing intent after a redeploy. Typed rather than string-matched because the route maps it
+ *  to 409, the code this server already uses for "understood, and the state says no" -- the same
+ *  answer the teardown paths give when the thing they were asked to demolish is still there.
+ *  Nothing is recorded when it is thrown: not the desired state, not the runtime cache. */
+export class LifecycleFailedError extends Error {}
+
 /** The status of a branch whose teardown did not finish: the row is kept so the resources it names
  *  can be found and the demolition retried (`unwindBranch`). */
 export const CLEANUP_FAILED = 'cleanup-failed'
@@ -1043,10 +1050,22 @@ export class Engine {
     // is already right and must not be rewritten, and the EXACT verb matters (oss allows a suspended
     // volume-bearing service, so suspend must not be coarsened to stop). Best-effort, like the
     // adapter ops in lifecycle(): the deploy itself has already succeeded.
-    // Re-assert anyway: `start` is a hint an adapter may ignore, and this is the guarantee.
+    // Re-assert anyway: `start` is a hint an adapter may ignore, and this is the guarantee. A
+    // guarantee that swallows its own failure is not one: the re-assert used to be best-effort
+    // and `afterDeploy` below then told the scheduler `onPaused`/`onStopped` for a container
+    // that had just been started and never stopped. The deploy itself HAS succeeded, so the
+    // truth is recorded first (the replacement is up) and the call then fails, naming the verb
+    // to retry. Nothing is left claiming a transition that did not happen.
     if (standing === 'stopped' || standing === 'suspended') {
       const op = standing === 'suspended' ? this.compute.suspend : this.compute.stop
-      await op?.call(this.compute, this.ref(project, b), group).catch(() => { /* best-effort */ })
+      try {
+        await op?.call(this.compute, this.ref(project, b), group)
+      } catch (e) {
+        if (started) this.scheduler.onUp(key)
+        this.router.invalidate()
+        const verb = standing === 'suspended' ? 'suspend' : 'stop'
+        throw new LifecycleFailedError(`deployed ${group}, but could not re-assert its ${standing} state on the replacement container (${e instanceof Error ? e.message : String(e)}): it is RUNNING against a ${standing} intent. Run \`insta compute ${verb} ${group}\` to retry`)
+      }
     }
     this.afterDeploy(key, { started, startAsleep: opts.startAsleep }) // WP3
     this.router.invalidate()                                          // WP2
@@ -1486,21 +1505,33 @@ export class Engine {
       // WP3 edit point: the intent is written FIRST for a start, so the wake that follows cannot be
       // refused by the very intent it is clearing (`insta compute start` also re-enables auto-wake).
       if (verb === 'start') mutate((s) => { s.branches[branch.id].apps[group].desiredState = desired })
-      // The adapter op stays: it unpauses and starts (or stops with the configured grace) exactly as
-      // before. Best-effort, platform parity.
-      const graceSec = verb === 'stop' ? this.cfg.sleep.stopGraceSec : undefined
-      await (verb === 'stop'
-        ? this.compute.stop?.(ref, group, { graceSec })
-        : op.call(this.compute, ref, group)
-      )?.catch(() => { /* best-effort, platform parity */ })
       if (verb === 'start') {
-        // ...and then WAIT for readiness through the scheduler (re-entrant: this holds the key),
-        // which also clears the sleep mark and stamps activity. A container that is not there any
-        // more is not an error for an intent write: the row keeps the intent and reports `none`.
+        // The adapter's start is a HINT and the wake is the authority: it holds this key
+        // (re-entrant), waits for readiness, clears the sleep mark and stamps activity, and it
+        // throws when the service does not come up. So a start that the adapter refuses but the
+        // wake completes is a success, and one neither can do is the wake's error. A container
+        // that is not there any more is not an error for an intent write: the row keeps the
+        // intent and reports `none`.
+        await op.call(this.compute, ref, group).catch(() => { /* the wake below is the authority */ })
         await this.wake(key, { door: 'api' }).catch((e: unknown) => {
           if (!(e instanceof NoContainerError)) throw e
         })
       } else {
+        // NOT best-effort, and this is the sharp end of the rule the rest of this file follows.
+        // The adapter op IS the transition here, there is no second authority behind it, and a
+        // swallowed failure did not merely lose an error: the row was then written to the
+        // REQUESTED state and `onStopped`/`onPaused` wrote `exited`/`paused` into the snapshot
+        // the sweep and the eviction pass reason from. That fabricates a runtime fact rather
+        // than failing to learn one -- a container believed stopped while it is running and
+        // holding RAM is the worst possible input to a box with a memory floor, and routing
+        // then honours a stopped intent for a service that is still answering. The row and the
+        // cache are written from the OUTCOME, so a failure propagates with nothing recorded.
+        const graceSec = verb === 'stop' ? this.cfg.sleep.stopGraceSec : undefined
+        try {
+          await (verb === 'stop' ? this.compute.stop?.(ref, group, { graceSec }) : op.call(this.compute, ref, group))
+        } catch (e) {
+          throw new LifecycleFailedError(`could not ${verb} ${group} on branch ${branch.name}: ${e instanceof Error ? e.message : String(e)}. Nothing was changed: the service keeps its previous state and this ${verb} can be retried`)
+        }
         mutate((s) => { s.branches[branch.id].apps[group].desiredState = desired })
         if (verb === 'stop') this.scheduler.onStopped(key)
         else this.scheduler.onPaused(key)

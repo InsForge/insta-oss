@@ -184,7 +184,15 @@ export class Scheduler {
     this.forgetAddress(key)
   }
 
-  /** The developer stopped it: NOT sleep, so the sleep mark is cleared (runtime-health reads it). */
+  /** The developer stopped it: NOT sleep, so the sleep mark is cleared (runtime-health reads it).
+   *
+   *  Every `on<Transition>` hook RECORDS an outcome its caller has observed; none of them can
+   *  verify one, because none of them reads docker. So a caller may only call one after the
+   *  transition it names has actually happened: writing `exited` here for a `docker stop` that
+   *  failed puts a fact that is not true into the snapshot the idle sweep and the eviction pass
+   *  reason from, which is worse than any missing error. The callers are `lifecycleLocked` and
+   *  `afterDeploy` in the engine (both now gated on the adapter call succeeding) and, inside
+   *  this file, `sleep()` after `runtime.stop` resolves and `wakeLocked` after `awaitReady`. */
   onStopped(key: ServiceKey): void {
     this.hooks.markSlept(key, null)
     this.setCached(key, 'exited')

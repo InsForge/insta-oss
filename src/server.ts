@@ -8,6 +8,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyServerFac
 import fastifyStatic from '@fastify/static'
 import { registerAuth } from './auth'
 import { loadConfig, type Config } from './config'
+import { LifecycleFailedError } from './engine'
 import type { Engine, Teardown } from './engine'
 import * as govern from './govern'
 import { isManagedDbType, parseServiceId } from './manageddb'
@@ -307,7 +308,12 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     if (!body.image) return reply.code(400).send({ error: 'image required' })
     if (!gated(id, 'deploy', reply)) return reply
     try { return await engine.deploy(id, body.branch ?? 'main', { image: body.image, port: body.port, group: body.group }) }
-    catch (e) { return reply.code(400).send({ error: e instanceof Error ? e.message : String(e) }) }
+    catch (e) {
+      // 409 for the one failure that is not about the request: the image went out and the
+      // container could not be put back into the standing stopped/suspended state it had.
+      const m = e instanceof Error ? e.message : String(e)
+      return reply.code(e instanceof LifecycleFailedError ? 409 : 400).send({ error: m })
+    }
   })
 
   app.get('/projects/:id/policy', async (req) => ({
@@ -392,13 +398,17 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   // ---- service lifecycle + access (contract parity) ----
   // Ungated like the platform; ?branch= scopes the target (default branch otherwise) because
   // oss service ids are stable across branches rather than per-branch rows.
-  const errCode = (m: string): number => (notFoundish(m) ? 404 : 400)
+  // A transition the RUNTIME refused is not a bad request: 409, the code this file already uses
+  // for "understood, and the state says no" (the teardown envelope). Nothing was recorded when
+  // one of these is thrown, so the verb can simply be retried.
+  const errCode = (m: string, e?: unknown): number =>
+    (e instanceof LifecycleFailedError ? 409 : notFoundish(m) ? 404 : 400)
   for (const verb of ['start', 'stop', 'suspend'] as const) {
     app.post(`/projects/:id/services/:sid/${verb}`, async (req, reply) => {
       const { id, sid } = req.params as { id: string; sid: string }
       if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
       try { return await engine.lifecycle(id, sid, verb, (req.query as { branch?: string }).branch) }
-      catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+      catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m, e)).send({ error: m }) }
     })
   }
 
@@ -411,7 +421,7 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     if (!gated(id, 'deploy', reply)) return reply
     try { return await engine.restart(id, sid, (req.query as { branch?: string }).branch) }
-    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m, e)).send({ error: m }) }
   })
 
   app.get('/projects/:id/services/:sid/state', async (req, reply) => {
