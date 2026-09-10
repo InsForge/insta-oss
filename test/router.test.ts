@@ -1270,6 +1270,51 @@ test('a certificate that STOPS being readable goes absent, and does not keep its
   }
 })
 
+test('a REPLACED certificate is judged on its own merits, not silenced by the last one', () => {
+  // The operator sequence, not a unit of the limiter: they see "expires in N days", replace the
+  // file, and land on another near-expiry certificate -- the wrong file from the CA, last
+  // year's bundle, a renewal that did not renew. Under a limiter that spans the change they
+  // hear nothing for six hours, at the moment they are most likely to read silence as
+  // confirmation that they fixed it.
+  const dir = mkdtempSync(join(tmpdir(), 'io-relimit-'))
+  const mint = (out: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${join(dir, 'k.pem')} -out ${out} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  try {
+    const live = join(dir, 'live.crt')
+    const next = join(dir, 'next.crt')
+    mint(live, 12)
+    const said: string[] = []
+    const watch = new SuppliedCertWatch(live, { log: (m) => { said.push(m) } })
+    const t0 = Date.now()
+
+    expect(watch.maybeWarn(t0)).toBe(true)
+    expect(said[0]).toMatch(/expires in (11|12) days/)
+    // The limiter still does its job for the file that has not changed: a couple of hours of
+    // sweeps say nothing more.
+    for (let i = 1; i <= 240; i++) { watch.refresh(t0 + i * 30_000); expect(watch.maybeWarn(t0 + i * 30_000)).toBe(false) }
+    expect(said).toHaveLength(1)
+
+    // They replace it, and what they installed is also nearly expired.
+    mint(next, 4)
+    renameSync(next, live)
+    const at = t0 + 241 * 30_000                                // minutes later, not six hours
+    watch.refresh(at)
+    expect(watch.maybeWarn(at)).toBe(true)
+    expect(said).toHaveLength(2)
+    expect(said[1]).toMatch(/expires in (3|4) days/)
+
+    // ...and the new one then earns its own quiet, which is what the limiter is for.
+    for (let i = 1; i <= 240; i++) { watch.refresh(at + i * 30_000); expect(watch.maybeWarn(at + i * 30_000)).toBe(false) }
+    expect(said).toHaveLength(2)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('the expiry warning is said once, then stays quiet for hours', () => {
   // Fired every sweep it is tens of thousands of identical lines between the day it starts and
   // the day the certificate is replaced, which is a log nobody reads and so a warning nobody

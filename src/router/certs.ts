@@ -191,6 +191,12 @@ export class SuppliedCertWatch {
     // back, while a file that is simply not a certificate is asked about once per change.
     if (stamp === this.stamp) return
     this.stamp = stamp
+    // A DIFFERENT file is a different question, so the warning limiter starts over. It exists
+    // to stop one certificate repeating itself every 30 s for weeks; it must not silence a
+    // replacement. The operator who sees "expires in 12 days", installs the wrong file and
+    // lands on another near-expiry certificate is exactly the person who needs telling, and is
+    // the likeliest to read silence as confirmation that they fixed it.
+    this.lastWarnAt = 0
     const cert = this.read(this.certFile, now)
     this.cached = cert ? { path: cert.path, notAfterMs: Date.parse(cert.notAfter) } : null
   }
@@ -214,9 +220,11 @@ export class SuppliedCertWatch {
     }
   }
 
-  /** The warning, at most once per `WARN_EVERY_MS`, and always once per boot. `warnExpiring`'s
-   *  answer is what stamps the limiter, so a beat that had nothing to say does not start the
-   *  clock and the first beat that does say something is not swallowed. */
+  /** The warning, at most once per `WARN_EVERY_MS` FOR THE SAME FILE, and always once per boot.
+   *  `warnExpiring`'s answer is what stamps the limiter, so a beat that had nothing to say does
+   *  not start the clock and the first beat that does say something is not swallowed. A file
+   *  that changes clears the limiter (see `sync`), so a replacement is judged on its own
+   *  merits immediately rather than inheriting the silence its predecessor earned. */
   maybeWarn(now = Date.now()): boolean {
     if (this.lastWarnAt !== 0 && now - this.lastWarnAt < WARN_EVERY_MS) return false
     const said = warnExpiring(this.current(now), this.log)
