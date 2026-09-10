@@ -498,37 +498,97 @@ export class Engine {
     const projectId = project.id
     // Each database forks inside provisionBranch (db.fork); each bucket copies here; compute redeploys.
     const b = await this.serialize('provision', () => this.provisionBranch(project, name, false, source, branchId))
-    // WP4 hook: /data volumes fork BEFORE the redeploy loop, so each new container starts on its
-    // own copy rather than sharing the source's bytes.
-    const volumes = await this.forkVolumes(project, source, b)
-    for (const s of this.stList(projectId)) {
-      const from = this.bucketHandle(project, source, s.id)
-      const to = this.bucketHandle(project, b, s.id)
-      if (from && to) await this.storage.cloneInto(from.bucket, to.bucket, b.network)
+    // `provisionBranch` COMMITS the branch row, and every step below it -- the volume forks, the
+    // bucket copies, the compute deploys, the inherited secrets -- builds resources that row
+    // already advertises. `provisionBranch`'s own rollback cannot reach any of them, so a failure
+    // down here used to return an error and leave a HALF-BUILT branch whose name was taken: the
+    // retry the user made next was refused with `branch "x" already exists`, and the only way out
+    // was to delete a branch that had never finished being created.
+    //
+    // The compensation therefore covers the whole operation: `unwindBranch` runs the same
+    // demolition `branch delete` runs and drops the row last, so a failed create leaves nothing
+    // behind and the NAME IS FREE for an ordinary retry. The alternative -- a resumable
+    // `provisioning` row a retry continues -- was rejected because it fights the reservation this
+    // PR already has: `reserveBranchRef` yields to a branch row, and boot's
+    // `reclaimAbandonedReservations` deliberately KEEPS any claim whose branch row still exists.
+    // A row that outlives its operation is exactly the stuck state this fixes, one status field
+    // further along, and it would put a half-built branch in front of every list, route and
+    // deploy that resolves a branch by name.
+    let secretsCloned = false
+    try {
+      // WP4 hook: /data volumes fork BEFORE the redeploy loop, so each new container starts on its
+      // own copy rather than sharing the source's bytes.
+      const volumes = await this.forkVolumes(project, source, b)
+      for (const s of this.stList(projectId)) {
+        const from = this.bucketHandle(project, source, s.id)
+        const to = this.bucketHandle(project, b, s.id)
+        if (from && to) await this.storage.cloneInto(from.bucket, to.bucket, b.network)
+      }
+      // compute = redeploy: same image, SAME listen port, allocated host mapping.
+      for (const [group, app] of Object.entries(source.apps)) {
+        // WP3 hook: a clone of a non-always-on service starts asleep (false until the scheduler lands).
+        await this.deployAllocatingPort(projectId, name, group, app, { startAsleep: this.startAsleepFor(project, b, group) })
+      }
+      // platform parity: the parent branch's user-defined (branch-scoped) secrets clone onto the new
+      // branch, and so do its bindings (a template's platform credential renames must survive a fork).
+      mutate((st) => {
+        const list = st.userSecrets[projectId] ?? []
+        const inherited = list.filter((u) => u.branch === source.name).map((u) => ({ ...u, branch: name }))
+        st.userSecrets[projectId] = [...list, ...inherited]
+        if (source.bindings?.length) st.branches[b.id].bindings = source.bindings.map((x) => ({ ...x }))
+        // the DB volume-size setting travels with the clone (it describes the copied database)
+        if (source.dbVolumeGib !== undefined) st.branches[b.id].dbVolumeGib = source.dbVolumeGib
+      })
+      secretsCloned = true
+      // WP3 hook: the clone's databases sleep until first use (no-op until the scheduler lands).
+      await this.sleepNewBranch(project, b)
+      // WP4: how the database and each /data volume were copied (decision 39), so `insta events`
+      // shows whether the box reflinked or fell back to streaming and copying.
+      const db = this.forkResults.get(b.id)
+      this.forkResults.delete(b.id)
+      this.emit(projectId, name, 'resource', 'branch.created', { from: source.name, ...(db ? { db } : {}), volumes })
+      return b
+    } catch (e) {
+      await this.unwindBranch(project, b, secretsCloned)
+      throw e
     }
-    // compute = redeploy: same image, SAME listen port, allocated host mapping.
-    for (const [group, app] of Object.entries(source.apps)) {
-      // WP3 hook: a clone of a non-always-on service starts asleep (false until the scheduler lands).
-      await this.deployAllocatingPort(projectId, name, group, app, { startAsleep: this.startAsleepFor(project, b, group) })
+  }
+
+  /** Undo a branch create that failed AFTER its row was committed.
+   *
+   *  `teardownBranch` is the demolition `branch delete` uses, so every provider object the create
+   *  made -- containers, buckets, the network, the branch's bytes -- goes exactly the way it would
+   *  if the branch had finished and then been deleted. The ROW goes last: with it gone, the name,
+   *  the ref, the lane ports and the minted hostnames it owned are all free, and the user's retry
+   *  is an ordinary create rather than a collision.
+   *
+   *  Best effort throughout. The caller is already throwing the failure the user needs to see, and
+   *  a compensation that throws its own would replace it with a worse one. */
+  private async unwindBranch(project: Project, b: Branch, secretsCloned: boolean): Promise<void> {
+    // The row as it stands now, not the snapshot the create started from: the deploy loop wrote
+    // apps onto it, and those are what `teardownBranch` forgets from the scheduler.
+    const row = loadState().branches[b.id] ?? b
+    const ref = this.ref(project, b)
+    try {
+      await this.teardownBranch(project, row, newTeardown())
+    } catch (e) {
+      console.warn(`could not fully undo the failed create of branch "${b.name}": ${e instanceof Error ? e.message : String(e)}`)
     }
-    // platform parity: the parent branch's user-defined (branch-scoped) secrets clone onto the new
-    // branch, and so do its bindings (a template's platform credential renames must survive a fork).
-    mutate((st) => {
-      const list = st.userSecrets[projectId] ?? []
-      const inherited = list.filter((u) => u.branch === source.name).map((u) => ({ ...u, branch: name }))
-      st.userSecrets[projectId] = [...list, ...inherited]
-      if (source.bindings?.length) st.branches[b.id].bindings = source.bindings.map((x) => ({ ...x }))
-      // the DB volume-size setting travels with the clone (it describes the copied database)
-      if (source.dbVolumeGib !== undefined) st.branches[b.id].dbVolumeGib = source.dbVolumeGib
-    })
-    // WP3 hook: the clone's databases sleep until first use (no-op until the scheduler lands).
-    await this.sleepNewBranch(project, b)
-    // WP4: how the database and each /data volume were copied (decision 39), so `insta events`
-    // shows whether the box reflinked or fell back to streaming and copying.
-    const db = this.forkResults.get(b.id)
     this.forkResults.delete(b.id)
-    this.emit(projectId, name, 'resource', 'branch.created', { from: source.name, ...(db ? { db } : {}), volumes })
-    return b
+    mutate((s) => {
+      delete s.branches[b.id]
+      // The clone inherits the source's branch-scoped secrets BY NAME, so the copies it made are
+      // exactly the rows naming a branch that is about to stop existing. Only drop them when that
+      // step actually ran: a failure before it has nothing of its own to clean.
+      if (secretsCloned) {
+        const list = s.userSecrets[b.projectId]
+        if (list) s.userSecrets[b.projectId] = list.filter((u) => u.branch !== b.name)
+      }
+      // The row superseded the ref claim on commit; if anything re-took it, it is not ours.
+      if (s.branchReservations?.[ref] === b.id) delete s.branchReservations[ref]
+    })
+    this.releaseLanes(b.id)
+    this.router.invalidate()
   }
 
   /** Rename a project — DISPLAY NAME ONLY, like the cloud: every resource keeps its original

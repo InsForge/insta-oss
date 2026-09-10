@@ -13,12 +13,15 @@ import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
 import type { ComputeAdapter, StorageAdapter } from '../src/types'
 import { mutate } from '../src/state'
-import { calls, db, compute, storage, managed, makeEngine, resetFakes, serverConfig, testConfig } from './fakes'
+import { calls, data, db, compute, storage, managed, makeEngine, resetFakes, serverConfig, testConfig } from './fakes'
 
 let app: ReturnType<typeof buildServer>
+/** The engine `app` is built on: tests that spy on an engine method need THIS instance. */
+let engine: Engine
 beforeEach(() => {
   resetFakes()
-  app = buildServer(makeEngine())
+  engine = makeEngine()
+  app = buildServer(engine)
 })
 
 const post = (url: string, payload?: unknown) => app.inject({ method: 'POST', url, payload })
@@ -1947,6 +1950,118 @@ test('a failed branch create gives its ref claim back, and compensates only its 
   fork.mockRestore()
   expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
   expect(branchReservations()).toEqual({})
+})
+
+// The arm above fails INSIDE `provisionBranch`, where the rollback already lived. Everything
+// `createBranch` does AFTER `provisionBranch` returns — the /data volume forks, the bucket object
+// copies, the compute redeploys, the inherited secrets — happens with the branch ROW already
+// committed, and `provisionBranch`'s rollback cannot reach any of it. A failure there used to
+// return an error and leave a half-built branch standing under a name that was now taken: the
+// retry was refused with `already exists`, and the user's only way forward was to delete a branch
+// that had never finished being created. Each of those steps is failed in turn below, and the
+// answer has to be the same every time: nothing of the branch survives, and the name is free.
+
+/** A source branch that exercises every post-commit step: a database, a bucket, and a compute
+ *  group with a /data volume deployed on it (so `forkVolumes` has a real directory to clone). */
+async function sourceWithEveryStep(): Promise<string> {
+  const id = (await post('/orgs/local/projects', { name: 'demo' })).json().project.id
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'db' })
+  await post(`/projects/${id}/services`, { type: 'storage', name: 'store' })
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'web', volumeGib: 1 })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', port: 3000, group: 'web' })
+  await put(`/projects/${id}/secrets/API_KEY`, { value: 'from-main', branch: 'main' })
+  calls.length = 0
+  return id
+}
+
+/** Everything a failed create must leave behind: nothing. Read fresh from state each time. */
+function assertNothingOfFeatSurvives(id: string): void {
+  const st = loadState()
+  expect(Object.values(st.branches).filter((b) => b.projectId === id && b.name === 'feat')).toEqual([])
+  expect(branchReservations()).toEqual({})
+  expect(st.laneReservations ?? {}).toEqual({})
+  // The inherited secret copy goes with the branch that would have owned it, so a retry inherits
+  // ONE copy rather than stacking a second on top of the first.
+  expect((st.userSecrets[id] ?? []).filter((u) => u.branch === 'feat')).toEqual([])
+  // ...and the resources the create had already built are gone: the clone's own containers,
+  // bucket, network and bytes, and NOT the source's.
+  expect(calls).toContain('compute.destroy:demo-feat')
+  expect(calls).toContain('db.destroy:io-demo-feat-pg-db')
+  expect(calls).toContain('st.destroy:io-demo-feat-store')
+  expect(calls.some((c) => c.startsWith('data.remove:') && c.includes('demo-feat'))).toBe(true)
+  expect(calls.filter((c) => /:io-demo-main|:demo-main|data\.remove:.*demo-main/.test(c) && /destroy|remove/.test(c))).toEqual([])
+}
+
+/** The retry the user makes next has to be an ordinary create, not a collision. */
+async function assertRetryWorks(id: string): Promise<void> {
+  const retry = await post(`/projects/${id}/branches`, { name: 'feat' })
+  expect(retry.statusCode).toBe(201)
+  const st = loadState()
+  const row = Object.values(st.branches).find((b) => b.projectId === id && b.name === 'feat')!
+  expect(row.databases?.['pg-db']?.container).toBe('io-demo-feat-pg-db')
+  expect(row.buckets?.['st-store']?.bucket).toBe('io-demo-feat-store')
+  expect(row.apps.web).toBeDefined()
+  expect((st.userSecrets[id] ?? []).filter((u) => u.branch === 'feat')).toHaveLength(1)
+  expect(branchReservations()).toEqual({})
+}
+
+test('post-commit step 1 (the /data volume fork) fails: nothing of the branch survives and the retry works', async () => {
+  const id = await sourceWithEveryStep()
+  const clone = vi.spyOn(data, 'cloneTree').mockRejectedValueOnce(new Error('clone boom'))
+  const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
+  expect(bad.statusCode).toBeGreaterThanOrEqual(400)
+  expect(bad.json().error).toContain('clone boom')
+  assertNothingOfFeatSurvives(id)
+  clone.mockRestore()
+  await assertRetryWorks(id)
+})
+
+test('post-commit step 2 (the bucket object copy) fails: nothing of the branch survives and the retry works', async () => {
+  const id = await sourceWithEveryStep()
+  const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
+  const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
+  expect(bad.statusCode).toBeGreaterThanOrEqual(400)
+  expect(bad.json().error).toContain('bucket boom')
+  assertNothingOfFeatSurvives(id)
+  cloneInto.mockRestore()
+  await assertRetryWorks(id)
+})
+
+test('post-commit step 3 (the compute redeploy) fails: nothing of the branch survives and the retry works', async () => {
+  const id = await sourceWithEveryStep()
+  const deploy = vi.spyOn(compute, 'deploy').mockRejectedValueOnce(new Error('deploy boom'))
+  const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
+  expect(bad.statusCode).toBeGreaterThanOrEqual(400)
+  expect(bad.json().error).toContain('deploy boom')
+  assertNothingOfFeatSurvives(id)
+  // The hostname the deploy minted for the clone's group went back too, or the retry's own deploy
+  // would be refused as a collision with a branch that does not exist.
+  expect(Object.keys(loadState().hostReservations ?? {})).toEqual([])
+  deploy.mockRestore()
+  await assertRetryWorks(id)
+})
+
+test('post-commit step 4 (the last one, after the secrets are cloned) fails: the secret copies go too', async () => {
+  const id = await sourceWithEveryStep()
+  // The inherited secrets and bindings are a synchronous state write with no failure of its own,
+  // so the step AFTER it is what proves its compensation: by then the copies exist.
+  const sleep = vi.spyOn(engine, 'sleepNewBranch').mockRejectedValueOnce(new Error('sleep boom'))
+  const bad = await post(`/projects/${id}/branches`, { name: 'feat' })
+  expect(bad.statusCode).toBeGreaterThanOrEqual(400)
+  expect(bad.json().error).toContain('sleep boom')
+  assertNothingOfFeatSurvives(id)
+  // The source's own secret is untouched: only the copies made for the branch that failed go.
+  expect((loadState().userSecrets[id] ?? []).filter((u) => u.branch === 'main').map((u) => u.name)).toEqual(['API_KEY'])
+  sleep.mockRestore()
+  await assertRetryWorks(id)
+})
+
+test('a create that fails post-commit emits no branch.created event', async () => {
+  const id = await sourceWithEveryStep()
+  const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
+  await post(`/projects/${id}/branches`, { name: 'feat' })
+  cloneInto.mockRestore()
+  expect(loadState().events.filter((e) => e.action === 'branch.created' && e.branch === 'feat')).toEqual([])
 })
 
 /** The default branch's id (host reservations and app rows are keyed by it). */
