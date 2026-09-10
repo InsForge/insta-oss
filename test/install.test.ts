@@ -160,8 +160,16 @@ test('--tls custom serves a supplied certificate and emits NO on-demand issuance
   // and the daemon presents it on the database lanes, which is the other door issuance would
   // otherwise publish a hostname through.
   const compose = run(['--print-compose', '--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/wild.crt', '--tls-key', '/etc/instacloud/tls/wild.key'], { INSTA_OSS_DOMAIN: 'example.test' })
-  expect(compose.match(/- \/etc\/instacloud\/tls\/wild\.crt:\/etc\/instacloud\/tls\/wild\.crt:ro/g)).toHaveLength(2)
-  expect(compose.match(/- \/etc\/instacloud\/tls\/wild\.key:\/etc\/instacloud\/tls\/wild\.key:ro/g)).toHaveLength(2)
+  // The DIRECTORY, not the two files, and this is the renewal story rather than a detail: a file
+  // bind mount resolves to an inode at mount time, and every renewal tool replaces a certificate
+  // by renaming a new file over the old name, so a container with the FILE mounted keeps reading
+  // the old inode until it is recreated. With the directory mounted the name is resolved through
+  // the mount on every open. Once per container, and once more when the key lives elsewhere.
+  expect(compose.match(/- \/etc\/instacloud\/tls:\/etc\/instacloud\/tls:ro/g)).toHaveLength(2)
+  expect(compose).not.toContain('wild.crt:/etc/instacloud/tls/wild.crt')
+  const split = run(['--print-compose', '--tls', 'custom', '--tls-cert', '/etc/pki/live/wild.crt', '--tls-key', '/etc/pki/keys/wild.key'], { INSTA_OSS_DOMAIN: 'example.test' })
+  expect(split.match(/- \/etc\/pki\/live:\/etc\/pki\/live:ro/g)).toHaveLength(2)
+  expect(split.match(/- \/etc\/pki\/keys:\/etc\/pki\/keys:ro/g)).toHaveLength(2)
   // No mounts at all in the other modes.
   expect(run(['--print-compose'], { INSTA_OSS_DOMAIN: 'example.test' })).not.toContain(':ro\n      - /etc')
 
@@ -225,6 +233,61 @@ test('--tls custom refuses a half-configured pair, and the paths it cannot mount
     expect(env2.INSTA_OSS_TLS_KEY_FILE).toBe('')
   } finally {
     rmSync(cfg, { recursive: true, force: true })
+  }
+})
+
+test('--tls custom checks the pair can actually serve, before anything starts', () => {
+  // Readable and syntactically safe is not the same as able to serve. A mismatched key, a
+  // malformed PEM, an expired certificate or a perfectly good certificate for another domain all
+  // used to pass, leaving Caddy crash-looping while the install exited 0 saying it was serving
+  // your certificate. Third instance of one pattern in this script: success reported over a
+  // configuration that cannot work.
+  const dir = mkdtempSync(join(tmpdir(), 'io-tls-'))
+  const openssl = (args: string, input?: string): void => {
+    const r = spawnSync('sh', ['-c', args], { encoding: 'utf8', input })
+    if (r.status !== 0) throw new Error(`openssl failed: ${args}\n${r.stderr}`)
+  }
+  const key = join(dir, 'k.pem')
+  const other = join(dir, 'other.pem')
+  const wild = join(dir, 'wild.crt')
+  const apex = join(dir, 'apex.crt')
+  const wrong = join(dir, 'wrong.crt')
+  const expired = join(dir, 'expired.crt')
+  const mismatched = join(dir, 'mismatched.crt')
+  const junk = join(dir, 'junk.crt')
+  try {
+    openssl(`openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${key} -out ${wild} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:example.test' 2>/dev/null`)
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${apex} -subj '/CN=example.test' -addext 'subjectAltName=DNS:example.test' 2>/dev/null`)
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${wrong} -subj '/CN=*.elsewhere.test' -addext 'subjectAltName=DNS:*.elsewhere.test' 2>/dev/null`)
+    // `-days 1` with a start date in the past is the portable way to get an expired one.
+    openssl(`openssl req -x509 -key ${key} -sha256 -not_before 20200101000000Z -not_after 20200102000000Z -out ${expired} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`)
+    openssl(`openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${other} -out ${mismatched} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`)
+    writeFileSync(junk, 'this is not a certificate\n')
+
+    const bad: Array<[string, string, string]> = [
+      [junk, key, 'not a PEM certificate'],
+      [wild, junk, 'not a PEM private key'],
+      [mismatched, key, 'is not the key for'],
+      [expired, key, 'has already expired'],
+      [apex, key, 'does not cover api.example.test'],
+      [wrong, key, 'does not cover api.example.test'],
+    ]
+    for (const [c, k, says] of bad) {
+      // A --print-* run over files that EXIST checks them too, which is how this runs without
+      // root: the checks are skipped only when there is nothing to read.
+      const r = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', c, '--tls-key', k], { INSTA_OSS_DOMAIN: 'example.test' })
+      expect(r.status, says).toBe(1)
+      expect(r.stderr, says).toContain(says)
+    }
+    // ...and the pair that can serve gets past the certificate checks, failing later for the
+    // reason a non-root run always fails.
+    const ok = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', wild, '--tls-key', key], { INSTA_OSS_DOMAIN: 'example.test' })
+    expect(ok.status, ok.stderr).toBe(0)
+    expect(parseEnv(ok.stdout).INSTA_OSS_TLS).toBe('custom')
+    // ...and a path that does not exist yet still renders, because there is nothing to check.
+    expect(tryRun(['--print-env', '--tls', 'custom', '--tls-cert', '/nope/c.crt', '--tls-key', '/nope/k.key'], { INSTA_OSS_DOMAIN: 'example.test' }).status).toBe(0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 

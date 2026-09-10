@@ -221,6 +221,9 @@ if [ "$TLS" = custom ]; then
     # nothing; a real install refuses rather than bringing a stack up that cannot serve TLS.
     if [ -z "$PRINT" ] && [ ! -r "$_f" ]; then die "cannot read '$_f': --tls custom serves this file, so the install stops here rather than starting an edge with no certificate"; fi
   done
+  # The directories are what gets mounted (see `tls_mounts`), so they are resolved here, once.
+  TLS_CERT_DIR=$(dirname "$TLS_CERT")
+  TLS_KEY_DIR=$(dirname "$TLS_KEY")
 elif [ -n "$TLS_CERT" ] || [ -n "$TLS_KEY" ]; then
   # A flag or an environment variable is a REQUEST, and nothing in this mode would serve it, so it
   # stops. A value that only the previous install left in instad.env is not a request: it is how a
@@ -322,6 +325,50 @@ shaped "$DOMAIN" '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}
   die "'$DOMAIN' is not a hostname: it must be dot-separated labels of a-z, 0-9 and inner hyphens, 1-63 characters each, with at least two labels and no empty label (a leading dot, a double dot or a bare name all fail here rather than after the install)"
 DOMAIN_CHANGED=0
 [ -n "$OLD_DOMAIN" ] && [ "$OLD_DOMAIN" != "$DOMAIN" ] && DOMAIN_CHANGED=1
+
+# The supplied pair is checked HERE, after the domain, because one of the checks is whether the
+# certificate covers the names this install will serve. Everything else about it was validated
+# with the flags above.
+if [ "$TLS" = custom ]; then
+  # ...and the pair is CHECKED before anything starts. Readable and syntactically safe is not the
+  # same as able to serve: a mismatched key, a malformed PEM or a perfectly good certificate for
+  # another domain leaves Caddy crash-looping while this script exits 0 and says it is serving
+  # your certificate. That is the third time this installer has reported success over a
+  # configuration that cannot work, so this is the check rather than another warning.
+  #
+  # Run whenever both files can be READ, in any mode: a --print-* run over real files checks them
+  # too (which is also how the suite exercises this without root), and a --print-* run over paths
+  # that do not exist yet renders as before, since there is nothing to check.
+  check_tls_pair() {
+    openssl x509 -in "$TLS_CERT" -noout >/dev/null 2>&1 ||
+      die "'$TLS_CERT' is not a PEM certificate openssl can read"
+    openssl pkey -in "$TLS_KEY" -noout >/dev/null 2>&1 ||
+      die "'$TLS_KEY' is not a PEM private key openssl can read"
+    _cpub=$(openssl x509 -in "$TLS_CERT" -noout -pubkey 2>/dev/null)
+    _kpub=$(openssl pkey -in "$TLS_KEY" -pubout 2>/dev/null)
+    [ -n "$_cpub" ] && [ "$_cpub" = "$_kpub" ] ||
+      die "'$TLS_KEY' is not the key for '$TLS_CERT' (their public keys differ): the edge would fail to load the pair and crash-loop"
+    openssl x509 -in "$TLS_CERT" -noout -checkend 0 >/dev/null 2>&1 ||
+      die "'$TLS_CERT' has already expired ($(openssl x509 -in "$TLS_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)); replace it before installing"
+    # Every name this install will actually serve. A wildcard covers all three; a certificate for
+    # the apex alone, or for another domain entirely, fails here instead of at a browser.
+    for _h in "api.$DOMAIN" "console.$DOMAIN" "web-example-main.$DOMAIN"; do
+      openssl x509 -in "$TLS_CERT" -noout -checkhost "$_h" >/dev/null 2>&1 ||
+        die "'$TLS_CERT' does not cover $_h: --tls custom serves it for every name under $DOMAIN, so it needs *.$DOMAIN (subject $(openssl x509 -in "$TLS_CERT" -noout -subject 2>/dev/null | cut -d= -f2-))"
+    done
+    openssl x509 -in "$TLS_CERT" -noout -checkend 1814400 >/dev/null 2>&1 ||
+      warn "'$TLS_CERT' expires within 21 days ($(openssl x509 -in "$TLS_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)): nothing renews a supplied certificate, and the daemon will keep saying so"
+  }
+  if [ -r "$TLS_CERT" ] && [ -r "$TLS_KEY" ]; then
+    if have openssl; then
+      check_tls_pair
+    elif [ -z "$PRINT" ] && pkg_install openssl >/dev/null 2>&1 && have openssl; then
+      check_tls_pair
+    elif [ -z "$PRINT" ]; then
+      die "openssl is required to check the certificate --tls custom is about to serve, and it could not be installed"
+    fi
+  fi
+fi
 
 SECRET=$(resolve INSTA_OSS_SECRET '' '')
 [ -n "$SECRET" ] || SECRET=$(randhex 32)
@@ -521,9 +568,20 @@ EOF
 # the edge serves it and the daemon presents it on the database lanes, and one path in instad.env
 # is then valid in either place, exactly as the data directory already works. Empty in every other
 # mode, so the compose file is unchanged there.
+#
+# The DIRECTORIES are mounted, not the two files, and that is the whole of the renewal story. A
+# file bind mount resolves to an inode at mount time, and every renewal tool replaces a
+# certificate by writing a new file and renaming it over the old name (or by moving a symlink):
+# the directory entry changes, the inode does not, and a container with the FILE mounted keeps
+# reading the old certificate until it is recreated. `docker compose restart edge` restarts the
+# process without recreating the mount, so it does not help either. With the directory mounted,
+# the name is resolved through the mount on every open, so a rename inside it is visible
+# immediately: the daemon's next handshake re-reads the new file and the edge picks it up on a
+# restart. One mount when both files share a directory, which is the usual case.
 tls_mounts() {
   [ "$TLS" = custom ] || return 0
-  printf '\n      - %s:%s:ro\n      - %s:%s:ro' "$TLS_CERT" "$TLS_CERT" "$TLS_KEY" "$TLS_KEY"
+  printf '\n      - %s:%s:ro' "$TLS_CERT_DIR" "$TLS_CERT_DIR"
+  [ "$TLS_KEY_DIR" = "$TLS_CERT_DIR" ] || printf '\n      - %s:%s:ro' "$TLS_KEY_DIR" "$TLS_KEY_DIR"
 }
 
 # Caddyfile with concrete values (Caddy has no env placeholders for an omitted email line).
@@ -1025,7 +1083,31 @@ cert_present() { [ -n "$(find "$CERT_DIR" -type f -name "api.$DOMAIN.crt" 2>/dev
 # for a file that will never appear, and then warning about it, would be the install telling an
 # operator something is wrong when the mode is working exactly as asked.
 if [ "$TLS" = custom ]; then
-  curl -sk --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 30 -o /dev/null "https://api.$DOMAIN/healthz" || true
+  # MANDATORY, not decorative. The old form probed with `-k`, swallowed the result with
+  # `|| true`, and then logged that it was serving your certificate whatever had happened -- so a
+  # pair the edge could not load left Caddy crash-looping while this script exited 0 saying it
+  # worked. Two things have to hold: the edge answers, and what it answers with is the
+  # certificate this install was given.
+  _ours=$(openssl x509 -in "$TLS_CERT" -noout -serial 2>/dev/null | cut -d= -f2)
+  _served=''
+  _t=0
+  while [ "$_t" -lt 60 ]; do
+    if curl -sk --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 10 -o /dev/null "https://api.$DOMAIN/healthz"; then
+      _served=$(printf '' | openssl s_client -connect 127.0.0.1:443 -servername "api.$DOMAIN" 2>/dev/null |
+        openssl x509 -noout -serial 2>/dev/null | cut -d= -f2)
+      [ -n "$_served" ] && break
+    fi
+    _t=$((_t + 5))
+    sleep 5
+  done
+  if [ -z "$_served" ]; then
+    compose logs --tail=30 edge 2>&1 || true
+    die "the edge never answered https://api.$DOMAIN with a certificate after 60 s (see the log above): --tls custom has nothing else to fall back on, so this is a failed install rather than a warning"
+  fi
+  if [ "$_served" != "$_ours" ]; then
+    compose logs --tail=30 edge 2>&1 || true
+    die "the edge is serving certificate serial $_served, not the $_ours in $TLS_CERT (see the log above)"
+  fi
   log "serving the supplied certificate $TLS_CERT for *.$DOMAIN (nothing is issued, so no hostname is published)"
 else
 # The internal issuer is local and answers in seconds; ACME does not, and four minutes covers a
