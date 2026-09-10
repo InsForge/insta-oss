@@ -120,11 +120,15 @@ export function createPgLane(deps: PgLaneDeps, bind: string, port: number): Serv
   return server
 }
 
+/** The budget for the whole negotiation: the eight bytes AND, when they ask for TLS, the
+ *  handshake that follows. One number, because they are one exchange from the client's side. */
+const NEGOTIATION_MS = 10_000
+
 /** Answer the SSL negotiation and pick the route. Returns null when the connection is finished. */
 async function negotiate(deps: PgLaneDeps, c: Socket, listenPort: number): Promise<Negotiated | null> {
   const server = deps.cfg.mode === 'server'
   for (;;) {
-    const head = await readExactly(c, 8, 10_000)
+    const head = await readExactly(c, 8, NEGOTIATION_MS)
     if (!head) { c.destroy(); return null }
     const code = head.readUInt32BE(4)
 
@@ -153,6 +157,24 @@ async function negotiate(deps: PgLaneDeps, c: Socket, listenPort: number): Promi
 /** Wrap the socket in TLS with the edge's certificates and route by the servername. */
 function terminate(deps: PgLaneDeps, c: Socket): Promise<Negotiated | null> {
   return new Promise((resolve) => {
+    // An ABSOLUTE deadline across the HANDSHAKE, which is the part the negotiation's own timer
+    // does not cover: `readExactly` clears its timer the moment the eight bytes arrive, so a
+    // client that sent `SSLRequest`, read the `S` and then said nothing more held a descriptor,
+    // a socket, TLS state and an unresolved promise until it disconnected or the daemon
+    // restarted. Unauthenticated, on a port published to the internet, for the price of eight
+    // bytes -- and it exhausts the daemon before authentication or routing is ever reached.
+    //
+    // It destroys BOTH ends: destroying the TLSSocket alone can leave the underlying socket and
+    // its descriptor behind, which leaks the same thing more quietly. It settles the promise on
+    // that path too, since an unresolved promise is the other half of what leaked. And it is
+    // cleared on `secure` AND on `error`, so a finished handshake leaves no timer holding a
+    // reference to any of it.
+    const deadline = setTimeout(() => {
+      tls.destroy()
+      c.destroy()
+      resolve(null)
+    }, NEGOTIATION_MS)
+    const settle = (v: Negotiated | null): void => { clearTimeout(deadline); resolve(v) }
     const tls = new TLSSocket(c, {
       isServer: true,
       // The default context is `api.<domain>`, which the installer's first request creates: a client
@@ -162,11 +184,11 @@ function terminate(deps: PgLaneDeps, c: Socket): Promise<Negotiated | null> {
       SNICallback: deps.sniCallback,
       minVersion: 'TLSv1.2',
     })
-    tls.once('error', () => { tls.destroy(); resolve(null) })
+    tls.once('error', () => { clearTimeout(deadline); tls.destroy(); c.destroy(); resolve(null) })
     tls.once('secure', () => {
       const name = (tls.servername || '').toString().toLowerCase().replace(/\.$/, '')
-      if (!name) { tls.end(NO_SNI); resolve(null); return }
-      resolve({ stream: tls, route: deps.table().byHost(name), pending: null })
+      if (!name) { settle(null); tls.end(NO_SNI); return }
+      settle({ stream: tls, route: deps.table().byHost(name), pending: null })
     })
   })
 }

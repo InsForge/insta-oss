@@ -26,6 +26,9 @@ export interface SniLaneDeps extends WakeDeps {
   log?(msg: string): void
 }
 
+/** The handshake budget, matching the pg lane's negotiation budget. */
+const HANDSHAKE_MS = 10_000
+
 /** One SNI lane. `kind` is the managed type this port serves; a servername belonging to any other
  *  lane is closed after the handshake (a clean close beats a TLS alert: the client sees the port). */
 export function createSniLane(deps: SniLaneDeps, kind: ManagedDbType, bind: string, port: number): TlsServer {
@@ -34,7 +37,11 @@ export function createSniLane(deps: SniLaneDeps, kind: ManagedDbType, bind: stri
   // gets a close instead of an opaque handshake failure (decision 21). It has to go in through
   // `setSecureContext`; the Router calls the same method again for a certificate that arrives after
   // the lane is already listening (refreshDefaultContext).
-  const server = createServer({ SNICallback: deps.sniCallback, minVersion: 'TLSv1.2' })
+  // `handshakeTimeout` because these lanes are published on the internet too and node's default
+  // is two minutes: a client that opens a connection and never sends a ClientHello holds a
+  // descriptor for that long, which is the same shape as the pg lane's finding (`terminate` in
+  // `pg.ts`), just already bounded. Ten seconds is the same budget the pg negotiation uses.
+  const server = createServer({ SNICallback: deps.sniCallback, minVersion: 'TLSv1.2', handshakeTimeout: HANDSHAKE_MS })
   if (deps.defaultMaterial) server.setSecureContext(deps.defaultMaterial)
   server.on('secureConnection', (sock: TLSSocket) => { void handle(sock) })
   server.on('tlsClientError', () => { /* a scanner or a client with no trust: nothing to log per packet */ })

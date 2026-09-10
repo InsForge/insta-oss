@@ -379,6 +379,30 @@ test('the pg-wire lane end to end: a real psql picks its database by SNI over TL
     expect(ip).not.toBe('')
     if (direct) expect(await accepts(ip, 5432)).toBe(true)
     else expect(await inspect(PG, '{{json .NetworkSettings.Ports}}')).toContain('127.0.0.1')
+
+    // An UNAUTHENTICATED client that sends the eight negotiation bytes, reads the `S`, and then
+    // says nothing more. The negotiation's own timer is cleared by those eight bytes, so before
+    // the handshake deadline this held a descriptor, a socket, TLS state and an unresolved
+    // promise until the peer went away or the daemon restarted -- on a port published to the
+    // internet, for the price of eight bytes and no credentials.
+    const stalled = await new Promise<{ closed: boolean; ms: number }>((resolve) => {
+      const t0 = Date.now()
+      const s = netConnect({ host: '127.0.0.1', port: lanePgPort })
+      const giveUp = setTimeout(() => { s.destroy(); resolve({ closed: false, ms: Date.now() - t0 }) }, 25_000)
+      s.once('connect', () => {
+        const req = Buffer.alloc(8)
+        req.writeUInt32BE(8, 0)
+        req.writeUInt32BE(80877103, 4)      // SSLRequest
+        s.write(req)
+      })
+      s.on('data', () => { /* the `S`, and then we stall on purpose */ })
+      s.once('error', () => { /* a destroy from the far end can surface as ECONNRESET */ })
+      s.once('close', () => { clearTimeout(giveUp); resolve({ closed: true, ms: Date.now() - t0 }) })
+    })
+    expect(stalled.closed).toBe(true)
+    // ...and it was the DEADLINE that closed it, not an immediate refusal of the negotiation.
+    expect(stalled.ms).toBeGreaterThan(5_000)
+    expect(stalled.ms).toBeLessThan(25_000)
   } finally {
     await tls.stop()
   }
