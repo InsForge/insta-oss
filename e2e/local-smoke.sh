@@ -222,6 +222,14 @@ wait_for 60 sh -c "[ \"\$(docker inspect -f '{{.State.Status}}' $VOLC)\" = runni
 # ever fail. cp still goes through the container's own /data, which is the mount being proved.
 printf 'forked\n' > "$DATA/volmarker"
 docker cp "$DATA/volmarker" "$VOLC:/data/marker" || FAIL "could not write the volume marker"
+# Touch main's database immediately before the fork, and keep this line. It is not redundant
+# with the round trip in step 6: the idle timer is 20s and everything between them (a service
+# add, a deploy, and a wait of up to 60s for the container to come up) can outrun it, which
+# would put the source at rest and let the fork below take the reflink path. The assertion after
+# step 6b requires a LIVE source, so the precondition is made explicit rather than left to how
+# fast the runner happened to be.
+psql "$DBURL" -v ON_ERROR_STOP=1 -qtAc 'select 1' >/dev/null \
+  || FAIL "could not keep main awake before the feat2 fork"
 insta branch create feat2 --from main >/dev/null || FAIL "branch create feat2 failed"
 VOLC2=$(svc_container "$SLUG-feat2" voljob)
 FEAT2URL=$(printf '%s\n' "$URL" | sed -e "s/-main\./-feat2./" -e "s|http://web-|http://voljob-|")
