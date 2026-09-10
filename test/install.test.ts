@@ -321,9 +321,13 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
     // so this installed cleanly and was then rejected by every client, while the install said it
     // had worked. Skipped where openssl cannot date a certificate forward (`req -not_before`
     // arrived in 3.5), rather than silently not testing it.
-    const dated = spawnSync('sh', ['-c',
-      `openssl req -x509 -key ${key} -sha256 -not_before 20990101000000Z -not_after 20990201000000Z -out ${future} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:*.s3.example.test' 2>&1`,
-    ], { encoding: 'utf8' })
+    const mintDated = (dates: string, out: string): { status: number | null; out: string } => {
+      const r = spawnSync('sh', ['-c',
+        `openssl req -x509 -key ${key} -sha256 ${dates} -out ${out} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:*.s3.example.test' 2>&1`,
+      ], { encoding: 'utf8' })
+      return { status: r.status, out: `${r.stdout}${r.stderr}` }
+    }
+    const dated = mintDated('-not_before 20990101000000Z -not_after 20990201000000Z', future)
     if (dated.status === 0) {
       const r = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', future, '--tls-key', key], { INSTA_OSS_DOMAIN: 'example.test' })
       expect(r.status).toBe(1)
@@ -332,10 +336,14 @@ test('--tls custom checks the pair can actually serve, before anything starts', 
       // The skip has to be able to tell "this openssl has no -not_before" (3.5 added it) from
       // "the command is broken". Sending stderr to /dev/null and then asserting it is defined
       // could not: it passed for a typo, a wrong flag or any other failure, and silently did not
-      // test the refusal at all, under a comment claiming the opposite. So the output has to say
-      // the flag is the problem, and anything else fails here.
-      expect(dated.stdout + dated.stderr, `openssl failed for some reason OTHER than not supporting -not_before: ${dated.stdout}${dated.stderr}`)
-        .toMatch(/not_before|Unrecognized flag|unknown option|unrecognized|Unknown option|invalid option/i)
+      // test the refusal at all, under a comment claiming the opposite. Matching the WORDING
+      // cannot either, which CI showed: OpenSSL 3.0 answers an unknown flag with nothing but
+      // "req: Use -help for summary.". So the control is the same command with `-days` in place
+      // of the two date flags. If that succeeds, the flags are the only difference and the skip
+      // is honest; if it fails too, openssl itself is the problem here and this says so loudly
+      // rather than quietly testing nothing.
+      const control = mintDated('-days 30', join(dir, 'control.crt'))
+      expect(control.status, `openssl req fails for a reason other than -not_before, so the not-yet-valid refusal was NOT exercised. With the dates: ${dated.out} Without them: ${control.out}`).toBe(0)
     }
 
     // WHY the second wildcard, checked the way a TLS client checks it rather than asserted. A
