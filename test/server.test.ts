@@ -2655,6 +2655,49 @@ test('a service add ALREADY IN FLIGHT when the create snapshots cannot wedge the
   }
 })
 
+test('a service rename that lands while a create is queued cannot give the clone no database', async () => {
+  // The create re-reads the source row, passes its key check, and THEN waits in the engine-wide
+  // provision chain. A rename ahead of it in that chain changes the service id while it waits.
+  // `provisionBranch` filters a freshly read registration list through the row the create
+  // captured, so the new id is looked up in the old row, finds nothing, and the database drops
+  // out of the fork list with no error at all: 201, and a clone with no database.
+  const id = await sourceWithEveryStep()
+  let enterRename!: () => void
+  let goRename!: () => void
+  const inRename = new Promise<void>((r) => { enterRename = r })
+  const renameGate = new Promise<void>((r) => { goRename = r })
+  const realRename = db.rename!.bind(db)
+  const rename = vi.spyOn(db, 'rename').mockImplementationOnce(async (container, to) => {
+    enterRename()
+    await renameGate
+    return realRename(container, to)
+  })
+
+  try {
+    // 1. The rename is in flight, inside `serialize('provision')`.
+    const renaming = post(`/projects/${id}/services/pg-db/rename`, { name: 'db2' })
+    await inRename
+
+    // 2. The create arrives. Its row still says `pg-db`.
+    let created = false
+    const create = post(`/projects/${id}/branches`, { name: 'feat' }).then((r) => { created = true; return r })
+    await settle()
+    expect(created).toBe(false)
+
+    // 3. The rename completes and the registration is now `pg-db2`.
+    goRename()
+    expect((await within(10_000, renaming, 'the service rename')).statusCode).toBe(200)
+    expect((await within(10_000, create, 'the branch create')).statusCode).toBe(201)
+
+    // The clone carries the database under its new id, and a fork was actually issued for it.
+    const feat = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')!
+    expect(Object.keys(feat.databases ?? {})).toEqual(['pg-db2'])
+    expect(calls.filter((c) => c.startsWith('db.fork:'))).toHaveLength(1)
+  } finally {
+    rename.mockRestore()
+  }
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))

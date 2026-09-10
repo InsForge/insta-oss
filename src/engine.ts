@@ -1645,6 +1645,10 @@ export class Engine {
    *  deriving one) while `<new-group>-<ref>` resolved nowhere, and the services list kept
    *  advertising the stale domain and endpoint. */
   async renameComputeService(projectId: string, oldName: string, newName: string): Promise<ServiceRow | undefined> {
+    return this.withOp(this.renameKeys(projectId, `cp-${oldName}`), () => this.renameComputeServiceLocked(projectId, oldName, newName))
+  }
+
+  private async renameComputeServiceLocked(projectId: string, oldName: string, newName: string): Promise<ServiceRow | undefined> {
     return this.serialize('provision', async () => {
       const project = this.getProject(projectId)
       if (!project) throw new Error('project not found')
@@ -1907,6 +1911,10 @@ export class Engine {
    *  user secrets. Deployed compute containers keep the OLD host in their env until their next
    *  deploy — same as the cloud, where a rename re-keys stored names but never hot-patches env. */
   async renameManagedService(projectId: string, serviceId: string, newName: string): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
+    return this.withOp(this.renameKeys(projectId, serviceId), () => this.renameManagedServiceLocked(projectId, serviceId, newName))
+  }
+
+  private async renameManagedServiceLocked(projectId: string, serviceId: string, newName: string): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     const m = this.managedList(projectId).find((x) => x.id === serviceId)
@@ -3031,6 +3039,25 @@ export class Engine {
     }
   }
 
+  /** What a service RENAME holds: every branch's branch key and its key for this service.
+   *
+   *  Decision 52 names rename among the takers and all four rename paths took nothing, or only
+   *  `serialize('provision')`, which is not an operation key. A rename mutates the SERVICE ID,
+   *  and `provisionBranch` filters a freshly read registration list through the branch row the
+   *  create captured: after a rename lands mid-create, `carries(project, staleRow, d)` looks the
+   *  new id up in the old row, finds nothing, and the database silently drops out of the fork
+   *  list. The clone comes back 201 with no database at all. Holding every carrier's branch key
+   *  makes the rename queue behind a create instead, which closes it by construction rather than
+   *  by widening a snapshot.
+   *
+   *  Project-wide because a rename is: it re-mints a hostname on every branch that carries the
+   *  service and renames each container. Taken `withOp` OUTER and `serialize('provision')` inner,
+   *  the order every other taker uses, so the engine-wide invariant holds: keys are acquired
+   *  before the provision chain, never after it, and no path can close a cycle between them. */
+  private renameKeys(projectId: string, serviceId: string): ServiceKey[] {
+    return this.listBranches(projectId).flatMap((b) => [this.branchOp(b), this.serviceKey(b, serviceId)])
+  }
+
   /** What a WHOLE-branch operation holds: the branch key plus every service key on the branch. */
   private branchKeys(project: Project, b: Branch): ServiceKey[] {
     return [
@@ -3883,6 +3910,10 @@ export class Engine {
    *  branch's container and minted hostname, bindings and service-bound user secrets. The data
    *  directory keeps its immutable `dataId` (decision 16). */
   async renameDbService(projectId: string, serviceId: string, newName: string): Promise<ServiceRow> {
+    return this.withOp(this.renameKeys(projectId, serviceId), () => this.renameDbServiceLocked(projectId, serviceId, newName))
+  }
+
+  private async renameDbServiceLocked(projectId: string, serviceId: string, newName: string): Promise<ServiceRow> {
     return this.serialize('provision', async () => {
       const project = this.getProject(projectId)
       if (!project) throw new Error('project not found')
@@ -3999,6 +4030,10 @@ export class Engine {
   /** Rename a storage service: a re-key only. The bucket handle is immutable (its name is baked
    *  into every object URL and into the access key scoped to it), exactly like the cloud. */
   async renameStorageService(projectId: string, serviceId: string, newName: string): Promise<ServiceRow> {
+    return this.withOp(this.renameKeys(projectId, serviceId), () => this.renameStorageServiceLocked(projectId, serviceId, newName))
+  }
+
+  private async renameStorageServiceLocked(projectId: string, serviceId: string, newName: string): Promise<ServiceRow> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     const reg = this.stList(projectId).find((s) => s.id === serviceId)
