@@ -623,6 +623,15 @@ if have ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
 elif have firewall-cmd && [ "$(firewall-cmd --state 2>/dev/null || true)" = running ]; then
   log "firewalld is running: allowing the edge, the database lane and container-to-host traffic"
   fw_firewalld | run_rules
+else
+  # No host firewall to restrict anything, and the lanes bind 0.0.0.0 in server mode
+  # (INSTA_OSS_LANE_BIND above), so 6379 and 27017 are reachable from wherever this box is
+  # reachable. A warning and not a refusal: most of these boxes are protected by a cloud
+  # security group instead, and refusing would break every one of those installs.
+  warn "no active ufw or firewalld found, so nothing here restricts the database lanes"
+  warn "  the redis (6379) and mongodb (27017) lanes listen on all interfaces and are NOT meant to be public"
+  warn "  restrict them at your cloud security group, or enable ufw and re-run this script to have it do it:"
+  warn "    ufw allow 80,443,5432/tcp && ufw enable && sh install.sh -y"
 fi
 
 # ---- 5. data dir and reflinks ----

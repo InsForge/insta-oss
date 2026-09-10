@@ -253,6 +253,12 @@ test('--print-firewall lists the docker0 and inbound rules; the script gates the
   expect(out).toContain('firewall-cmd --reload')
   expect(script).toMatch(/ufw status 2>\/dev\/null \| grep -q '\^Status: active'/)
   expect(script).toMatch(/firewall-cmd --state/)
+  // ...and when it finds NEITHER it restricts nothing, so it has to say so rather than leave the
+  // operator believing the lanes are private: they bind 0.0.0.0 in server mode, so 6379 and
+  // 27017 are then only as private as the box's own security group. A warning, not a refusal:
+  // most of these boxes are protected that way and refusing would break every such install.
+  expect(script).toMatch(/no active ufw or firewalld found/)
+  expect(script).toMatch(/redis \(6379\) and mongodb \(27017\)[^\n]*NOT meant to be public/)
 })
 
 test('the run path: every port the daemon binds is refused, readiness on /healthz, the final lines', () => {

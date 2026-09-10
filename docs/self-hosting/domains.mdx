@@ -127,15 +127,28 @@ libpq 14 or newer, the JDBC driver 42.2.x or newer, node-postgres, psycopg 3. An
 a clear error that says there was no SNI in the TLS handshake, and the fix is to upgrade the client
 or connect from inside the branch.
 
-Redis and MongoDB are NOT public. Their lanes work the same way, on 6379 and 27017 with TLS and
-SNI, and apps reach them by hostname from the branch network, but the installer opens those two
-ports to Docker's own address pools only, never to the internet. That is deliberate: an internet
-facing Redis or MongoDB on every self-hosted box is one of the most reliably abused defaults there
-is, and neither has anything like the exposure record of Postgres behind TLS. Reach them from your
-apps, from the box itself, or across a VPN or an SSH tunnel you control. Opening 6379 or 27017 to
-the world is a firewall rule you add yourself, knowing what it means. MySQL does not multiplex, so
-each MySQL service gets its own plaintext port, printed in its credentials, and that port is not
-opened publicly either.
+Redis and MongoDB are not meant to be public, and whether they actually are is up to your
+firewall. Their lanes work the same way as Postgres, on 6379 and 27017 with TLS and SNI, and apps
+reach them by hostname from the branch network. Two things decide the rest:
+
+- the daemon binds every lane to all interfaces in server mode (`INSTA_OSS_LANE_BIND`, `0.0.0.0`),
+  so the ports are listening wherever this box is reachable;
+- the installer writes its restricting rules ONLY when it finds an active `ufw` or a running
+  `firewalld`. On a box with neither, it changes no firewall at all and warns you, and 6379 and
+  27017 are then reachable from the internet.
+
+So do one of these before you put anything in them: restrict the two ports at your cloud security
+group, which is how most of these boxes are protected, or enable `ufw` and re-run the installer,
+which allows 80, 443 and 5432 publicly and the database lanes to Docker's address pools only. The
+tighter option, and the one to ask for if you want it, is binding the redis and mongodb lanes to
+the docker bridge instead of `0.0.0.0`; today `INSTA_OSS_LANE_BIND` moves all the lanes together,
+Postgres included, so it is not a per-lane switch yet.
+
+None of this is because Redis and MongoDB are special: it is because an internet-facing one on a
+box someone forgot about is among the most reliably abused things on the internet, and neither has
+Postgres's record behind TLS. Reach them from your apps, from the box itself, or across a VPN or
+an SSH tunnel you control. MySQL does not multiplex, so each MySQL service gets its own plaintext
+port, printed in its credentials, and the same two rules apply to it.
 
 A sleeping database wakes on connect. The first connection can take a few seconds; after that it
 is a normal local Postgres.
