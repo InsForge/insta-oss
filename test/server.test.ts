@@ -1132,8 +1132,21 @@ test('managed db remove: destroys on every branch, drops rows + secrets; rename 
   // retires behind the last carrier.
   const featSid = (await get(`/projects/${id}/services?branch=feat`)).json().services
     .find((x: { name: string }) => x.name === 'kv').id as string
+
+  // A secret bound to the service on feat, so removal has something branch-scoped to clean up.
+  expect((await put(`/projects/${id}/secrets/FEAT_TOKEN`,
+    { value: 'feat-only', branch: 'feat', service: 'redis/kv' })).statusCode).toBe(200)
+  // The bound-name inventory is per branch: main must not borrow feat's.
+  expect((await get(`/projects/${id}/services/rd-kv/secrets`)).json().secrets).not.toContain('FEAT_TOKEN')
+  expect((await get(`/projects/${id}/services/${featSid}/secrets`)).json().secrets).toContain('FEAT_TOKEN')
+
   expect((await del_(`/projects/${id}/services/${featSid}`)).statusCode).toBe(200)
   expect(calls).toContain('md.destroy:io-demo-feat-rd-kv')
+  // The secrets bound to the service on THIS branch go with it, even though the registration
+  // survives for main. Left behind, they came back from the branch bundle as ordinary secrets:
+  // the credentials of a service that no longer exists on that branch.
+  expect(Object.keys((await get(`/projects/${id}/secrets?branch=feat`)).json().secrets))
+    .not.toContain('FEAT_TOKEN')
   expect(loadState().projects[id].managedServices?.map((x) => x.id)).toEqual(['rd-kv'])
   const del = await del_(`/projects/${id}/services/rd-kv`)
   expect(del.statusCode).toBe(200)

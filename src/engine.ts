@@ -247,7 +247,18 @@ export class Engine {
    *  dropping it would strip that branch's row of its type, name and data key. The user secrets
    *  bound to the service go with the registration, for the same reason: they are project-level.
    *  Returns whether the registration went. */
-  private retireRegistration(project: Project, reg: { id: string }, type: 'postgres' | 'storage' | 'managed', source: string): boolean {
+  private retireRegistration(project: Project, reg: { id: string }, type: 'postgres' | 'storage' | 'managed', source: string, removedFrom?: Branch): boolean {
+    // The secrets bound to the service on the branch it was just removed from go with it, whether
+    // or not the shared registration can retire. They used to be deleted only in the full-retire
+    // mutate below, so removing a service from one branch while another still carried it left that
+    // branch's bound rows behind, and `userSecretsFor` then handed them back as ordinary branch
+    // secrets: the credentials of a service that no longer exists there.
+    if (removedFrom) {
+      mutate((st) => {
+        st.userSecrets[project.id] = (st.userSecrets[project.id] ?? [])
+          .filter((u) => !(u.service === source && u.branch === removedFrom.name))
+      })
+    }
     if (this.listBranches(project.id).some((b) => this.carries(project, b, reg, type))) return false
     mutate((st) => {
       const pr = st.projects[project.id]
@@ -990,7 +1001,12 @@ export class Engine {
     const svc = this.serviceOf(projectId, sid)
     this.assertServiceOnBranch(project, branch, sid, svc.type)
     const list = loadState().userSecrets[projectId] ?? []
-    const bound = list.filter((u) => u.service === `${svc.type}/${svc.name}`).map((u) => u.name)
+    // Bound secrets are per branch, so a branch-scoped inventory must not borrow another branch's.
+    // The minted half beside it is already resolved for THIS branch, so listing every branch's
+    // bound names made the two halves describe different things.
+    const bound = list
+      .filter((u) => u.service === `${svc.type}/${svc.name}` && u.branch === branch.name)
+      .map((u) => u.name)
     return [...new Set([...this.mintedNamesOf(project, branch, sid), ...bound])].sort()
   }
 
@@ -1558,7 +1574,7 @@ export class Engine {
       st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.source !== `${m.type}/${m.name}`)
     })
     this.scheduler.forget([this.serviceKey(branch, sid)]) // WP3
-    this.retireRegistration(project, m, 'managed', `${m.type}/${m.name}`)
+    this.retireRegistration(project, m, 'managed', `${m.type}/${m.name}`, branch)
     this.router.invalidate()
     this.emit(projectId, branch.name, 'resource', 'service.removed', { type: m.type, name: m.name })
     return t
@@ -3399,7 +3415,7 @@ export class Engine {
         st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.source !== `postgres/${reg.name}`)
       })
       this.scheduler.forget([this.serviceKey(branch, sid)])                                          // WP3
-      this.retireRegistration(project, reg, 'postgres', `postgres/${reg.name}`)
+      this.retireRegistration(project, reg, 'postgres', `postgres/${reg.name}`, branch)
       this.router.invalidate()
       this.emit(projectId, branch.name, 'resource', 'service.removed', { type: 'postgres', name: reg.name })
       return t
@@ -3513,7 +3529,7 @@ export class Engine {
       st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.source !== `storage/${reg.name}`)
     })
     await this.detachIfLastBucket(branch)
-    this.retireRegistration(project, reg, 'storage', `storage/${reg.name}`)
+    this.retireRegistration(project, reg, 'storage', `storage/${reg.name}`, branch)
     this.router.invalidate()
     this.emit(projectId, branch.name, 'resource', 'service.removed', { type: 'storage', name: reg.name })
     return t
