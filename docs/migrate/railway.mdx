@@ -72,13 +72,9 @@ Attach <your-domain> to the compute service and give me the DNS records to publi
 
 Publish the records at your DNS provider, then ask your agent to check the domain. Keep the Railway project frozen, and do not delete it, until the old records have aged out of resolver caches.
 
-## Workers and scheduled jobs
+## Cron jobs
 
-Compute on InstaCloud is serverless. A service scales to zero and wakes on an incoming request, and that shapes both of these.
-
-A background worker becomes a second compute service, with two adjustments. It has to listen on a port, because that is how the platform routes to it and health-checks it, and you should leave always-on enabled, because a suspended worker has no incoming traffic to wake it. A worker that does not serve HTTP today therefore needs a small change: one listener is enough.
-
-Scheduled jobs are not supported for now. The platform will add them. Until then, run the schedule outside the service and have it call an endpoint your app exposes.
+Cron jobs are not supported for now. The platform will add them. Until then, run the schedule outside the service and have it call an endpoint your app exposes.
 
 And that is it. Every InstaCloud action your agent took is a command you can run yourself, in the [CLI reference](/reference/cli/overview); the inspection on the other side used that provider's own CLI and API.
 
