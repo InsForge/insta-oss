@@ -354,9 +354,16 @@ if [ "$TLS" = custom ]; then
       die "'$TLS_CERT' has already expired ($(openssl x509 -in "$TLS_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)); replace it before installing"
     # Every name this install will actually serve. A wildcard covers all three; a certificate for
     # the apex alone, or for another domain entirely, fails here instead of at a browser.
+    # The OUTPUT, not the exit status: `x509 -checkhost` prints "does match" or "does NOT match"
+    # in every version that has the flag, and returns 1 for a miss only in newer ones (OpenSSL 3.0
+    # on an Ubuntu 24.04 runner returns 0 either way, which is how a green local run shipped a
+    # check that passed for the wrong domain).
     for _h in "api.$DOMAIN" "console.$DOMAIN" "web-example-main.$DOMAIN"; do
-      openssl x509 -in "$TLS_CERT" -noout -checkhost "$_h" >/dev/null 2>&1 ||
-        die "'$TLS_CERT' does not cover $_h: --tls custom serves it for every name under $DOMAIN, so it needs *.$DOMAIN (subject $(openssl x509 -in "$TLS_CERT" -noout -subject 2>/dev/null | cut -d= -f2-))"
+      _hostout=$(openssl x509 -in "$TLS_CERT" -noout -checkhost "$_h" 2>/dev/null || true)
+      case $_hostout in
+        *'does match'*) ;;
+        *) die "'$TLS_CERT' does not cover $_h: --tls custom serves it for every name under $DOMAIN, so it needs *.$DOMAIN (subject $(openssl x509 -in "$TLS_CERT" -noout -subject 2>/dev/null | cut -d= -f2-))" ;;
+      esac
     done
     openssl x509 -in "$TLS_CERT" -noout -checkend 1814400 >/dev/null 2>&1 ||
       warn "'$TLS_CERT' expires within 21 days ($(openssl x509 -in "$TLS_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)): nothing renews a supplied certificate, and the daemon will keep saying so"
