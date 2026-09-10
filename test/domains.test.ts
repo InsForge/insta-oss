@@ -71,6 +71,28 @@ test('the dns verdict follows the record: a CNAME to us is ok, an A record elsew
   expect(b.configured).toBe(false)
 })
 
+test('server mode with no certificate store to read does not report a domain ready', async () => {
+  // `domainCertOk` answered `true` when it could not LOOK -- server mode with the certificate
+  // directory unset -- so `configured`/`ready` was reported for a name whose edge may hold no
+  // certificate at all. Local mode still answers true, because there is no TLS to have.
+  // `INSTA_OSS_TLS_CERT_DIR=''` falls back to the server default PATH, so the unset case is
+  // reached on the config object: this is the daemon that has no certificate store to consult,
+  // not one whose store is empty.
+  const base = serverConfig()
+  const cfg2 = { ...base, tls: { ...base.tls, certDir: null } }
+  const engine2 = makeEngine(cfg2)
+  const { project } = await engine2.createProject('demo2')
+  await engine2.deploy(project.id, 'main', { image: 'app:1', port: 3000, group: 'web' })
+  dnsRecords.set('api.example.test', { a: ['203.0.113.7'] })
+  dnsRecords.set('tls.example.com', { a: ['203.0.113.7'] })
+
+  const b = await engine2.setComputeDomain(project.id, { hostname: 'tls.example.com', group: 'web' }) as unknown as Record<string, unknown>
+  // The DNS half is fine: this is the certificate half saying "unknown", not "no".
+  expect((b.dns as { status: string }[])[0].status).toBe('ok')
+  expect(b.configured).toBe(false)
+  expect(b.status).toBe('pending')
+})
+
 test('an unattached name reads `not added` with an empty dns list, never a 404', async () => {
   const b = json(await get('hostname=never-added.example.com'))
   expect(b.status).toBe('not added')

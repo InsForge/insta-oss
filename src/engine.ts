@@ -3223,8 +3223,15 @@ export class Engine {
     return { project, branch, group }
   }
 
+  /** Whether this hostname has a certificate. Local mode terminates no TLS, so there is nothing
+   *  to have and `true` is an answer rather than a guess. Server mode with no certificate
+   *  directory configured is a different thing: we cannot LOOK, and "cannot look" reported as
+   *  "there is one" made `domainResult` answer `configured: true` / `ready` for a name that may
+   *  serve nothing. An unreadable directory already answers false through `findCertFiles`, which
+   *  is the safe direction for this question. */
   private domainCertOk(hostname: string): boolean {
-    if (this.cfg.mode !== 'server' || !this.cfg.tls.certDir) return true
+    if (this.cfg.mode !== 'server') return true
+    if (!this.cfg.tls.certDir) return false
     return findCertFiles(this.cfg.tls.certDir, hostname) !== null
   }
 
