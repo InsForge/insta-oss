@@ -15,7 +15,7 @@ import { loadState, mutate } from './state'
 import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret, DataDirOps, PgTarget, ServiceKey, ServiceLimits, ServiceSettings } from './types'
 // ---- region WP2 (router): the router's pure modules feed the seams at the end of this class ----
 import { findCertFiles } from './router/certs'
-import { checkDns, domainResult, DomainError, normalizeHostname, notAdded, systemResolver, type ComputeDomainResult, type Resolver } from './router/domains'
+import { checkDns, domainResult, DomainError, mapLimit, normalizeHostname, notAdded, ourAddresses, systemResolver, type ComputeDomainResult, type Resolver } from './router/domains'
 import { assertHostLabel, bucketsOf, buildTable, databasesOf, hostFor as fqdnFor, hostOnly, labelFor, RESERVED_LABELS, type HostKind } from './router/table'
 import type { State } from './state'
 // ---- end region WP2 ----
@@ -90,6 +90,9 @@ const movedUnderUs = (sid: string, what: string): Error =>
  *  up. Two is the converging case (the first round takes `branchOp(source)`, which every service
  *  add now needs); the third is slack for an add that lands between two rounds. */
 const CREATE_LOCK_ROUNDS = 3
+/** How many domain rows a listing checks at once. Small on purpose: each one is a DNS round
+ *  trip with its own timeout, and the box this runs on is a single node. */
+const DOMAIN_CHECK_CONCURRENCY = 8
 const newTeardown = (): Teardown => ({ destroyed: 0, failed: 0 })
 /** Run one teardown step and count it. `what` names the thing for the operator's message. */
 async function count(t: Teardown, fn: () => Promise<unknown>, what?: string): Promise<void> {
@@ -3109,8 +3112,8 @@ export class Engine {
     return findCertFiles(this.cfg.tls.certDir, hostname) !== null
   }
 
-  private async domainEnvelope(project: Project, branch: Branch, group: string, hostname: string): Promise<ComputeDomainResult> {
-    const dns = await checkDns(hostname, this.cfg, this.resolver)
+  private async domainEnvelope(project: Project, branch: Branch, group: string, hostname: string, ours?: Set<string>): Promise<ComputeDomainResult> {
+    const dns = await checkDns(hostname, this.cfg, this.resolver, ours)
     return domainResult({
       hostname, flyApp: appContainerName(this.ref(project, branch), group), service: group,
       dns, certOk: this.domainCertOk(hostname),
@@ -3160,11 +3163,16 @@ export class Engine {
     const branchId = opts.branch ? this.getBranchByName(projectId, opts.branch)?.id : undefined
     const rows = Object.values(s.customDomains ?? {}).filter((cd) =>
       cd.projectId === projectId && (!branchId || cd.branchId === branchId) && (!opts.group || cd.group === opts.group))
-    return await Promise.all(rows.map(async (cd) => {
+    // The target address lookup is identical for every row, so it happens ONCE here, and the
+    // per-row checks run with a ceiling on how many are in flight: nothing caps the number of
+    // domains a project may attach, and a `Promise.all` over the list turned a single listing
+    // into as many simultaneous resolver operations as there are rows.
+    const ours = await ourAddresses(this.cfg, this.resolver)
+    return await mapLimit(rows, DOMAIN_CHECK_CONCURRENCY, async (cd) => {
       const branch = s.branches[cd.branchId]
       if (!branch) return notAdded(cd.hostname, '', cd.group)
-      return await this.domainEnvelope(project, branch, cd.group, cd.hostname)
-    }))
+      return await this.domainEnvelope(project, branch, cd.group, cd.hostname, ours)
+    })
   }
 
   /** Detach a hostname. 404 when it was never attached to this project. */

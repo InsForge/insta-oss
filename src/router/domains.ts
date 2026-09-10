@@ -73,9 +73,35 @@ export const systemResolver: Resolver = {
 const NOT_FOUND = new Set(['ENOTFOUND', 'NXDOMAIN', 'ENODATA'])
 const errCode = (e: unknown): string => String((e as { code?: string }).code ?? '')
 
+/** The addresses that count as "us": the API name's A records plus the recorded public IP.
+ *  Resolved ONCE per request by a caller with several hostnames to check. */
+export async function ourAddresses(cfg: Config, resolver: Resolver = systemResolver): Promise<Set<string>> {
+  const ours = new Set<string>(cfg.publicIp ? [cfg.publicIp] : [])
+  try { for (const a of await resolver.resolve4(`api.${cfg.domain}`)) ours.add(a) } catch { /* the API name may be unresolvable on a private box */ }
+  return ours
+}
+
+/** Run `fn` over `items` with at most `limit` in flight, in order. A `Promise.all` over an
+ *  unbounded list of domains fans every one of them into the resolver at once: there is no
+ *  project-level cap on domains, so an admin with a large list can start hundreds of
+ *  simultaneous DNS operations by accident, on a box whose whole premise is one node. */
+export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array<R>(items.length)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      out[i] = await fn(items[i])
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker))
+  return out
+}
+
 /** The one record we ask for: a CNAME to `api.<domain>`, or an A record to the box when the installer
  *  recorded a public address. `status` never leaves the cloud's four values. */
-export async function checkDns(hostname: string, cfg: Config, resolver: Resolver = systemResolver): Promise<DnsRecordCheck> {
+export async function checkDns(hostname: string, cfg: Config, resolver: Resolver = systemResolver, ours?: Set<string>): Promise<DnsRecordCheck> {
   const target = `api.${cfg.domain}`
   const record: DnsRecordCheck = {
     type: 'CNAME',
@@ -85,9 +111,10 @@ export async function checkDns(hostname: string, cfg: Config, resolver: Resolver
     status: 'unchecked',
   }
 
-  // What "us" resolves to: the API name's addresses plus the recorded public IP.
-  const ours = new Set<string>(cfg.publicIp ? [cfg.publicIp] : [])
-  try { for (const a of await resolver.resolve4(target)) ours.add(a) } catch { /* the API name may be unresolvable on a private box */ }
+  // What "us" resolves to. It is the SAME lookup for every row of a listing, so a caller with
+  // more than one hostname to check resolves it once and passes it in (`ourAddresses`); a list
+  // of a few hundred domains otherwise repeats this identical query a few hundred times.
+  const addressesOfUs = ours ?? await ourAddresses(cfg, resolver)
 
   let cnames: string[] = []
   try { cnames = await resolver.resolveCname(hostname) } catch (e) {
@@ -99,7 +126,7 @@ export async function checkDns(hostname: string, cfg: Config, resolver: Resolver
   try {
     const addrs = await resolver.resolve4(hostname)
     if (!addrs.length) return { ...record, status: 'missing' }
-    if (addrs.some((a) => ours.has(a))) return { ...record, status: 'ok' }
+    if (addrs.some((a) => addressesOfUs.has(a))) return { ...record, status: 'ok' }
     // A CNAME to us that we could not read directly still resolves to our addresses, so a plain
     // address comparison is the honest test; anything else is pointed elsewhere.
     return { ...record, status: 'mismatch' }

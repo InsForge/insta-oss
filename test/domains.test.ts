@@ -4,7 +4,7 @@
 // envelope carries NO `ssl` key, was pinned nowhere. DNS is the fake resolver from `test/fakes.ts`.
 import { test, expect, beforeEach } from 'vitest'
 import { buildServer } from '../src/server'
-import { dnsRecords, makeEngine, resetFakes, testConfig } from './fakes'
+import { dnsRecords, makeEngine, resetFakes, serverConfig, testConfig } from './fakes'
 import type { FastifyInstance } from 'fastify'
 import type { Engine } from '../src/engine'
 
@@ -114,4 +114,44 @@ test('list returns one envelope per attached name and detach takes it back out',
   expect((json(await app.inject({ method: 'GET', url: `/projects/${projectId}/compute/domains` })).items as unknown[]).length).toBe(1)
   // A second detach is a 404: the row is gone, not silently re-answered.
   expect((await app.inject({ method: 'DELETE', url: `/projects/${projectId}/compute/domain`, payload: { hostname: 'one.example.com' } })).statusCode).toBe(404)
+})
+
+test('a domain listing resolves the target once and bounds how many rows it checks at once', async () => {
+  // No project-level cap on domains: a `Promise.all` over the list turned one listing into as
+  // many simultaneous resolver operations as there are rows, each with its own DNS timeout, on
+  // a box whose whole premise is one node. And every row independently re-resolved the same
+  // `api.<domain>` target.
+  const engine = makeEngine(serverConfig())
+  const { project } = await engine.createProject('demo')
+  await engine.deploy(project.id, 'main', { image: 'app:1', port: 3000, group: 'web' })
+
+  let targets = 0
+  let inFlight = 0
+  let peak = 0
+  engine.resolver = {
+    resolve4: async (host: string) => {
+      if (host === 'api.example.test') { targets++; return ['203.0.113.9'] }
+      inFlight++
+      peak = Math.max(peak, inFlight)
+      await new Promise((r) => setTimeout(r, 5))
+      inFlight--
+      return ['198.51.100.1']
+    },
+    resolveCname: async () => { throw Object.assign(new Error('nope'), { code: 'ENOTFOUND' }) },
+  }
+
+  for (let i = 0; i < 40; i++) {
+    await engine.setComputeDomain(project.id, { hostname: `d${i}.example.com`, group: 'web' })
+  }
+  targets = 0
+  peak = 0
+
+  const rows = await engine.listComputeDomains(project.id)
+
+  expect(rows).toHaveLength(40)
+  // ONE target lookup for the whole listing, not one per row.
+  expect(targets).toBe(1)
+  // ...and a ceiling on the rest.
+  expect(peak).toBeLessThanOrEqual(8)
+  expect(peak).toBeGreaterThan(1)          // still concurrent, just bounded
 })
