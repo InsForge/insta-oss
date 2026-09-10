@@ -77,6 +77,28 @@ test('the e2e scripts are valid POSIX sh and executable', () => {
   }
 })
 
+// With `--tls internal` the daemon issues its own CA and every client has to be pointed at it
+// through the variable IT reads. The installer's guidance and the TLS docs listed three and left
+// out `AWS_CA_BUNDLE`, the only one an S3 client reads, so anyone who followed them got a working
+// curl, psql and CLI and an upload that failed with "unable to get local issuer certificate".
+// The e2e server smoke ran into exactly that. All four are named in all three places, together.
+test('the internal-CA guidance names the variable every client reads, S3 included', () => {
+  const vars = ['--cacert', 'PGSSLROOTCERT', 'NODE_EXTRA_CA_CERTS', 'AWS_CA_BUNDLE']
+  const install = readFileSync(join(root, 'install.sh'), 'utf8')
+  const guidance = install.split('\n').find((l) => l.includes('internal issuer:'))
+  expect(guidance, 'install.sh prints no internal-issuer guidance').toBeDefined()
+  for (const v of vars) expect(guidance, `install.sh guidance omits ${v}`).toContain(v)
+
+  const domains = readFileSync(join(root, 'docs/self-hosting/domains.mdx'), 'utf8')
+  for (const v of vars) expect(domains, `docs/self-hosting/domains.mdx omits ${v}`).toContain(v)
+
+  // ...and the smoke script exports what it tells operators to export.
+  const smoke = readFileSync(join(root, 'e2e/server-smoke.sh'), 'utf8')
+  for (const v of ['PGSSLROOTCERT', 'NODE_EXTRA_CA_CERTS', 'AWS_CA_BUNDLE']) {
+    expect(smoke, `e2e/server-smoke.sh never exports ${v}`).toContain(`export ${v}`)
+  }
+})
+
 const FIXTURE = 'e2e/fixtures/tpl-hello/insta.template.yaml'
 
 test('the e2e template fixture is a valid draft manifest', async () => {

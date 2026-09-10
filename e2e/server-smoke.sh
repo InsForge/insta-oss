@@ -147,6 +147,12 @@ if [ -n "$CA" ]; then
   export NODE_EXTRA_CA_CERTS
   PGSSLROOTCERT=$CA
   export PGSSLROOTCERT
+  # Each client reads its OWN variable. The S3 step used to be told nothing, so with
+  # --tls internal it was the one call that could not verify the edge certificate every
+  # other step had just verified: "SSL validation failed ... unable to get local issuer
+  # certificate". botocore trusts AWS_CA_BUNDLE and nothing else.
+  AWS_CA_BUNDLE=$CA
+  export AWS_CA_BUNDLE
 fi
 insta login --api-key "$TOKEN" --api-url "$API" | grep -q "$EMAIL" \
   || FAIL "insta login did not print the admin email"

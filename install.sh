@@ -808,6 +808,6 @@ log "  Setup:    https://console.$DOMAIN/setup"
 log "  API:      https://api.$DOMAIN"
 [ -z "$NAT_NOTE" ] || log "  Note:     $NAT_NOTE"
 log "  CLI:      insta login --api-key <token from the setup page> --api-url https://api.$DOMAIN"
-[ -z "$CA_FILE" ] || log "  CA:       $CA_FILE (internal issuer: pass it to curl --cacert, PGSSLROOTCERT, NODE_EXTRA_CA_CERTS)"
+[ -z "$CA_FILE" ] || log "  CA:       $CA_FILE (internal issuer: pass it to curl --cacert, PGSSLROOTCERT, NODE_EXTRA_CA_CERTS, AWS_CA_BUNDLE)"
 log "  Config $CFG   Data $DATA   Reflinks: $REFLINK"
 log 'Re-run this script to upgrade (add --version vX.Y.Z to pin).'

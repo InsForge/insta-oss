@@ -68,13 +68,19 @@ certificate step.
 `INSTA_OSS_TLS=acme` (the default) uses a public CA and needs the name to resolve to the box from
 the internet. `INSTA_OSS_TLS=internal` uses a local issuer instead, for a box on a private
 network. The installer copies the root certificate to `/var/lib/instacloud/edge/ca.pem`, and
-clients need to trust it:
+clients need to trust it. Each one reads its own variable, so a tool that is not told will fail
+on its own while everything else works:
 
 ```bash
 curl --cacert /var/lib/instacloud/edge/ca.pem https://api.example.com/healthz
 export PGSSLROOTCERT=/var/lib/instacloud/edge/ca.pem
 export NODE_EXTRA_CA_CERTS=/var/lib/instacloud/edge/ca.pem
+export AWS_CA_BUNDLE=/var/lib/instacloud/edge/ca.pem
 ```
+
+`AWS_CA_BUNDLE` is the one S3 clients read: the AWS CLI, boto3 and the AWS SDKs ignore the other
+three, so without it an upload to `https://s3.example.com` fails with `SSL validation failed` and
+`unable to get local issuer certificate` while curl and psql against the same box are fine.
 
 ### When one hostname will not verify
 

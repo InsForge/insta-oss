@@ -203,13 +203,25 @@ psql_roundtrip() {
 }
 
 # _aws ARGS... : the aws CLI if it is installed, else the official image over the host network.
+# The CA follows the same three-way shape as _curl, through the variable botocore actually reads.
+# The AWS CLI trusts neither NODE_EXTRA_CA_CERTS nor PGSSLROOTCERT nor --cacert: its trust store
+# is AWS_CA_BUNDLE, which the caller exports beside the other two. In the container the bundle has
+# to be mounted at the path that variable names, or it points at nothing.
 _aws() {
+  _aws_flags=''
+  if [ -z "${AWS_CA_BUNDLE:-}" ] && [ "${INSECURE:-0}" = "1" ]; then
+    _aws_flags='--no-verify-ssl'
+  fi
   if command -v aws >/dev/null 2>&1; then
-    aws "$@"
+    # shellcheck disable=SC2086
+    aws $_aws_flags "$@"
   else
+    # shellcheck disable=SC2086
     docker run --rm --network host \
       -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_ENDPOINT_URL_S3 \
-      -e AWS_DEFAULT_REGION=garage -v /tmp:/tmp amazon/aws-cli:2.15.0 "$@"
+      -e AWS_DEFAULT_REGION=garage -e AWS_CA_BUNDLE \
+      ${AWS_CA_BUNDLE:+-v $AWS_CA_BUNDLE:$AWS_CA_BUNDLE:ro} \
+      -v /tmp:/tmp amazon/aws-cli:2.15.0 $_aws_flags "$@"
   fi
 }
 
