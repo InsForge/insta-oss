@@ -292,18 +292,46 @@ sh install.sh --domain example.com --tls custom \
   --tls-key  /etc/instacloud/tls/wildcard.key
 ```
 
-The certificate must cover `*.<domain>` and, ideally, `<domain>` itself. Both files are mounted
-read-only into the edge and the daemon at the same paths, and the daemon presents the same
-certificate on the database lanes, so nothing anywhere asks for a per-hostname certificate.
+The certificate must cover `*.<domain>`, and the installer checks that before it starts anything:
+the PEM has to parse, the key has to match the certificate, it must not have expired, and it must
+cover `api.<domain>`, `console.<domain>` and a service hostname. A pair that cannot serve fails
+the install rather than leaving the edge crash-looping behind a success message. The
+post-install probe is part of that: the edge has to answer with **that** certificate before this
+prints anything reassuring.
+
+The **directory** holding the pair is mounted read-only into the edge and the daemon (the same
+path on both sides), not the two files, and the daemon presents the same certificate on the
+database lanes, so nothing anywhere asks for a per-hostname certificate. Keep the pair in a
+directory of its own: everything beside it is visible to both containers.
 
 What you take on:
 
 - **Renewal is yours, and the daemon will not let it fail silently.** Nothing renews a supplied
-  certificate. Replace the two files and run `docker compose -f /etc/instacloud/compose.yml
-  restart edge` (the daemon re-reads the file on the next handshake, so its lanes need no
-  restart). The daemon logs a warning at boot and every sweep once the certificate is inside 21
-  days, and `GET /healthz` carries the remaining lifetime unconditionally so you can alert on
-  your own margin:
+  certificate. Write the new pair into the same directory and move it over the old names, which
+  is what renewal tooling does:
+
+  ```bash
+  # your tool writes wild.crt.new / wild.key.new into /etc/instacloud/tls, then:
+  mv -f /etc/instacloud/tls/wild.crt.new /etc/instacloud/tls/wild.crt
+  mv -f /etc/instacloud/tls/wild.key.new /etc/instacloud/tls/wild.key
+  cd /etc/instacloud && docker compose --env-file instad.env restart edge
+  ```
+
+  The daemon needs nothing: it re-reads the file on its next handshake, and `healthz` follows on
+  its own beat. The edge needs its process restarted, because Caddy loads certificates when it
+  loads its config and does not watch the file. Nothing needs the containers RECREATED, which is
+  why the directory is what gets mounted: a bind-mounted FILE stays attached to the inode it
+  resolved at mount time, so a rename over it would be invisible inside the container and the
+  edge would keep serving the old certificate until it expired.
+
+  If your renewal tool keeps its output behind symlinks into another tree (certbot's
+  `live/<domain>` pointing at `archive/`), point `--tls-cert` at a plain directory instead and
+  copy the pair there in a deploy hook: the symlink targets are outside the mount and would not
+  resolve inside the containers.
+
+  The daemon logs a warning at boot and every few hours once the certificate is inside 21 days,
+  says something louder once it has expired, and `GET /healthz` carries the remaining lifetime
+  unconditionally so you can alert on your own margin:
 
   ```bash
   curl -s https://api.example.com/healthz

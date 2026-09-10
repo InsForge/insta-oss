@@ -376,6 +376,16 @@ served_serial() {
   openssl s_client -connect "127.0.0.1:443" -servername "$1" </dev/null 2>/dev/null \
     | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2
 }
+# `healthz` carries the supplied certificate's own notAfter, so this asks the daemon WHICH file
+# it is reading rather than trusting a log line. The renewal below has a different validity, so
+# the two dates distinguish the old certificate from the new one.
+healthz_matches_file() {
+  _na=$(curl -sS -k "https://api.$DOMAIN/healthz" 2>/dev/null | sed -n 's/.*"notAfter":"\([^"]*\)".*/\1/p')
+  [ -n "$_na" ] || return 1
+  _want=$(date -u -d "$(openssl x509 -in "$E2E_TLS_DIR/wild.crt" -noout -enddate | cut -d= -f2)" +%s 2>/dev/null) || return 1
+  _got=$(date -u -d "$_na" +%s 2>/dev/null) || return 1
+  [ "$_want" = "$_got" ]
+}
 
 ( cd "$ROOT" && INSTA_OSS_TLS=custom sh install.sh -y \
     --tls-cert "$E2E_TLS_DIR/wild.crt" --tls-key "$E2E_TLS_DIR/wild.key" ) 2>&1 | tee -a "$INSTALL_LOG"
@@ -422,6 +432,43 @@ if openssl s_client -help 2>&1 | grep -q 'starttls'; then
 else
   printf 'SKIP %s\n' "openssl has no -starttls: the database lane certificate check did not run" 1>&2
 fi
+
+# RENEWAL, done the way a renewal tool does it: write the new pair alongside and rename it over
+# the old name. This is the test that catches the mount being wrong. A file bind mount resolves to
+# an inode at mount time, so with the FILES mounted the containers keep reading the old
+# certificate after the rename and the documented procedure is a lie that expires with the
+# certificate. With the DIRECTORY mounted, the name is resolved through the mount on every open.
+openssl req -x509 -newkey rsa:2048 -sha256 -days 3 -nodes \
+  -keyout "$E2E_TLS_DIR/next.key" -out "$E2E_TLS_DIR/next.crt" \
+  -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
+  || FAIL "could not mint the renewal certificate"
+NEXT=$(openssl x509 -in "$E2E_TLS_DIR/next.crt" -noout -serial | cut -d= -f2)
+[ "$NEXT" != "$OURS" ] || FAIL "the renewal certificate has the same serial as the first one"
+chmod 600 "$E2E_TLS_DIR/next.key"
+mv -f "$E2E_TLS_DIR/next.crt" "$E2E_TLS_DIR/wild.crt"
+mv -f "$E2E_TLS_DIR/next.key" "$E2E_TLS_DIR/wild.key"
+
+# The DAEMON needs nothing: it re-stats the path per handshake, and with the directory mounted it
+# now resolves to the new file. `healthz` follows on its own beat.
+LANE_AFTER=""
+if openssl s_client -help 2>&1 | grep -q 'starttls'; then
+  LANE_AFTER=$(openssl s_client -connect "127.0.0.1:5432" -starttls postgres -servername "$PGHOST_NAME" </dev/null 2>/dev/null \
+    | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2)
+  [ "$LANE_AFTER" = "$NEXT" ] || FAIL "after the rename the pg lane still presents '$LANE_AFTER', not the renewed '$NEXT'"
+fi
+wait_for 90 healthz_matches_file || FAIL "healthz never reported the renewed certificate"
+OK "the daemon and its lanes pick up a renamed certificate with no restart"
+
+# The EDGE needs its process restarted (Caddy loads certificates at config load and does not
+# watch the file), and that is all it needs now: the mount does not have to be recreated.
+( cd /etc/instacloud && docker compose --env-file instad.env restart edge ) >/dev/null 2>&1 \
+  || FAIL "could not restart the edge"
+wait_for 90 curl_k_ok "https://api.$DOMAIN/healthz" || FAIL "the edge did not come back after the restart"
+[ "$(served_serial "api.$DOMAIN")" = "$NEXT" ] \
+  || FAIL "after a restart the edge still serves the old certificate: the documented renewal does not work"
+AFTER=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
+[ "$AFTER" = "$BEFORE" ] || FAIL "the renewal made something issue a certificate"
+OK "the edge serves the renewed certificate after a plain restart"
 
 # ...and back, because a box has to be able to leave this mode: the leftover paths in instad.env
 # are not a request nothing can serve, they are the previous install.
