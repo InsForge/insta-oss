@@ -1441,33 +1441,63 @@ export class Engine {
     })
   }
 
-  /** Remove a compute group: destroy its containers (and /data volumes) on every branch, unregister. */
-  async removeComputeService(projectId: string, name: string): Promise<Teardown> {
-    const project = this.getProject(projectId)
-    if (!project) throw new Error('project not found')
+  /** Remove a compute group from ONE branch, resolved exactly as its postgres, storage and managed
+   *  siblings resolve one: the qualifier on the id first, then `opts.branch`, then the default
+   *  (decision 49). A group is a project-level REGISTRATION, but what a branch carries is a
+   *  container and, with `--volume`, a `/data` directory of its own bytes, so sweeping every branch
+   *  destroyed main's container and deleted main's volume when the caller asked to drop the copy on
+   *  `feat` — with both the branch-qualified id and `?branch=feat` on the request.
+   *
+   *  The registration (the name, its volume record, its limits and always-on settings) is what
+   *  survives one branch's copy: it retires with the LAST branch that still runs the group, which
+   *  is also what makes removing a group that was never deployed anywhere unregister it. */
+  async removeComputeService(projectId: string, serviceId: string, opts: { branch?: string } = {}): Promise<Teardown> {
+    const { project, branch, sid } = this.removalTarget(projectId, serviceId, opts.branch)
+    const parsed = parseServiceId(sid)
     // A name no branch and no registration claims is a 404, not an empty teardown reporting the
     // successful removal of something that never existed (contract section 9).
+    if (parsed?.type !== 'compute') throw new Error('service not found')
+    const name = parsed.name
     if (!this.computeGroupNames(projectId).includes(name)) throw new Error('service not found')
     const vol = project.computeVolumes?.[name]
     const t = newTeardown()
-    for (const b of this.listBranches(projectId)) {
-      if (!b.apps[name]) continue
-      await count(t, () => docker(['rm', '-f', '-v', `io-${this.ref(project, b)}-app-${name}`]))
+    // Only this branch's copy. A branch that carries no container for the group has nothing to
+    // destroy here, and that is not a 404: the registration shows on every branch's list with a
+    // `runtime` of `none` until a deploy puts a container there (the divergence COMPATIBILITY
+    // records), so removing it from such a branch has to be accepted and count nothing.
+    if (branch.apps[name]) {
+      await count(t, () => docker(['rm', '-f', '-v', `io-${this.ref(project, branch)}-app-${name}`]))
       // WP4: the /data bytes are a directory under the data dir; remove it AFTER the container.
-      if (vol) await count(t, () => this.data.remove(this.layout().vol(this.ref(project, b), vol.id)))
+      if (vol) await count(t, () => this.data.remove(this.layout().vol(this.ref(project, branch), vol.id)))
       mutate((st) => {
-        delete st.branches[b.id].apps[name]
-        st.branches[b.id].bindings = (st.branches[b.id].bindings ?? []).filter((x) => x.target !== `compute/${name}`)
+        delete st.branches[branch.id].apps[name]
+        st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.target !== `compute/${name}`)
+      })
+      this.scheduler.forget([this.serviceKey(branch, sid)])                                          // WP3
+    }
+    // The custom domains bound to the group ON THIS BRANCH answered through the container that
+    // just went; another branch's stay, because its container still serves them.
+    this.releaseDomainsFor(projectId, branch.id, name)                                               // WP2
+    // The secrets bound to the group on the branch it was just removed from go with it, whether or
+    // not the shared registration can retire — the rule `retireRegistration` applies to the other
+    // three types, and for the same reason: `userSecretsFor` would otherwise hand them back as
+    // ordinary branch secrets, the credentials of a service that no longer exists there.
+    const source = `compute/${name}`
+    mutate((st) => {
+      st.userSecrets[projectId] = (st.userSecrets[projectId] ?? [])
+        .filter((u) => !(u.service === source && u.branch === branch.name))
+    })
+    if (!this.listBranches(projectId).some((b) => b.apps[name])) {
+      mutate((st) => {
+        const pr = st.projects[projectId]
+        pr.computeGroups = (pr.computeGroups ?? []).filter((g) => g !== name)
+        if (pr.computeVolumes) delete pr.computeVolumes[name]
+        if (pr.serviceSettings) delete pr.serviceSettings[`cp-${name}`]
+        st.userSecrets[projectId] = (st.userSecrets[projectId] ?? []).filter((u) => u.service !== source)
       })
     }
-    mutate((st) => {
-      const pr = st.projects[projectId]
-      pr.computeGroups = (pr.computeGroups ?? []).filter((g) => g !== name)
-      if (pr.computeVolumes) delete pr.computeVolumes[name]
-      if (pr.serviceSettings) delete pr.serviceSettings[`cp-${name}`]
-    })
     this.router.invalidate()
-    this.emit(projectId, null, 'resource', 'service.removed', { type: 'compute', name })
+    this.emit(projectId, branch.name, 'resource', 'service.removed', { type: 'compute', name })
     return t
   }
 

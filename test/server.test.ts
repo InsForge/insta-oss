@@ -314,6 +314,57 @@ test('services remove: compute, postgres and storage all tear down and report th
   expect((await app.inject({ method: 'DELETE', url: `/projects/${id}/services/cp-ghost` })).statusCode).toBe(404)
 })
 
+// The compute arm of the same rule (decision 49 + 50). A group's registration is project-level,
+// but its container and the bytes of its `/data` volume are per branch, so a remove on `feat`
+// that swept every branch destroyed main's container and deleted main's volume — a 200 answering
+// a request that carried the branch twice, in the qualified id and in `?branch`.
+test('services remove: a compute group goes from ONE branch; main keeps its container, its volume bytes and its row', async () => {
+  const id = await createProject()
+  expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'api', volumeGib: 5 })).statusCode).toBe(201)
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'api' })
+  expect((await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })).statusCode).toBe(201)
+  // The fork carries the group onto feat with a volume directory of its own.
+  expect(calls.some((c) => /^deploy\.volume:demo-feat:api:/.test(c))).toBe(true)
+
+  // The id the CLI would use: it picks the row from the branch-scoped list (decision 49).
+  const featRows = (await get(`/projects/${id}/services?branch=feat`)).json().services as Array<{ id: string; name: string }>
+  const featId = featRows.find((r) => r.name === 'api')!.id
+  expect(featId).toMatch(/^[0-9a-f-]{36}:cp-api$/)
+
+  calls.length = 0
+  vi.mocked(dockerFn).mockClear()
+  const del = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/${encodeURIComponent(featId)}?branch=feat` })
+  expect(del.statusCode).toBe(200)
+  // One container and one volume directory: feat's, and only feat's.
+  expect(del.json().teardown).toEqual({ destroyed: 2, failed: 0 })
+  const rm = vi.mocked(dockerFn).mock.calls.map((c) => (c[0] as string[]).join(' ')).filter((c) => c.startsWith('rm '))
+  expect(rm).toEqual(['rm -f -v io-demo-feat-app-api'])
+  const removed = calls.filter((c) => c.startsWith('data.remove:'))
+  expect(removed.some((c) => /\/vol\/demo-feat\//.test(c))).toBe(true)
+  expect(removed.some((c) => /\/vol\/demo-main\//.test(c))).toBe(false)
+
+  // main still runs the group, still lists it, and still owns the volume record.
+  const mainRows = (await get(`/projects/${id}/services?branch=main`)).json().services as Array<{ id: string; name: string; volume_gib: number | null }>
+  const onMain = mainRows.find((r) => r.name === 'api')
+  expect(onMain).toMatchObject({ id: 'cp-api', volume_gib: 5 })
+  expect((await get(`/projects/${id}/services/cp-api/volume`)).json())
+    .toEqual({ volume: { sizeGib: 5, mountPath: '/data' }, cap: { volumeGib: 100 } })
+  // ...and feat keeps the project-level registration in its list, with no container behind it,
+  // which is what an undeployed group looks like on any branch.
+  const after = (await get(`/projects/${id}/services?branch=feat`)).json().services as Array<{ name: string; runtime?: string }>
+  expect(after.find((r) => r.name === 'api')).toMatchObject({ runtime: 'none' })
+
+  // The registration retires only with the LAST carrier.
+  const last = await app.inject({ method: 'DELETE', url: `/projects/${id}/services/cp-api?branch=main` })
+  expect(last.statusCode).toBe(200)
+  expect(last.json().teardown).toEqual({ destroyed: 2, failed: 0 })
+  for (const b of ['main', 'feat']) {
+    const rows = (await get(`/projects/${id}/services?branch=${b}`)).json().services as Array<{ name: string }>
+    expect(rows.some((r) => r.name === 'api')).toBe(false)
+  }
+  expect((await get(`/projects/${id}/services/cp-api/volume`)).statusCode).toBe(404)
+})
+
 test('removing ONE of two storage services leaves the shared object store on the branch network', async () => {
   const id = await createProject()
   expect((await post(`/projects/${id}/services`, { type: 'storage', name: 'blobs' })).statusCode).toBe(201)

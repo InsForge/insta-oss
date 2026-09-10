@@ -97,7 +97,7 @@ test('a second deploy into the same branch mints n8n-2 beside the first, and bot
   expect(await keyOf('n8n')).not.toBe(await keyOf('n8n-2'))
 
   for (const group of ['n8n', 'n8n-2']) {
-    const t = await engine.removeComputeService(projectId, group)
+    const t = await engine.removeComputeService(projectId, `cp-${group}`)
     expect(t.failed).toBe(0)
   }
   expect((await engine.services(projectId, 'main')).filter((s) => s.type === 'compute')).toEqual([])
