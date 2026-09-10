@@ -2741,6 +2741,79 @@ test('a removal queued behind a rename refuses instead of destroying the renamed
   }
 })
 
+test('a branch delete whose container refuses to go keeps its data and its row', async () => {
+  // `count()` swallowed every teardown failure into a counter and carried on, so a FAILED
+  // `docker rm` was followed by deleting the bind-mounted data directory that container was
+  // still writing, and then by dropping the row that named both. Docker refusing a removal, or
+  // being unavailable, took the database files out from under a surviving Postgres.
+  const id = await sourceWithEveryStep()
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  const feat = Object.values(loadState().branches).find((b) => b.projectId === id && b.name === 'feat')!
+  calls.length = 0
+  const destroy = vi.spyOn(db, 'destroy').mockRejectedValueOnce(new Error('container is in use'))
+
+  const del = await del_(`/projects/${id}/branches/${feat.id}`)
+  destroy.mockRestore()
+
+  expect(del.statusCode).toBe(200)
+  expect(del.json().teardown.failed).toBeGreaterThan(0)
+  // The bytes stay: something is still mounting them.
+  expect(calls.filter((c) => c.startsWith('data.remove:'))).toEqual([])
+  // ...and so does the row, marked, so the survivor is still named by something and
+  // `insta branch delete` can retry exactly this demolition.
+  expect(loadState().branches[feat.id]?.status).toBe('cleanup-failed')
+})
+
+test('a project delete holds the keys of a branch that committed while it queued', async () => {
+  // The delete's key set is a snapshot; a branch that commits between it and the acquisition is
+  // in the re-read LIST but none of its keys were acquired, so a deploy on that branch could run
+  // straight through its teardown and leave a container behind. Closed by the same union
+  // re-drive `createBranch` uses, and this is the test that runs an operation ON that branch.
+  const id = await sourceWithEveryStep()
+  const paused = pauseBeforeCommit()
+  const create = post(`/projects/${id}/branches`, { name: 'feat' })
+  await paused.entered
+
+  // The delete snapshots now: main only, because feat's row does not exist yet.
+  let deleted = false
+  const del = engine.destroyProject(id).then((t) => { deleted = true; return t })
+  await settle()
+  expect(deleted).toBe(false)
+
+  // Pause the delete INSIDE feat's teardown, so the deploy below lands while it is running.
+  let enterTeardown!: () => void
+  let goTeardown!: () => void
+  const inTeardown = new Promise<void>((r) => { enterTeardown = r })
+  const teardownGate = new Promise<void>((r) => { goTeardown = r })
+  const realStDestroy = storage.destroy.bind(storage)
+  const stDestroy = vi.spyOn(storage, 'destroy').mockImplementation(async (bucket, network) => {
+    if (bucket.includes('demo-feat')) { enterTeardown(); await teardownGate }
+    return realStDestroy(bucket, network)
+  })
+
+  paused.release()
+  expect((await within(10_000, create, 'the branch create')).statusCode).toBe(201)
+  await within(10_000, inTeardown, 'the teardown of feat')
+
+  let deployed = false
+  const deploy = post(`/projects/${id}/deploy`, { image: 'app:2', port: 3000, group: 'web', branch: 'feat' })
+    .then((r) => { deployed = true; return r })
+  await settle()
+  // Without the re-drive this deploy runs INSIDE the teardown, on a branch being demolished.
+  expect(deployed).toBe(false)
+
+  goTeardown()
+  await within(10_000, del, 'the project delete')
+  const answer = await within(10_000, deploy, 'the deploy')
+  paused.restore()
+  stDestroy.mockRestore()
+
+  // It ran after the teardown, found nothing, and built nothing.
+  expect(answer.statusCode).toBeGreaterThanOrEqual(400)
+  expect(calls.filter((c) => c.startsWith('deploy:demo-feat:web:app:2'))).toEqual([])
+  expect(Object.values(loadState().branches).filter((b) => b.projectId === id).map((b) => b.name)).toEqual([])
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))

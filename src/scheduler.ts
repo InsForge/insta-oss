@@ -247,6 +247,18 @@ export class Scheduler {
     return this.withOp(keys, fn)
   }
 
+  /** Is this container still there? Evidence, not assumption: `gone` only when docker ANSWERED
+   *  and the container was not in the answer, `unknown` when it could not answer at all. The
+   *  teardown paths delete bind-mounted bytes only on a `gone`, because deleting the files a
+   *  surviving container is still writing is the one mistake there is no recovering from. */
+  async containerPresence(container: string): Promise<'present' | 'gone' | 'unknown'> {
+    try {
+      return (await this.runtime.containers()).has(container) ? 'present' : 'gone'
+    } catch {
+      return 'unknown'
+    }
+  }
+
   /** True while any operation holds or waits on the key (the sweep's in-flight test). */
   private busy(key: ServiceKey): boolean {
     return (this.ops.get(key)?.count ?? 0) > 0 || this.wakes.has(key) || this.sleeping.has(key)

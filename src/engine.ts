@@ -126,6 +126,27 @@ async function networkState(network: string): Promise<'present' | 'missing' | 'u
   }
 }
 
+/** Remove a container and PROVE it is gone before anything that depended on it is deleted.
+ *
+ *  `count()` turns every failure into a counter and lets execution carry on, which on the
+ *  teardown paths meant a FAILED `docker rm` was followed by deleting the bind-mounted data
+ *  directory that container was still writing, and then by dropping the only row that named
+ *  either of them. Docker being unavailable, or refusing a removal, took the database files out
+ *  from under a surviving Postgres and left nothing to retry with.
+ *
+ *  So the removal is not the evidence: the probe after it is, three ways like the network and
+ *  fingerprint probes (`gone` only when docker ANSWERED and the container was not in the answer).
+ *  Only `gone` returns true, and only a true return may delete the bytes or the row. */
+async function removeContainer(sched: { containerPresence(c: string): Promise<'present' | 'gone' | 'unknown'> }, t: Teardown, container: string, remove: () => Promise<unknown>): Promise<boolean> {
+  let failure: string | undefined
+  try { await remove() } catch (e) { failure = e instanceof Error ? e.message : String(e) }
+  const state = await sched.containerPresence(container)
+  if (state === 'gone') { t.destroyed++; return true }
+  t.failed++
+  console.warn(`container ${container} is ${state === 'unknown' ? 'in an unknown state (docker could not answer)' : 'still there'} after its removal${failure ? `: ${failure}` : ''}; its data is left in place and its row is kept`)
+  return false
+}
+
 /** A teardown step whose SUCCESS is not a provider object the summary counts -- decision 50 counts
  *  containers, buckets and directories, and neither the branch network nor the object store's
  *  detach from it is one of those -- but whose FAILURE still means the branch is not gone.
@@ -2275,13 +2296,30 @@ export class Engine {
    *  After the containers: data directories (WP4), scheduler keys (WP3), custom domains (WP2). */
   private async teardownBranch(project: Project, b: Branch, t: Teardown): Promise<void> {
     const ref = this.ref(project, b)
-    await count(t, () => this.compute.destroy(ref))
+    // Every container this branch owns, so what follows can be gated on them ACTUALLY being
+    // gone rather than on the removal call having returned.
+    const survivors: string[] = []
+    const prove = async (container: string, remove: () => Promise<unknown>): Promise<void> => {
+      if (!(await removeContainer(this.scheduler, t, container, remove))) survivors.push(container)
+    }
+    const groups = Object.keys(b.apps ?? {})
+    if (groups.length) {
+      // One `compute.destroy` takes the whole branch's apps, so it is proved per container.
+      let removed = false
+      const once = async (): Promise<void> => { if (!removed) { removed = true; await this.compute.destroy(ref) } }
+      for (const g of groups) await prove(appContainerName(ref, g), once)
+    } else {
+      await count(t, () => this.compute.destroy(ref))
+    }
     // Only what this branch CARRIES: services are branch-scoped, so a registration another branch
     // materialised has no container, no bucket and no bytes here, and destroying its derived name
     // would count a provider object that never existed into the teardown summary.
     const dbs = this.dbList(project.id).filter((d) => this.carries(project, b, d, 'postgres'))
     const stores = this.stList(project.id).filter((x) => this.carries(project, b, x, 'storage'))
-    for (const d of dbs) await count(t, () => this.db.destroy(this.pgContainer(project, b, d.id)))
+    for (const d of dbs) {
+      const c = this.pgContainer(project, b, d.id)
+      await prove(c, () => this.db.destroy(c))
+    }
     for (const x of stores) await count(t, () => this.storage.destroy(this.bucketOf(project, b, x.id), b.network))
     // The object store is ONE container for the whole box, attached to this branch's network: it is
     // detached once, after every bucket on the network is gone (a per-bucket detach would strand the
@@ -2293,15 +2331,26 @@ export class Engine {
     // still attached, and that IS counted.
     if (this.storage.detachFrom) await countFailure(t, `detach the object store from ${b.network}`, () => this.storage.detachFrom!(b.network))
     const managed = this.managedList(project.id).filter((m) => this.carries(project, b, m, 'managed'))
-    for (const m of managed) await count(t, () => this.managedDb.destroy(managedContainerName(ref, m.type, m.name)))
+    for (const m of managed) {
+      const c = managedContainerName(ref, m.type, m.name)
+      await prove(c, () => this.managedDb.destroy(c))
+    }
     await countFailure(t, `remove network ${b.network}`, () => removeNetwork(b.network))
-    // WP4: the branch's bytes, after every container that held them. A remove failure is counted and
-    // never fails the delete (an unreadable directory must not wedge `insta branch delete`).
-    for (const root of this.layout().branchRoots(ref)) {
-      await count(t, () => this.data.remove(root).catch((e) => {
-        console.warn(`could not remove ${root}: ${e instanceof Error ? e.message : String(e)}`)
-        throw e
-      }))
+    // WP4: the branch's bytes, after every container that held them, and ONLY when every one of
+    // those containers is proven gone. These are bind mounts: deleting them under a container
+    // that is still running takes the files out from under it, and a `docker rm` that failed or
+    // a docker that could not answer is exactly when that happens. A remove failure of its own
+    // is counted and never fails the delete (an unreadable directory must not wedge
+    // `insta branch delete`).
+    if (survivors.length) {
+      console.warn(`not removing the data of branch "${b.name}": ${survivors.join(', ')} ${survivors.length === 1 ? 'is' : 'are'} still there or unaccounted for`)
+    } else {
+      for (const root of this.layout().branchRoots(ref)) {
+        await count(t, () => this.data.remove(root).catch((e) => {
+          console.warn(`could not remove ${root}: ${e instanceof Error ? e.message : String(e)}`)
+          throw e
+        }))
+      }
     }
     const ids = [...dbs.map((d) => d.id), ...managed.map((m) => m.id), ...Object.keys(b.apps).map((g) => `cp-${g}`)]
     this.scheduler.forget(ids.map((sid) => this.serviceKey(b, sid)))                                          // WP3
@@ -2321,13 +2370,26 @@ export class Engine {
       // The row as it stands INSIDE the lock, not the snapshot the keys were built from: a
       // deploy or a create that was ahead of this in the queue has since written to it, and
       // tearing down the snapshot would miss whatever it added (`freshRemoval`'s rule, one level
-      // up). The keys are the snapshot's, which is the gap the docstring above records.
+      // up). The KEYS are still the snapshot's, and here that is sound rather than a gap: every
+      // operation that can add a service or a group to this branch takes `branchOp(b)` too, so
+      // none of them can have run since, and one that was in flight held it before this did.
       const { project: live, branch: row } = this.freshRemoval(projectId, branchId, branchId, 'branch delete')
       const t = newTeardown()
       await this.teardownBranch(live, row, t)
-      mutate((s) => { delete s.branches[branchId] })
+      // The row goes only when the demolition all went. Dropping it over a container that is
+      // still there, or over bytes that could not be removed, leaves resources holding ports,
+      // RAM and disk with nothing naming them: invisible to `branch list`, to project delete and
+      // to the operator, and never retried. `unwindBranch` has kept the row on that outcome
+      // since round nine; a deliberate `branch delete` owes the same, and `insta branch delete`
+      // run again retries exactly this demolition.
+      if (t.failed === 0) {
+        mutate((s) => { delete s.branches[branchId] })
+        this.emit(projectId, row.name, 'resource', 'branch.deleted', { teardown: t })
+      } else {
+        mutate((s) => { if (s.branches[branchId]) s.branches[branchId].status = CLEANUP_FAILED })
+        this.emit(projectId, row.name, 'resource', 'branch.cleanupFailed', { teardown: t })
+      }
       this.router.invalidate()
-      this.emit(projectId, b.name, 'resource', 'branch.deleted', { teardown: t })
       return t
     })
   }
@@ -2338,36 +2400,54 @@ export class Engine {
     const branches = this.listBranches(projectId)
     // The PROJECT key plus every branch's keys, in one sorted acquisition (never one branch at a
     // time: that is the ordering a concurrent multi-branch operation can deadlock against). The
-    // project key is what makes the LIST below complete: a branch create that has not committed
-    // its row yet is in no branch list, so its keys cannot be acquired here, and without a key
-    // covering the project the delete would queue on the SOURCE branch, wait for the create, and
-    // then remove the project while the clone it never saw kept its containers, its network and
-    // its bytes. `createProject` and `createBranch` hold the same key, so no branch of this
-    // project can come into existence while this runs.
+    // project key stops a branch coming into existence while this runs, since `createProject`
+    // and `createBranch` both hold it.
     //
-    // KNOWN GAP, stated rather than papered over: the list is complete, the KEYS are not. A
-    // branch that committed its row between the snapshot and the acquisition is torn down here
-    // without its own `branchOp` or service keys ever being held, so a `deploy`, a lifecycle op
-    // or a traffic wake on that branch can race the teardown and leave a container behind. Both
-    // reviewers graded it a Suggestion and it stays open deliberately: the obvious remedy is to
-    // acquire the late branch's keys while already holding this one, which is exactly the second
-    // acquisition the `branchOp` docstring forbids, and the alternative (re-driving one sorted
-    // acquisition over the union) is a change to an acquisition path that this round is not the
-    // moment for. It needs a project delete racing a branch create AND an operation landing on
-    // the new branch, and `DELETE /projects/:id` is govern-gated to `approve` by default.
-    return this.withOp([this.projectOp(project), ...branches.flatMap((b) => this.branchKeys(project, b))], async () => {
-      const t = newTeardown()
-      // Re-read under the lock rather than trusting the pre-lock snapshot: the rows may have
-      // moved (a rename, a create that finished just before we got in, a branch delete that beat
-      // us to one), and what must not survive this call is every branch the state has NOW.
-      for (const b of this.listBranches(projectId)) {
-        await this.teardownBranch(project, b, t)
-        mutate((s) => { delete s.branches[b.id] })
+    // It does not, on its own, make the KEYS complete: a branch that committed its row between
+    // this snapshot and the acquisition is in the re-read list but its `branchOp` and service
+    // keys were never acquired, so a deploy, a lifecycle op or a traffic wake on that branch
+    // could run straight through its teardown and leave a container behind. That is closed the
+    // same way `createBranch` closes it: the needed set is recomputed under the lock and, if it
+    // is not a subset of what was acquired, the whole acquisition is released and RE-DRIVEN over
+    // the union before anything is torn down. One sorted acquisition per round, never a nested
+    // one, and nothing has been destroyed when a round is abandoned.
+    let keys = [this.projectOp(project), ...branches.flatMap((b) => this.branchKeys(project, b))]
+    for (let round = 1; ; round++) {
+      const settled = new Set(keys)
+      const out = await this.withOp([...settled], async (): Promise<{ teardown: Teardown } | { union: ServiceKey[] }> => {
+        // Re-read under the lock rather than trusting the pre-lock snapshot: the rows may have
+        // moved (a rename, a create that finished just before we got in, a branch delete that
+        // beat us to one), and what must not survive this call is every branch the state has NOW.
+        const live = this.listBranches(projectId)
+        const needed = [this.projectOp(project), ...live.flatMap((b) => this.branchKeys(project, b))]
+        if (!needed.every((k) => settled.has(k))) return { union: [...new Set([...settled, ...needed])] }
+        const t = newTeardown()
+        let kept = false
+        for (const b of live) {
+          const before = t.failed
+          await this.teardownBranch(project, b, t)
+          // Same rule as `destroyBranch`: a row goes only when its demolition all went, so a
+          // container or a directory that refused is still named by something.
+          if (t.failed === before) mutate((s) => { delete s.branches[b.id] })
+          else {
+            kept = true
+            mutate((s) => { if (s.branches[b.id]) s.branches[b.id].status = CLEANUP_FAILED })
+            this.emit(projectId, b.name, 'resource', 'branch.cleanupFailed', { teardown: t })
+          }
+        }
+        // ...and the project row outlives a branch row that outlived its teardown, or the branch
+        // would point at a project that is gone, which is the orphan this all exists to prevent.
+        if (!kept) mutate((s) => { delete s.projects[projectId] })
+        else mutate((s) => { if (s.projects[projectId]) s.projects[projectId].status = CLEANUP_FAILED })
+        this.router.invalidate()
+        return { teardown: t }
+      })
+      if ('teardown' in out) return out.teardown
+      if (round >= CREATE_LOCK_ROUNDS) {
+        throw new Error(`project delete could not settle its lock set after ${CREATE_LOCK_ROUNDS} rounds: branches are being created or changed concurrently, retry the delete`)
       }
-      mutate((s) => { delete s.projects[projectId] })
-      this.router.invalidate()
-      return t
-    })
+      keys = out.union
+    }
   }
 
   // ---- observability (docker + SQL backed; cloud response shapes) ----
@@ -3112,7 +3192,8 @@ export class Engine {
    *  the create unwinds itself, which is why this is left rather than closed: the alternative is
    *  the union re-drive `createBranch` runs, and adding a second re-driving acquisition to a
    *  path that also holds the provision chain is a change to make deliberately, not at the end
-   *  of a round. `destroyProject` carries the same shape and the same note. */
+   *  of a round. (`destroyProject` had the same shape and no longer does: it re-drives its
+   *  acquisition over the union, which is the remedy this one is declining for now.) */
   private renameKeys(projectId: string, serviceId: string): ServiceKey[] {
     return this.listBranches(projectId).flatMap((b) => [this.branchOp(b), this.serviceKey(b, serviceId)])
   }
