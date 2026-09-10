@@ -167,7 +167,21 @@ export class LocalPostgres implements DatabaseAdapter {
    *  live branch row still references is left alone. */
   private async clearOrphan(t: PgTarget, opts: ProvisionOpts): Promise<void> {
     if (opts.referenced?.(t.container)) return
-    if (await containerExists(t.container, this.exec)) {
+    // This function DELETES a Postgres data directory, so it runs only on evidence. The evidence
+    // is docker's answer about the container of that name, and a probe that could not answer is
+    // not evidence of anything: `unreadable` means the daemon is not talking, or the inspect
+    // failed for a reason that says nothing about what is there. `referenced` cannot carry the
+    // whole weight here -- it is absent on every path where the caller believes it is creating
+    // the service -- so an unanswered probe aborts the sweep before the container removal AND
+    // before the bytes. What follows is then a create that fails on a non-empty directory or a
+    // name already in use, which is a loud, recoverable outcome; deleting a live branch's
+    // database because docker hiccuped is neither.
+    const status = await containerStatus(t.container, this.exec)
+    if (status === UNREADABLE) {
+      console.warn(`cannot tell whether ${t.container} is an orphan: docker could not report its state; leaving it and ${t.dataDir ?? 'its data directory'} untouched`)
+      return
+    }
+    if (status !== null) {
       console.warn(`removing orphan from an interrupted fork: container ${t.container}`)
       await this.exec(['rm', '-f', '-v', t.container]).catch(() => { /* raced away */ })
     }
@@ -388,12 +402,6 @@ async function inspectField(container: string, format: string, exec: DockerExec)
 
 function containerStatus(container: string, exec: DockerExec = docker): Promise<string | null> {
   return inspectField(container, '{{.State.Status}}', exec)
-}
-
-/** Anything but a definite "not there" counts as still there: an orphan sweep that skipped a
- *  container because the probe was unreadable would clone over an interrupted attempt. */
-async function containerExists(container: string, exec: DockerExec = docker): Promise<boolean> {
-  return (await containerStatus(container, exec)) !== null
 }
 
 /** One RUN of a container, as `docker inspect` reports it: the status plus the two timestamps

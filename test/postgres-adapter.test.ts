@@ -399,6 +399,24 @@ test('a sleeping source is cloned as it lies: no CHECKPOINT, and the copy still 
   expect(ops).toEqual(['clone:/data/pg/demo-main-db->/data/pg/demo-feat-db'])
 })
 
+test('an unreadable probe never deletes a data directory it cannot prove is an orphan', async () => {
+  // `clearOrphan` removes a container AND recursively deletes a Postgres data directory. The
+  // only evidence it has is docker's answer about that container, and `referenced` is absent on
+  // every path where the caller believes it is creating the service. So a probe that could not
+  // answer must stop the sweep before both, not after the container half.
+  const { calls, exec } = stubDocker({
+    on: (args) => (args[0] === 'inspect' ? new Error('Cannot connect to the Docker daemon at unix:///var/run/docker.sock') : undefined),
+  })
+  const { ops, data } = stubData({ isEmptyOrMissing: async () => false })
+  const pg = new LocalPostgres({ cfg: cfgWith('basebackup'), data, docker: exec })
+
+  await expect(pg.fork(src(), dst())).rejects.toThrow()
+
+  // Nothing of the destination was destroyed on an unanswered question.
+  expect(ops.filter((o) => o.startsWith('remove:'))).toEqual([])
+  expect(calls.filter((a) => a[0] === 'rm')).toEqual([])
+})
+
 test('a probe that cannot answer is not evidence the source is at rest', async () => {
   // `docker inspect` failing says nothing about the container unless dockerd SAYS there is no
   // such container. A daemon that is not talking, a template error, a permission failure: read
