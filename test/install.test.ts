@@ -285,6 +285,16 @@ test('the ssh advisory names every port sshd listens on, before the enable', () 
   const none = run(['--print-ssh-advice'], { IO_SSH_PORTS: ' ' })
   expect(none).toMatch(/ufw allow OpenSSH\s+# or your own SSH port/)
   expect(none.indexOf('OpenSSH')).toBeLessThan(none.indexOf('ufw enable'))
+  // SOCKET ACTIVATION, the Ubuntu 24.04 default and the case a fallback chain gets wrong: the
+  // documented way to move SSH is `systemctl edit ssh.socket` with ListenStream=2222, which
+  // leaves sshd_config at `#Port 22`, so `sshd -T` says 22 and the socket says 2222. Both are
+  // printed and the disagreement is stated rather than one of them being asserted.
+  expect(both).toMatch(/sshd config and the socket unit report DIFFERENT ports/)
+  expect(moved).not.toMatch(/DIFFERENT ports/)
+  // ...and the detection really does read all three sources, the socket unit among them.
+  expect(script).toMatch(/systemctl show ssh\.socket sshd\.socket --value -p Listen/)
+  expect(script).toMatch(/sshd -T/)
+  expect(script).toMatch(/ss -tlnpH/)
   // And the arm that prints it says whose job SSH is.
   expect(script).toMatch(/this script adds no SSH rule/)
   expect(script).toMatch(/ssh_advice \| while read/)

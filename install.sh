@@ -436,9 +436,20 @@ ssh_ports() {
     printf '%s\n' "$IO_SSH_PORTS" | tr -s ', ' '\n' | grep -E '^[0-9]+$' | sort -un
     return 0
   fi
-  _sp=$( { sshd -T 2>/dev/null || /usr/sbin/sshd -T 2>/dev/null; } | awk '/^port /{print $2}' )
-  [ -n "$_sp" ] || _sp=$(ss -tlnp 2>/dev/null | awk '/sshd/{n=split($4,a,":"); print a[n]}')
-  printf '%s\n' "$_sp" | grep -E '^[0-9]+$' | sort -un
+  # The UNION of three sources, never one with the others as fallbacks. `sshd -T` reports what
+  # the CONFIG says, and on a socket-activated box (the Ubuntu 24.04 default) that is not what
+  # the machine is listening on: the documented way to move SSH there is
+  # `systemctl edit ssh.socket` with ListenStream=2222, which leaves sshd_config at `#Port 22`.
+  # A fallback chain therefore asserts 22 on exactly the hardened boxes that moved it, because
+  # `sshd -T` always answers where sshd is installed and the later sources never run. With
+  # `Accept=no` systemd owns the listener too, so the `ss` source is process-filtered on sshd
+  # only as a third opinion, not as the socket-activation answer.
+  {
+    { sshd -T 2>/dev/null || /usr/sbin/sshd -T 2>/dev/null; } | awk '/^port /{print $2}'
+    systemctl show ssh.socket sshd.socket --value -p Listen 2>/dev/null |
+      sed -n 's/.*:\([0-9][0-9]*\)[[:space:]]*(Stream).*/\1/p'
+    ss -tlnpH 2>/dev/null | awk '/sshd/{n=split($4,a,":"); print a[n]}'
+  } | grep -E '^[0-9]+$' | sort -un
 }
 # The advisory the no-firewall arm prints: one allow per port sshd is ACTUALLY on, before the
 # enable, because an `ufw enable` that names the wrong port is the same lockout as one that names
@@ -447,12 +458,19 @@ ssh_ports() {
 # app profile and spells out the substitution.
 ssh_advice() {
   _adv=$(ssh_ports)
-  if [ -n "$_adv" ]; then
-    for _a in $_adv; do
-      printf '    ufw allow %s/tcp          # sshd is listening on %s: allow it BEFORE the enable\n' "$_a" "$_a"
-    done
-  else
+  _advn=$(printf '%s\n' "$_adv" | grep -c '^[0-9]' || true)
+  if [ -z "$_adv" ]; then
     printf '    ufw allow OpenSSH           # or your own SSH port: allow it BEFORE the enable\n'
+  else
+    # Where the sources DISAGREE, every candidate is printed and the disagreement is stated.
+    # Advice that admits uncertainty cannot lock anyone out; advice that asserts the wrong port
+    # can, and that is the whole failure this detection exists to avoid.
+    if [ "$_advn" -gt 1 ]; then
+      printf '    # sshd config and the socket unit report DIFFERENT ports. Allow every one you use:\n'
+    fi
+    for _a in $_adv; do
+      printf '    ufw allow %s/tcp          # ssh listens on %s: allow it BEFORE the enable\n' "$_a" "$_a"
+    done
   fi
   printf '    ufw allow 80,443,5432/tcp   # the edge and the postgres lane\n'
   printf '    ufw enable\n'
