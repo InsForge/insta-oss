@@ -10,7 +10,7 @@ import { createServer as createHttpServer, request as httpRequest, type Incoming
 import { connect as netConnect, createServer as createNetServer, type Server as NetServer } from 'node:net'
 import { connect as tlsConnect, type SecureContext } from 'node:tls'
 import { Router } from '../src/router'
-import { Certs, findCertFiles } from '../src/router/certs'
+import { Certs, findCertFiles, suppliedCert, warnExpiring, CERT_WARN_DAYS } from '../src/router/certs'
 import { createPgLane, errorResponse, PG_ERRORS } from '../src/router/pg'
 import { createSniLane } from '../src/router/tls'
 import { buildTable, type Route } from '../src/router/table'
@@ -1077,4 +1077,38 @@ test('a SUPPLIED certificate is served for every host, and nothing is ever issue
   expect(await gone.certFor('api.router.test')).toBeNull()
   expect(gone.certExists('api.router.test')).toBe(false)
   expect(issued).toBe(1)
+})
+
+
+test('a supplied certificate reports what it has left, and says so under three weeks', () => {
+  // The one certificate in this stack nothing renews. This cannot renew it either and does not
+  // try: it makes the number visible, so the failure is not announced by a browser.
+  const crt = join('test', 'fixtures', 'local', 'router.test', 'router.test.crt')
+  const cert = suppliedCert(crt)!
+  expect(cert.path).toBe(crt)
+  expect(Date.parse(cert.notAfter)).toBeGreaterThan(0)
+  expect(cert.daysLeft).toBe(Math.floor(cert.secondsLeft / 86_400))
+
+  // No file, an unreadable file and a file that is not a certificate all answer null, which is
+  // what `healthz` then omits -- itself worth alerting on, and never a false reassurance.
+  expect(suppliedCert(null)).toBeNull()
+  expect(suppliedCert('/nope/missing.crt')).toBeNull()
+  expect(suppliedCert(join('test', 'fixtures', 'local', 'router.test', 'router.test.key'))).toBeNull()
+
+  // The warning is a function of the clock, so it is tested against a clock: the fixture's own
+  // notAfter, moved backwards and forwards around the threshold.
+  const at = Date.parse(cert.notAfter)
+  const said: string[] = []
+  const log = (m: string): void => { said.push(m) }
+  const day = 86_400_000
+  expect(warnExpiring(suppliedCert(crt, at - (CERT_WARN_DAYS + 1) * day), log)).toBe(false)
+  expect(warnExpiring(suppliedCert(crt, at - (CERT_WARN_DAYS - 1) * day), log)).toBe(true)
+  expect(said[0]).toMatch(/expires in \d+ days? /)
+  expect(said[0]).toContain('Nothing renews a supplied certificate')
+  expect(warnExpiring(suppliedCert(crt, at + day), log)).toBe(true)
+  expect(said[1]).toContain('EXPIRED')
+  expect(said[1]).toContain('restart the edge')
+  // Nothing supplied: nothing said, in every other TLS mode.
+  expect(warnExpiring(null, log)).toBe(false)
+  expect(said).toHaveLength(2)
 })

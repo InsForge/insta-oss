@@ -298,11 +298,20 @@ certificate on the database lanes, so nothing anywhere asks for a per-hostname c
 
 What you take on:
 
-- **Renewal is yours.** Nothing renews a supplied certificate, and nothing here watches its
-  expiry. Replace the two files and run `docker compose -f /etc/instacloud/compose.yml restart
-  edge` (the daemon re-reads the file on the next handshake, so its lanes need no restart). Put a
-  reminder in whatever renews your other certificates; if it expires, browsers and `psql` will
-  say so before anything here does.
+- **Renewal is yours, and the daemon will not let it fail silently.** Nothing renews a supplied
+  certificate. Replace the two files and run `docker compose -f /etc/instacloud/compose.yml
+  restart edge` (the daemon re-reads the file on the next handshake, so its lanes need no
+  restart). The daemon logs a warning at boot and every sweep once the certificate is inside 21
+  days, and `GET /healthz` carries the remaining lifetime unconditionally so you can alert on
+  your own margin:
+
+  ```bash
+  curl -s https://api.example.com/healthz
+  # {"ok":true,"certificate":{"notAfter":"2027-03-01T00:00:00.000Z","daysLeft":172,"secondsLeft":14860800}}
+  ```
+
+  The `certificate` object is absent in the other TLS modes, and absent if the file cannot be
+  read, which is worth alerting on too.
 - **A custom domain outside your wildcard has no certificate.** `insta compute domain` still
   attaches the hostname and routes it, and `insta compute check-domain` reports it as `pending`
   rather than `ready` because the certificate does not cover it. Add it as a SAN to the

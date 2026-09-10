@@ -28,6 +28,7 @@ import { TemplateCatalog } from './templates/catalog'
 // ---- end region WP5 ----
 // ---- region WP2 (router) ----
 import { laneReallocator, Router } from './router'
+import { suppliedCert, warnExpiring } from './router/certs'
 import { engineRouterDeps, routerUpstream } from './router/deps'
 import { buildTable } from './router/table'
 // ---- end region WP2 ----
@@ -187,6 +188,16 @@ async function main(): Promise<void> {
   // which `engine.booting` kept the sweep out of).
   engine.scheduler.start()
   // ---- end region WP3 (start) ----
+
+  // A supplied certificate (`--tls custom`) is the one certificate in this stack that nothing
+  // renews, so it is the one whose expiry would otherwise be announced by a browser. Said at
+  // boot and then on the sweep's own beat, and only when it is close: the number itself is on
+  // `healthz` unconditionally for a monitor to read. This starts nothing and changes nothing.
+  if (cfg.tls.certFile) {
+    warnExpiring(suppliedCert(cfg.tls.certFile))
+    const timer = setInterval(() => { warnExpiring(suppliedCert(cfg.tls.certFile)) }, cfg.sleep.sweepSec * 1000)
+    timer.unref?.()
+  }
 
   if (cfg.mode === 'server') {
     console.log(`instad ${cfg.version} mode=server api=${cfg.apiUrl} console=${cfg.consoleUrl} data=${cfg.dataDir}`)

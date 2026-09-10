@@ -827,6 +827,28 @@ test('a rename whose UNDO also fails names what is stuck, and the retry finishes
   expect(rows.find((x) => x.name === 'api')?.runtime).not.toBe('none')
 })
 
+test('healthz carries what a supplied certificate has left, and nothing when there is none', async () => {
+  // `--tls custom` is the only mode whose certificate nothing renews, so `healthz` carries the
+  // remaining lifetime unconditionally: a monitor alerts on the margin its operator wants rather
+  // than on the 21 days the daemon warns at. Absent in every other mode.
+  expect((await get('/healthz')).json()).toEqual({ ok: true })
+
+  const crt = join('test', 'fixtures', 'local', 'router.test', 'router.test.crt')
+  const base = testConfig()
+  const cfg = { ...base, tls: { ...base.tls, certFile: crt, keyFile: crt } }
+  const withCert = buildServer(makeEngine(cfg), cfg)
+  const body = (await withCert.inject({ method: 'GET', url: '/healthz' })).json() as {
+    ok: boolean; certificate?: { notAfter: string; daysLeft: number; secondsLeft: number }
+  }
+  expect(body.ok).toBe(true)
+  expect(Date.parse(body.certificate!.notAfter)).toBeGreaterThan(0)
+  expect(body.certificate!.daysLeft).toBe(Math.floor(body.certificate!.secondsLeft / 86_400))
+
+  // A path that cannot be read reports NOTHING rather than a reassuring number.
+  const broken = { ...base, tls: { ...base.tls, certFile: '/nope/missing.crt', keyFile: '/nope/missing.key' } }
+  expect((await buildServer(makeEngine(broken), broken).inject({ method: 'GET', url: '/healthz' })).json()).toEqual({ ok: true })
+})
+
 test('a volume delete on a SUSPENDED service succeeds, and leaves it suspended', async () => {
   // `removeServiceVolumeLocked` redeployed each branch without the mount and then re-asserted
   // the recorded intent itself -- but `deploy()` already re-asserts it, with the exact verb, on

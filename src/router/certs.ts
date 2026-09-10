@@ -4,6 +4,7 @@
 // Caddy's: `<certDir>/<issuer>/<host>/<host>.crt` and `.key`.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { X509Certificate } from 'node:crypto'
 import { connect as tlsConnect, createSecureContext, type SecureContext } from 'node:tls'
 import type { Config } from '../config'
 import { isHostname } from './table'
@@ -25,6 +26,48 @@ export function findCertFiles(certDir: string, host: string): CertFiles | null {
     }
   }
   return null
+}
+
+/** What a SUPPLIED certificate has left, or null when there is none to read.
+ *
+ *  `--tls custom` is the only mode where a certificate is not renewed by whatever issued it, so
+ *  it is the only mode with a failure nobody is told about: the certificate expires and browsers
+ *  and `psql` are the first to say so. This cannot renew it, and it deliberately does not try.
+ *  What it can do is make the number visible -- so `healthz` carries it unconditionally and a
+ *  monitor can alert on whatever margin that operator wants, rather than on one we picked. */
+export interface SuppliedCert { path: string; notAfter: string; secondsLeft: number; daysLeft: number }
+
+/** Days at which the daemon starts saying so on its own. Three weeks is the useful margin for a
+ *  90-day certificate; an operator with a one-year corporate wildcard reads the number out of
+ *  `healthz` and picks their own. */
+export const CERT_WARN_DAYS = 21
+
+export function suppliedCert(certFile: string | null, now = Date.now()): SuppliedCert | null {
+  if (!certFile) return null
+  try {
+    const validTo = new X509Certificate(readFileSync(certFile)).validTo
+    const at = Date.parse(validTo)
+    if (!Number.isFinite(at)) return null
+    const secondsLeft = Math.round((at - now) / 1000)
+    return { path: certFile, notAfter: new Date(at).toISOString(), secondsLeft, daysLeft: Math.floor(secondsLeft / 86_400) }
+  } catch {
+    return null
+  }
+}
+
+/** One line, at boot and on the sweep's beat, when a supplied certificate is close to its end or
+ *  past it. Answers whether anything was said, so a caller can rate-limit it. */
+export function warnExpiring(cert: SuppliedCert | null, log: (m: string) => void = (m) => console.warn(m)): boolean {
+  if (!cert) return false
+  if (cert.secondsLeft <= 0) {
+    log(`the TLS certificate ${cert.path} EXPIRED on ${cert.notAfter}: every browser and psql client is now refusing this box. Replace both files and restart the edge (docker compose -f /etc/instacloud/compose.yml restart edge)`)
+    return true
+  }
+  if (cert.daysLeft <= CERT_WARN_DAYS) {
+    log(`the TLS certificate ${cert.path} expires in ${cert.daysLeft} day${cert.daysLeft === 1 ? '' : 's'} (${cert.notAfter}). Nothing renews a supplied certificate: replace both files and restart the edge`)
+    return true
+  }
+  return false
 }
 
 /** Production issuer: a handshake to the edge with `servername` makes Caddy issue on demand (or
