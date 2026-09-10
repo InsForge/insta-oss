@@ -55,6 +55,12 @@ export function suppliedCert(certFile: string | null, now = Date.now()): Supplie
   }
 }
 
+/** How often the same expiry warning may be repeated. The daemon says it once per boot and then
+ *  at most this often: a warning that repeats every sweep is tens of thousands of identical lines
+ *  between the day it starts and the day the certificate is replaced, which is a log nobody reads
+ *  and therefore a warning nobody sees. */
+export const WARN_EVERY_MS = 6 * 60 * 60 * 1000
+
 /** One line, at boot and on the sweep's beat, when a supplied certificate is close to its end or
  *  past it. Answers whether anything was said, so a caller can rate-limit it. */
 export function warnExpiring(cert: SuppliedCert | null, log: (m: string) => void = (m) => console.warn(m)): boolean {
@@ -68,6 +74,67 @@ export function warnExpiring(cert: SuppliedCert | null, log: (m: string) => void
     return true
   }
   return false
+}
+
+/** The supplied certificate as `/healthz` serves it: read on a TIMER, answered from memory.
+ *
+ *  `/healthz` is unauthenticated and public, and load balancers, monitors, the installer's own
+ *  wait loop and (measured on a live box) credential scanners poll it continuously. A
+ *  `readFileSync` per request is then a handle anyone can pull on to stall the event loop, and a
+ *  slow or remote mount makes each read arbitrarily long: the same class as the pre-auth
+ *  database-lane denial of service this project closed once already, reintroduced through a
+ *  health check. So the FILE READ happens on the daemon's own beat and the request does
+ *  arithmetic on a cached `notAfter`, which costs nothing per hit however fast the polling is.
+ *
+ *  The clock is still live: `current()` recomputes what is left every time it is asked, so a
+ *  cached read never serves a stale day count. And a refresh that CANNOT read the file drops the
+ *  cached value rather than keeping the last good one, because "absent when the file cannot be
+ *  read" has to survive a file that was readable and stopped being readable. */
+export class SuppliedCertWatch {
+  private cached: { path: string; notAfterMs: number } | null = null
+  private lastWarnAt = 0
+  private readonly read: (path: string, now: number) => SuppliedCert | null
+  private readonly log: (m: string) => void
+
+  constructor(
+    private readonly certFile: string | null,
+    opts: { read?: (path: string, now: number) => SuppliedCert | null; log?: (m: string) => void } = {},
+  ) {
+    this.read = opts.read ?? ((path, now) => suppliedCert(path, now))
+    this.log = opts.log ?? ((m) => console.warn(m))
+    this.refresh()
+  }
+
+  /** One read. Called at boot and on the daemon's beat, never from a request. */
+  refresh(now = Date.now()): void {
+    if (!this.certFile) { this.cached = null; return }
+    const cert = this.read(this.certFile, now)
+    // Unreadable now: the old value goes with it. A certificate nobody can read is not a
+    // certificate with 172 days left.
+    this.cached = cert ? { path: cert.path, notAfterMs: Date.parse(cert.notAfter) } : null
+  }
+
+  /** What is left, from the cache, with the arithmetic done now. No I/O. */
+  current(now = Date.now()): SuppliedCert | null {
+    if (!this.cached) return null
+    const secondsLeft = Math.round((this.cached.notAfterMs - now) / 1000)
+    return {
+      path: this.cached.path,
+      notAfter: new Date(this.cached.notAfterMs).toISOString(),
+      secondsLeft,
+      daysLeft: Math.floor(secondsLeft / 86_400),
+    }
+  }
+
+  /** The warning, at most once per `WARN_EVERY_MS`, and always once per boot. `warnExpiring`'s
+   *  answer is what stamps the limiter, so a beat that had nothing to say does not start the
+   *  clock and the first beat that does say something is not swallowed. */
+  maybeWarn(now = Date.now()): boolean {
+    if (this.lastWarnAt !== 0 && now - this.lastWarnAt < WARN_EVERY_MS) return false
+    const said = warnExpiring(this.current(now), this.log)
+    if (said) this.lastWarnAt = now
+    return said
+  }
 }
 
 /** Production issuer: a handshake to the edge with `servername` makes Caddy issue on demand (or

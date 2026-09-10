@@ -28,7 +28,7 @@ import { TemplateCatalog } from './templates/catalog'
 // ---- end region WP5 ----
 // ---- region WP2 (router) ----
 import { laneReallocator, Router } from './router'
-import { suppliedCert, warnExpiring } from './router/certs'
+import { SuppliedCertWatch } from './router/certs'
 import { engineRouterDeps, routerUpstream } from './router/deps'
 import { buildTable } from './router/table'
 // ---- end region WP2 ----
@@ -174,7 +174,10 @@ async function main(): Promise<void> {
   engine.router = router
   // ---- end region WP2 (router) ----
 
-  const app = buildServer(engine, cfg, { serverFactory: (handler) => { router.attach(handler); return router.httpServer } })
+  // One watch: `/healthz` answers from it and the beat below refreshes it, so the public
+  // endpoint never reads the file itself.
+  const certWatch = new SuppliedCertWatch(cfg.tls.certFile)
+  const app = buildServer(engine, cfg, { certWatch, serverFactory: (handler) => { router.attach(handler); return router.httpServer } })
   await app.listen({ host: cfg.listenHost, port: cfg.port })
 
   // ---- region WP2 (start) ----
@@ -194,8 +197,8 @@ async function main(): Promise<void> {
   // boot and then on the sweep's own beat, and only when it is close: the number itself is on
   // `healthz` unconditionally for a monitor to read. This starts nothing and changes nothing.
   if (cfg.tls.certFile) {
-    warnExpiring(suppliedCert(cfg.tls.certFile))
-    const timer = setInterval(() => { warnExpiring(suppliedCert(cfg.tls.certFile)) }, cfg.sleep.sweepSec * 1000)
+    certWatch.maybeWarn()
+    const timer = setInterval(() => { certWatch.refresh(); certWatch.maybeWarn() }, cfg.sleep.sweepSec * 1000)
     timer.unref?.()
   }
 

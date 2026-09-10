@@ -9,7 +9,7 @@ import fastifyStatic from '@fastify/static'
 import { registerAuth } from './auth'
 import { loadConfig, type Config } from './config'
 import { LifecycleFailedError } from './engine'
-import { suppliedCert } from './router/certs'
+import { SuppliedCertWatch } from './router/certs'
 import type { Engine, Teardown } from './engine'
 import * as govern from './govern'
 import { isManagedDbType, parseServiceId } from './manageddb'
@@ -44,7 +44,15 @@ export function isApiPath(url: string): boolean {
 
 /** `serverFactory` is forwarded straight into Fastify() so the router (WP2) can hand it the shared
  *  listener; undefined until then. `cfg` is the boot config (tests pass their own). */
-export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { serverFactory?: FastifyServerFactory } = {}): FastifyInstance {
+export function buildServer(
+  engine: Engine,
+  cfg: Config = loadConfig(),
+  opts: { serverFactory?: FastifyServerFactory; certWatch?: SuppliedCertWatch } = {},
+): FastifyInstance {
+  // main.ts passes the watch it refreshes on the daemon's beat; a server built without one (local
+  // mode, tests) reads once at construction and answers from that. Either way `/healthz` does no
+  // file I/O per request, which is what matters for a public unauthenticated endpoint.
+  const certWatch = opts.certWatch ?? new SuppliedCertWatch(cfg.tls.certFile)
   // 'loopback', not `true`. The only proxy in front of the daemon is the edge, on 127.0.0.1, and it
   // APPENDS the peer to X-Forwarded-For. `trustProxy: true` trusts the whole chain and takes its
   // LEFTMOST entry, which is whatever the remote client wrote, so `req.ip` was forgeable from
@@ -90,7 +98,7 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   // says so on its own under CERT_WARN_DAYS. Absent in every other mode, and absent when the file
   // cannot be read, which is itself worth alerting on.
   app.get('/healthz', async () => {
-    const cert = suppliedCert(cfg.tls.certFile)
+    const cert = certWatch.current()
     return { ok: true, ...(cert ? { certificate: { notAfter: cert.notAfter, daysLeft: cert.daysLeft, secondsLeft: cert.secondsLeft } } : {}) }
   })
   app.get('/orgs', async () => ({ orgs: [LOCAL_ORG] }))

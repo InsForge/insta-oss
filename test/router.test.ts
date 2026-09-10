@@ -10,7 +10,7 @@ import { createServer as createHttpServer, request as httpRequest, type Incoming
 import { connect as netConnect, createServer as createNetServer, type Server as NetServer } from 'node:net'
 import { connect as tlsConnect, type SecureContext } from 'node:tls'
 import { Router } from '../src/router'
-import { Certs, findCertFiles, suppliedCert, warnExpiring, CERT_WARN_DAYS } from '../src/router/certs'
+import { Certs, findCertFiles, suppliedCert, warnExpiring, SuppliedCertWatch, CERT_WARN_DAYS, WARN_EVERY_MS } from '../src/router/certs'
 import { createPgLane, errorResponse, PG_ERRORS } from '../src/router/pg'
 import { createSniLane } from '../src/router/tls'
 import { buildTable, type Route } from '../src/router/table'
@@ -1111,4 +1111,81 @@ test('a supplied certificate reports what it has left, and says so under three w
   // Nothing supplied: nothing said, in every other TLS mode.
   expect(warnExpiring(null, log)).toBe(false)
   expect(said).toHaveLength(2)
+})
+
+
+test('the certificate watch reads on its own beat, not per request', () => {
+  // `/healthz` is unauthenticated and polled continuously (load balancers, monitors, the
+  // installer's wait loop, and on a live box the scanners). A `readFileSync` per request is a
+  // handle anyone can pull on to stall the event loop, and a slow mount makes each read
+  // arbitrarily long: the same class as the pre-auth lane denial of service closed in #97,
+  // reintroduced through a health check.
+  const crt = join('test', 'fixtures', 'local', 'router.test', 'router.test.crt')
+  const real = suppliedCert(crt)!
+  const at = Date.parse(real.notAfter)
+  let reads = 0
+  const read = (path: string, now: number): ReturnType<typeof suppliedCert> => { reads++; return suppliedCert(path, now) }
+
+  const watch = new SuppliedCertWatch(crt, { read })
+  expect(reads).toBe(1)                                       // the constructor's own
+  for (let i = 0; i < 50; i++) expect(watch.current()).not.toBeNull()
+  expect(reads).toBe(1)                                       // ...and not one more
+  watch.refresh()
+  expect(reads).toBe(2)                                       // the beat reads
+
+  // The clock stays live even though the file is not re-read: what is left is computed per call.
+  const far = watch.current(at - 40 * 86_400_000)!
+  const near = watch.current(at - 5 * 86_400_000)!
+  expect(far.daysLeft).toBe(40)
+  expect(near.daysLeft).toBe(5)
+  expect(reads).toBe(2)
+})
+
+test('a certificate that STOPS being readable goes absent, and does not keep its last value', () => {
+  // The property that had to survive the caching: a cached 172 days is not a certificate. This is
+  // the file being replaced badly, unmounted, or chmod'ed away between two beats.
+  const crt = join('test', 'fixtures', 'local', 'router.test', 'router.test.crt')
+  let readable = true
+  const watch = new SuppliedCertWatch(crt, { read: (path, now) => (readable ? suppliedCert(path, now) : null) })
+  expect(watch.current()).not.toBeNull()
+  readable = false
+  watch.refresh()
+  expect(watch.current()).toBeNull()
+  // ...and it comes back when the file does.
+  readable = true
+  watch.refresh()
+  expect(watch.current()).not.toBeNull()
+})
+
+test('the expiry warning is said once, then stays quiet for hours', () => {
+  // Fired every sweep it is tens of thousands of identical lines between the day it starts and
+  // the day the certificate is replaced, which is a log nobody reads and so a warning nobody
+  // sees. `warnExpiring`'s boolean exists for this and was being discarded.
+  const crt = join('test', 'fixtures', 'local', 'router.test', 'router.test.crt')
+  const at = Date.parse(suppliedCert(crt)!.notAfter)
+  const said: string[] = []
+  const watch = new SuppliedCertWatch(crt, { read: (path, now) => suppliedCert(path, now), log: (m) => { said.push(m) } })
+
+  // Comfortably in date: nothing said, and nothing stamped, so the first real warning is not
+  // swallowed by a limiter that had already started.
+  const wellBefore = at - 60 * 86_400_000
+  for (let i = 0; i < 10; i++) expect(watch.maybeWarn(wellBefore + i * 30_000)).toBe(false)
+  expect(said).toEqual([])
+
+  // Inside the window: once, then quiet across a couple of hours of sweeps (240 of them).
+  const inside = at - (CERT_WARN_DAYS - 1) * 86_400_000
+  expect(watch.maybeWarn(inside)).toBe(true)
+  for (let i = 1; i <= 240; i++) expect(watch.maybeWarn(inside + i * 30_000), `sweep ${i}`).toBe(false)
+  expect(said).toHaveLength(1)
+
+  // ...and again once the interval has passed.
+  expect(watch.maybeWarn(inside + WARN_EVERY_MS + 1)).toBe(true)
+  expect(said).toHaveLength(2)
+
+  // Past the date it is louder, and obeys the same limiter.
+  const after = at + WARN_EVERY_MS + 2
+  expect(watch.maybeWarn(after)).toBe(true)
+  expect(said[2]).toContain('EXPIRED')
+  for (let i = 1; i <= 240; i++) expect(watch.maybeWarn(after + i * 30_000)).toBe(false)
+  expect(said).toHaveLength(3)
 })

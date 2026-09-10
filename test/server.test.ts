@@ -31,6 +31,7 @@ import { Engine } from '../src/engine'
 import type { ComputeAdapter, StorageAdapter } from '../src/types'
 import { mutate } from '../src/state'
 import { calls, data, db, compute, storage, managed, makeEngine, resetFakes, runtime, serverConfig, testConfig } from './fakes'
+import { SuppliedCertWatch, suppliedCert } from '../src/router/certs'
 
 let app: ReturnType<typeof buildServer>
 /** The engine `app` is built on: tests that spy on an engine method need THIS instance. */
@@ -847,6 +848,17 @@ test('healthz carries what a supplied certificate has left, and nothing when the
   // A path that cannot be read reports NOTHING rather than a reassuring number.
   const broken = { ...base, tls: { ...base.tls, certFile: '/nope/missing.crt', keyFile: '/nope/missing.key' } }
   expect((await buildServer(makeEngine(broken), broken).inject({ method: 'GET', url: '/healthz' })).json()).toEqual({ ok: true })
+
+  // ...and the endpoint does NO file I/O per request. It is unauthenticated and polled
+  // continuously, so a read per hit is a handle anyone can pull on to stall the event loop.
+  let reads = 0
+  const watch = new SuppliedCertWatch(crt, { read: (path, at) => { reads++; return suppliedCert(path, at) } })
+  const polled = buildServer(makeEngine(cfg), cfg, { certWatch: watch })
+  expect(reads).toBe(1)
+  for (let i = 0; i < 25; i++) {
+    expect((await polled.inject({ method: 'GET', url: '/healthz' })).statusCode).toBe(200)
+  }
+  expect(reads).toBe(1)
 })
 
 test('a volume delete on a SUSPENDED service succeeds, and leaves it suspended', async () => {
