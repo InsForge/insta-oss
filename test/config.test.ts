@@ -4,8 +4,29 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { loadConfig, isDaemonHost, CONFIG_KEYS } from '../src/config'
+import { suppliedFiles } from '../src/router/certs'
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'io-cfg-'))
+
+test('a supplied certificate is the PAIR: half of one is refused, naming the missing half', () => {
+  // With only the certificate set, the router served no supplied certificate and went on
+  // issuing per hostname, while `/healthz` reported a supplied certificate: the endpoint
+  // asserted the exact property the box was not providing, in the field an operator would use
+  // to confirm it. The installer refuses this combination; a hand-edited `instad.env` does not
+  // go through the installer, so it is refused here too, at boot, with the missing key named.
+  expect(() => loadConfig({ INSTA_OSS_TLS_CERT_FILE: '/etc/tls/full.pem' }, []))
+    .toThrow(/INSTA_OSS_TLS_KEY_FILE is required when the other is set/)
+  expect(() => loadConfig({ INSTA_OSS_TLS_KEY_FILE: '/etc/tls/key.pem' }, []))
+    .toThrow(/INSTA_OSS_TLS_CERT_FILE is required when the other is set/)
+
+  // Both halves load, and neither half is not a supplied certificate at all.
+  const both = loadConfig({ INSTA_OSS_TLS_CERT_FILE: '/etc/tls/full.pem', INSTA_OSS_TLS_KEY_FILE: '/etc/tls/key.pem' }, [])
+  expect(both.tls).toMatchObject({ certFile: '/etc/tls/full.pem', keyFile: '/etc/tls/key.pem' })
+  expect(suppliedFiles(both)).toEqual({ crt: '/etc/tls/full.pem', key: '/etc/tls/key.pem' })
+  const neither = loadConfig({}, [])
+  expect(neither.tls).toMatchObject({ certFile: null, keyFile: null })
+  expect(suppliedFiles(neither)).toBeNull()
+})
 
 test('local defaults: 127.0.0.1:8080, ~/.insta-oss, no auth, localhost domain, scheduler on', () => {
   const cfg = loadConfig({}, [])

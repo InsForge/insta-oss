@@ -86,7 +86,6 @@ export interface Config {
   }
 }
 
-/** Every INSTA_OSS_* key loadConfig reads (test/install.test.ts asserts install.sh writes each). */
 /** A supplied certificate is the PAIR or nothing. Half of one is refused rather than ignored:
  *  with only the certificate set, the router would go on issuing per-hostname certificates while
  *  `/healthz` reported a supplied one, so the endpoint would assert the very property the box
@@ -101,6 +100,7 @@ function suppliedPair(certFile: string, keyFile: string): { certFile: string | n
   return { certFile: null, keyFile: null }
 }
 
+/** Every INSTA_OSS_* key loadConfig reads (test/install.test.ts asserts install.sh writes each). */
 export const CONFIG_KEYS: readonly string[] = [
   'INSTA_OSS_MODE', 'INSTA_OSS_VERSION', 'INSTA_OSS_LISTEN_HOST', 'INSTA_OSS_PORT', 'INSTA_OSS_DATA_DIR', 'INSTA_OSS_STATE',
   'INSTA_OSS_GARAGE_CONFIG', 'INSTA_OSS_S3_HOST_ENDPOINT', 'INSTA_OSS_UI_DIST', 'INSTA_OSS_TEMPLATES_DIR', 'INSTA_OSS_DOMAIN',

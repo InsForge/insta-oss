@@ -32,7 +32,7 @@ import { Engine } from '../src/engine'
 import type { ComputeAdapter, StorageAdapter } from '../src/types'
 import { mutate } from '../src/state'
 import { calls, data, db, compute, storage, managed, makeEngine, resetFakes, runtime, serverConfig, testConfig } from './fakes'
-import { SuppliedCertWatch, suppliedCert } from '../src/router/certs'
+import { SuppliedCertWatch, suppliedCert, suppliedFiles } from '../src/router/certs'
 
 let app: ReturnType<typeof buildServer>
 /** The engine `app` is built on: tests that spy on an engine method need THIS instance. */
@@ -849,6 +849,17 @@ test('healthz carries what a supplied certificate has left, and nothing when the
   // A path that cannot be read reports NOTHING rather than a reassuring number.
   const broken = { ...base, tls: { ...base.tls, certFile: '/nope/missing.crt', keyFile: '/nope/missing.key' } }
   expect((await buildServer(makeEngine(broken), broken).inject({ method: 'GET', url: '/healthz' })).json()).toEqual({ ok: true })
+
+  // HALF a pair is not a supplied certificate. With only the certificate configured the router
+  // serves nothing supplied and goes on issuing per hostname, so an endpoint that reported one
+  // would assert the exact property the box was not providing -- in the field an operator reads
+  // to confirm it. Config refuses this combination outright; the endpoint is gated on the pair
+  // as well, because the two must never disagree about what the box is doing.
+  for (const half of [{ certFile: crt, keyFile: null }, { certFile: null, keyFile: crt }]) {
+    const cfgHalf = { ...base, tls: { ...base.tls, ...half } }
+    expect(suppliedFiles(cfgHalf)).toBeNull()
+    expect((await buildServer(makeEngine(cfgHalf), cfgHalf).inject({ method: 'GET', url: '/healthz' })).json()).toEqual({ ok: true })
+  }
 
   // ...and the endpoint does NO file I/O per request. It is unauthenticated and polled
   // continuously, so a read per hit is a handle anyone can pull on to stall the event loop.
