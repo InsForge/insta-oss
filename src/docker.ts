@@ -77,3 +77,38 @@ export function docker(args: string[], opts: { input?: Buffer; mergeStderr?: boo
     p.stdin.end(opts.input ?? undefined)
   })
 }
+
+/** Docker's own "there is no such container", in both spellings the CLI uses: the client-side
+ *  `Error: No such object: <name>` (Docker 27, measured) and dockerd's `No such container`. */
+export const NO_SUCH_CONTAINER = /no such (?:object|container)/i
+
+/**
+ * Remove a container and answer only when it is GONE, or raise.
+ *
+ * The one piece of safety logic this codebase must not have two copies of. Every teardown above
+ * it deletes bind-mounted data and drops the row that names it once this returns, so treating a
+ * failed removal as an already-absent one erases the files a still-running container is writing.
+ * Three ways, as everywhere else: dockerd saying there is no such container is absence; an
+ * ambiguous error is re-checked with a probe; anything the probe cannot clear raises.
+ *
+ * The Postgres and managed adapters both used to carry this, regex and probe included, which is
+ * exactly where a future fix lands in one copy and not the other.
+ */
+export async function destroyContainer(container: string, exec: DockerExec = docker): Promise<void> {
+  try {
+    await exec(['rm', '-f', '-v', container])
+    return
+  } catch (e) {
+    if (NO_SUCH_CONTAINER.test(e instanceof Error ? e.message : String(e))) return
+    try {
+      await exec(['inspect', '-f', '{{.State.Status}}', container])
+    } catch (probe) {
+      // Only dockerd's own not-found clears it. A probe that could not answer says nothing.
+      if (NO_SUCH_CONTAINER.test(probe instanceof Error ? probe.message : String(probe))) return
+    }
+    throw e
+  }
+}
+
+/** The docker seam both adapters inject in tests: the CLI in production, a stub in a unit test. */
+export type DockerExec = (args: string[], opts?: { input?: Buffer; mergeStderr?: boolean }) => Promise<Buffer>

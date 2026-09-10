@@ -16,7 +16,7 @@
 //   - the password is minted per instance (decision 18): a lane on a public interface must never
 //     carry a constant.
 import { randomBytes } from 'node:crypto'
-import { docker } from '../docker'
+import { docker, destroyContainer, NO_SUCH_CONTAINER } from '../docker'
 import { forkMethod, probedCapabilities, sharedDataDir } from '../datadir'
 import { loadConfig } from '../config'
 import { NoReflinkError } from '../types'
@@ -160,13 +160,7 @@ export class LocalPostgres implements DatabaseAdapter {
    *  ways as everywhere else in this adapter: dockerd saying there is no such container is
    *  absence, anything else is not, and the caller is told. */
   async destroy(container: string): Promise<void> {
-    try {
-      await this.exec(['rm', '-f', '-v', container])
-    } catch (e) {
-      if (NO_SUCH_CONTAINER.test(e instanceof Error ? e.message : String(e))) return
-      if ((await containerStatus(container, this.exec)) === null) return
-      throw e
-    }
+    return destroyContainer(container, this.exec)
   }
 
   async rename(container: string, to: string): Promise<void> {
@@ -407,10 +401,6 @@ function limitArgs(limits?: ServiceLimits): string[] {
   return ['--cpus', String(limits.cpu), '--memory', `${limits.memoryMb}m`, '--memory-swap', `${limits.memoryMb}m`]
 }
 
-/** Docker's own "there is no such container", in both spellings the CLI uses: the client-side
- *  `Error: No such object: <name>` (Docker 27, measured on the box) and dockerd's
- *  `No such container: <name>`. Nothing else is evidence of absence. */
-const NO_SUCH_CONTAINER = /no such (?:object|container)/i
 /** A probe that could not answer at all: a daemon that is not talking, a template error, a
  *  permission failure. It is NOT `gone`, and no caller may read it as "there is no writer". */
 const UNREADABLE = 'unreadable'

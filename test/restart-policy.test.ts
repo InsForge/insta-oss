@@ -4,7 +4,13 @@
 import { test, expect, vi } from 'vitest'
 
 const calls: string[][] = []
-vi.mock('../src/docker', () => ({ docker: vi.fn(async (args: string[]) => { calls.push(args); return Buffer.from('') }) }))
+// The REAL module with only `docker` replaced: it also exports the shared container
+// destroy-and-probe helper (and the not-found pattern it classifies with), and a factory that
+// returns just `docker` makes those undefined for every importer.
+vi.mock('../src/docker', async (orig) => ({
+  ...(await orig<typeof import('../src/docker')>()),
+  docker: vi.fn(async (args: string[]) => { calls.push(args); return Buffer.from('') }),
+}))
 
 import { DockerCompute } from '../src/adapters/compute'
 import { LocalPostgres, type DockerExec } from '../src/adapters/postgres'

@@ -137,7 +137,61 @@ test('a reflink fork writes no replication line at all: nothing streams', async 
   expect(indexOfMatch(calls, 'pg_basebackup')).toBe(-1)
 })
 
-// ---- readiness (#34): the probe that must not answer early -------------------------------------
+// ---- destroy: the layer where the evidence was being destroyed ---------------------------------
+//
+// The adapters are where a failed removal used to become an already-absent one, and every
+// teardown above them deletes bind-mounted data and drops the row that names it once destroy
+// returns. Nothing bound this layer, which is the vacuous-coverage shape this review has hit
+// twice already, so each of the three answers is pinned here and in test/manageddb-destroy.
+
+test('destroy: a container docker says is not there is gone, quietly', async () => {
+  const { calls, exec } = stubDocker({
+    on: (args) => (args[0] === 'rm' ? new Error('Error: No such object: io-demo-feat-pg-db') : undefined),
+  })
+  const { data } = stubData()
+  const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
+
+  await expect(pg.destroy('io-demo-feat-pg-db')).resolves.toBeUndefined()
+  // Dockerd answered, so no probe was needed.
+  expect(calls.filter((a) => a[0] === 'inspect')).toEqual([])
+})
+
+test('destroy: an ambiguous failure is cleared by the probe when the container is really gone', async () => {
+  const { calls, exec } = stubDocker({
+    on: (args) => (args[0] === 'rm' ? new Error('Error response from daemon: conflict, in progress') : undefined),
+  })
+  const { data } = stubData()
+  const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
+
+  // The stub answers `inspect` for no container, i.e. `No such object`, so absence is confirmed.
+  await expect(pg.destroy('io-demo-feat-pg-db')).resolves.toBeUndefined()
+  expect(calls.filter((a) => a[0] === 'inspect')).toHaveLength(1)
+})
+
+test('destroy: a removal that failed with the container STILL THERE raises', async () => {
+  const { exec } = stubDocker({
+    running: ['io-demo-feat-pg-db'],
+    on: (args) => (args[0] === 'rm' ? new Error('Error response from daemon: container is in use') : undefined),
+  })
+  const { data } = stubData()
+  const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
+
+  await expect(pg.destroy('io-demo-feat-pg-db')).rejects.toThrow(/container is in use/)
+})
+
+test('destroy: a probe that cannot answer is not absence either', async () => {
+  const { exec } = stubDocker({
+    on: (args) => new Error(args[0] === 'rm'
+      ? 'Error response from daemon: conflict, in progress'
+      : 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock'),
+  })
+  const { data } = stubData()
+  const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
+
+  await expect(pg.destroy('io-demo-feat-pg-db')).rejects.toThrow(/conflict, in progress/)
+})
+
+// ---- readiness (#34): the probe that must not answer early -------------------------------------// ---- readiness (#34): the probe that must not answer early -------------------------------------
 
 test('readiness needs the row a live server sends: an empty answer is not ready', async () => {
   // The image's initdb phase runs a temporary server on the unix socket, so `select 1` over
