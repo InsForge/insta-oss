@@ -53,8 +53,20 @@ A wake asks for room BEFORE it starts anything. It works out what the waking ser
 the least recently active candidates until that much is free above the floor, and starts the
 container only then, so the victim's memory is released before the new one claims any. When there
 is already room this costs nothing, because the check returns before it reads or stops anything.
-When there is not, the wake pays one stop grace, which is the moment that price is worth paying. If
-no room can be made it says so rather than starting into the floor.
+When there is not, the wake pays one stop grace PER SERVICE it has to sleep, because it evicts in
+a loop until there is room, and that is the moment that price is worth paying: a slow wake beats
+a box in swap-free reclaim.
+
+Two outcomes here are not the same, and it matters which one you are looking at:
+
+- **Nothing left to evict.** Every other service is always-on, answering a request right now, or
+  inside its wake-protection window. The scheduler logs that once and the wake PROCEEDS,
+  deliberately: refusing would make a service permanently unreachable on a box that is merely
+  full, and the kernel is the better last resort than a daemon that will not start anything.
+  This is what you will see on a small box whose services genuinely do not fit together.
+- **Eviction itself failed.** A stop that errors, not an empty pool. That is a fault in making
+  room rather than an absence of room, so the wake fails with `could not make room to wake
+  <container>` instead of starting into a floor it could not clear.
 
 What the wake path cannot do is see a service that grows AFTER it starts, and that is the limit
 worth planning around. The sweeper's own pass is every 30 seconds, so a service that balloons
