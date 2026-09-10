@@ -2450,6 +2450,32 @@ test('branch merge creates on the target every service the source has and it lac
   expect(calls.filter((c) => c.startsWith('db.fork:'))).toEqual([])
 })
 
+// A branch reserves ONE lane port per database it will actually run. Reserving one per project
+// registration eats the configured range on ports nothing will ever listen on, and leaves the
+// surplus behind as lane state no branch row supersedes.
+test('branch create reserves lanes for the services it will carry, not every registration', async () => {
+  // Six ports in the whole range, so an over-reservation cannot hide.
+  const engine = makeEngine(testConfig({ INSTA_OSS_LANE_PORT_RANGE: '20000-20005' }))
+  const { project } = await engine.createProject('demo')
+  await engine.addDbService(project.id, 'db')
+  const feat = await engine.createBranch(project.id, 'feat')           // carries `db` only
+  for (const name of ['a', 'b', 'c']) await engine.addDbService(project.id, name)   // main only
+  // Reading the bundle allocates main's three later lanes, so five of the six ports are live.
+  engine.secrets(project.id, 'main')
+  const main = engine.listBranches(project.id).find((b) => b.isDefault)!
+  expect(Object.keys(main.lanes ?? {}).sort()).toEqual(['pg-a', 'pg-b', 'pg-c', 'pg-db'])
+  expect(Object.keys(feat.lanes ?? {})).toEqual(['pg-db'])
+
+  // A branch cut from feat carries one database, so it needs the one port that is left. Asking
+  // for four is `no free lane port left in 20000-20005` on a create that needs one.
+  const clone = await engine.createBranch(project.id, 'feat2', 'feat')
+  expect(Object.keys(clone.lanes ?? {})).toEqual(['pg-db'])
+  const ports = new Set(engine.listBranches(project.id).flatMap((b) => Object.values(b.lanes ?? {})))
+  expect(ports.size).toBe(6)
+  // Nothing surplus is left claimed: the row supersedes every reservation the create took.
+  expect(loadState().laneReservations ?? {}).toEqual({})
+})
+
 // Every branch-scoped READ owes the same answer the list gives: a registration is the project's
 // namespace entry for a NAME, never proof that this branch has the thing. Advertising a service
 // the branch does not carry hands out a domain, an endpoint and a health verdict for something

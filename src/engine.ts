@@ -314,7 +314,12 @@ export class Engine {
     try {
       for (const d of dbs) this.assertHostFree(this.labelFor('postgres', d.name, ref))
       for (const m of managedRegs) this.assertHostFree(this.labelFor(m.type, m.name, ref))
-      lanes = this.allocLanes(project, branchId, this.branchServiceIds(project))                          // WP2
+      // From the FILTERED lists, not every registration the project has: a branch cut from a
+      // source that carries a subset gets lanes for the subset. Reserving one per registration
+      // both eats a small `INSTA_OSS_LANE_PORT_RANGE` (the create fails with "no free lane port
+      // left" on ports nothing will ever listen on) and leaves the surplus behind as lane state
+      // the branch row never supersedes.
+      lanes = this.allocLanes(project, branchId, [...dbs.map((d) => d.id), ...managedRegs.map((m) => m.id)])  // WP2
     } catch (e) {
       // Nothing is provisioned yet, so the ref claim is the only thing to give back — and it has to
       // be, or the retry that follows fixing the collision would refuse itself as "in flight".
@@ -468,7 +473,8 @@ export class Engine {
     // containers do not exist yet, so there is nothing for this lock to exclude — while holding
     // them would mean the nested deploy has to re-enter the same key.
     const branchId = randomUUID()
-    const ids = this.branchServiceIds(project)
+    // What the SOURCE carries is exactly what the clone will carry, so one list keys both sides.
+    const ids = this.carriedServiceIds(project, source)
     const keys = [
       ...ids.map((sid) => `${source.id}:${sid}`),
       ...Object.keys(source.apps).map((g) => `${source.id}:cp-${g}`),
@@ -2611,7 +2617,7 @@ export class Engine {
   /** A clone's databases sleep until first use: they were provisioned and readied, and nothing has
    *  asked them for anything yet. Always-on services stay up. */
   async sleepNewBranch(project: Project, branch: Branch): Promise<void> {
-    for (const sid of this.branchServiceIds(project)) {
+    for (const sid of this.carriedServiceIds(project, branch)) {
       if (this.effectiveAlwaysOn(project, branch, sid)) continue
       await this.sleep(this.serviceKey(branch, sid), 'branch-create').catch(() => false)
     }
@@ -3079,9 +3085,14 @@ export class Engine {
     return { bucket: branch.bucket, env: branch.s3 ?? {}, public: branch.storagePublic ?? false }
   }
 
-  /** Every service id a branch materialises, in the order provisionBranch creates them. */
-  private branchServiceIds(project: Project): string[] {
-    return [...this.dbList(project.id).map((d) => d.id), ...this.managedList(project.id).map((m) => m.id)]
+  /** The database service ids ONE branch carries (postgres then managed, the order
+   *  `provisionBranch` creates them in). Services are branch-scoped, so the project's registration
+   *  list is not this: it is every name the project has ever registered, on any branch. */
+  private carriedServiceIds(project: Project, branch: Branch): string[] {
+    return [
+      ...this.dbList(project.id).filter((d) => this.carries(project, branch, d, 'postgres')).map((d) => d.id),
+      ...this.managedList(project.id).filter((m) => this.carries(project, branch, m, 'managed')).map((m) => m.id),
+    ]
   }
 
   // ---- env assembly (contract 00 section 10, plan 05 section 5) ----------------------------------
