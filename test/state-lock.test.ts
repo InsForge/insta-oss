@@ -180,7 +180,13 @@ test('a reservation whose creator never committed is released at boot, so a retr
   // before the first await and the branch row only at the end, so a crash in between keeps the
   // claims with nobody left to release them. `ghost` is that dead creator.
   st.mutate((s) => {
-    s.branches = { live: { id: 'live', projectId: 'p1', name: 'main' } as never }
+    // `live` is a committed branch whose claims are all still backed by a row, so they stay.
+    s.branches = {
+      live: {
+        id: 'live', projectId: 'p1', name: 'main',
+        apps: { web: { hostPort: 20002, host: 'web-demo-main.example.test' } },
+      } as never,
+    }
     s.branchReservations = { 'demo-feat': 'ghost', 'demo-main': 'live' }
     s.laneReservations = { '20000': 'ghost', '20002': 'live' }
     s.hostReservations = { 'web-demo-feat': 'ghost:cp-web', 'web-demo-main': 'live:cp-web' }
@@ -195,6 +201,31 @@ test('a reservation whose creator never committed is released at boot, so a retr
   expect(released.hosts).toEqual(['web-demo-feat'])
   const after = st.loadState()
   expect(after.branchReservations).toEqual({ 'demo-main': 'live' })
+  expect(after.laneReservations).toEqual({ '20002': 'live' })
+  expect(after.hostReservations).toEqual({ 'web-demo-main': 'live:cp-web' })
+})
+
+test('a lane or host claim abandoned on a branch that still exists is released too', () => {
+  // The harder half of the same bug: a deploy or a service add takes these claims one at a time on
+  // a branch that already exists, so testing "does the branch exist" keeps an abandoned claim
+  // forever. Only the row that supersedes the claim proves it is still needed. `live` here has one
+  // real app holding one port and one hostname; the other two claims are residue.
+  st.mutate((s) => {
+    s.branches = {
+      live: {
+        id: 'live', projectId: 'p1', name: 'main',
+        apps: { web: { hostPort: 20002, host: 'web-demo-main.example.test' } },
+      } as never,
+    }
+    s.laneReservations = { '20002': 'live', '20004': 'live' }
+    s.hostReservations = { 'web-demo-main': 'live:cp-web', 'api-demo-main': 'live:cp-api' }
+  })
+
+  const released = st.reclaimAbandonedReservations()
+
+  expect(released.lanes).toEqual(['20004'])
+  expect(released.hosts).toEqual(['api-demo-main'])
+  const after = st.loadState()
   expect(after.laneReservations).toEqual({ '20002': 'live' })
   expect(after.hostReservations).toEqual({ 'web-demo-main': 'live:cp-web' })
 })

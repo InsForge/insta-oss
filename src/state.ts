@@ -266,13 +266,31 @@ export function reclaimAbandonedReservations(): { branches: string[]; lanes: str
     for (const [ref, owner] of Object.entries(s.branchReservations ?? {})) {
       if (!liveBranch.has(owner)) { delete s.branchReservations![ref]; released.branches.push(ref) }
     }
-    for (const [port, owner] of Object.entries(s.laneReservations ?? {})) {
-      if (!liveBranch.has(owner)) { delete s.laneReservations![port]; released.lanes.push(port) }
+    // A live branch is NOT enough for a lane or a host claim. Those are taken per deploy and per
+    // service add, so a create interrupted on a branch that already existed leaves a claim whose
+    // owning branch is still there: testing the branch alone would keep it forever, which is the
+    // same leak one level down. What retires a claim is the row that supersedes it, so look for
+    // that row. Repeated interrupted deploys would otherwise eat the lane range.
+    const portsInUse = new Set<string>()
+    const hostsInUse = new Set<string>()
+    for (const b of Object.values(s.branches ?? {})) {
+      for (const p of Object.values(b.lanes ?? {})) portsInUse.add(String(p))
+      for (const app of Object.values(b.apps ?? {})) {
+        if (app.hostPort !== undefined) portsInUse.add(String(app.hostPort))
+        if (app.host) hostsInUse.add(app.host)
+      }
+      for (const d of Object.values(b.databases ?? {})) if (d.host) hostsInUse.add(d.host)
+      for (const m of Object.values(b.managed ?? {})) if (m.host) hostsInUse.add(m.host)
     }
-    // A host claim is owned by a ServiceKey (`<branchId>:<serviceId>`) or by a branchId, so the
-    // branch half is what has to still exist either way.
+    for (const [port, owner] of Object.entries(s.laneReservations ?? {})) {
+      if (!liveBranch.has(owner) || !portsInUse.has(port)) { delete s.laneReservations![port]; released.lanes.push(port) }
+    }
+    // A host claim is owned by a ServiceKey (`<branchId>:<serviceId>`) or by a branchId. The
+    // recorded hosts are full names and the claim is the bounded label, so compare on the label.
     for (const [label, owner] of Object.entries(s.hostReservations ?? {})) {
-      if (!liveBranch.has(owner.split(':')[0]!)) { delete s.hostReservations![label]; released.hosts.push(label) }
+      const owned = liveBranch.has(owner.split(':')[0]!)
+        && [...hostsInUse].some((h) => h === label || h.startsWith(`${label}.`))
+      if (!owned) { delete s.hostReservations![label]; released.hosts.push(label) }
     }
     return released
   })
