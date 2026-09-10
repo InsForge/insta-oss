@@ -997,9 +997,18 @@ test('volume delete (cloud 2026-08-08 contract): eager rebuild without the mount
 
   // A qualified id is resolved, not merely stripped: a stale or foreign branch id must 404 rather
   // than have its qualifier discarded and the detach proceed on a project the caller never named.
-  const foreign = await del_(`/projects/${id}/services/00000000-0000-4000-8000-000000000000:cp-api/volume`)
+  const gone = '00000000-0000-4000-8000-000000000000'
+  const foreign = await del_(`/projects/${id}/services/${gone}:cp-api/volume`)
   expect(foreign.statusCode).toBe(404)
-  expect((await get(`/projects/${id}/services/cp-api/volume`)).json().volume).not.toBeNull()
+  // All three verbs on this resource resolve the qualifier, not just DELETE. A stale one used to
+  // read back a 200 and, worse, WRITE the project-level record and answer 200, which is a silent
+  // successful write against a branch that no longer exists.
+  expect((await get(`/projects/${id}/services/${gone}:cp-api/volume`)).statusCode).toBe(404)
+  expect((await put(`/projects/${id}/services/${gone}:cp-api/volume`, { sizeGib: 99 })).statusCode).toBe(404)
+  expect((await post(`/projects/${id}/services/${gone}:cp-api/rename`, { name: 'nope' })).statusCode).toBe(404)
+  const stillThere = (await get(`/projects/${id}/services/cp-api/volume`)).json().volume
+  expect(stillThere).not.toBeNull()
+  expect(stillThere.sizeGib).toBe(10)
 
   const del = await del_(`/projects/${id}/services/${branchId}:cp-api/volume`)
   expect(del.statusCode).toBe(200)

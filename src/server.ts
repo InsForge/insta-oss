@@ -418,7 +418,12 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     const { name } = (req.body ?? {}) as { name?: string }
     if (!name) return reply.code(400).send({ error: 'name required' })
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
-    const sid = bareSid(raw)
+    // resolveSid rather than bareSid, per contract section 10, which names rename in that family:
+    // a qualified sid that points at a deleted or foreign branch must 404, not have its qualifier
+    // discarded and the rename applied to whatever the bare id happens to match.
+    let sid: string
+    try { sid = engine.resolveSid(id, raw, (req.query as { branch?: string }).branch).serviceId }
+    catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
     if (!gated(id, 'service.rename', reply)) return reply
     try {
       const service = sid.startsWith('cp-') ? await engine.renameComputeService(id, sid.slice(3), name)
@@ -440,7 +445,13 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
   app.get('/projects/:id/services/:sid/volume', async (req, reply) => {
     const { id, sid } = req.params as { id: string; sid: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
-    try { return engine.serviceVolume(id, sid) }
+    // resolveSid, like DELETE below: contract section 10 says every /services/:sid/* route resolves
+    // the qualifier and 404s when the branch is gone or belongs to another project. Stripping it
+    // unread meant a stale qualifier read back a silent 200 on a resource it no longer named.
+    try {
+      const { serviceId } = engine.resolveSid(id, sid, (req.query as { branch?: string }).branch)
+      return engine.serviceVolume(id, serviceId)
+    }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
   })
 
@@ -449,7 +460,12 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     const { sizeGib } = (req.body ?? {}) as { sizeGib?: number }
     if (typeof sizeGib !== 'number') return reply.code(400).send({ error: 'sizeGib (number) required' })
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
-    try { return await engine.setServiceVolume(id, sid, sizeGib) }
+    // Same resolution as GET and DELETE: a stale qualifier used to write the project-level record
+    // and answer 200, which is the worst of the three because it is a silent successful write.
+    try {
+      const { serviceId } = engine.resolveSid(id, sid, (req.query as { branch?: string }).branch)
+      return await engine.setServiceVolume(id, serviceId, sizeGib)
+    }
     catch (e) { const m = e instanceof Error ? e.message : String(e); return reply.code(errCode(m)).send({ error: m }) }
   })
 
@@ -471,7 +487,8 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     // resolveSid, not bareSid: bareSid strips the qualifier without looking at it, so a stale or
     // foreign branch id would be discarded in silence and the detach would go ahead on a project
     // the caller never named. resolveSid validates the branch belongs to this project and throws
-    // 'branch not found' otherwise, which is what GET and PUT on this resource already do.
+    // 'branch not found' otherwise. GET and PUT above now do the same; when this route was fixed
+    // first they did not, and the comment here claimed they did.
     try {
       const { serviceId } = engine.resolveSid(id, sid, (req.query as { branch?: string }).branch)
       return await engine.removeServiceVolume(id, serviceId)
