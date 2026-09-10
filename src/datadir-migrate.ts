@@ -135,7 +135,7 @@ async function migratePostgres(deps: MigrateDeps, project: Project, branch: Bran
   let wasRunning = true
   if (legacyExists) {
     wasRunning = (await inspect(legacy, '{{.State.Running}}')) !== 'false'
-    await docker(['stop', legacy]).catch(() => { /* already down */ })
+    await stopForCopy(legacy)
     if (!(await pgDataComplete(deps, target))) {
       // Staged, verified, promoted -- and only THEN is the legacy container (and with it the
       // anonymous volume holding the only complete copy of these bytes) removed.
@@ -143,6 +143,13 @@ async function migratePostgres(deps: MigrateDeps, project: Project, branch: Bran
         if (!(await pgDataComplete(deps, staged))) throw new Error(`copy of ${legacy} left an incomplete PGDATA in ${staged}`)
       })
     }
+    // The removal stays HERE, after a verified copy and before the replacement runs, and that is
+    // a deliberate limit rather than an oversight. Holding it until `pgRun` has started the new
+    // container would be safer still on this arm, but the managed arm structurally cannot do it
+    // (its replacement REUSES the legacy container's name, so the removal has to come first), and
+    // a rule that holds on one arm and not the other is how this file gets a fourth defect. What
+    // makes the removal safe is what is now above it: the source is proven at rest, and the copy
+    // is staged, verified and promoted before anything is deleted.
     await docker(['rm', '-f', '-v', legacy]).catch(() => { /* raced away */ })
   } else if (!(await pgDataComplete(deps, target))) {
     // nothing to migrate and nothing migrated: a branch whose database was never provisioned
@@ -179,6 +186,33 @@ async function migratePostgres(deps: MigrateDeps, project: Project, branch: Bran
   return true
 }
 
+/** Stop a container and PROVE it stopped, before a single byte is read out of it.
+ *
+ *  `docker stop` was `.catch(() => {})` here, on both arms, commented "already down" -- which is
+ *  ONE of the things a failed stop means and not the one that matters. The others are "still
+ *  running": a stop that timed out, a daemon that did not answer, a container that refused the
+ *  signal. The copy that follows then reads a LIVE Postgres or Redis, which is not
+ *  crash-consistent, and the `docker rm -f -v` after it deletes the anonymous volume holding the
+ *  only authoritative copy. Third instance of one rule in this file: the probes were fixed and
+ *  the stop was never looked at.
+ *
+ *  The classification is the one `inspect` already uses, not a fourth: an explicit `false` is
+ *  permission to copy; `true` is a live writer; `null` is a container that went away while we
+ *  were stopping it, so there is nothing to copy from; and a probe that cannot answer raises out
+ *  of `inspect` itself. Every path but the first leaves the branch unmigrated, which is the
+ *  outcome this whole file is built around: the source is untouched and the next boot retries. */
+async function stopForCopy(container: string): Promise<void> {
+  // The error is deliberately not read: whatever it says, the state below is the evidence.
+  await docker(['stop', container]).catch(() => { /* classified by the probe, not by the error */ })
+  const running = await inspect(container, '{{.State.Running}}')
+  if (running === null) {
+    throw new Error(`${container} disappeared while it was being stopped, so its data cannot be copied; this branch is left unmigrated and the next boot retries it`)
+  }
+  if (running !== 'false') {
+    throw new Error(`could not stop ${container} (docker still reports it running), so its data directory has a live writer and copying it would not be crash-consistent; nothing was copied or removed, and the next boot retries this branch`)
+  }
+}
+
 /** The handle a legacy row carries (`io-<ref>-pg`), read from state when present (decision 17). */
 function legacyPgContainer(branch: Branch, ref: string): string {
   return branch.databases?.['pg-db']?.container ?? `io-${ref}-pg`
@@ -192,6 +226,13 @@ function pgRowSettled(branchId: string, fresh: string, dataId: string): boolean 
 }
 
 /** Whether `dir` holds a WHOLE PGDATA, not the first few files of one.
+ *
+ *  What this proves and what it does not, stated plainly, because its presence is part of why
+ *  the arm above looked safe: it proves the copy did not STOP EARLY. It says nothing at all
+ *  about whether the bytes are crash-consistent -- a file-level copy of a running Postgres
+ *  passes this check and may still be unrecoverable. Only a source with no writer gives
+ *  consistency, which is what `stopForCopy` is for; this is the other half, and neither
+ *  substitutes for the other.
  *
  *  `PG_VERSION` is four bytes the copy walk writes as soon as it reaches that name, so it is there
  *  long before the tree is: the old check treated an interrupted copy as a finished one and the
@@ -318,7 +359,7 @@ async function migrateManaged(deps: MigrateDeps, project: Project, branch: Branc
     let wasRunning = true
     if (containerExists) {
       wasRunning = (await inspect(container, '{{.State.Running}}')) !== 'false'
-      await docker(['stop', container]).catch(() => {})
+      await stopForCopy(container)
       for (const p of dataPaths(m.type)) {
         // Unconditionally: this block runs only when the container EXISTS and is not on the bind
         // mount, so the container is still the authority on these bytes and anything already at

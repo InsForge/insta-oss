@@ -343,6 +343,51 @@ test('G: a probe that cannot ANSWER leaves the branch unmigrated, and stops noth
   expect(contentsOf(pgDir())).toContain('global/pg_control')
 })
 
+test('I: a STOP that fails copies nothing and removes nothing, on both arms', async () => {
+  // The stop was `.catch(() => {})` on both arms, commented "already down" -- one of the things
+  // a failed stop means, and not the one that matters. The others are "still running", and the
+  // step after the copy is `docker rm -f -v`, which deletes the anonymous volume holding the
+  // only authoritative copy. So a stop that failed while the database was live took a
+  // file-level copy of a running Postgres and then destroyed the source. The path-existence
+  // check does not save it: that proves the copy did not stop early, not that it is
+  // crash-consistent.
+  writeLegacyState({ managed: true, managedDataId: 'cache' })
+  world.containers.set(MD_REDIS, { running: true, mounts: [] })
+  world.sources.set(MD_REDIS, REDIS_FILES)
+  hooks.unreadable = (a) => a[0] === 'stop'      // the stop fails; the container stays running
+
+  const out = await boot()
+  expect(out.migrated).toEqual([])
+  expect(out.failed).toHaveLength(1)
+  expect(out.failed[0].error).toContain(`could not stop ${LEGACY_PG}`)
+  expect(out.failed[0].error).toContain('crash-consistent')
+
+  // Nothing was copied out of the live container, nothing was removed, and the branch is not
+  // stamped: the source is exactly as it was and the next boot retries.
+  expect(world.paths.has(pgDir())).toBe(false)
+  expect(world.containers.has(LEGACY_PG)).toBe(true)
+  expect(world.sources.get(LEGACY_PG)).toEqual(PGDATA_FILES)
+  expect(world.log.filter((l) => l.startsWith('rm:'))).toEqual([])
+  expect(world.log.filter((l) => l.startsWith('copy:'))).toEqual([])
+  expect(branchRow().dataVersion).toBeUndefined()
+
+  // The MANAGED arm has the identical sequence. Let postgres through and fail only its stop.
+  hooks.unreadable = (a) => a[0] === 'stop' && a[1] === MD_REDIS
+  const second = await boot()
+  expect(second.failed).toHaveLength(1)
+  expect(second.failed[0].error).toContain(`could not stop ${MD_REDIS}`)
+  expect(world.containers.has(MD_REDIS)).toBe(true)
+  expect(world.sources.get(MD_REDIS)).toEqual(REDIS_FILES)
+  expect(world.paths.has(`${mdDir()}/data`)).toBe(false)
+  expect(branchRow().dataVersion).toBeUndefined()
+
+  // ...and with docker answering, the whole thing migrates.
+  hooks.unreadable = undefined
+  expect((await boot()).migrated).toEqual([REF])
+  expect(contentsOf(`${mdDir()}/data`)).toEqual(['appendonly.aof', 'dump.rdb'])
+  expect(contentsOf(pgDir())).toContain('global/pg_control')
+})
+
 test('H: a volume probe that cannot answer is not "there is no volume"', async () => {
   // `volume inspect` failing used to read as "no legacy volume, nothing to copy", and the branch
   // was stamped with the compute service's /data still in a named volume.
