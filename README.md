@@ -27,7 +27,9 @@ curl -fsSL https://get.instacloud.com | sh
 ```
 
 The daemon image is not published yet, so until the first release the one-liner has nothing to
-pull. Build it on the box and point the installer at it:
+pull. A tag is not enough on its own: the installer asks GitHub for the latest RELEASE, so a
+`vX.Y.Z` tag publishes the image but the one-liner keeps finding nothing until a Release is
+published for that tag too. Build it on the box and point the installer at it:
 
 ```bash
 curl -fsSL https://get.docker.com | sudo sh          # only when the box has no Docker yet

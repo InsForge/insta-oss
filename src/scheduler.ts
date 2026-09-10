@@ -88,6 +88,10 @@ export interface SchedulerHooks {
 const MiB = 1024 * 1024
 /** What a wake assumes a service needs when nothing has ever been measured for it. */
 const DEFAULT_RSS: Record<ServiceKind, number> = { compute: 256 * MiB, postgres: 128 * MiB, managed: 256 * MiB }
+/** A runaway ceiling for the eviction loop, sampled from nothing and high enough that no real
+ *  box reaches it: the loop's real terminators are the floor being met and the candidate pool
+ *  being empty, and `tried` makes it provably unable to revisit a service. */
+const EVICTION_CEILING = 10_000
 /** How many idle services the sweep stops at once. */
 const SLEEP_CONCURRENCY = 4
 /** Readiness poll interval inside a wake. */
@@ -498,21 +502,19 @@ export class Scheduler {
     // which no wake and no later loop turn calls. Without this, one pass would keep finding the same
     // pressure and sleep EVERY eligible service instead of the least recently active one.
     let freed = 0
-    // Bounded by the CANDIDATE SET, not by a magic number, and RE-READ every turn. Each turn
-    // adds its victim to `tried` and `isVictim` excludes those, so the pool shrinks by one per
-    // turn from the set as it stands; but the set itself can GROW while this runs, because
-    // every `sleep()` waits out a stop grace and a deploy committing in that window registers a
-    // new running service (`targets()` is memoized on the state revision, so it sees it). A
-    // bound computed once at the start is then too small, and the loop gives up with the floor
-    // unmet and eligible victims present -- the same silent give-up the old cap of 32 caused,
-    // reached through concurrency instead. Re-reading the count each turn is what makes the
-    // bound track the thing it is bounding.
+    // The two returns above are the real terminators: the floor being met, and the pool being
+    // empty. Termination does not depend on the counter below at all -- each turn adds its
+    // victim to `tried` and `isVictim` excludes those, so the loop provably cannot revisit a
+    // service and the pool it draws from strictly shrinks.
     //
-    // This is a runaway guard and nothing more. The real terminators are the two returns above:
-    // the floor being met, and the pool being empty. An empty pool proceeds deliberately
-    // (contract decision 52: everything left is always-on, serving or recently woken, and the
-    // kernel is the last resort); reaching the bound does not, and says so.
-    for (let guard = 0; guard <= this.targets().length; guard++) {
+    // The counter is a runaway guard and nothing else, so it is a CONSTANT. The two obvious
+    // alternatives are both wrong, and this delta shipped each of them in turn: a bound sampled
+    // once from `targets().length` is too small the moment a deploy registers a service
+    // mid-loop (every `sleep()` waits out a stop grace, so that window is seconds wide), and a
+    // bound re-read from `targets().length` in the loop condition grows with the very set it is
+    // bounding, which bounds nothing. A fixed ceiling is finite by inspection and cannot be
+    // argued with.
+    for (let guard = 0; guard < EVICTION_CEILING; guard++) {
       const mem = this.runtime.memory()
       if (!mem) return
       // Whichever is larger: what the runtime reports (authoritative once it notices a stop) or the
@@ -538,11 +540,11 @@ export class Scheduler {
         freed += this.rec(victim.key).lastRssBytes ?? DEFAULT_RSS[victim.kind]
       }
     }
-    // Falling out of the loop means the runaway guard tripped with the floor still unmet: one
-    // turn per registered service was not enough, which takes services being registered as fast
-    // as they are evicted. It is not a full box and not an empty pool, so it is neither of the
-    // two outcomes above, and it says so rather than passing for either.
-    console.warn(`memory pressure: gave up making room after ${this.targets().length + 1} attempts with the floor still unmet; services are being registered as fast as they are evicted`)
+    // Falling out of the loop is not a full box and not an empty pool: both of those return
+    // above. It means the loop ran EVICTION_CEILING times without meeting the floor and without
+    // exhausting the pool, which the `tried` argument says cannot happen, so it is a bug in this
+    // loop and it says exactly that rather than passing for either outcome.
+    console.warn(`memory pressure: gave up after ${EVICTION_CEILING} eviction attempts with the floor still unmet and candidates remaining; this is a bug in the eviction loop, not a full box and not an empty pool`)
   }
 
   private isVictim(t: ServiceTarget, now: number, exclude: Set<ServiceKey>, tried: Set<ServiceKey>): boolean {

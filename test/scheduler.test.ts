@@ -394,7 +394,7 @@ test('a wake needing room evicts BEFORE it starts: the victim is down before the
     .toBeLessThan(calls.indexOf(`runtime.start:${waking.container}`))
 })
 
-test('eviction keeps going past 32 victims: the bound is the candidate set, not a magic number', async () => {
+test('eviction keeps going past 32 victims: the old cap gave up with the floor unmet', async () => {
   // The loop used to give up after 32 turns and fall through in silence, so a wake on a box
   // with more services than that could start with the floor still uncleared while eligible
   // victims remained. Distinct from an empty pool, which proceeds on purpose.
@@ -422,7 +422,7 @@ test('eviction keeps going past 32 victims: the bound is the candidate set, not 
   expect(stopped).toBeLessThan(45)
 })
 
-test('the eviction bound follows the CURRENT target count, not the one it started with', async () => {
+test('eviction does not give up when the target set grows under it', async () => {
   // Every `sleep()` waits out a stop grace, so the loop is seconds long, and a deploy that
   // commits in that window registers a new running service. A bound computed once at the start
   // is then too small and the loop gives up with the floor unmet and victims still available:

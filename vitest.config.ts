@@ -12,10 +12,14 @@ const docker = !!process.env.RUN_DOCKER_TESTS
 export default defineConfig({
   test: {
     root: '.', testTimeout: 120_000, hookTimeout: 120_000, pool: 'forks',
-    // Restore spies and mock implementations after every test. Three separate review rounds found
-    // the same leak: a test installs a gate or a throwing mock, restores it on the line AFTER its
-    // assertions, and a timeout -- which is exactly what the concurrency tests exist to detect --
-    // skips the restore and silently corrupts every later test in the file. Measured before
+    // Restore spies and mock implementations BEFORE each test: vitest applies `restoreMocks` in
+    // the runner's `onBeforeTryTask` hook, not after the test that installed them. The outcome
+    // is what matters and the mechanism is worth stating correctly, because the two read
+    // differently to the next maintainer: nothing cleans up after a test that died, and nothing
+    // needs to -- the restore that runs before the NEXT test is what stops a leaked mock
+    // reaching it. Three separate review rounds found that leak here: a test installs a gate or
+    // a throwing mock, restores it on the line AFTER its assertions, and a timeout -- which is
+    // exactly what the concurrency tests exist to detect -- never reaches that line. Measured before
     // enabling: `mockRestore` on a `vi.fn(impl)` restores the implementation passed to `vi.fn`,
     // and every `vi.mock` factory here is that shape, so this returns each file to its intended
     // default rather than blanking it. Nothing in the suite relies on a mock persisting across

@@ -33,8 +33,12 @@ curl -fsSL https://raw.githubusercontent.com/InsForge/insta-oss/main/install.sh 
 
 ## Build the image yourself
 
-The daemon image is not published yet, so the one-liner above has nothing to pull. Until a release
-exists, build the image on the box and point the installer at it with `INSTA_OSS_IMAGE`:
+The daemon image is not published yet, so the one-liner above has nothing to pull. Note what
+"published" means here, because it is more than tagging: the installer resolves the version from
+the GitHub RELEASES endpoint (`/releases/latest`), not from the tag list, so pushing a `vX.Y.Z`
+tag builds and pushes the image but leaves `curl … | sh` still finding nothing. A GitHub Release
+has to be published for that tag as well. Until then, build the image on the box and point the
+installer at it with `INSTA_OSS_IMAGE`:
 
 ```bash
 curl -fsSL https://get.docker.com | sudo sh          # only when the box has no Docker yet
