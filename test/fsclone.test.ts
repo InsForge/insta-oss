@@ -3,11 +3,13 @@
 // a short-lived child process with two engines, `ficlone` on Linux and `cp-c` on macOS, so it is
 // exercised here the way the daemon runs it: argv in, JSON out, on a real temporary directory with
 // the engine this platform actually uses.
-import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, beforeEach, expect, test } from 'vitest'
+import { NoReflinkError } from '../src/types'
+import { isHelperRetryable, translateCloneError } from '../src/datadir'
 
 const HELPER = new URL('../src/fsclone.cjs', import.meta.url).pathname
 const ENGINE = process.platform === 'darwin' ? 'cp-c' : 'ficlone'
@@ -82,4 +84,55 @@ test('isempty distinguishes an empty directory from a missing one and from a ful
   expect(read(empty).empty).toBe(true)
   expect(read(join(root, 'missing')).empty).toBe(true)
   expect(read(full).empty).toBe(false)
+})
+
+// ---- the permission answer, and what the daemon makes of it ----
+//
+// `runLocal` in src/datadir.ts runs this program as a CHILD PROCESS, and a promisified `execFile`
+// rejection carries the child's EXIT STATUS in `e.code`, never the child's errno. A permission
+// refusal that exits 1 therefore reached the daemon as the string "1", matched neither the helper
+// codes nor the no-reflink codes, and propagated raw: on an unprivileged Linux daemon meeting a
+// PGDATA the postgres image chowned 0700 to its own uid, `branch create` failed outright under
+// INSTA_OSS_FORK=auto instead of streaming pg_basebackup, and printed `Command failed:` instead of
+// the refusal message under INSTA_OSS_FORK=reflink. The exit code is the carrier that survives.
+
+/** Root reads through mode 0000, so there is no refusal to observe. */
+const asRoot = process.getuid?.() === 0
+
+test.skipIf(asRoot)('a source it cannot read exits 77, not 1: that is what the helper fallback keys on', () => {
+  const src = join(root, 'locked')
+  mkdirSync(src, { recursive: true })
+  writeFileSync(join(src, 'PG_VERSION'), '16\n')
+  chmodSync(src, 0o000)
+  try {
+    const r = spawnSync(process.execPath, [HELPER, 'clone', src, join(root, 'copy'), '--reflink=auto', `--engine=${ENGINE}`], { encoding: 'utf8' })
+    expect(r.status).toBe(77)
+    expect(r.stderr).toContain('permission denied')
+    expect(r.stderr).toContain('EACCES')
+    // Not the no-reflink code: a refusal to read is not a filesystem that cannot clone, and the two
+    // send the caller down different paths (helper retry vs pg_basebackup).
+    expect(r.status).not.toBe(75)
+  } finally {
+    chmodSync(src, 0o700)
+  }
+})
+
+test('exit 77 becomes the EACCES-coded error the helper fallback retries; exit 75 stays a NoReflinkError', () => {
+  // Shaped exactly like a promisified execFile rejection: the child's exit status lands in `code`.
+  const childExit = (status: number, stderr: string): Error =>
+    Object.assign(new Error(`Command failed: node fsclone.cjs clone ...\n${stderr}`), { code: status })
+
+  const denied = translateCloneError(childExit(77, 'permission denied: EACCES /var/lib/instacloud/pg/demo-main/db'))
+  expect(isHelperRetryable(denied)).toBe(true)
+  expect(denied).not.toBeInstanceOf(NoReflinkError)
+
+  // The other exit code keeps its own meaning, and a plain failure keeps passing through untouched.
+  expect(translateCloneError(childExit(75, 'no reflink support: ENOTSUP'))).toBeInstanceOf(NoReflinkError)
+  const other = childExit(1, 'ENOSPC: no space left on device')
+  expect(translateCloneError(other)).toBe(other)
+  expect(isHelperRetryable(translateCloneError(other))).toBe(false)
+
+  // The helper container reports the same thing through `docker`, whose message carries the exit.
+  const viaDocker = new Error('docker run --rm -i ... -> exit 77: permission denied: EPERM')
+  expect(isHelperRetryable(translateCloneError(viaDocker))).toBe(true)
 })

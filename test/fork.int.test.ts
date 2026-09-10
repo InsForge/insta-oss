@@ -27,7 +27,7 @@
 // `reflink=1`) the reflink path is exercised for real; where it cannot (ext4, overlayfs) the same
 // assertions run against the stream, and `expectedAuto` is what keeps them honest.
 import { test, expect, beforeAll, afterAll } from 'vitest'
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadConfig, type Config } from '../src/config'
@@ -57,6 +57,8 @@ const cfgFor = (fork: 'auto' | 'reflink' | 'basebackup'): Config => loadConfig({
 const data = sharedDataDir(cfgFor('auto'))
 /** What `INSTA_OSS_FORK=auto` must resolve to ON THIS BOX, from the real probe. */
 let expectedAuto: 'reflink' | 'basebackup' = 'basebackup'
+/** The image every helper-container read and write in this file runs in (`node:22-alpine`). */
+const HELPER_IMAGE = cfgFor('auto').data.helperImage
 
 const containers: string[] = []
 const target = (ref: string): PgTarget => {
@@ -78,6 +80,12 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const c of containers) await docker(['rm', '-f', '-v', c]).catch(() => { /* best effort */ })
   await docker(['network', 'rm', NETWORK]).catch(() => { /* best effort */ })
+  // Every PGDATA under here is 0700 and owned by the image's own uid, so an unprivileged `rmSync`
+  // cannot even scandir it. The helper container can, and that is the same reason the fallback
+  // this file's last case pins exists at all.
+  await docker(['run', '--rm', '--mount', `type=bind,src=${DATA},dst=${DATA}`,
+    HELPER_IMAGE, 'sh', '-c', `rm -rf ${DATA}/pg ${DATA}/vol ${DATA}/md`])
+    .catch(() => { /* best effort */ })
   rmSync(DATA, { recursive: true, force: true })
 })
 
@@ -201,4 +209,33 @@ test('INSTA_OSS_FORK=reflink refuses a fork it cannot reflink; auto streams one 
   } finally {
     strict.restore()
   }
+}, 300_000)
+
+/** The one box shape the helper fallback exists for: an unprivileged Linux daemon and bytes it is
+ *  not allowed to read. macOS runs the `cp-c` engine and a root daemon reads everything, so neither
+ *  has a fallback to observe; CI, an unprivileged ubuntu runner, is exactly where this bites. */
+const canObserveHelperFallback = process.platform === 'linux' && process.getuid?.() !== 0
+
+test.skipIf(!canObserveHelperFallback)('a source this daemon may not read is copied by the helper container, not failed', async () => {
+  const base = join(DATA, 'vol', 'forktest-denied')
+  const src = join(base, 'src')
+  const dst = join(base, 'dst')
+  mkdirSync(base, { recursive: true, mode: 0o700 })
+  // Built by a container as root and left 0700 under a uid this process is not: exactly the shape
+  // the postgres entrypoint leaves a PGDATA in, which is why an unprivileged daemon cannot read it.
+  await docker(['run', '--rm', '--mount', `type=bind,src=${DATA},dst=${DATA}`, HELPER_IMAGE,
+    'sh', '-c', `mkdir -p ${src} && printf 16 > ${src}/PG_VERSION && chown -R 999:999 ${src} && chmod 700 ${src}`])
+  // The precondition, stated rather than assumed: the daemon's own process really cannot read it.
+  expect(() => readdirSync(src)).toThrow(/EACCES|EPERM/)
+
+  // Before the exit code existed this threw `Command failed: ... exit 1` from the child, because a
+  // child's errno never reaches the parent: the fallback below could not tell a refusal from any
+  // other failure, so `branch create` on an ordinary non-root Linux laptop failed outright.
+  const out = await data.cloneTree(src, dst)
+  expect(['reflink', 'copy']).toContain(out.method)
+
+  // The bytes really landed, read back the only way this process can read them.
+  const got = await docker(['run', '--rm', '--mount', `type=bind,src=${DATA},dst=${DATA}`,
+    HELPER_IMAGE, 'cat', `${dst}/PG_VERSION`])
+  expect(got.toString().trim()).toBe('16')
 }, 300_000)

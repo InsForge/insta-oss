@@ -30,6 +30,15 @@ export interface DataCapabilities { dataDir: string; reflink: boolean; engine: C
 
 /** `fsclone.cjs` exit code for "this filesystem cannot reflink and the caller asked for always". */
 const EXIT_NO_REFLINK = 75
+/** `fsclone.cjs` exit code for "this process cannot read those bytes" (EACCES or EPERM).
+ *
+ *  It needs a code of its own because `runLocal` runs the program as a CHILD PROCESS and a
+ *  promisified `execFile` rejection carries the child's exit STATUS in `e.code`, never the child's
+ *  errno. With the child exiting 1, `errnoOf` answered "1", `HELPER_CODES` did not match, and the
+ *  helper fallback below -- the entire answer to an unprivileged Linux daemon meeting a PGDATA the
+ *  postgres image chowned 0700 to its own uid -- was unreachable: on the ordinary `npm run dev`
+ *  laptop path a branch create failed outright instead of falling through to `pg_basebackup`. */
+const EXIT_DENIED = 77
 /** Errno answers that mean "no reflink here", not "the copy is broken" (decision 23). */
 const NO_REFLINK_CODES = ['ENOSYS', 'ENOTSUP', 'EXDEV', 'EINVAL', 'EOPNOTSUPP']
 /** Errno answers that mean "this daemon cannot read those bytes; run the verb in the helper". */
@@ -196,13 +205,15 @@ export class DataDir implements DataDirOps {
   // ---- runners ----
 
   /** One verb, in a short-lived child of the daemon, falling back to the helper container on the
-   *  permission errors an unprivileged Linux daemon gets from a chowned PGDATA. */
+   *  permission errors an unprivileged Linux daemon gets from a chowned PGDATA. The child reports
+   *  those as exit 77, which `translateCloneError` turns back into an EACCES-coded error: a child's
+   *  errno does not survive the process boundary on its own (see EXIT_DENIED). */
   private async runVerb(argv: string[], opts: { engine: CopyEngine; helperOnly?: boolean }): Promise<unknown> {
     if (opts.engine === 'helper' && opts.helperOnly) return this.runHelper(argv)
     try {
       return await this.runLocal(argv)
     } catch (e) {
-      if (opts.engine !== 'helper' || !HELPER_CODES.includes(errnoOf(e))) throw e
+      if (opts.engine !== 'helper' || !isHelperRetryable(e)) throw e
       return this.runHelper(argv)
     }
   }
@@ -212,7 +223,7 @@ export class DataDir implements DataDirOps {
       const { stdout } = await execFileP(process.execPath, [scriptPath(), ...argv], { maxBuffer: 8 * 1024 * 1024 })
       return parseJson(stdout)
     } catch (e) {
-      throw this.translate(e)
+      throw translateCloneError(e)
     }
   }
 
@@ -225,23 +236,37 @@ export class DataDir implements DataDirOps {
       ], { input: readFileSync(scriptPath()) })
       return parseJson(out.toString())
     } catch (e) {
-      throw this.translate(e)
+      throw translateCloneError(e)
     }
-  }
-
-  /** exit 75 (or an errno that means the same thing) becomes NoReflinkError, which the postgres
-   *  adapter turns into a `pg_basebackup` fork. */
-  private translate(e: unknown): unknown {
-    const code = errnoOf(e)
-    const status = e && typeof e === 'object' && 'code' in e ? (e as { code: unknown }).code : undefined
-    const message = e instanceof Error ? e.message : String(e)
-    if (status === EXIT_NO_REFLINK || /exit 75\b/.test(message) || /no reflink support/.test(message)) {
-      return new NoReflinkError(message.trim() || 'no reflink support')
-    }
-    if (NO_REFLINK_CODES.includes(code)) return new NoReflinkError(code)
-    return e
   }
 }
+
+/** What a failed `fsclone.cjs` run MEANS, from either runner.
+ *
+ *  exit 75 (or an errno that says the same thing) becomes NoReflinkError, which the postgres adapter
+ *  turns into a `pg_basebackup` fork. exit 77 becomes an EACCES-CODED error, which is what `runVerb`
+ *  recognises and retries in the helper container: the child's own errno never survives the process
+ *  boundary, so the exit code is the only durable carrier (matching on stderr text would drift).
+ *  Everything else passes through untouched. */
+export function translateCloneError(e: unknown): unknown {
+  const code = errnoOf(e)
+  const status = e && typeof e === 'object' && 'code' in e ? (e as { code: unknown }).code : undefined
+  const message = e instanceof Error ? e.message : String(e)
+  if (status === EXIT_NO_REFLINK || /exit 75\b/.test(message) || /no reflink support/.test(message)) {
+    return new NoReflinkError(message.trim() || 'no reflink support')
+  }
+  if (status === EXIT_DENIED || /exit 77\b/.test(message) || /permission denied: E/.test(message)) {
+    const denied = new Error(message.trim() || 'permission denied')
+    ;(denied as Error & { code: string }).code = 'EACCES'
+    return denied
+  }
+  if (NO_REFLINK_CODES.includes(code)) return new NoReflinkError(code)
+  return e
+}
+
+/** Whether `runVerb` would retry this error in the helper container. Exported for the tests that
+ *  pin the pair: `translateCloneError` has to produce something this answers true for. */
+export function isHelperRetryable(e: unknown): boolean { return HELPER_CODES.includes(errnoOf(e)) }
 
 function parseJson(text: string): unknown {
   const t = text.trim()

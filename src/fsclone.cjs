@@ -18,6 +18,11 @@
 //   isempty <dir>          -> {"empty":bool}
 // Exit 75 means: the target filesystem cannot reflink and --reflink=always was asked for
 // (the caller then streams pg_basebackup, or plain-copies a volume).
+// Exit 77 means: this process cannot read (or write) those bytes, EACCES or EPERM. It has a code of
+// its own because a CHILD PROCESS cannot hand an errno back: a promisified `execFile` rejection
+// carries the child's exit STATUS in `e.code`, so a plain exit 1 reached `src/datadir.ts` as the
+// string "1" and its helper-container fallback -- the whole answer to an unprivileged Linux daemon
+// meeting a PGDATA the postgres image chowned 0700 to its own uid -- could never fire.
 //
 // Test hooks, never set in production: INSTA_OSS_FSCLONE_FSTYPE forces the filesystem answer,
 // INSTA_OSS_FSCLONE_CP overrides the cp binary, INSTA_OSS_FSCLONE_TRACE appends one JSON line per cp
@@ -33,6 +38,8 @@ const FICLONE = fs.constants.COPYFILE_FICLONE_FORCE
 // Linux filesystems without reflinks answer ENOTSUP or EOPNOTSUPP (decision 23).
 const NO_REFLINK = new Set(['ENOSYS', 'ENOTSUP', 'EXDEV', 'EINVAL', 'EOPNOTSUPP'])
 const EXIT_NO_REFLINK = 75
+const EXIT_DENIED = 77
+const DENIED = new Set(['EACCES', 'EPERM'])
 
 // PGDATA scrub, applied to the COPY (never the source): runtime scratch a recovering postmaster must
 // not inherit. The directories stay, their contents go.
@@ -277,6 +284,10 @@ try {
   if (e instanceof NoReflink) {
     process.stderr.write('no reflink support: ' + e.message + '\n')
     process.exit(EXIT_NO_REFLINK)
+  }
+  if (e && DENIED.has(e.code)) {
+    process.stderr.write('permission denied: ' + e.code + (e.path ? ' ' + e.path : '') + '\n')
+    process.exit(EXIT_DENIED)
   }
   process.stderr.write(((e && e.stack) || e) + '\n')
   process.exit(1)
