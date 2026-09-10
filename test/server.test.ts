@@ -1784,6 +1784,35 @@ test('...and the other order: a PROJECT whose default branch would take a live r
   expect(loadState().branches[await branchOf(d, 'a-main')].databases?.['pg-db']?.container).toBe('io-demo-a-main-pg-db')
 })
 
+// The arm above races a branch that provisions a database and a bucket, so the loser can be
+// stopped by a hostname collision on its way in. The destructive arm is an EMPTY project: there
+// is no hostname to compare, and `docker network create` failing because the network already
+// exists is deliberately swallowed (the ref claim is what makes reusing it safe). Only the ref
+// reservation stands between two creates and one shared stack here.
+test('two concurrent createBranch calls on an EMPTY project: still one branch, and nothing torn down', async () => {
+  const engine = makeEngine()
+  const { project } = await engine.createProject('demo')   // no services at all
+  calls.length = 0
+  vi.mocked(dockerFn).mockClear()
+
+  const settled = await Promise.allSettled([
+    engine.createBranch(project.id, 'feat'),
+    engine.createBranch(project.id, 'feat'),
+  ])
+  expect(settled.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+  const lost = settled.find((r) => r.status === 'rejected') as PromiseRejectedResult
+  expect(String(lost.reason)).toContain('branch "feat" already exists')
+
+  // One row, one network, and the loser removed neither the network nor the branch root of the
+  // winner it collided with.
+  expect(engine.listBranches(project.id).filter((b) => b.name === 'feat')).toHaveLength(1)
+  const dockerArgs = vi.mocked(dockerFn).mock.calls.map((c) => (c[0] as string[]).join(' '))
+  expect(dockerArgs.filter((a) => a === 'network create io-demo-feat')).toHaveLength(1)
+  expect(dockerArgs).not.toContain('network rm io-demo-feat')
+  expect(calls.filter((c) => c.startsWith('data.remove:'))).toEqual([])
+  expect(branchReservations()).toEqual({})
+})
+
 test('a failed branch create gives its ref claim back, and compensates only its own resources', async () => {
   const id = await createProject()
   const fork = vi.spyOn(db, 'fork').mockRejectedValueOnce(new Error('boom'))
