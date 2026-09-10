@@ -491,6 +491,13 @@ HEALTHZ_BEFORE=$(healthz_notafter)
 [ -n "$HEALTHZ_BEFORE" ] || FAIL "healthz is not reporting a certificate before the renewal"
 [ "$NEXT" != "$OURS" ] || FAIL "the renewal certificate has the same serial as the first one"
 chmod 600 "$E2E_TLS_DIR/next.key"
+# ...and with the OLD timestamps put back on the new files. A rename changes the inode and need
+# not change the mtime, and renewal and configuration tools routinely preserve timestamps, so a
+# cache keyed on mtime alone serves the replaced certificate for the life of the process. The
+# lane cache was exactly that, while `/healthz` was not, so the endpoint reported the renewal
+# and psql was still handed the old file. `touch -r` reproduces that on a real box.
+touch -r "$E2E_TLS_DIR/wild.crt" "$E2E_TLS_DIR/next.crt"
+touch -r "$E2E_TLS_DIR/wild.key" "$E2E_TLS_DIR/next.key"
 mv -f "$E2E_TLS_DIR/next.crt" "$E2E_TLS_DIR/wild.crt"
 mv -f "$E2E_TLS_DIR/next.key" "$E2E_TLS_DIR/wild.key"
 
@@ -505,6 +512,13 @@ fi
 wait_for 90 healthz_moved_from "$HEALTHZ_BEFORE" || FAIL "healthz still reports the certificate it read before the rename"
 healthz_matches_file || FAIL "healthz reports a notAfter that is not the file's"
 OK "healthz followed the renewal: $HEALTHZ_BEFORE -> $(healthz_notafter)"
+
+# The two have to AGREE. Divergence is the actual harm: an operator confirms a renewal on the
+# endpoint while the lanes go on presenting the old certificate to every psql client.
+if [ -n "$LANE_AFTER" ]; then
+  [ "$LANE_AFTER" = "$NEXT" ] || FAIL "healthz reports the renewal but the pg lane presents '$LANE_AFTER'"
+  OK "healthz and the database lane report the same certificate after the renewal"
+fi
 OK "the daemon and its lanes pick up a renamed certificate with no restart"
 
 # The EDGE needs its process restarted (Caddy loads certificates at config load and does not

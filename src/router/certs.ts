@@ -9,7 +9,34 @@ import { connect as tlsConnect, createSecureContext, type SecureContext } from '
 import type { Config } from '../config'
 import { isHostname } from './table'
 
-export interface CertFiles { crt: string; key: string; mtimeMs: number }
+export interface CertFiles { crt: string; key: string; stamp: string }
+
+/** What a file looks like NOW, as one comparable string: mtime, size, inode, ctime and mode.
+ *
+ *  ONE function, because two caches in this file ask the same question -- "is this still the
+ *  file I read?" -- and the last time they answered it differently the endpoint an operator
+ *  checks said a renewal had landed while the database lanes were still presenting the old
+ *  certificate. Mtime alone is not the answer: an atomic rename changes the inode and need not
+ *  change the mtime at all, and renewal and configuration tools routinely preserve timestamps,
+ *  so a cache keyed on mtime serves a replaced certificate indefinitely. Null when the path
+ *  cannot be stat'd, which is a different state from "unchanged" and is treated as one. */
+export function fileStamp(path: string): string | null {
+  try {
+    const st = statSync(path)
+    return `${st.mtimeMs}:${st.size}:${st.ino}:${st.ctimeMs}:${st.mode}`
+  } catch {
+    return null
+  }
+}
+
+/** BOTH halves, for anything that serves the pair. A renewal replaces the key as well, and a
+ *  stamp over the certificate alone would miss a key-only change and go on presenting a
+ *  certificate whose key is no longer the one on disk. Null when either half cannot be read. */
+export function pairStamp(crt: string, key: string): string | null {
+  const a = fileStamp(crt)
+  const b = fileStamp(key)
+  return a === null || b === null ? null : `${a}|${b}`
+}
 
 /** Walk the store for an exact host match. `host` reaches here from a TLS servername, which on the
  *  three server-mode lanes arrives from anyone who can open a TCP connection to the box, so it is
@@ -22,7 +49,8 @@ export function findCertFiles(certDir: string, host: string): CertFiles | null {
     const crt = join(certDir, issuer, host, `${host}.crt`)
     const key = join(certDir, issuer, host, `${host}.key`)
     if (existsSync(crt) && existsSync(key)) {
-      try { return { crt, key, mtimeMs: statSync(crt).mtimeMs } } catch { /* raced a renewal; next issuer or null */ }
+      const stamp = pairStamp(crt, key)
+      if (stamp !== null) return { crt, key, stamp }        // else: raced a renewal; next issuer or null
     }
   }
   return null
@@ -143,16 +171,11 @@ export class SuppliedCertWatch {
    *  parsed even if it arrives with the same mtime, size and inode. */
   private sync(now: number): void {
     if (!this.certFile) { this.cached = null; this.stamp = null; return }
-    let stamp: string | null = null
-    try {
-      const st = statSync(this.certFile)
-      // ctime and mode as well as mtime, size and inode: a file that stops being READABLE
-      // without its contents changing (a chmod, an ownership change) has to drop the cached
-      // value too, and "absent when the file cannot be read" is a property this cache is not
-      // allowed to cost. Metadata changes move ctime, so the next beat re-reads and the read
-      // failing is what clears it.
-      stamp = `${st.mtimeMs}:${st.size}:${st.ino}:${st.ctimeMs}:${st.mode}`
-    } catch {
+    // The same `fileStamp` the lane contexts use, so the two cannot drift into disagreeing
+    // about whether a renewal happened. This one stamps the CERTIFICATE only, because what it
+    // reports is the certificate's expiry; the lane contexts serve both halves and stamp both.
+    const stamp = fileStamp(this.certFile)
+    if (stamp === null) {
       // Gone or unreadable: the old value goes with it. A certificate nobody can read is not a
       // certificate with 172 days left.
       this.cached = null
@@ -219,7 +242,7 @@ export function triggerIssuance(cfg: Config): (host: string) => Promise<void> {
 const CACHE_MAX = 256
 
 export class Certs {
-  private cache = new Map<string, { ctx: SecureContext; mtimeMs: number; crt: string }>()
+  private cache = new Map<string, { ctx: SecureContext; stamp: string; crt: string }>()
   private readonly certDir: string | null
   private readonly supplied: CertFiles | null
   private readonly issue: (host: string) => Promise<void>
@@ -233,7 +256,7 @@ export class Certs {
     log?: (msg: string) => void
   }) {
     this.certDir = opts.certDir
-    this.supplied = opts.supplied ? { ...opts.supplied, mtimeMs: 0 } : null
+    this.supplied = opts.supplied ? { ...opts.supplied, stamp: '' } : null
     this.issue = opts.issue ?? (async () => { /* no issuer: tests and local mode */ })
     this.log = opts.log ?? ((m) => console.warn(m))
   }
@@ -244,7 +267,8 @@ export class Certs {
    *  the caller answers no certificate and the lane says so. */
   private suppliedFiles(): CertFiles | null {
     if (!this.supplied) return null
-    try { return { ...this.supplied, mtimeMs: statSync(this.supplied.crt).mtimeMs } } catch { return null }
+    const stamp = pairStamp(this.supplied.crt, this.supplied.key)
+    return stamp === null ? null : { ...this.supplied, stamp }
   }
 
   /** True when a certificate for `host` is available (no issuance attempt). */
@@ -261,7 +285,7 @@ export class Certs {
     try { return { cert: readFileSync(files.crt), key: readFileSync(files.key) } } catch { return null }
   }
 
-  /** The context for `host`: cached by the .crt mtime; missing -> trigger issuance once, re-walk;
+  /** The context for `host`: cached by the PAIR's stamp; missing -> trigger issuance once, re-walk;
    *  still missing -> null (the lane then falls back to the default context so the client completes
    *  the handshake and receives a readable error instead of an alert). */
   async certFor(host: string): Promise<SecureContext | null> {
@@ -286,14 +310,21 @@ export class Certs {
     return this.contextFor(host, files)
   }
 
-  /** One loaded context per host, cached by the .crt's mtime so a renewal or a replaced file is
-   *  picked up on the next handshake. */
+  /** One loaded context per host, cached by the pair's `fileStamp` so a renewal or a replaced
+   *  file is picked up on the next handshake.
+   *
+   *  It used to be the certificate's MTIME alone, which is not an identity: the documented
+   *  renewal is an atomic rename, that changes the inode without necessarily changing the
+   *  mtime, and tools that preserve timestamps are ordinary. The lanes then served the old
+   *  certificate for as long as the process lived -- while `/healthz`, hardened separately,
+   *  reported the new one. The endpoint an operator checks to confirm a renewal said yes while
+   *  `psql` was still being handed the expired file, which is worse than either being wrong. */
   private contextFor(host: string, files: CertFiles): SecureContext | null {
     const hit = this.cache.get(host)
-    if (hit && hit.mtimeMs === files.mtimeMs && hit.crt === files.crt) return hit.ctx
+    if (hit && hit.stamp === files.stamp && hit.crt === files.crt) return hit.ctx
     try {
       const ctx = createSecureContext({ cert: readFileSync(files.crt), key: readFileSync(files.key) })
-      this.cache.set(host, { ctx, mtimeMs: files.mtimeMs, crt: files.crt })
+      this.cache.set(host, { ctx, stamp: files.stamp, crt: files.crt })
       while (this.cache.size > CACHE_MAX) {
         const oldest = this.cache.keys().next().value
         if (oldest === undefined) break

@@ -3,7 +3,7 @@
 // service waits for exactly one wake, the waiting keeps the service awake through ONE shared timer,
 // and every failure mode has a readable answer instead of a dropped connection.
 import { test, expect, beforeEach, afterEach, vi } from 'vitest'
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1080,6 +1080,86 @@ test('a SUPPLIED certificate is served for every host, and nothing is ever issue
   expect(issued).toBe(1)
 })
 
+
+test('a renewal with the SAME mtime is still picked up by the lanes, and healthz agrees', async () => {
+  // The documented renewal is an atomic rename, and a rename changes the inode without
+  // necessarily changing the mtime: renewal and configuration tools routinely preserve
+  // timestamps. The lane contexts were cached on the certificate's mtime ALONE, so they went on
+  // presenting the old certificate for the life of the process -- while `/healthz`, whose watch
+  // had been hardened separately, reported the new one. The endpoint an operator checks to
+  // confirm a renewal landed said yes while `psql` was still being handed the old file.
+  //
+  // One mechanism, two implementations, one of them hardened: both sides derive their identity
+  // from `fileStamp` now, so they cannot drift again.
+  const dir = mkdtempSync(join(tmpdir(), 'io-renew-mtime-'))
+  const mint = (crt: string, key: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${key} -out ${crt} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  const serialOf = (crt: string): string =>
+    spawnSync('sh', ['-c', `openssl x509 -in ${crt} -noout -serial`], { encoding: 'utf8' }).stdout.trim()
+  try {
+    const crt = join(dir, 'wildcard.crt')
+    const key = join(dir, 'wildcard.key')
+    mint(crt, key, 30)
+    const first = serialOf(crt)
+    // A whole-second timestamp, so putting it back after the rename restores it EXACTLY:
+    // `utimesSync` cannot express the sub-millisecond precision a fresh write has, and the
+    // trap being reproduced is an identical mtime, not an approximately identical one.
+    const fixed = new Date(Math.floor(Date.now() / 1000) * 1000 - 86_400_000)
+    utimesSync(crt, fixed, fixed)
+    utimesSync(key, fixed, fixed)
+    const before = statSync(crt)
+
+    const certs = new Certs({ certDir: null, supplied: { crt, key }, issue: async () => { throw new Error('nothing may be issued here') } })
+    const watch = new SuppliedCertWatch(crt)
+    const ctx1 = await certs.certFor('pg-db-demo-main.example.test')
+    expect(ctx1).not.toBeNull()
+    const notAfterBefore = watch.current()!.notAfter
+
+    // The renewal, with the certificate's timestamps put back exactly as they were. Everything
+    // else about the file is different: contents, size, inode.
+    mint(join(dir, 'next.crt'), join(dir, 'next.key'), 90)
+    const second = serialOf(join(dir, 'next.crt'))
+    expect(second).not.toBe(first)
+    renameSync(join(dir, 'next.crt'), crt)
+    renameSync(join(dir, 'next.key'), key)
+    utimesSync(crt, fixed, fixed)
+    utimesSync(key, fixed, fixed)
+    expect(statSync(crt).mtimeMs).toBe(before.mtimeMs)          // the trap, reproduced exactly
+
+    // The lane hands back a DIFFERENT context, built from the file that is there now.
+    const ctx2 = await certs.certFor('pg-db-demo-main.example.test')
+    expect(ctx2).not.toBe(ctx1)
+    expect(certs.materialFor('pg-db-demo-main.example.test')!.cert.toString())
+      .toBe(readFileSync(crt).toString())
+
+    // ...and the two answers agree, which is the property the divergence destroyed: the field an
+    // operator reads to confirm a renewal and the certificate the lanes actually present.
+    watch.refresh()
+    expect(watch.current()!.notAfter).not.toBe(notAfterBefore)
+    expect(watch.current()!.notAfter).toBe(suppliedCert(crt)!.notAfter)
+    expect(watch.current()!.daysLeft).toBeGreaterThan(80)
+
+    // An unchanged pair is still cached: the fix must not turn every handshake into a read.
+    const ctx3 = await certs.certFor('pg-db-demo-main.example.test')
+    expect(ctx3).toBe(ctx2)
+
+    // A KEY-only change counts too. A pair whose halves no longer belong together is a
+    // handshake failure, so the stamp covers both files rather than only the certificate.
+    mint(join(dir, 'other.crt'), join(dir, 'other.key'), 90)
+    const keyBefore = statSync(key)
+    renameSync(join(dir, 'other.key'), key)
+    utimesSync(key, fixed, fixed)
+    expect(statSync(key).mtimeMs).toBe(keyBefore.mtimeMs)
+    const ctx4 = await certs.certFor('pg-db-demo-main.example.test')
+    expect(ctx4).not.toBe(ctx3)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test('a supplied certificate reports what it has left, and says so under three weeks', () => {
   // The one certificate in this stack nothing renews. This cannot renew it either and does not
