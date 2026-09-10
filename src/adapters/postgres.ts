@@ -101,9 +101,12 @@ export class LocalPostgres implements DatabaseAdapter {
    *  walk and not from the destination's logs afterwards.
    *
    *  This costs the fast path almost nothing: databases here sleep (decision 12 and the whole
-   *  scheduler), so the parent of a branch is stopped most of the time, and a stopped or paused
-   *  container has no writer at all. Its directory is exactly the `kill -9` state Postgres recovers
-   *  from through WAL, and because nothing changes during the walk the copy is one moment of it. */
+   *  scheduler), so the parent of a branch is stopped most of the time, and a stopped container
+   *  has no writer at all. Its directory is exactly the `kill -9` state Postgres recovers from
+   *  through WAL, and because nothing changes during the walk the copy is one moment of it. What
+   *  proves nothing changed is the source's run fingerprint (`RUN_FMT`) read before and after the
+   *  walk: a status re-read alone cannot see a container that started and stopped again inside
+   *  the window, and a paused source cannot be shown to have stayed frozen at all, so it streams. */
   async fork(src: PgTarget & { url: string }, dst: PgTarget, opts: ForkOpts = {}): Promise<{ url: string; method: 'reflink' | 'basebackup'; ms: number }> {
     const t0 = Date.now()
     const method = forkMethod(this.cfg, probedCapabilities())
@@ -180,18 +183,23 @@ export class LocalPostgres implements DatabaseAdapter {
   private async forkByReflink(src: PgTarget & { url: string }, dst: PgTarget, opts: ForkOpts, isRetry: boolean): Promise<number> {
     // Decided BEFORE anything is created or removed, so a source that turns out to be live costs
     // the destination nothing.
-    if (await isRunning(src.container, this.exec)) throw new RunningSourceError(sourceIsLive(src.container))
+    const before = await runFingerprint(src.container, this.exec)
+    if (!atRest(before)) throw new RunningSourceError(sourceIsLive(src.container, stateOf(before)))
     await this.clearOrphan(dst, opts)
     const t0 = Date.now()
     await this.data.clonePostgres(src.dataDir, dst.dataDir)
     // The belt for the gap between the two: nothing in this daemon can start the source while a
     // fork holds its ServiceKey (decision 52 -- a traffic wake, a lifecycle start and a management
     // query all take that lock and queue behind this operation), but a `docker start` from outside
-    // is not covered by any lock we hold. A source that came up during the walk means the copy
-    // spans a write, so it is thrown away here rather than started and trusted.
-    if (await isRunning(src.container, this.exec)) {
+    // is not covered by any lock we hold. What has to be detected is any RUN that happened during
+    // the walk, not just one that is still going: a start followed by a stop leaves the container
+    // `exited` again, so the status on its own reads the same before and after while Postgres
+    // wrote through the whole copy. The run timestamps are what move, so the whole fingerprint is
+    // compared and any difference throws the copy away rather than starting it and trusting it.
+    const after = await runFingerprint(src.container, this.exec)
+    if (after !== before) {
       await this.data.remove(dst.dataDir).catch(() => {})
-      throw new RunningSourceError(`${src.container} started while its data directory was being cloned; the copy spans a write`)
+      throw new RunningSourceError(`${src.container} ran while its data directory was being cloned (${before ?? 'gone'} -> ${after ?? 'gone'}); the copy spans a write`)
     }
     await this.run(dst, opts, [])
     try {
@@ -276,8 +284,8 @@ class TornCopyError extends Error {}
  *  streams instead (and `INSTA_OSS_FORK=reflink` refuses rather than producing a torn copy). */
 class RunningSourceError extends Error {}
 
-const sourceIsLive = (container: string): string =>
-  `${container} is running: a file-level clone of a live Postgres data directory is not crash-consistent`
+const sourceIsLive = (container: string, state: string): string =>
+  `${container} is ${state}: a file-level clone of a live Postgres data directory is not crash-consistent`
 
 /** `docker run` for a provision, a clone start, or the boot migration's re-create under the new
  *  container name. `--mount type=bind`, never `-v` (decision 56): with `-v` dockerd CREATES a
@@ -353,9 +361,33 @@ async function containerExists(container: string, exec: DockerExec = docker): Pr
   return (await containerStatus(container, exec)) !== null
 }
 
-async function isRunning(container: string, exec: DockerExec = docker): Promise<boolean> {
-  return (await containerStatus(container, exec)) === 'running'
+/** One RUN of a container, as `docker inspect` reports it: the status plus the two timestamps
+ *  docker stamps when a run begins and ends. Measured on Docker 27 (`docker inspect -f` on a
+ *  container taken through the whole cycle): a stop moves `FinishedAt`, the next start moves
+ *  `StartedAt`, and a restart moves both, so a start-and-stop pair that happens between two reads
+ *  is visible even though the status is `exited` on both of them. A pause and unpause moves
+ *  NOTHING -- not the status once it is paused again, not either timestamp, not even `.State.Pid`
+ *  -- which is why `paused` is refused up front instead of being fingerprinted. */
+const RUN_FMT = '{{.State.Status}}|{{.State.StartedAt}}|{{.State.FinishedAt}}'
+
+/** The container states with no process inside: the only ones whose data directory may be walked
+ *  file by file. `running` is a writer. `paused` is a live postmaster with its processes frozen,
+ *  and an unpause and re-pause inside the walk leaves every inspect field identical, so a paused
+ *  source cannot be shown to have stayed still and is streamed instead. `restarting` and `dead`
+ *  are not at rest either. A container that does not exist has no writer and is at rest: an
+ *  already-removed source with its bytes still on disk is a clone this adapter may make. */
+const AT_REST = new Set(['exited', 'created'])
+
+async function runFingerprint(container: string, exec: DockerExec = docker): Promise<string | null> {
+  try {
+    return (await exec(['inspect', '-f', RUN_FMT, container])).toString().trim()
+  } catch {
+    return null
+  }
 }
+
+const stateOf = (fingerprint: string | null): string => (fingerprint === null ? 'gone' : fingerprint.split('|')[0])
+const atRest = (fingerprint: string | null): boolean => fingerprint === null || AT_REST.has(stateOf(fingerprint))
 
 /** The clone's DSN is the source's with the host swapped: a file-level fork inherits the source's
  *  roles and passwords (decision 18). */

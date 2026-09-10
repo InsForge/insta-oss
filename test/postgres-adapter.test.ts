@@ -283,6 +283,81 @@ test('a source that starts DURING the walk throws the copy away and streams', as
   expect(startedCopy).toBeGreaterThan(calls.findIndex((a) => a.includes('pg_basebackup')))
 })
 
+test('a source that starts AND STOPS again during the walk is caught, and the copy is thrown away', async () => {
+  // The case above is only half of it. A `docker start` from outside that is still running when
+  // the walk ends changes the STATUS, so a status re-read catches it; a start followed by a stop
+  // does not. The container is `exited` before the walk and `exited` after it, while a postmaster
+  // ran, recovered, checkpointed and shut down in between -- and the walk assembled the copy out
+  // of both sides of that. What moves is the pair of run timestamps docker stamps, so the whole
+  // fingerprint is what gets compared.
+  const seen: string[] = []
+  let run = 1
+  // The source is at rest for both reads; the fork's own wake door is what makes it live, after
+  // the walk has already been judged, because the stream it falls back to needs a running server.
+  let live = false
+  const status = (): string => (live ? 'running' : 'exited')
+  // Both reads say `exited`. Only the timestamps differ, exactly as a real stop-start-stop leaves
+  // them (measured: a start moves StartedAt, the stop that follows moves FinishedAt).
+  const fingerprint = (): string => `${status()}|2026-09-10T07:13:1${run}.437235833Z|2026-09-10T07:13:1${run}.619748917Z`
+  const calls: string[][] = []
+  const exec: DockerExec = async (args) => {
+    calls.push([...args])
+    if (args[0] === 'inspect') {
+      if (args[args.length - 1] !== 'io-demo-main-pg-db') throw new Error('Error: No such object')
+      if (!args[2].includes('StartedAt')) return Buffer.from(`${status()}\n`)
+      const fp = fingerprint()
+      seen.push(fp)
+      return Buffer.from(`${fp}\n`)
+    }
+    if (args.includes('select 1')) return Buffer.from('1\n')
+    return Buffer.from('')
+  }
+  const { ops, data } = stubData({
+    // One whole run of the source, begun and ended inside the walk.
+    clonePostgres: async (s, d) => { ops.push(`clone:${s}->${d}`); run++; return { method: 'reflink', ms: 1 } },
+  })
+  const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
+
+  const out = await pg.fork(src(), dst(), { ensureSourceRunning: async () => { live = true } })
+
+  // The copy that spans the run is discarded, not started and trusted.
+  expect(out.method).toBe('basebackup')
+  expect(ops).toContain('clone:/data/pg/demo-main-db->/data/pg/demo-feat-db')
+  expect(ops).toContain('remove:/data/pg/demo-feat-db')
+  const streamed = calls.findIndex((a) => a.includes('pg_basebackup'))
+  expect(streamed).toBeGreaterThanOrEqual(0)
+  expect(calls.findIndex((a) => a.join(' ').includes('--name io-demo-feat-pg-db'))).toBeGreaterThan(streamed)
+  // ...and the fixture is what makes that binding: the status is IDENTICAL on both reads, so
+  // nothing but the timestamps could have caught this one.
+  expect(seen).toHaveLength(2)
+  expect(seen[0].split('|')[0]).toBe('exited')
+  expect(seen[1].split('|')[0]).toBe('exited')
+  expect(seen[0]).not.toBe(seen[1])
+})
+
+test('a PAUSED source is streamed too: an unpause and re-pause inside the walk moves no field', async () => {
+  // A paused container is a live postmaster with its processes frozen, and `docker unpause`
+  // followed by `docker pause` leaves the status, both run timestamps and even the pid exactly as
+  // they were (measured on Docker 27). There is therefore no reading that can show a paused
+  // source held still for the walk, so it is refused up front like a running one.
+  const { calls, exec } = stubDocker({ running: ['io-demo-main-pg-db'], status: 'paused' })
+  const { ops, data } = stubData()
+  const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
+
+  const out = await pg.fork(src(), dst())
+
+  expect(out.method).toBe('basebackup')
+  expect(ops.filter((o) => o.startsWith('clone:'))).toEqual([])
+  expect(indexOfMatch(calls, 'pg_basebackup')).toBeGreaterThanOrEqual(0)
+})
+
+test('INSTA_OSS_FORK=reflink names the state it refused, paused included', async () => {
+  const { exec } = stubDocker({ running: ['io-demo-main-pg-db'], status: 'paused' })
+  const { data } = stubData()
+  const pg = new LocalPostgres({ cfg: cfgWith('reflink'), data, docker: exec })
+  await expect(pg.fork(src(), dst())).rejects.toThrow(/is paused: a file-level clone/)
+})
+
 test('a sleeping source is cloned as it lies: no CHECKPOINT, and the copy still starts', async () => {
   // `running: []`: the source container exists for nobody, which is what an asleep (exited) or
   // already removed source looks like to `docker inspect -f {{.State.Status}}`.
