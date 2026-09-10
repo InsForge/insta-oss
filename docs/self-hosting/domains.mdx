@@ -76,6 +76,32 @@ export PGSSLROOTCERT=/var/lib/instacloud/edge/ca.pem
 export NODE_EXTRA_CA_CERTS=/var/lib/instacloud/edge/ca.pem
 ```
 
+### When one hostname will not verify
+
+Under `acme` the edge lists the local issuer after the public CA, so a name whose ACME order
+fails still gets a certificate and still serves HTTPS. It is signed by the box, so a normal
+client refuses it: `curl` says "unable to get local issuer certificate", the AWS CLI says
+"SSL validation failed", and only that one hostname is affected. The edge then keeps serving the
+local certificate until it nears expiry, so a single failed order sticks.
+
+Check which issuer holds a name:
+
+```bash
+sudo find /var/lib/instacloud/caddy/data/caddy/certificates -name '*.crt' | sed 's|.*/certificates/||'
+```
+
+Names under `local/` fell back. Delete the one that fell back and let the edge order it again:
+
+```bash
+sudo rm -rf /var/lib/instacloud/caddy/data/caddy/certificates/local/<hostname>
+sudo docker restart io-edge
+curl -sS -o /dev/null -w '%{ssl_verify_result}\n' https://<hostname>/     # 0 means it verifies
+```
+
+If it falls back again, the name is not reaching the box from the internet on port 80, or the
+public CA is rate limiting the suffix. The sslip.io warning above is the usual cause: every
+reinstall re-orders a certificate for every hostname.
+
 ## Databases from anywhere
 
 Postgres, Redis and MongoDB share one public port each, and the daemon routes by the hostname in
