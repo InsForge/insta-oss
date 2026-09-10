@@ -45,6 +45,17 @@ To go back to the hosted platform, run `insta env use prod`, or unset `INSTA_API
 There is no `insta tokens` command. Tokens are created in the dashboard, or with `POST /tokens`.
 </Note>
 
+### Tokens are not scoped
+
+`POST /tokens` accepts a `scopes` array and returns it on the token record, and so does the hosted
+platform. Neither enforces it. A token is a label on a full-power credential: every valid `insta_`
+key acts as the single admin, on every route. Treat `scopes` as a note to yourself about what you
+made the token for, not as a permission boundary.
+
+Two things follow. Give each agent, box, or CI job its own token, so revoking one does not disturb
+the others. And to take access away, revoke the token: `DELETE /tokens/<id>`, or the dashboard's
+**API tokens** tab. Revocation is immediate, and it is the only lever a token has.
+
 ## MCP and agent skills
 
 The MCP server is a thin client over the same API, so the same bearer works:

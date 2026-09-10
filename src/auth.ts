@@ -268,12 +268,25 @@ export function registerAuth(app: FastifyInstance, cfg: Config): void {
 
   app.get('/tokens', async () => ({ tokens: (loadState().identity?.tokens ?? []).map(apiTokenOut) }))
 
+  // `scopes` is accepted, stored and echoed, and never enforced: any valid `insta_` key is a full
+  // actor. That is the cloud's behaviour too, not a local shortcut (platform accounts/service.ts
+  // stashes scopes in the api key's metadata, auth/service.ts reads them onto the Actor, and no
+  // route ever consults the field), so the wire shape stays identical and a CLI that sends scopes
+  // to both keeps working. What the cloud does NOT do is tell you, and a caller who sets
+  // `scopes: ['read']` and believes it has a read-only key has a full-power one. So a request that
+  // supplies scopes gets that said back to it. A request that sends none is byte-identical to the
+  // cloud's response.
+  const SCOPES_NOTE = 'scopes are recorded and returned for your own bookkeeping, never enforced: this daemon has one admin, and every valid token acts as that admin. Revoke a token to take its access away.'
+
   app.post('/tokens', async (req, reply) => {
     const b = body(req)
     if (b.orgId !== undefined && b.orgId !== null) return reply.code(400).send({ error: 'orgId must be omitted on a single-tenant daemon' })
     try {
       const { key, row } = mutate((s) => mintToken(s, { name: b.name, scopes: b.scopes, expiresInDays: b.expiresInDays }))
-      return reply.code(201).send({ token: key, record: apiTokenOut(row) })
+      return reply.code(201).send({
+        token: key, record: apiTokenOut(row),
+        ...(row.scopes.length ? { warning: SCOPES_NOTE } : {}),
+      })
     } catch (e) { return sendError(reply, e) }
   })
 

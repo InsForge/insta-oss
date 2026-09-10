@@ -242,6 +242,35 @@ test('tokens: create, list newest first, delete once, and reject orgId', async (
   expect(bad.json().error).toContain('orgId must be omitted')
 })
 
+// Scopes are accepted and echoed because that is the cloud's wire shape (it stashes them on the
+// api key's metadata and reads them onto its Actor), and neither plane enforces them: any valid
+// `insta_` key is a full actor on every route. Rejecting them would break a CLI that talks to
+// both, so the daemon takes them and says plainly what they are worth.
+test('token scopes are informational: echoed, warned about, and NOT a permission boundary', async () => {
+  const cookie = cookieOf(await signUp())
+  const h = { cookie }
+  const scoped = await send('POST', '/tokens', { headers: h, payload: { name: 'ro', scopes: ['read'] } })
+  expect(scoped.statusCode).toBe(201)
+  expect(scoped.json().record.scopes).toEqual(['read'])
+  expect(scoped.json().warning).toMatch(/never enforced/)
+
+  // A create with no scopes carries no warning: that response stays the cloud's shape byte for byte.
+  const plain = await send('POST', '/tokens', { headers: h, payload: { name: 'full' } })
+  expect(plain.json().record.scopes).toEqual([])
+  expect(plain.json().warning).toBeUndefined()
+
+  // The claim the warning makes is true: a `read`-scoped key performs a WRITE, and mints another
+  // token while it is at it.
+  const key = scoped.json().token
+  const bearer = { authorization: `Bearer ${key}` }
+  const created = await send('POST', '/orgs/local/projects', { headers: bearer, payload: { name: 'written-by-ro' } })
+  expect(created.statusCode).toBe(201)
+  expect((await send('POST', '/tokens', { headers: bearer, payload: { name: 'minted-by-ro' } })).statusCode).toBe(201)
+  // ...and revoking it is what actually stops it, since the scope never did.
+  await send('DELETE', `/tokens/${scoped.json().record.id}`, { headers: h })
+  expect((await send('GET', '/me', { headers: bearer })).statusCode).toBe(401)
+})
+
 test('a revoked key and an expired key both stop authenticating', async () => {
   const cookie = cookieOf(await signUp())
   const h = { cookie }

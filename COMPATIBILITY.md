@@ -57,6 +57,12 @@ create one in the dashboard, on the Account page, or with `POST /tokens` and a s
 `GET /tokens` lists them and `DELETE /tokens/:id` revokes one. In local mode those routes stay
 `501`, because there is nothing to authenticate.
 
+`scopes` is accepted on create and echoed back on the record, matching the hosted platform's wire
+shape, and like the platform it is never enforced: every valid `insta_` key acts as the one admin
+on every route. It is a label, not a permission boundary, so revoking a token is the only way to
+withdraw its access. A create that supplies a non-empty `scopes` gets a `warning` field saying so,
+which the hosted API does not send; a create without scopes returns the cloud's shape exactly.
+
 ## Agent sessions
 
 The CLI enrols itself as an agent whenever it detects one around it (Claude Code, Codex, Cursor)
