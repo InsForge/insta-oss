@@ -2474,6 +2474,11 @@ export class Engine {
    *  After the containers: data directories (WP4), scheduler keys (WP3), custom domains (WP2). */
   private async teardownBranch(project: Project, b: Branch, t: Teardown): Promise<void> {
     const ref = this.ref(project, b)
+    // What this branch's own demolition adds to the counter. `destroyProject` shares ONE
+    // `Teardown` across every branch and already decides each ROW by this delta
+    // (`t.failed === before`), so everything else this teardown decides has to use the same
+    // scope or the two disagree -- which is exactly what a cumulative test did below.
+    const failedBefore = t.failed
     // Every container this branch owns, so what follows can be gated on them ACTUALLY being
     // gone rather than on the removal call having returned.
     const survivors: string[] = []
@@ -2546,7 +2551,15 @@ export class Engine {
     // Releasing the domains is sharper still: the branch row is kept and refuses provisioning,
     // so its hostnames must stay claimed rather than becoming available to something else while
     // the old container is still answering on them.
-    if (t.failed > 0) return
+    //
+    // THE DELTA, not the total. A cumulative `t.failed > 0` is right for `destroyBranch`, which
+    // owns its counter, and wrong for `destroyProject`, which shares one across every branch:
+    // a branch demolished COMPLETELY after an earlier branch failed would see the earlier
+    // failure, return here, and keep its keys and domains -- while `destroyProject`, deciding
+    // the row by the delta, saw no new failure and deleted the row. Keys and domain rows
+    // orphaned permanently, because a retry only walks branch rows that still exist. Whatever
+    // decides the row decides these, in the same scope, in both callers.
+    if (t.failed !== failedBefore) return
     const ids = [...dbs.map((d) => d.id), ...managed.map((m) => m.id), ...Object.keys(b.apps).map((g) => `cp-${g}`)]
     this.scheduler.forget(ids.map((sid) => this.serviceKey(b, sid)))                                          // WP3
     this.releaseDomainsFor(project.id, b.id)                                                                  // WP2

@@ -3480,6 +3480,51 @@ test('a SUCCESSFUL create whose destination is renamed mid-flight does not leak 
   expect((await get(`/projects/${id}/secrets?branch=feat`)).json().secrets.API_KEY).toBe('from-main')
 })
 
+test('a project delete with MIXED results releases each branch by its own outcome', async () => {
+  // `destroyProject` shares ONE `Teardown` across every branch and decides each row by the
+  // per-branch DELTA. A cumulative `t.failed > 0` guard on the keys and domains therefore
+  // disagreed with it: a branch demolished completely AFTER an earlier branch failed kept its
+  // scheduler keys and its hostnames while its row was deleted, orphaning both permanently,
+  // because a retry only walks branch rows that still exist.
+  const id = await sourceWithEveryStep()
+  for (const name of ['feat-a', 'feat-b']) {
+    expect((await post(`/projects/${id}/branches`, { name })).statusCode).toBe(201)
+    expect((await post(`/projects/${id}/compute/domain?branch=${name}`, { hostname: `${name}.example.com`, group: 'web' })).statusCode).toBe(200)
+  }
+  const branchOfName = (name: string): string =>
+    Object.values(loadState().branches).find((b) => b.projectId === id && b.name === name)!.id
+  const aId = branchOfName('feat-a')
+  const bId = branchOfName('feat-b')
+  // The failing branch must be torn down BEFORE the succeeding one for the bug to be reachable.
+  const order = engine.listBranches(id).map((b) => b.name)
+  expect(order.indexOf('feat-a')).toBeLessThan(order.indexOf('feat-b'))
+  engine.beginHold(`${aId}:cp-web`)
+  engine.beginHold(`${bId}:cp-web`)
+
+  const realDestroy = db.destroy.bind(db)
+  const destroy = vi.spyOn(db, 'destroy').mockImplementation(async (container: string) => {
+    if (container.includes('demo-feat-a-')) throw new Error('container is in use')
+    return realDestroy(container)
+  })
+  try {
+    await engine.destroyProject(id)
+  } finally {
+    destroy.mockRestore()
+  }
+
+  const st = loadState()
+  // The branch that FAILED keeps all three: row, hold, hostname.
+  expect(st.branches[aId]?.status).toBe('cleanup-failed')
+  expect(engine.holds(`${aId}:cp-web`)).toBe(1)
+  expect(st.customDomains?.['feat-a.example.com']).toBeDefined()
+  // The branch that SUCCEEDED releases all three, even though an earlier branch had failed.
+  expect(st.branches[bId]).toBeUndefined()
+  expect(engine.holds(`${bId}:cp-web`)).toBe(0)
+  expect(st.customDomains?.['feat-b.example.com']).toBeUndefined()
+  // ...and the project row is kept, because a branch row outlived its teardown.
+  expect(st.projects[id]).toBeDefined()
+})
+
 test('a create that fails post-commit emits no branch.created event', async () => {
   const id = await sourceWithEveryStep()
   const cloneInto = vi.spyOn(storage, 'cloneInto').mockRejectedValueOnce(new Error('bucket boom'))
