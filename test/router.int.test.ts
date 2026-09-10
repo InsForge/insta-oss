@@ -86,6 +86,24 @@ const inspect = async (container: string, fmt: string): Promise<string> =>
 /** A request through the router's HTTP listener with an explicit Host, as the edge would send it.
  *  `node:http` and not `fetch`: Host is a forbidden header name in fetch, so undici silently
  *  replaces it with the address dialled, and every request in this file would reach the API. */
+/**
+ * A just-deployed container is RUNNING before the process inside it has bound its port, and the
+ * router answers that window with a 502 because the connect really is refused. Deploy does not
+ * gate on the app answering (`docs/self-hosting/sleep.mdx` says as much, and always-on is the
+ * documented mitigation), so a test that asserts on its first request is asserting on the app's
+ * startup rather than on routing. Give the bind a bounded wait: what these cases exist to prove is
+ * that the lane reaches the container, not how fast nginx starts.
+ */
+async function viaHostReady(host: string, path = '/', within = 30_000): Promise<{ status: number; body: string }> {
+  const deadline = Date.now() + within
+  let last = await viaHost(host, path)
+  while (last.status === 502 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 250))
+    last = await viaHost(host, path)
+  }
+  return last
+}
+
 function viaHost(host: string, path = '/'): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = httpRequest({ host: '127.0.0.1', port: cfg.port, path, method: 'GET', headers: { host } }, (res) => {
@@ -155,7 +173,7 @@ test('Host routing reaches the real container, and a daemon host still reaches t
   expect(branch.apps.web.host).toBe(APP_HOST)
   expect(branch.databases?.['pg-db']?.host).toBe(PG_HOST)
 
-  const res = await viaHost(APP_HOST)
+  const res = await viaHostReady(APP_HOST)
   expect(res.status).toBe(200)
   // nginx's own index, so the bytes really came from that container and not from Fastify.
   expect(res.body).toContain('Welcome to nginx')
@@ -201,7 +219,9 @@ test('a service the developer stopped answers a readable error and is NOT woken 
 
   await engine.lifecycle(projectId, 'cp-web', 'start')
   expect(await state(APP)).toBe('running')
-  expect((await viaHost(APP_HOST)).status).toBe(200)
+  // An explicit start returns when the container is running, which is earlier than the app inside
+  // it accepting, so this is the same bind window as the first case.
+  expect((await viaHostReady(APP_HOST)).status).toBe(200)
 }, 180_000)
 
 /** Speak the first two moves of the Postgres protocol over the lane and return the message type the
