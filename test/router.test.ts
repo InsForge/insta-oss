@@ -18,7 +18,7 @@ import { SSL_REQUEST, startupMessage } from '../src/router/wake'
 import type { ServiceState, UpstreamAddr, UpstreamLike } from '../src/router/deps'
 import type { Config } from '../src/config'
 import type { State } from '../src/state'
-import { resetFakes, serverConfig, testConfig } from './fakes'
+import { makeEngine, resetFakes, serverConfig, testConfig } from './fakes'
 import type { Branch, Project } from '../src/types'
 
 // ---- fakes -------------------------------------------------------------------------------------
@@ -864,4 +864,34 @@ test('sniCallback hands the default context to a servername the route table does
   expect(await ask('scan-1.example.com')).toBe(fallback)
   expect(await ask('scan-2.example.com')).toBe(fallback)
   expect(issued).toEqual([])
+})
+
+// ---- write classes: what actually rebuilds the table --------------------------------------------
+
+test('an audit event does not rebuild the route table; a real service change does', async () => {
+  const cfg = testConfig()
+  const engine = makeEngine(cfg)
+  const { project } = await engine.createProject('demo')
+  // No `table` seam: this Router builds from the real state file, memoized on the routing revision.
+  const router = new Router({
+    cfg, stateOf: () => 'running', wake: async () => { /* nothing sleeps here */ },
+    touch: () => { /* no scheduler */ }, beginHold: () => { /* idem */ }, endHold: () => { /* idem */ },
+    upstream: new FakeUpstream(), log: () => { /* quiet */ },
+  })
+  try {
+    const before = router.table()
+    // Secrets reads, storage object activity, template progress and every sleep or wake come
+    // through emit. None of them changes a route, so none of them may cost a table rebuild.
+    engine.emit(project.id, 'main', 'agent', 'secret.read', { name: 'API_KEY' })
+    expect(router.table()).toBe(before)
+    // The event still landed: this is an audit-class write, not a skipped one.
+    expect(engine.listEvents(project.id).map((e) => e.kind)).toContain('secret.read')
+    // A routing-class write is the thing that must invalidate.
+    await engine.createProject('other')
+    const after = router.table()
+    expect(after).not.toBe(before)
+    expect(after.byHost(`api.${cfg.domain}`)).toBeDefined()
+  } finally {
+    await router.stop()
+  }
 })

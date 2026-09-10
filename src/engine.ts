@@ -169,11 +169,16 @@ export class Engine {
   }
   private net(project: Project, branch: string): string { return `io-${this.ref(project, branch)}` }
 
+  /** An audit-class write (contract 00 section 5): the timeline is not routing. A secrets read, a
+   *  storage object listing, template progress and every sleep or wake emits here, and a routing
+   *  write would bump `rev`, drop the router's memoized table and rebuild the scheduler's target
+   *  projection for a row no route depends on. `{ audit: true }` bumps `auditRev` instead, which
+   *  the router ignores (decision 54). */
   emit(projectId: string, branch: string | null, source: AuditEvent['source'], kind: string, payload: unknown = {}, dedupKey: string | null = null): void {
     mutate((s) => {
       if (dedupKey && s.events.some((e) => e.projectId === projectId && e.dedupKey === dedupKey)) return
       s.events.push({ id: randomUUID(), projectId, branch, source, kind, payload, dedupKey, createdAt: new Date().toISOString() })
-    })
+    }, { audit: true })
   }
 
   getProject(id: string): Project | undefined { return loadState().projects[id] }
