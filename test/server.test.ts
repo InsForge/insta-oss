@@ -1740,6 +1740,50 @@ test('two concurrent createBranch calls for one name: one wins, the other is ref
   expect(branchReservations()).toEqual({})
 })
 
+// A branch NAME is unique per project; the `ref` has to be unique per DAEMON. `ref` is
+// `<projectSlug>-<branchSlug>` and a hyphen lives inside both halves, so project `demo-a` with
+// branch `main` and project `demo` with branch `a-main` spell one ref: one network, one set of
+// container names, and one set of data roots, because `branchRoots(ref)` keys on the ref alone.
+// Left unguarded, the second create adopts the first's storage and a later delete of either takes
+// the other project's postgres bytes with it, 200 and all.
+test('a branch ref is unique across PROJECTS: `demo` + `a-main` cannot take `demo-a` + `main`', async () => {
+  const a = (await post('/orgs/local/projects', { name: 'demo-a' })).json().project.id
+  const d = (await post('/orgs/local/projects', { name: 'demo' })).json().project.id
+  await post(`/projects/${d}/services`, { type: 'postgres', name: 'db' })
+  calls.length = 0
+  vi.mocked(dockerFn).mockClear()
+
+  const clash = await post(`/projects/${d}/branches`, { name: 'a-main' })
+  expect(clash.statusCode).toBe(409)
+  expect(clash.json().error).toContain('both name the resources demo-a-main')
+  expect(clash.json().error).toContain('in project "demo-a"')
+  // Refused before anything was made, and before anything of the VICTIM's was touched.
+  expect(calls).toEqual([])
+  expect(vi.mocked(dockerFn).mock.calls.map((c) => (c[0] as string[]).join(' '))).toEqual([])
+  expect(branchReservations()).toEqual({})
+  // `demo-a` still owns the ref, with its branch row intact.
+  const aMain = (await get(`/projects/${a}/branches`)).json().branches
+  expect(aMain.map((b: { name: string }) => b.name)).toEqual(['main'])
+  expect(loadState().branches[aMain[0].id].ref).toBe('demo-a-main')
+})
+
+test('...and the other order: a PROJECT whose default branch would take a live ref is refused whole', async () => {
+  const d = (await post('/orgs/local/projects', { name: 'demo' })).json().project.id
+  await post(`/projects/${d}/services`, { type: 'postgres', name: 'db' })
+  expect((await post(`/projects/${d}/branches`, { name: 'a-main' })).statusCode).toBe(201)
+  calls.length = 0
+
+  const clash = await post('/orgs/local/projects', { name: 'demo-a' })
+  expect(clash.statusCode).toBe(409)
+  expect(clash.json().error).toContain('both name the resources demo-a-main')
+  // No half-made project survives the refusal, and the victim's stack is untouched: a create that
+  // compensated over the ref would have removed `demo`/`a-main`'s database and its bytes.
+  expect((await get('/orgs/local/projects')).json().projects.map((p: { name: string }) => p.name)).toEqual(['demo'])
+  expect(calls.filter((c) => /\.destroy:|^data\.remove:/.test(c))).toEqual([])
+  expect(branchReservations()).toEqual({})
+  expect(loadState().branches[await branchOf(d, 'a-main')].databases?.['pg-db']?.container).toBe('io-demo-a-main-pg-db')
+})
+
 test('a failed branch create gives its ref claim back, and compensates only its own resources', async () => {
   const id = await createProject()
   const fork = vi.spyOn(db, 'fork').mockRejectedValueOnce(new Error('boom'))

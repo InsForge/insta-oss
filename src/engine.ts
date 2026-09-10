@@ -2219,13 +2219,28 @@ export class Engine {
    *  anything, and the compensation path can prove the resources it is about to remove are its own.
    *
    *  The ref is checked as well as the name because it is what the resources are named after: two
-   *  different names that slug to one ref would collide on every container. */
+   *  different names that slug to one ref would collide on every container.
+   *
+   *  The NAME is unique per project; the REF is unique per DAEMON. `ref` is
+   *  `<projectSlug>-<branchSlug>` and a hyphen occurs inside both halves, so it is not injective
+   *  across projects: `demo-a` / `main` and `demo` / `a-main` both spell `demo-a-main`. Nothing
+   *  downstream re-separates them — `branchRoots(ref)` keys the data directories on the ref alone,
+   *  and the network and container names carry no project either — so the second create silently
+   *  adopts the first's storage, and a later `branch delete` (or `project delete`) removes the
+   *  OTHER project's postgres bytes, volumes and managed data while its branch row goes on
+   *  advertising `ready` with credentials for a directory that is gone. Each row is resolved
+   *  against ITS OWN project, so both creation orders report the collision and refuse. Renaming
+   *  the ref to an unambiguous separator would fix it too, and was rejected: it renames every
+   *  container and every directory on an existing install. */
   private reserveBranchRef(project: Project, name: string, ref: string, branchId: string): void {
     mutate((s) => {
       for (const b of Object.values(s.branches)) {
-        if (b.projectId !== project.id) continue
-        if (b.name === name) throw new Error(`branch "${name}" already exists`)
-        if (this.ref(project, b) === ref) throw new Error(`branch "${name}" already exists as "${b.name}" (both name the resources ${ref})`)
+        if (b.projectId === project.id && b.name === name) throw new Error(`branch "${name}" already exists`)
+        const owner = s.projects[b.projectId]
+        const bRef = b.ref ?? (owner ? this.ref(owner, b.name) : undefined)
+        if (bRef === ref) {
+          throw new Error(`branch "${name}" already exists as "${b.name}" in project "${owner?.name ?? b.projectId}" (both name the resources ${ref})`)
+        }
       }
       const holder = s.branchReservations?.[ref]
       if (holder !== undefined && holder !== branchId) throw new Error(`branch "${name}" already exists (a create for it is in flight)`)
