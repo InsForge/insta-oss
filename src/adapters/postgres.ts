@@ -249,8 +249,11 @@ export async function pgWaitReady(container: string, timeoutMs = READY_TIMEOUT_M
       await exec(['exec', container, 'pg_isready', '-h', '127.0.0.1', '-p', '5432', '-U', 'postgres', '-d', DB])
       const out = (await exec(['exec', container, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-d', DB,
         '-tAc', 'select 1'])).toString().trim()
-      // A real server answers `1`; an empty capture only happens with a stubbed docker in tests.
-      if (out === '' || out.split('\n')[0].trim() === '1') return
+      // Only the row a live server sends back counts. An empty capture is NOT ready: this predicate
+      // exists because the image's initdb phase runs a temporary server on the unix socket while
+      // the real one is still starting (#34), and "nothing came back" is exactly what that phase
+      // looks like. Tests inject the `exec` seam instead of widening the production check.
+      if (out.split('\n')[0].trim() === '1') return
       last = `select 1 answered ${JSON.stringify(out)}`
     } catch (e) {
       last = firstLine(e)

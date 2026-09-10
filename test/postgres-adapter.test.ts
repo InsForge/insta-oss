@@ -4,7 +4,7 @@
 // assertable in milliseconds. The Docker suites (fork.int, clone-isolation.int) prove the same
 // paths against a real server; this file is what fails fast when the sequence changes.
 import { test, expect } from 'vitest'
-import { LocalPostgres, type DockerExec } from '../src/adapters/postgres'
+import { LocalPostgres, pgWaitReady, type DockerExec } from '../src/adapters/postgres'
 import type { Config } from '../src/config'
 import type { DataDirOps, PgTarget } from '../src/types'
 import { testConfig } from './fakes'
@@ -110,6 +110,51 @@ test('a reflink fork writes no replication line at all: nothing streams', async 
   expect(out.method).toBe('reflink')
   expect(line(calls).filter((l) => l.includes(HBA))).toEqual([])
   expect(indexOfMatch(calls, 'pg_basebackup')).toBe(-1)
+})
+
+// ---- readiness (#34): the probe that must not answer early -------------------------------------
+
+test('readiness needs the row a live server sends: an empty answer is not ready', async () => {
+  // The image's initdb phase runs a temporary server on the unix socket, so `select 1` over
+  // 127.0.0.1 can come back with nothing while the real server is still starting. That is the bug
+  // this probe exists for, and it stays not-ready until a `1` arrives.
+  let answers = 0
+  const { calls, exec } = stubDocker({
+    running: ['io-demo-main-pg-db'],
+    on: (args) => (args.includes('select 1') ? (answers++ < 2 ? '' : '1') : undefined),
+  })
+  await pgWaitReady('io-demo-main-pg-db', 10_000, exec)
+  expect(answers).toBe(3)
+  // Each not-ready round re-checks that the container is still alive before it sleeps.
+  expect(calls.filter((a) => a[0] === 'inspect').length).toBe(2)
+})
+
+test('readiness gives up on the deadline with the last answer, and never calls it ready', async () => {
+  const { exec } = stubDocker({ running: ['io-demo-main-pg-db'], selectOne: '' })
+  await expect(pgWaitReady('io-demo-main-pg-db', 1, exec)).rejects.toThrow(/never became ready: select 1 answered ""/)
+})
+
+test('a container that exited during the wait ends it with its own logs', async () => {
+  const { exec } = stubDocker({
+    running: ['io-demo-main-pg-db'],
+    status: 'exited',
+    on: (args) => {
+      if (args.includes('select 1')) return new Error('server closed the connection unexpectedly')
+      if (args[0] === 'logs') return 'FATAL: data directory has invalid permissions'
+      return undefined
+    },
+  })
+  await expect(pgWaitReady('io-demo-main-pg-db', 10_000, exec))
+    .rejects.toThrow(/exited before it became ready[\s\S]*invalid permissions/)
+})
+
+test('a plain provision waits for readiness before it hands back a DSN', async () => {
+  const { calls, exec } = stubDocker()
+  const { data } = stubData()
+  const pg = new LocalPostgres({ cfg: cfgWith(), data, docker: exec })
+  await pg.provision({ container: 'io-demo-main-pg-db', network: 'io-demo-main', dataDir: '/data/pg/demo-main-db' })
+  expect(indexOfMatch(calls, 'run -d')).toBeLessThan(indexOfMatch(calls, 'pg_isready'))
+  expect(indexOfMatch(calls, 'pg_isready')).toBeLessThan(indexOfMatch(calls, 'select 1'))
 })
 
 test('a source that already carries the line is not asked twice in one fork', async () => {
