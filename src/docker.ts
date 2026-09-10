@@ -43,8 +43,22 @@ const MAX_STDERR_BYTES = 64 * 1024
  *  `mergeStderr` folds stderr into the captured output — `docker logs` replays the container's own
  *  stderr stream there (Postgres logs entirely to stderr), which is data, not error noise. */
 export function docker(args: string[], opts: { input?: Buffer; mergeStderr?: boolean } = {}): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
+  return dockerCall(args, opts).done
+}
+
+/** One docker CLI invocation with a handle on the CHILD.
+ *
+ *  A caller that gives up on a docker call still has a process running, and that process can act
+ *  after the caller has released whatever lock it held: a `stop` that lands late stops whatever
+ *  holds the name by then, which after a deploy is the REPLACEMENT container. So the timeout
+ *  wrapper needs more than a race against a promise -- it needs to end the command and to know
+ *  that it ended. `kill()` is that, and `done` still settles only when the child has closed, so
+ *  "this rejected" and "no command of ours is running" are the same moment. */
+export function dockerCall(args: string[], opts: { input?: Buffer; mergeStderr?: boolean } = {}): { done: Promise<Buffer>; kill: () => void } {
+  let child: ReturnType<typeof spawn> | undefined
+  const done = new Promise<Buffer>((resolve, reject) => {
     const p = spawn('docker', args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    child = p
     const out: Buffer[] = []
     let outBytes = 0
     let overflowed = false
@@ -76,6 +90,10 @@ export function docker(args: string[], opts: { input?: Buffer; mergeStderr?: boo
     p.stdin.on('error', () => { /* the child exited before it read stdin (killed on overflow) */ })
     p.stdin.end(opts.input ?? undefined)
   })
+  // SIGKILL, not SIGTERM: this is called when a bound has already expired, and a client that
+  // negotiates its own shutdown is a client that can keep the caller waiting again. It is
+  // idempotent and harmless on a child that has already exited.
+  return { done, kill: () => { child?.kill('SIGKILL') } }
 }
 
 /** Docker's own "there is no such container", in both spellings the CLI uses: the client-side

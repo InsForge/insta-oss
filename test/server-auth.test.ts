@@ -6,7 +6,10 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-vi.mock('../src/docker', () => ({ docker: vi.fn(async () => Buffer.from('')) }))
+vi.mock('../src/docker', () => ({
+  docker: vi.fn(async () => Buffer.from('')),
+  dockerCall: () => ({ done: Promise.resolve(Buffer.from('')), kill: () => {} }),
+}))
 
 import { buildServer } from '../src/server'
 import { resetAdmin } from '../src/auth'

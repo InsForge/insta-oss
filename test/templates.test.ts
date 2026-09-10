@@ -4,7 +4,13 @@
 // Docker is mocked; the health probe is injected, and one case pins what the DEFAULT probe dials.
 import { test, expect, afterEach, beforeEach, vi } from 'vitest'
 
-vi.mock('../src/docker', () => ({ docker: vi.fn((args: string[] = []) => fakeDocker(args)) }))
+// `dockerCall` is the same seam with a handle on the child: the scheduler's runtime verbs go
+// through it so a timed-out call can be killed and waited for. A factory that returns only
+// `docker` leaves it undefined for every importer, so it is mocked here too, over the same fake.
+vi.mock('../src/docker', () => ({
+  docker: vi.fn((args: string[] = []) => fakeDocker(args)),
+  dockerCall: (args: string[] = []) => ({ done: fakeDocker(args), kill: () => {} }),
+}))
 
 /** The docker seam, with the ONE fidelity the database health gate needs: `docker ps -a` answers
  *  from `FakeRuntime`, the single fake container store (decision 53), which the fake postgres

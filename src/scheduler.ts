@@ -16,7 +16,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Config } from './config'
-import { docker } from './docker'
+import { dockerCall } from './docker'
 import { parseSize } from './observe'
 import type { ManagedDbType, ServiceKey, ServiceKind, ServiceLimits } from './types'
 import type { UpstreamLike } from './upstream'
@@ -605,7 +605,16 @@ export class Scheduler {
           if (live === 'created') { this.onAsleep(key, reason); return true }
           return false
         }
-        await this.runtime.stop(t.container, this.graceFor(t, reason))
+        try {
+          await this.runtime.stop(t.container, this.graceFor(t, reason))
+        } catch (e) {
+          // A stop that failed or timed out may still land on the daemon side, so what this
+          // snapshot says about the container is not evidence any more: drop the entry rather
+          // than let the rest of this pass -- or the eviction pool behind it -- decide anything
+          // from it. The next full read is what re-establishes the fact.
+          this.stateCache.delete(t.container)
+          throw e
+        }
         this.onAsleep(key, reason)
         this.hooks.emit(key, 'service.sleep', { service: t.serviceId, reason })
         return true
@@ -866,12 +875,41 @@ export class Scheduler {
 /** How long any single docker call may take before the caller gives up on it. */
 const DOCKER_TIMEOUT_MS = 20_000
 
-function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+/** A docker call with a deadline, where the deadline KILLS THE COMMAND and waits for it.
+ *
+ *  This used to reject its own wrapper and walk away, leaving the child running. The caller then
+ *  released its operation key while a process it had started could still act, and that process
+ *  acts on a NAME: a late `stop` stops whatever holds the name by then, which after a deploy is
+ *  the replacement container, and a late `start` undoes an explicit stop. Same family as the
+ *  wake bound above -- work outliving its lock -- one layer down.
+ *
+ *  So the promise settles only once the child has CLOSED: the timer kills it (SIGKILL, so the
+ *  wait is process teardown and not a negotiation) and the rejection comes from the child's own
+ *  exit. "The caller gave up" and "no docker command of ours is running" are then the same
+ *  moment, which is what makes releasing the key afterwards safe.
+ *
+ *  What this cannot do is unmake a request dockerd has already accepted: `docker stop` is an
+ *  HTTP call to the daemon, and killing the client does not cancel the daemon's own work. That
+ *  residue is bounded by never RECORDING an outcome nobody verified (the caller throws, and its
+ *  snapshot entry for the container is dropped so the next decision re-reads) and would only be
+ *  closed completely by addressing containers by id rather than by name, which is a change to
+ *  every runtime verb and every recorded call string, not one for this round. */
+export function withTimeout<T>(call: { done: Promise<T>; kill: () => void }, ms: number, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => { reject(new Error(`docker ${what} timed out after ${ms} ms`)) }, ms)
+    let expired = false
+    const timer = setTimeout(() => { expired = true; call.kill() }, ms)
     timer.unref?.()
-    p.then((v) => { clearTimeout(timer); resolve(v) }, (e: unknown) => { clearTimeout(timer); reject(e instanceof Error ? e : new Error(String(e))) })
+    const timedOut = (): Error => new Error(`docker ${what} timed out after ${ms} ms (the command was killed and has exited)`)
+    call.done.then(
+      (v) => { clearTimeout(timer); if (expired) reject(timedOut()); else resolve(v) },
+      (e: unknown) => { clearTimeout(timer); reject(expired ? timedOut() : (e instanceof Error ? e : new Error(String(e)))) },
+    )
   })
+}
+
+/** `docker(...)` with a deadline: the seam every mutating verb in this file goes through. */
+function boundedDocker(args: string[], ms: number, what: string): Promise<Buffer> {
+  return withTimeout(dockerCall(args), ms, what)
 }
 
 /** The memory ceiling of THIS process's own cgroup, or null when it has none.
@@ -967,7 +1005,7 @@ export class DockerRuntime implements Runtime {
   constructor(private cfg: Config, private upstream: UpstreamLike) {}
 
   async containers(): Promise<Map<string, { state: ContainerState; id: string }>> {
-    const out = await withTimeout(docker(['ps', '-a', '--format', '{{.Names}}\t{{.State}}\t{{.ID}}']), DOCKER_TIMEOUT_MS, 'ps')
+    const out = await boundedDocker(['ps', '-a', '--format', '{{.Names}}\t{{.State}}\t{{.ID}}'], DOCKER_TIMEOUT_MS, 'ps')
     const map = new Map<string, { state: ContainerState; id: string }>()
     for (const line of out.toString().trim().split('\n').filter(Boolean)) {
       const [name, state, id] = line.split('\t')
@@ -977,7 +1015,7 @@ export class DockerRuntime implements Runtime {
   }
 
   async stats(): Promise<Map<string, number>> {
-    const out = await withTimeout(docker(['stats', '--no-stream', '--format', '{{.Name}}\t{{.MemUsage}}']), DOCKER_TIMEOUT_MS, 'stats')
+    const out = await boundedDocker(['stats', '--no-stream', '--format', '{{.Name}}\t{{.MemUsage}}'], DOCKER_TIMEOUT_MS, 'stats')
     const map = new Map<string, number>()
     let total = 0
     for (const line of out.toString().trim().split('\n').filter(Boolean)) {
@@ -1019,14 +1057,14 @@ export class DockerRuntime implements Runtime {
   }
 
   async start(container: string): Promise<void> {
-    await withTimeout(docker(['start', container]), DOCKER_TIMEOUT_MS, 'start')
+    await boundedDocker(['start', container], DOCKER_TIMEOUT_MS, 'start')
   }
 
   /** Sleep is `docker stop` with a grace, never `docker pause`: SIGTERM (SIGINT for the postgres
    *  image, its fast shutdown), then SIGKILL after the grace. Compute containers carry `--init` so
    *  the signal reaches an app whose PID 1 is a shell (decision 60). */
   async stop(container: string, graceSec: number): Promise<void> {
-    await withTimeout(docker(['stop', '-t', String(graceSec), container]), DOCKER_TIMEOUT_MS + graceSec * 1000, 'stop')
+    await boundedDocker(['stop', '-t', String(graceSec), container], DOCKER_TIMEOUT_MS + graceSec * 1000, 'stop')
     // Budget mode has no kernel to ask, so the total it subtracts from the budget is maintained
     // here: a container that is gone is not holding its last sample any more.
     const sample = this.lastRss.get(container)
@@ -1037,12 +1075,12 @@ export class DockerRuntime implements Runtime {
   }
 
   async unpause(container: string): Promise<void> {
-    await withTimeout(docker(['unpause', container]), DOCKER_TIMEOUT_MS, 'unpause')
+    await boundedDocker(['unpause', container], DOCKER_TIMEOUT_MS, 'unpause')
   }
 
   async update(container: string, limits: ServiceLimits): Promise<void> {
-    await withTimeout(
-      docker(['update', '--cpus', String(limits.cpu), '--memory', `${limits.memoryMb}m`, '--memory-swap', `${limits.memoryMb}m`, container]),
+    await boundedDocker(
+      ['update', '--cpus', String(limits.cpu), '--memory', `${limits.memoryMb}m`, '--memory-swap', `${limits.memoryMb}m`, container],
       DOCKER_TIMEOUT_MS, 'update',
     )
   }
@@ -1052,7 +1090,7 @@ export class DockerRuntime implements Runtime {
   async probe(t: ServiceTarget): Promise<boolean> {
     if (t.kind === 'postgres') {
       try {
-        await withTimeout(docker(['exec', t.container, 'pg_isready', '-h', '127.0.0.1', '-U', 'postgres', '-d', 'app']), DOCKER_TIMEOUT_MS, 'exec pg_isready')
+        await boundedDocker(['exec', t.container, 'pg_isready', '-h', '127.0.0.1', '-U', 'postgres', '-d', 'app'], DOCKER_TIMEOUT_MS, 'exec pg_isready')
         return true
       } catch { return false }
     }

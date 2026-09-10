@@ -4,7 +4,7 @@
 // operation lock and eviction testable without containers.
 import { test, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
-  EVICTION_CEILING, NoContainerError, Scheduler, ServiceStoppedError, WakeTimeoutError,
+  EVICTION_CEILING, NoContainerError, Scheduler, ServiceStoppedError, WakeTimeoutError, withTimeout,
   type ServiceTarget, type SleepReason, type WakeDoor,
 } from '../src/scheduler'
 
@@ -1125,4 +1125,55 @@ test('the door and reason unions are the four doors and the three reasons', () =
   const reasons: SleepReason[] = ['idle', 'memory', 'branch-create']
   expect(doors).toHaveLength(3)
   expect(reasons).toHaveLength(3)
+})
+
+
+// ---- a docker call that outran its deadline -----------------------------------------------------
+
+test('a timed-out docker call is KILLED and waited for: nothing acts after the caller unwinds', async () => {
+  // The wrapper used to reject its own promise and walk away, leaving the child running. The
+  // caller then released its operation key while a process it had started could still act, and
+  // that process acts on a NAME: a late `stop` stops whatever holds the name by then, which
+  // after a deploy is the replacement container. Same family as the wake bound, one layer down.
+  let killed = false
+  let exited = false
+  let endChild!: () => void
+  const done = new Promise<string>((_, reject) => { endChild = () => { exited = true; reject(new Error('killed')) } })
+  const call = {
+    done,
+    // A real child does not vanish on the signal: it is reaped a moment later, and it is THAT
+    // moment the caller may not run before.
+    kill: () => { killed = true; setTimeout(endChild, 50) },
+  }
+
+  let settled = false
+  const p = withTimeout(call, 10, 'stop').then(
+    () => { settled = true },
+    () => { settled = true },
+  )
+  await vi.advanceTimersByTimeAsync(20)
+  expect(killed).toBe(true)
+  expect(exited).toBe(false)
+  expect(settled, 'the caller must not be released while its child is still alive').toBe(false)
+
+  await vi.advanceTimersByTimeAsync(60)
+  await p
+  expect(exited).toBe(true)
+  expect(settled).toBe(true)
+  await expect(withTimeout({ done: Promise.reject(new Error('killed')), kill: () => {} }, 10, 'stop').catch((e: unknown) => (e as Error).message))
+    .resolves.toContain('killed')
+})
+
+test('a timed-out docker call reports the timeout, not the child\'s own dying error', async () => {
+  // Built at the moment it is awaited: a rejected promise left lying about is an unhandled
+  // rejection warning, not a test.
+  const failing = (): { done: Promise<string>; kill: () => void } =>
+    ({ done: Promise.reject(new Error('signal SIGKILL')), kill: () => {} })
+  // Expired first, so the caller is told what actually happened to its command.
+  const slow = { done: new Promise<string>((_, reject) => { setTimeout(() => { reject(new Error('signal SIGKILL')) }, 30) }), kill: () => {} }
+  const p = withTimeout(slow, 10, 'stop')
+  await vi.advanceTimersByTimeAsync(40)
+  await expect(p).rejects.toThrow(/docker stop timed out after 10 ms \(the command was killed and has exited\)/)
+  // ...and a call that fails on its own, inside the deadline, keeps its own error.
+  await expect(withTimeout(failing(), 10_000, 'stop')).rejects.toThrow(/signal SIGKILL/)
 })

@@ -4,7 +4,10 @@
 import { test, expect, beforeEach, afterEach, vi } from 'vitest'
 import { createServer } from 'node:net'
 
-vi.mock('../src/docker', () => ({ docker: vi.fn(async () => Buffer.from('')) }))
+vi.mock('../src/docker', () => ({
+  docker: vi.fn(async () => Buffer.from('')),
+  dockerCall: () => ({ done: Promise.resolve(Buffer.from('')), kill: () => {} }),
+}))
 
 import { docker as dockerFn } from '../src/docker'
 import { Upstream } from '../src/upstream'
