@@ -1128,11 +1128,17 @@ test('managed db remove: destroys on every branch, drops rows + secrets; rename 
   const merge = await post(`/projects/${id}/branches/main/merge`, { from: 'feat' })
   expect(merge.json().skipped).toContainEqual({ type: 'redis', name: 'kv', reason: 'exists' })
 
-  // remove sweeps every branch
+  // remove is per branch, like add: one call per branch that carries it, and the registration
+  // retires behind the last carrier.
+  const featSid = (await get(`/projects/${id}/services?branch=feat`)).json().services
+    .find((x: { name: string }) => x.name === 'kv').id as string
+  expect((await del_(`/projects/${id}/services/${featSid}`)).statusCode).toBe(200)
+  expect(calls).toContain('md.destroy:io-demo-feat-rd-kv')
+  expect(loadState().projects[id].managedServices?.map((x) => x.id)).toEqual(['rd-kv'])
   const del = await del_(`/projects/${id}/services/rd-kv`)
   expect(del.statusCode).toBe(200)
   expect(calls).toContain('md.destroy:io-demo-main-rd-kv')
-  expect(calls).toContain('md.destroy:io-demo-feat-rd-kv')
+  expect(loadState().projects[id].managedServices).toEqual([])
   const after = (await get(`/projects/${id}/services`)).json().services
   expect(after.find((x: { id: string }) => x.id === 'rd-kv')).toBeUndefined()
   expect((await get(`/projects/${id}/secrets?branch=main`)).json().secrets.REDIS_URL).toBeUndefined()
@@ -2398,6 +2404,62 @@ test('branch merge creates on the target every service the source has and it lac
   expect(names(await listOn(id, 'main'))).toEqual(['analytics', 'cache', 'db', 'store'])
   // Structural only: the merge provisions a fresh empty database, it never forks feat's data.
   expect(calls.filter((c) => c.startsWith('db.fork:'))).toEqual([])
+})
+
+// Removal is the other half of the same model: the cloud made a service branch-owned so that
+// "add/remove stay local and branches diverge". Tearing every branch's copy down meant deleting
+// the service you added on `feat` also destroyed main's database and its bytes.
+test('removing a service on one branch leaves every other branch its service AND its data', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics' })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  const mainDsn = (await get(`/projects/${id}/services/pg-analytics/credentials`)).json().credentials.DATABASE_URL as string
+  const featSid = (await listOn(id, 'feat')).find((x) => x.name === 'analytics')!.id
+  calls.length = 0
+
+  expect((await del_(`/projects/${id}/services/${featSid}`)).statusCode).toBe(200)
+  // Exactly feat's container and feat's bytes. Main's were what the project-wide sweep destroyed.
+  expect(calls.filter((c) => c.startsWith('db.destroy:'))).toEqual(['db.destroy:io-demo-feat-pg-analytics'])
+  expect(calls.some((c) => c.startsWith('data.remove:') && c.includes('demo-feat'))).toBe(true)
+  expect(calls.filter((c) => c.startsWith('data.remove:') && c.includes('demo-main'))).toEqual([])
+  // main still HAS the service, and the DSN it had before still names the same live container.
+  expect(names(await listOn(id, 'main'))).toEqual(['analytics', 'db', 'store'])
+  expect(names(await listOn(id, 'feat'))).toEqual(['db', 'store'])
+  expect((await get(`/projects/${id}/services/pg-analytics/credentials`)).json().credentials.DATABASE_URL).toBe(mainDsn)
+  expect(loadState().branches[await branchOf(id, 'main')].databases?.['pg-analytics']).toBeDefined()
+  // The registration is the project's namespace entry (decision 49): it survives while main carries it.
+  expect(loadState().projects[id].dbServices?.map((d) => d.id).sort()).toEqual(['pg-analytics', 'pg-db'])
+
+  // ...and it retires with the LAST branch that carries the name.
+  expect((await del_(`/projects/${id}/services/pg-analytics`)).statusCode).toBe(200)
+  expect(calls).toContain('db.destroy:io-demo-main-pg-analytics')
+  expect(loadState().projects[id].dbServices?.map((d) => d.id)).toEqual(['pg-db'])
+  expect((await get(`/projects/${id}/services/pg-analytics/credentials`)).statusCode).toBe(404)
+})
+
+test('remove resolves its branch like add: ?branch, and a branch that does not carry it is a 404', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  await post(`/projects/${id}/services`, { type: 'storage', name: 'uploads', branch: 'feat' })
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache', branch: 'feat' })
+  calls.length = 0
+
+  // main never carried either, so removing them there destroys nothing and says why.
+  const missing = await del_(`/projects/${id}/services/st-uploads`)
+  expect(missing.statusCode).toBe(404)
+  expect(missing.json().error).toBe('service not found on branch "main"')
+  expect((await del_(`/projects/${id}/services/rd-cache?branch=main`)).statusCode).toBe(404)
+  expect(calls).toEqual([])
+
+  // On feat both go, and each registration retires behind its last carrier.
+  expect((await del_(`/projects/${id}/services/st-uploads?branch=feat`)).statusCode).toBe(200)
+  expect(calls).toContain('st.destroy:io-demo-feat-uploads')
+  expect((await del_(`/projects/${id}/services/rd-cache?branch=feat`)).statusCode).toBe(200)
+  expect(calls).toContain('md.destroy:io-demo-feat-rd-cache')
+  expect(calls.filter((c) => c.includes('demo-main'))).toEqual([])
+  expect(loadState().projects[id].storageServices?.map((x) => x.name)).toEqual(['store'])
+  expect(loadState().projects[id].managedServices).toEqual([])
+  expect(names(await listOn(id, 'feat'))).toEqual(['db', 'store'])
 })
 // ---- end region WP5 ----
 

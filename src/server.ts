@@ -707,17 +707,23 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     catch (e) { return objErr(reply, e) }
   })
 
-  // Remove a service of ANY type, on every branch, and answer the cloud's teardown summary
-  // (decision 50): how many containers, buckets and directories went, and how many refused to.
+  // Remove a service and answer the cloud's teardown summary (decision 50): how many containers,
+  // buckets and directories went, and how many refused to. Postgres, storage and managed databases
+  // are removed from ONE branch, resolved exactly as an add resolves one: the qualifier on the id
+  // first, then `?branch`, then the default (decision 49). Removing every branch's copy destroyed
+  // main's database, and its bytes, when the caller asked to drop the one on `feat`. The
+  // project-level registration retires with the last branch that carries the name. A compute group
+  // is the stated divergence, project-wide here as it is on add: it owns no data of its own.
   app.delete('/projects/:id/services/:sid', async (req, reply) => {
     const { id, sid: raw } = req.params as { id: string; sid: string }
+    const on = { branch: (req.query as { branch?: string }).branch }
     const sid = bareSid(raw)
     if (!gated(id, 'service.remove', reply)) return reply
     try {
       const teardown = sid.startsWith('cp-') ? await engine.removeComputeService(id, sid.slice(3))
-        : sid.startsWith('pg-') ? await engine.removeDbService(id, sid)
-        : sid.startsWith('st-') ? await engine.removeStorageService(id, sid)
-        : await engine.removeManagedService(id, sid)
+        : sid.startsWith('pg-') ? await engine.removeDbService(id, raw, on)
+        : sid.startsWith('st-') ? await engine.removeStorageService(id, raw, on)
+        : await engine.removeManagedService(id, raw, on)
       return { teardown }
     } catch (e) { return reply.code(404).send({ error: e instanceof Error ? e.message : String(e) }) }
   })

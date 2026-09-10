@@ -210,6 +210,41 @@ export class Engine {
     return !!branch.managed?.[reg.id]
   }
 
+  /** The 404 every branch-scoped read and action owes a service this branch does not carry: the
+   *  registration is the project's namespace entry, not proof that the branch has the thing. */
+  private assertCarries(project: Project, branch: Branch, reg: { id: string }, type: 'postgres' | 'storage' | 'managed'): void {
+    if (!this.carries(project, branch, reg, type)) throw new Error(`service not found on branch "${branch.name}"`)
+  }
+
+  /** The branch a service REMOVAL acts on, plus the bare service id: the qualifier on the id
+   *  first, then `?branch`, then the default branch (decision 49). That is the branch `add`
+   *  resolves through `targetBranch`, so a remove undoes exactly what an add did and nothing on
+   *  any other branch. */
+  private removalTarget(projectId: string, serviceId: string, branchName?: string): { project: Project; branch: Branch; sid: string } {
+    const project = this.getProject(projectId)
+    if (!project) throw new Error('project not found')
+    const { branch, serviceId: sid } = this.resolveSid(projectId, serviceId, branchName)
+    return { project, branch, sid }
+  }
+
+  /** Retire the project-level registration once the LAST branch carrying the service is gone.
+   *  A service id is the project's namespace and has to stay stable across branches (decision 49),
+   *  so the registration outlives one branch's copy: while another branch still carries the name,
+   *  dropping it would strip that branch's row of its type, name and data key. The user secrets
+   *  bound to the service go with the registration, for the same reason: they are project-level.
+   *  Returns whether the registration went. */
+  private retireRegistration(project: Project, reg: { id: string }, type: 'postgres' | 'storage' | 'managed', source: string): boolean {
+    if (this.listBranches(project.id).some((b) => this.carries(project, b, reg, type))) return false
+    mutate((st) => {
+      const pr = st.projects[project.id]
+      if (type === 'postgres') pr.dbServices = (pr.dbServices ?? []).filter((d) => d.id !== reg.id)
+      else if (type === 'storage') pr.storageServices = (pr.storageServices ?? []).filter((x) => x.id !== reg.id)
+      else pr.managedServices = (pr.managedServices ?? []).filter((m) => m.id !== reg.id)
+      st.userSecrets[project.id] = (st.userSecrets[project.id] ?? []).filter((u) => u.service !== source)
+    })
+    return true
+  }
+
   /** The postgres handle of ONE database service on a branch: READ from the row (decision 17); a
    *  row provisioned before the data migration still runs today's `io-<ref>-pg` container. */
   private pgContainer(project: Project, branch: Branch, serviceId = 'pg-db'): string {
@@ -1449,32 +1484,28 @@ export class Engine {
     return this.managedRow(entry)
   }
 
-  /** Remove a managed database: destroy its container on every branch, unregister. The data goes
-   *  with it — same irreversibility class as removing a compute service. */
-  async removeManagedService(projectId: string, serviceId: string): Promise<Teardown> {
-    const project = this.getProject(projectId)
-    if (!project) throw new Error('project not found')
-    const m = this.managedList(projectId).find((x) => x.id === serviceId)
+  /** Remove a managed database from ONE branch (`removalTarget`): destroy THAT branch's container
+   *  and its bytes, and unregister only once no branch carries the name any more. The data goes
+   *  with it — same irreversibility class as removing a compute service — which is exactly why the
+   *  blast radius is one branch (see `removeDbService`). */
+  async removeManagedService(projectId: string, serviceId: string, opts: { branch?: string } = {}): Promise<Teardown> {
+    const { project, branch, sid } = this.removalTarget(projectId, serviceId, opts.branch)
+    const m = this.managedList(projectId).find((x) => x.id === sid)
     if (!m) throw new Error('service not found')
-    const branches = this.listBranches(projectId)
+    this.assertCarries(project, branch, m, 'managed')
     const t = newTeardown()
-    for (const b of branches) {
-      const ref = this.ref(project, b)
-      await count(t, () => this.managedDb.destroy(managedContainerName(ref, m.type, m.name)))
-      // WP4: the data goes with the container (same irreversibility class as the compute service).
-      await count(t, () => this.data.remove(this.layout().md(ref, m.type, m.dataId ?? m.name)))
-      mutate((st) => {
-        delete st.branches[b.id].managed?.[serviceId]
-        st.branches[b.id].bindings = (st.branches[b.id].bindings ?? []).filter((x) => x.source !== `${m.type}/${m.name}`)
-      })
-    }
+    const ref = this.ref(project, branch)
+    await count(t, () => this.managedDb.destroy(managedContainerName(ref, m.type, m.name)))
+    // WP4: the data goes with the container (same irreversibility class as the compute service).
+    await count(t, () => this.data.remove(this.layout().md(ref, m.type, m.dataId ?? m.name)))
     mutate((st) => {
-      const pr = st.projects[projectId]
-      pr.managedServices = (pr.managedServices ?? []).filter((x) => x.id !== serviceId)
+      delete st.branches[branch.id].managed?.[sid]
+      st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.source !== `${m.type}/${m.name}`)
     })
-    this.scheduler.forget(branches.map((b) => this.serviceKey(b, serviceId))) // WP3
+    this.scheduler.forget([this.serviceKey(branch, sid)]) // WP3
+    this.retireRegistration(project, m, 'managed', `${m.type}/${m.name}`)
     this.router.invalidate()
-    this.emit(projectId, null, 'resource', 'service.removed', { type: m.type, name: m.name })
+    this.emit(projectId, branch.name, 'resource', 'service.removed', { type: m.type, name: m.name })
     return t
   }
 
@@ -1818,13 +1849,18 @@ export class Engine {
   private async teardownBranch(project: Project, b: Branch, t: Teardown): Promise<void> {
     const ref = this.ref(project, b)
     await count(t, () => this.compute.destroy(ref))
-    for (const d of this.dbList(project.id)) await count(t, () => this.db.destroy(this.pgContainer(project, b, d.id)))
-    for (const x of this.stList(project.id)) await count(t, () => this.storage.destroy(this.bucketOf(project, b, x.id), b.network))
+    // Only what this branch CARRIES: services are branch-scoped, so a registration another branch
+    // materialised has no container, no bucket and no bytes here, and destroying its derived name
+    // would count a provider object that never existed into the teardown summary.
+    const dbs = this.dbList(project.id).filter((d) => this.carries(project, b, d, 'postgres'))
+    const stores = this.stList(project.id).filter((x) => this.carries(project, b, x, 'storage'))
+    for (const d of dbs) await count(t, () => this.db.destroy(this.pgContainer(project, b, d.id)))
+    for (const x of stores) await count(t, () => this.storage.destroy(this.bucketOf(project, b, x.id), b.network))
     // The object store is ONE container for the whole box, attached to this branch's network: it is
     // detached once, after every bucket on the network is gone (a per-bucket detach would strand the
     // purge of the next one), and before `network rm`, which refuses while anything is attached.
     if (this.storage.detachFrom) await this.storage.detachFrom(b.network).catch(() => {})
-    const managed = this.managedList(project.id)
+    const managed = this.managedList(project.id).filter((m) => this.carries(project, b, m, 'managed'))
     for (const m of managed) await count(t, () => this.managedDb.destroy(managedContainerName(ref, m.type, m.name)))
     try { await docker(['network', 'rm', b.network]) } catch { /* gone */ }
     // WP4: the branch's bytes, after every container that held them. A remove failure is counted and
@@ -1835,7 +1871,7 @@ export class Engine {
         throw e
       }))
     }
-    const ids = [...this.dbList(project.id).map((d) => d.id), ...managed.map((m) => m.id), ...Object.keys(b.apps).map((g) => `cp-${g}`)]
+    const ids = [...dbs.map((d) => d.id), ...managed.map((m) => m.id), ...Object.keys(b.apps).map((g) => `cp-${g}`)]
     this.scheduler.forget(ids.map((sid) => this.serviceKey(b, sid)))                                          // WP3
     this.releaseDomainsFor(project.id, b.id)                                                                  // WP2
   }
@@ -3250,32 +3286,31 @@ export class Engine {
     })
   }
 
-  /** Remove a postgres service from every branch (the data goes with it) and unregister it. */
-  async removeDbService(projectId: string, serviceId: string): Promise<Teardown> {
-    const project = this.getProject(projectId)
-    if (!project) throw new Error('project not found')
-    const reg = this.dbList(projectId).find((d) => d.id === serviceId)
+  /** Remove a postgres service from ONE branch: the qualifier on the id, else `opts.branch`, else
+   *  the project's default branch. The data goes with it, on that branch only.
+   *
+   *  Removal is branch-scoped for the same reason `addDbService` is: the cloud made a service
+   *  branch-owned so that "add/remove stay local and branches diverge" (platform migration
+   *  `0022_branch_scoped_services.sql`). Destroying every branch's copy meant a `services remove`
+   *  run on `feat` also destroyed main's database and its bytes. */
+  async removeDbService(projectId: string, serviceId: string, opts: { branch?: string } = {}): Promise<Teardown> {
+    const { project, branch, sid } = this.removalTarget(projectId, serviceId, opts.branch)
+    const reg = this.dbList(projectId).find((d) => d.id === sid)
     if (!reg) throw new Error('service not found')
-    const branches = this.listBranches(projectId)
-    return this.withOp(branches.map((b) => this.serviceKey(b, serviceId)), async () => {
+    this.assertCarries(project, branch, reg, 'postgres')
+    return this.withOp([this.serviceKey(branch, sid)], async () => {
       const t = newTeardown()
-      for (const b of branches) {
-        const row = this.dbHandle(project, b, serviceId)
-        if (row) await count(t, () => this.db.destroy(row.container))
-        await count(t, () => this.data.remove(this.layout().pg(this.ref(project, b), reg.dataId)))
-        mutate((st) => {
-          delete st.branches[b.id].databases?.[serviceId]
-          st.branches[b.id].bindings = (st.branches[b.id].bindings ?? []).filter((x) => x.source !== `postgres/${reg.name}`)
-        })
-      }
+      const row = this.dbHandle(project, branch, sid)
+      if (row) await count(t, () => this.db.destroy(row.container))
+      await count(t, () => this.data.remove(this.layout().pg(this.ref(project, branch), reg.dataId)))
       mutate((st) => {
-        const pr = st.projects[projectId]
-        pr.dbServices = (pr.dbServices ?? []).filter((d) => d.id !== serviceId)
-        st.userSecrets[projectId] = (st.userSecrets[projectId] ?? []).filter((u) => u.service !== `postgres/${reg.name}`)
+        delete st.branches[branch.id].databases?.[sid]
+        st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.source !== `postgres/${reg.name}`)
       })
-      this.scheduler.forget(branches.map((b) => this.serviceKey(b, serviceId)))                      // WP3
+      this.scheduler.forget([this.serviceKey(branch, sid)])                                          // WP3
+      this.retireRegistration(project, reg, 'postgres', `postgres/${reg.name}`)
       this.router.invalidate()
-      this.emit(projectId, null, 'resource', 'service.removed', { type: 'postgres', name: reg.name })
+      this.emit(projectId, branch.name, 'resource', 'service.removed', { type: 'postgres', name: reg.name })
       return t
     })
   }
@@ -3367,29 +3402,25 @@ export class Engine {
     })
   }
 
-  /** Remove a storage service: purge and delete its bucket on every branch, unregister. */
-  async removeStorageService(projectId: string, serviceId: string): Promise<Teardown> {
-    const project = this.getProject(projectId)
-    if (!project) throw new Error('project not found')
-    const reg = this.stList(projectId).find((s) => s.id === serviceId)
+  /** Remove a storage service from ONE branch (`removalTarget`): purge and delete THAT branch's
+   *  bucket, and unregister only once no branch carries the name any more. Branch-scoped for the
+   *  reason spelled out on `removeDbService`. */
+  async removeStorageService(projectId: string, serviceId: string, opts: { branch?: string } = {}): Promise<Teardown> {
+    const { project, branch, sid } = this.removalTarget(projectId, serviceId, opts.branch)
+    const reg = this.stList(projectId).find((s) => s.id === sid)
     if (!reg) throw new Error('service not found')
+    this.assertCarries(project, branch, reg, 'storage')
     const t = newTeardown()
-    for (const b of this.listBranches(projectId)) {
-      const row = this.bucketHandle(project, b, serviceId)
-      if (row) await count(t, () => this.storage.destroy(row.bucket, b.network))
-      mutate((st) => {
-        delete st.branches[b.id].buckets?.[serviceId]
-        st.branches[b.id].bindings = (st.branches[b.id].bindings ?? []).filter((x) => x.source !== `storage/${reg.name}`)
-      })
-      await this.detachIfLastBucket(b)
-    }
+    const row = this.bucketHandle(project, branch, sid)
+    if (row) await count(t, () => this.storage.destroy(row.bucket, branch.network))
     mutate((st) => {
-      const pr = st.projects[projectId]
-      pr.storageServices = (pr.storageServices ?? []).filter((s) => s.id !== serviceId)
-      st.userSecrets[projectId] = (st.userSecrets[projectId] ?? []).filter((u) => u.service !== `storage/${reg.name}`)
+      delete st.branches[branch.id].buckets?.[sid]
+      st.branches[branch.id].bindings = (st.branches[branch.id].bindings ?? []).filter((x) => x.source !== `storage/${reg.name}`)
     })
+    await this.detachIfLastBucket(branch)
+    this.retireRegistration(project, reg, 'storage', `storage/${reg.name}`)
     this.router.invalidate()
-    this.emit(projectId, null, 'resource', 'service.removed', { type: 'storage', name: reg.name })
+    this.emit(projectId, branch.name, 'resource', 'service.removed', { type: 'storage', name: reg.name })
     return t
   }
 
