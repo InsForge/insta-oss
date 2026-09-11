@@ -22,6 +22,8 @@ export type Service = {
   /** `host[:port]` (a script may read it); never a URL (decision 40). */
   endpoint?: string
   updated_at?: string
+  /** When the service was created (the console's Created column). */
+  created_at?: string
   // Additive columns from the serverless routes (contract section 9, services row).
   always_on?: boolean; image?: string; port?: number; volume_gib?: number | null
   template_deployment_id?: string; template_code?: string; pg_version?: number

@@ -57,6 +57,8 @@ export interface ServiceRow {
   domain?: string
   endpoint?: string
   runtime?: string
+  /** When the service was created (the console's Created column). */
+  created_at?: string
   updated_at?: string
   public?: boolean
   desired_state?: string
@@ -1285,6 +1287,7 @@ export class Engine {
         ...this.rowNetwork(project, branch, { id: d.id, type: 'postgres', name: d.name }),
         runtime: rt(d.id),
         ...(d.templateDeploymentId ? { template_deployment_id: d.templateDeploymentId } : {}),
+        created_at: iso(d.createdAt),
         updated_at: iso(d.createdAt),
       })),
       // Storage endpoint/container derive from the branch's OWN minted creds, so branches
@@ -1298,6 +1301,7 @@ export class Engine {
         // `s3.<domain>`, which matches no container, so every bucket on a real install read
         // 'stopped' while Garage was up and serving it.
         runtime: branch ? this.runtimeOf(GARAGE_CONTAINER) : undefined,
+        created_at: iso(s.createdAt),
         updated_at: iso(s.createdAt),
       })),
       // Managed databases (redis/mysql/mongodb): one private container per branch. `port` +
@@ -1309,6 +1313,7 @@ export class Engine {
         always_on: branch ? this.effectiveAlwaysOn(project, branch, m.id) : undefined,
         ...this.rowNetwork(project, branch, { id: m.id, type: m.type, name: m.name }),
         runtime: rt(m.id),
+        created_at: iso(m.createdAt),
         updated_at: iso(m.createdAt),
       })),
       ...[...groups].sort().map((g) => {
@@ -1327,6 +1332,9 @@ export class Engine {
           ...(cfgd.templateCode ? { template_code: cfgd.templateCode } : {}),
           ...this.rowNetwork(project, branch, { id: `cp-${g}`, type: 'compute', name: g }),
           runtime: branch ? rt(`cp-${g}`) : app ? undefined : 'none',
+          // The registration's own time (addComputeService stamps it); a group that predates the
+          // stamp falls back to its last deploy.
+          created_at: iso(cfgd.createdAt ?? app?.updatedAt),
           updated_at: iso(app?.updatedAt),
         }
       }),

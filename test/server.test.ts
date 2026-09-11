@@ -4341,6 +4341,19 @@ test('the always-on default: main is always-on like the cloud, a branch clone sc
   expect((await engine.addManagedService(project.id, 'redis', 'scratch', { branch: 'feat' })).always_on).toBe(false)
 })
 
+test('every service row carries created_at, the time the service was created (the console’s Created column)', async () => {
+  const engine = makeEngine(testConfig())
+  const { project } = await engine.createProject('demo')
+  await engine.addComputeService(project.id, 'web')
+  await engine.addManagedService(project.id, 'redis', 'cache', {})
+  const rows = await engine.services(project.id)
+  expect(rows.map((r) => r.type).sort()).toEqual(expect.arrayContaining(['compute', 'redis']))
+  for (const row of rows) {
+    expect(typeof row.created_at, `${row.type} ${row.name}`).toBe('string')
+    expect(Number.isNaN(Date.parse(row.created_at!)), `${row.type} ${row.name}`).toBe(false)
+  }
+})
+
 test('PUT always-on takes null to follow the default again, and refuses anything else that is not a boolean', async () => {
   const cfg = testConfig({ INSTA_OSS_ALWAYS_ON_DEFAULT: '1' })
   const engine = makeEngine(cfg)
