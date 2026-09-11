@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { DEPLOY_BUTTON_ASSET, findDeployButtons, ghcrGateMessage, ghcrRetryVerdict, parseGhcrRef, rewriteReadme, stripDeployBadge } from './publish-lib.mjs'
 
 const SHA = 'a'.repeat(40)
-const REPO = 'InsForge/insta-oss'
+const REPO = 'InsForge/instacloud-oss'
 const DIR = 'templates/example'
 const cdn = (p) => `https://cdn.jsdelivr.net/gh/${REPO}@${SHA}/${p}`
 

@@ -92,7 +92,7 @@ function readmeOf(dir) {
 }
 
 function absolutizeReadme(text, dir) {
-  const repo = process.env.GITHUB_REPOSITORY ?? "InsForge/insta-oss";
+  const repo = process.env.GITHUB_REPOSITORY ?? "InsForge/instacloud-oss";
   const sha = process.env.GITHUB_SHA ?? gitHead();
   if (!sha) return text; // no commit to pin to: publish the text unchanged rather than guess
   const root = repoRoot();
@@ -114,7 +114,7 @@ function logoUrlOf(dir, m) {
   if (!declared || declared === "none") return undefined;
   const file = String(declared).replace(/^\.\//, "");
   if (!existsSync(join(dir, file))) return undefined;
-  const repo = process.env.GITHUB_REPOSITORY ?? "InsForge/insta-oss";
+  const repo = process.env.GITHUB_REPOSITORY ?? "InsForge/instacloud-oss";
   const sha = process.env.GITHUB_SHA ?? gitHead();
   if (!sha) return undefined;
   return `https://cdn.jsdelivr.net/gh/${repo}@${sha}/${dir.replace(/^\.\//, "")}/${file}`;
