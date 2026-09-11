@@ -4,6 +4,7 @@ import {
   Button, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch,
 } from '@insforge/ui'
 import { api, type ServiceType } from '../api'
+import { usePoll } from '../hooks'
 import type { PendingApproval } from './ApprovalPrompt'
 import { ErrorNote, Field, Modal } from './ui'
 
@@ -28,13 +29,18 @@ export function AddServiceDialog({ projectId, branch, onClose, onDone, onApprova
   const [name, setName] = useState('')
   const [image, setImage] = useState('')
   const [port, setPort] = useState('8080')
-  // Starts where the daemon's default is (on, like the hosted platform), and is sent ONLY when the
-  // user flips it: an explicit value pins the service on every branch, while an untouched one
-  // leaves the default branch always-on and lets branch clones scale to zero.
+  // Shows what the daemon will actually do, and is sent ONLY when the user flips it. Untouched, a
+  // service is always-on on the DEFAULT branch when the daemon's default is on (like the hosted
+  // platform) and scales to zero on any other branch, so the switch starts there; an explicit
+  // value pins the service on every branch. Showing the default everywhere claimed "always on"
+  // for a service a preview branch would then put to sleep.
   const { boot } = useAuth()
-  const [alwaysOn, setAlwaysOnState] = useState(boot.alwaysOnDefault)
-  const [alwaysOnTouched, setAlwaysOnTouched] = useState(false)
-  const setAlwaysOn = (v: boolean): void => { setAlwaysOnState(v); setAlwaysOnTouched(true) }
+  const { data: branches } = usePoll(() => api.branches(projectId), [projectId])
+  const onDefaultBranch = branches?.find((b) => b.name === branch)?.is_default === true
+  const [picked, setPicked] = useState<boolean | null>(null)
+  const alwaysOnTouched = picked !== null
+  const alwaysOn = picked ?? (boot.alwaysOnDefault && onDefaultBranch)
+  const setAlwaysOn = (v: boolean): void => setPicked(v)
   const [withVolume, setWithVolume] = useState(false)
   const [volumeGib, setVolumeGib] = useState('1')
   const [isPublic, setIsPublic] = useState(false)

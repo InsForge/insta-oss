@@ -70,7 +70,7 @@ export interface Config {
     wakeProtectSec: number        // INSTA_OSS_WAKE_PROTECT_SEC 60
     ramFloorPct: number           // INSTA_OSS_RAM_FLOOR_PCT    15 (0..90; 0 disables the pressure pass)
     memBudgetMb: number | null    // INSTA_OSS_MEM_BUDGET_MB    null (synthetic total for tests/e2e; null = /proc/meminfo)
-    alwaysOnDefault: boolean      // INSTA_OSS_ALWAYS_ON_DEFAULT false
+    alwaysOnDefault: boolean      // INSTA_OSS_ALWAYS_ON_DEFAULT true (default branch only; see effectiveAlwaysOn)
   }
   data: {
     helperImage: string           // INSTA_OSS_HELPER_IMAGE     node:22-alpine

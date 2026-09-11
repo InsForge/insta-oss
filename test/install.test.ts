@@ -81,7 +81,10 @@ test('--print-env writes every key loadConfig reads plus the stack-only keys, wi
     INSTA_OSS_IDLE_COMPUTE_SEC: '300',
     INSTA_OSS_IDLE_DB_SEC: '600',
     INSTA_OSS_RAM_FLOOR_PCT: '15',
-    INSTA_OSS_ALWAYS_ON_DEFAULT: '0',
+    // On, like the daemon's own default: a fresh install's default-branch compute is always-on.
+    // An upgrade keeps whatever its instad.env already says (precedence: env, then the existing
+    // file, then this), so a running box's behaviour does not change underneath it.
+    INSTA_OSS_ALWAYS_ON_DEFAULT: '1',
   })
   // derived-while-empty keys stay empty so the daemon computes them from DOMAIN and DATA_DIR
   for (const k of ['INSTA_OSS_STATE', 'INSTA_OSS_GARAGE_CONFIG', 'INSTA_OSS_S3_HOST_ENDPOINT', 'INSTA_OSS_API_URL', 'INSTA_OSS_CONSOLE_URL', 'INSTA_OSS_TLS_CERT_DIR']) expect(env[k]).toBe('')
