@@ -373,7 +373,6 @@ openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
   -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:*.s3.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
   || FAIL "could not mint a wildcard certificate for *.$DOMAIN"
 chmod 600 "$E2E_TLS_DIR/wild.key"
-OURS=$(file_fp "$E2E_TLS_DIR/wild.crt")
 BEFORE=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
 
 curl_k_ok() { curl -sS -k -o /dev/null -f "$1"; }
@@ -385,6 +384,9 @@ served_fp() {
     | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2
 }
 file_fp() { openssl x509 -in "$1" -noout -fingerprint -sha256 | cut -d= -f2; }
+# After the definitions: a POSIX sh function does not exist until the line defining it has run,
+# and a call above it dies with "not found" -- which neither `sh -n` nor shellcheck reports.
+OURS=$(file_fp "$E2E_TLS_DIR/wild.crt")
 # `healthz` carries the supplied certificate's own notAfter, so this asks the daemon WHICH file
 # it is reading rather than trusting a log line. The renewal below has a different validity, so
 # the two dates distinguish the old certificate from the new one.
