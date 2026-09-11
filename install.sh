@@ -77,10 +77,19 @@ resolve_link() {
     esac
     _n=$((_n + 1))
   done
-  # Normalise, so `/a/b/../c` is not mounted as a different path than `/a/c`.
-  _d=$(cd "$(dirname "$_p")" 2>/dev/null && pwd -P) || { printf '%s' "$_p"; return 0; }
+  # Normalise LEXICALLY (`pwd -L`), so `/a/b/../c` is mounted as `/a/c` and `..` means the parent
+  # of the path as written. That is how the containers resolve the link: from the link's own
+  # mounted directory, never through a host symlink between the two. When a directory on the way
+  # is itself a symlink (an /etc/letsencrypt kept on another volume), the PHYSICAL path is one the
+  # containers never see and the link would dangle there; docker resolves a mount source's own
+  # symlinks, so mounting the lexical path is what makes it resolve.
+  _d=$(cd -L "$(dirname "$_p")" 2>/dev/null && pwd -L) || { printf '%s' "$_p"; return 0; }
   printf '%s/%s' "$_d" "$(basename "$_p")"
 }
+
+# The directory a bind mount of DIR actually attaches, since docker resolves a source's symlinks:
+# what the overlap checks have to judge as well as the path written in compose.yml.
+phys_dir() { (cd -P "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
 
 # A NEWLINE walks through a `grep -Eq '^...$'` check, because grep tests each LINE: `^` and `$`
 # anchor a line, never the string, so a value whose FIRST line is well shaped passes and carries
@@ -272,7 +281,28 @@ if [ "$TLS" = custom ]; then
   # how the daemon reads the same file for the database lanes that the edge serves. Translating
   # paths per container to accommodate a certificate stored in the one directory a data
   # migration moves wholesale is a worse trade than saying so here, with the fix in the message.
+  # ONE link is followed. Only the link's directory and its target's are mounted, so in a chain
+  # (live -> links -> archive) the middle hop does not exist inside the containers and the
+  # configured path dangles there, while it reads fine here and passes every check below.
+  # Refused before anything is written or restarted; certbot's live/ links are a single hop.
+  for _f in "$TLS_CERT" "$TLS_KEY"; do
+    [ -L "$_f" ] || continue
+    _t=$(readlink "$_f") || die "cannot read the symlink '$_f'"
+    case $_t in /*) _tp=$_t ;; *) _tp=$(dirname "$_f")/$_t ;; esac
+    [ ! -L "$_tp" ] ||
+      die "'$_f' is a symlink to '$_t', which is itself a symlink. Only one link is followed inside the containers (the link's directory and its target's are mounted, nothing between), so a chain would dangle there while it reads fine here. Point --tls-cert and --tls-key at a link whose target is the real file, as certbot's live/ links are, or at the file itself"
+  done
+  # The directories written into compose.yml are the four below, and two of them come from where
+  # a symlink LEADS rather than from the flag, so they get the flag's shape check too.
   for _d in "$TLS_CERT_DIR" "$TLS_KEY_DIR" "$TLS_CERT_REAL_DIR" "$TLS_KEY_REAL_DIR"; do
+    shaped "$_d" '^/[A-Za-z0-9._/-]*$' ||
+      die "the TLS directory '$_d' (where --tls-cert or --tls-key leads) is not a plain absolute path: it is written into compose.yml and mounted into two containers, so it may hold only letters, digits, dot, dash, underscore and /"
+  done
+  # ...and the overlap checks judge each of them twice: as written, and as the directory docker
+  # actually attaches, since a bind mount resolves its source's symlinks. A path that looks
+  # harmless can land inside the data directory or on the configuration directory.
+  for _d in "$TLS_CERT_DIR" "$TLS_KEY_DIR" "$TLS_CERT_REAL_DIR" "$TLS_KEY_REAL_DIR" \
+    "$(phys_dir "$TLS_CERT_DIR")" "$(phys_dir "$TLS_KEY_DIR")" "$(phys_dir "$TLS_CERT_REAL_DIR")" "$(phys_dir "$TLS_KEY_REAL_DIR")"; do
     _why=''
     case $_d in
       /) _why='is the filesystem root, which would be mounted over the whole container' ;;

@@ -440,6 +440,49 @@ test.skipIf(!hasOpenssl)('a symlinked certificate mounts the directory it RESOLV
   }
 })
 
+test.skipIf(!hasOpenssl)('a link the containers cannot follow is refused, and one through a symlinked directory is mounted where it leads', () => {
+  // Only the link's directory and its target's are mounted, so inside the containers nothing
+  // between them exists. Both layouts below read fine on the host.
+  const root = mkdtempSync(join(tmpdir(), 'io-le2-'))
+  const mint = (crt: string, key: string): void => {
+    const r = spawnSync('sh', ['-c', `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${key} -out ${crt} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:*.s3.example.test,DNS:example.test' 2>/dev/null`], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  try {
+    // A CHAIN, live -> links -> archive: the middle hop is not mounted, so the configured path
+    // dangles inside both containers. Refused before anything is written or restarted.
+    for (const d of ['live', 'links', 'archive']) mkdirSync(join(root, d), { recursive: true })
+    mint(join(root, 'archive', 'cert.pem'), join(root, 'archive', 'key.pem'))
+    symlinkSync('../archive/cert.pem', join(root, 'links', 'cert.pem'))
+    symlinkSync('../links/cert.pem', join(root, 'live', 'cert.pem'))
+    const chained = tryRun(['--print-compose', '--tls', 'custom',
+      '--tls-cert', join(root, 'live', 'cert.pem'), '--tls-key', join(root, 'archive', 'key.pem'),
+    ], { INSTA_OSS_DOMAIN: 'example.test' })
+    expect(chained.status).toBe(1)
+    expect(chained.stderr).toContain('is itself a symlink')
+
+    // A symlinked DIRECTORY on the way (le -> real, as when /etc/letsencrypt lives on another
+    // volume). Inside the container the certbot link is walked from <root>/le/live/x, so it lands
+    // in <root>/le/archive/x: that is what has to be mounted, not the physical directory the host
+    // reaches through the symlink.
+    mkdirSync(join(root, 'real', 'live', 'x'), { recursive: true })
+    mkdirSync(join(root, 'real', 'archive', 'x'), { recursive: true })
+    mint(join(root, 'real', 'archive', 'x', 'fullchain1.pem'), join(root, 'real', 'archive', 'x', 'privkey1.pem'))
+    symlinkSync('../../archive/x/fullchain1.pem', join(root, 'real', 'live', 'x', 'fullchain.pem'))
+    symlinkSync('../../archive/x/privkey1.pem', join(root, 'real', 'live', 'x', 'privkey.pem'))
+    symlinkSync(join(root, 'real'), join(root, 'le'))
+    const compose = run(['--print-compose', '--tls', 'custom',
+      '--tls-cert', join(root, 'le', 'live', 'x', 'fullchain.pem'),
+      '--tls-key', join(root, 'le', 'live', 'x', 'privkey.pem'),
+    ], { INSTA_OSS_DOMAIN: 'example.test' })
+    const mounts = compose.split('\n').filter((l) => l.trim().endsWith(':ro'))
+    expect(mounts.some((l) => l.includes('/le/archive/x:')), mounts.join('\n')).toBe(true)
+    expect(mounts.some((l) => l.includes('/real/archive/x:')), mounts.join('\n')).toBe(false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('an ACME email is an email, or absent', () => {
   // Same ending as the domain: it is rendered into the Caddyfile and a malformed address is
   // rejected by the CA after the install rather than before it. Empty stays legitimate.

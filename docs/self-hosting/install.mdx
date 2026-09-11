@@ -353,7 +353,10 @@ What you take on:
   Symlinks are followed: certbot's `live/<domain>/fullchain.pem` points into
   `archive/<domain>/`, and the installer mounts both directories, so the link resolves inside
   the containers and a renewal that re-points it stays visible. Point `--tls-cert` at the
-  `live/` path, not the `archive/` one.
+  `live/` path, not the `archive/` one. ONE link is followed, because only the link's directory
+  and its target's are mounted: a link to another link is refused, since the middle hop would
+  not exist inside the containers. A symlinked directory on the way (an `/etc/letsencrypt` kept
+  on another volume) is fine; the target is mounted at the path the link leads to.
 
   The daemon logs a warning at boot and every few hours once the certificate is inside 21 days,
   says something louder once it has expired, and `GET /healthz` carries the remaining lifetime
