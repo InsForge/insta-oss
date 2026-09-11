@@ -1,4 +1,4 @@
-# Contributing to insta-oss
+# Contributing to InstaCloud OSS
 
 ## Dev setup
 

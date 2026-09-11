@@ -1,4 +1,4 @@
-# insta-oss
+# InstaCloud OSS
 
 The open-source InstaCloud runtime: one daemon over your Docker that answers the same API the
 hosted platform answers. Serverless on a single machine, branches that fork the disk, and the same
@@ -237,7 +237,7 @@ On a laptop:
 
 ```bash
 insta project delete                                        # per project (approval is opt-in: set project.delete to approve in the dashboard)
-docker ps -aq --filter name=io- | xargs docker rm -f        # every insta-oss container
+docker ps -aq --filter name=io- | xargs docker rm -f        # every InstaCloud OSS container
 docker volume rm io-garage-meta io-garage-data              # the shared object store data
 rm -rf ~/.insta-oss                                         # daemon state
 ```

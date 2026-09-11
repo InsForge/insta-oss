@@ -69,7 +69,7 @@ Unlike the database, a volume is copied whether or not its app is running. The d
 consistent alternative for the live case (`pg_basebackup` streams it), and an inconsistent copy of
 a database does not survive its own crash recovery. A volume has neither: nothing can stream an
 arbitrary application's files consistently, so the choice is between copying a live directory and
-failing every branch create of an app that is awake. insta-oss copies. What the branch gets is
+failing every branch create of an app that is awake. InstaCloud OSS copies. What the branch gets is
 each file as it stood when the walk reached it, which is many moments of the tree and not one: a
 crash or a power cut freezes a single instant, and this does not, so an invariant that spans two
 files (a log and the record it describes, a rename and the index entry for it) can land broken in

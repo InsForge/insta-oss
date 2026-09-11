@@ -22,7 +22,7 @@ Buckets are private by default; create with `--public` (or flip later) to serve 
 `insta branch create` forks the bucket copy-on-write: the branch opens with all of the parent's objects, and writes on either side never touch the other. Uploads an agent makes on its task branch disappear with `insta branch delete`.
 
 <Note>
-On self-hosted insta-oss the fork is a full object sync rather than copy-on-write — same isolation, duplicated at clone time.
+On self-hosted InstaCloud OSS the fork is a full object sync rather than copy-on-write — same isolation, duplicated at clone time.
 </Note>
 
 ## Credentials
