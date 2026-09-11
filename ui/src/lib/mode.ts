@@ -25,9 +25,9 @@ declare global {
   interface Window { __INSTA_OSS__?: Partial<Boot> | null }
 }
 
-function envMode(): string | undefined {
+function envVar(name: string): string | undefined {
   const meta = import.meta as unknown as { env?: Record<string, string | undefined> }
-  return meta.env?.VITE_INSTA_MODE
+  return meta.env?.[name]
 }
 
 function asMode(v: unknown): RunMode {
@@ -39,7 +39,8 @@ function asMode(v: unknown): RunMode {
  *  the same way, so a partial injection never yields `undefined` URLs. */
 export function readBoot(
   win: BootWindow | undefined = typeof window === 'undefined' ? undefined : (window as BootWindow),
-  fallbackMode: string | undefined = envMode(),
+  fallbackMode: string | undefined = envVar('VITE_INSTA_MODE'),
+  fallbackAlwaysOn: string | undefined = envVar('VITE_INSTA_ALWAYS_ON_DEFAULT'),
 ): Boot {
   const origin = win?.location?.origin ?? ''
   const injected = win?.__INSTA_OSS__
@@ -49,10 +50,15 @@ export function readBoot(
       setupRequired: injected.setupRequired === true,
       apiUrl: injected.apiUrl ?? origin,
       consoleUrl: injected.consoleUrl ?? origin,
-      // An older daemon injects no such field; the daemon's own default is on, so that is what a
-      // missing field means.
-      alwaysOnDefault: injected.alwaysOnDefault !== false,
+      // ON only when the daemon says so. A shell without the field comes from a daemon older than
+      // the field, and that daemon's default was OFF: reading a missing field as on made the add
+      // dialog show "Always on" for a service that daemon then created scale-to-zero.
+      alwaysOnDefault: injected.alwaysOnDefault === true,
     }
   }
-  return { mode: asMode(fallbackMode), setupRequired: false, apiUrl: origin, consoleUrl: origin, alwaysOnDefault: true }
+  // No shell means the Vite dev server, which proxies to a daemon it cannot ask; the value comes
+  // from VITE_INSTA_ALWAYS_ON_DEFAULT (set it to 0 for a daemon running INSTA_OSS_ALWAYS_ON_DEFAULT=0),
+  // and unset it matches the daemon's own default, on.
+  const alwaysOnDefault = fallbackAlwaysOn === undefined || !['0', 'false'].includes(fallbackAlwaysOn.trim().toLowerCase())
+  return { mode: asMode(fallbackMode), setupRequired: false, apiUrl: origin, consoleUrl: origin, alwaysOnDefault }
 }

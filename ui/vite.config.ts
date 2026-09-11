@@ -11,6 +11,9 @@ const API_PREFIXES = [
   '/auth', '/api', '/templates', '/template-deployments',
 ]
 const target = process.env.VITE_INSTA_API ?? 'http://127.0.0.1:8080'
+// The dev server has no daemon shell to read the always-on default from. Set
+// VITE_INSTA_ALWAYS_ON_DEFAULT=0 when the daemon above runs with INSTA_OSS_ALWAYS_ON_DEFAULT=0, so the
+// add-service switch shows what the daemon will do; unset, it assumes the daemon's default (on).
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
