@@ -38,6 +38,44 @@
   --page: var(--semantic-0);
 }
 
+/*
+ * Pin a subtree to the LIGHT palette regardless of the active theme (the auth pages keep their
+ * light card even in dark mode). Restates the kit's light tokens plus this app's overrides; custom
+ * properties resolve from the nearest setter, so this wins over `.dark` on <html> inside the scope.
+ */
+.light {
+  --semantic-0: 255 255 255;
+  --semantic-1: 247 247 247;
+  --semantic-2: 240 240 240;
+  --semantic-3: 232 232 232;
+  --semantic-4: 224 224 224;
+  --semantic-5: 217 217 217;
+  --semantic-6: 209 209 209;
+  --alpha-4: rgba(0, 0, 0, 0.04);
+  --alpha-8: rgba(0, 0, 0, 0.08);
+  --alpha-12: rgba(0, 0, 0, 0.12);
+  --alpha-16: rgba(0, 0, 0, 0.16);
+  --alpha-inverse-4: rgba(255, 255, 255, 0.04);
+  --alpha-inverse-8: rgba(255, 255, 255, 0.08);
+  --alpha-inverse-12: rgba(255, 255, 255, 0.12);
+  --alpha-inverse-16: rgba(255, 255, 255, 0.16);
+  --foreground: var(--insforge-black);
+  --muted-foreground: var(--insforge-neutral-600);
+  --disabled: var(--insforge-neutral-400);
+  --inverse: var(--insforge-white);
+  --primary: var(--insforge-black);
+  --theme: var(--insforge-emerald-600);
+  --success: var(--insforge-green-600);
+  --destructive: var(--insforge-red-600);
+  --warning: var(--insforge-amber-600);
+  --info: var(--insforge-sky-600);
+  --border: var(--alpha-8);
+  --card: var(--insforge-white);
+  --toast: var(--insforge-white);
+  --page: var(--semantic-3);
+  color-scheme: light;
+}
+
 @theme inline {
   --font-sans: var(--insforge-font);
 
