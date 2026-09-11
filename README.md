@@ -131,10 +131,11 @@ it holds 100 MB or 100 GB; one that is awake is streamed with `pg_basebackup` in
 correct but takes time proportional to its size. The source is never touched either way. One task,
 one branch, many in parallel.
 
-**Serverless on one node.** Your default branch's apps are always-on, like the hosted platform.
-Databases and every branch clone scale to zero: an idle one is stopped, not billed to your RAM, and
-the next request starts it again in a second or two. That is what lets one box hold dozens of
-branches. Either default can be switched per service: `insta compute always-on off web`.
+**Serverless on one node.** On your default branch, apps and managed databases (Redis, MySQL,
+MongoDB) are always-on, like the hosted platform. Postgres and everything on a branch clone scale to
+zero: an idle one is stopped, not billed to your RAM, and the next request starts it again in a
+second or two. That is what lets one box hold dozens of branches. Any of these can be switched per
+service: `insta compute always-on off web`.
 
 **Governance at the credential boundary.** The daemon is the only thing holding credentials, and
 every sensitive action passes an allow, deny or approve gate before it touches a resource. Agents

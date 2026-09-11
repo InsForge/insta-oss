@@ -4741,6 +4741,14 @@ test('an unknown ?branch on a service add is a 404, not a silent write to the de
   expect(names(await listOn(id, 'main'))).toEqual(['db', 'store'])
 })
 
+test('an unknown ?branch on a compute add is a 404 too, and registers no project-wide group', async () => {
+  const id = await createProject()
+  const r = await post(`/projects/${id}/services`, { type: 'compute', name: 'web', branch: 'nope' })
+  expect(r.statusCode).toBe(404)
+  expect(r.json().error).toBe('branch "nope" not found')
+  expect(names(await listOn(id, 'main'))).toEqual(['db', 'store'])
+})
+
 test('the same name is addable on a second branch, and refused on a branch that already carries it', async () => {
   const id = await createProject()
   await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })

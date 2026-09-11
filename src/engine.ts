@@ -1742,6 +1742,11 @@ export class Engine {
   ): ServiceRow {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
+    // A named branch that does not exist is a 404 before anything is registered, as it is for every
+    // other service type: a create from a stale branch page must not register a project-wide group.
+    if (opts.branch !== undefined && !this.listBranches(projectId).some((b) => b.name === opts.branch)) {
+      throw new Error(`branch "${opts.branch}" not found`)
+    }
     this.assertServiceName(name)
     const groups = new Set(project.computeGroups ?? [])
     for (const b of this.listBranches(projectId)) for (const g of Object.keys(b.apps)) groups.add(g)
