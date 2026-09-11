@@ -3,8 +3,8 @@
 // the "Add Your Service" picker. Self-host divergences: no canvas view yet, and no agent-connect
 // panel on the empty state.
 
-import { useEffect, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useCallback, useEffect, useState } from 'react'
+import { useParams, useSearchParams } from 'react-router-dom'
 import { cn, Switch } from '@insforge/ui'
 import { api, type Service } from '../api'
 import { usePoll, useWaking } from '../hooks'
@@ -12,6 +12,7 @@ import { healthFor } from '../lib/status'
 import { ApprovalPrompt, type PendingApproval } from '../components/ApprovalPrompt'
 import { AddFirstServiceDialog, AddServiceButton } from '../components/console/AddService'
 import { ServiceTable } from '../components/console/ServiceTable'
+import { ServiceDetailModal } from '../components/console/ServiceDetailModal'
 import { ErrorNote } from '../components/ui'
 
 /** Always-on for compute and managed rows: `PUT /services/:sid/always-on {enabled}`. */
@@ -57,7 +58,11 @@ export function PgAlwaysOnSwitch({ projectId, branch, group, onError, onApproval
 
 export function Services() {
   const { projectId, branch } = useParams() as { projectId: string; branch: string }
-  const nav = useNavigate()
+  // The detail overlay is URL-driven (`?service=<id>&tab=`), as on the console: deep links,
+  // refresh and the back button all open and close it.
+  const [params, setParams] = useSearchParams()
+  const openId = params.get('service')
+  const closeDetail = useCallback(() => setParams({}), [setParams])
   const waking = useWaking()
   const interval = waking.anyWaking ? 2000 : 5000
   const { data: services, error, reload } = usePoll(() => api.services(projectId, branch), [projectId, branch], interval)
@@ -95,12 +100,16 @@ export function Services() {
       ) : (
         <div className="flex flex-col px-6">
           <ServiceTable projectId={projectId} branch={branch} services={rows} health={health} isWaking={waking.isWaking}
-            onOpen={(s) => nav(`/p/${projectId}/${branch}/services/${s.id}`)}
+            onOpen={(s) => setParams({ service: s.id })}
             onDone={reload} onError={setActionError} onApproval={setApproval} />
         </div>
       )}
       {(actionError || error) && <div className="px-6"><ErrorNote error={actionError ?? error} /></div>}
       <AddFirstServiceDialog {...flow} open={addFirstOpen} onOpenChange={setAddFirstOpen} />
+      {openId && (
+        <ServiceDetailModal projectId={projectId} branch={branch} serviceId={openId} requestedTab={params.get('tab')}
+          onClose={closeDetail} />
+      )}
       <ApprovalPrompt projectId={projectId} pending={approval} onClose={() => setApproval(null)} />
     </div>
   )

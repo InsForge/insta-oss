@@ -5,6 +5,7 @@ import { Gauge } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api, type MetricSeries } from '../api'
 import { usePoll } from '../hooks'
+import { labelMatches } from './Logs'
 
 // The one sanctioned hex exception: the chart series palette (Figma observability design).
 const SERIES_COLORS = ['#10b981', '#ec4899', '#3b82f6']
@@ -27,11 +28,12 @@ type Snapshot = { t: number; values: Record<string, number> } // instance -> val
 type History = { cpu: Snapshot[]; memory: Snapshot[] }
 
 /** Latest value per instance for one metric name across the returned series. */
-function latest(series: MetricSeries[], name: string): Record<string, number> {
+function latest(series: MetricSeries[], name: string, only?: string): Record<string, number> {
   const out: Record<string, number> = {}
   for (const s of series) {
     if (s.name !== name) continue
     const label = instanceLabel(s.labels?.instance)
+    if (only && !labelMatches(label, only)) continue
     const last = s.points[s.points.length - 1]
     if (label && last) out[label] = last[1]
   }
@@ -101,11 +103,11 @@ function SeriesChart({ title, snapshots, unit, format }: {
 }
 
 /** Live container telemetry — NOT billing (that pipeline is cloud-only by design). The daemon
- *  serves a point-in-time docker-stats snapshot; the page accumulates them into a rolling
- *  window while open. */
-export function Usage() {
-  const { projectId, branch } = useParams() as { projectId: string; branch: string }
+ *  serves a point-in-time docker-stats snapshot; the panel accumulates them into a rolling window
+ *  while open. `service` narrows it to one service (a service's Metrics tab). */
+export function LiveMetrics({ projectId, branch, service }: { projectId: string; branch: string; service?: { name: string } }) {
   const history = useRef<History>({ cpu: [], memory: [] })
+  const only = service?.name
 
   const { data, error } = usePoll(async () => {
     const [compute, db] = await Promise.all([
@@ -115,74 +117,71 @@ export function Usage() {
     const series = [...compute.series, ...db.series]
     const t = Date.now()
     for (const name of ['cpu', 'memory'] as const) {
-      const values = latest(series, name)
+      const values = latest(series, name, only)
       if (Object.keys(values).length) {
         history.current[name] = [...history.current[name], { t, values }].slice(-240)
       }
     }
     return { series, note: compute.note }
-  }, [projectId, branch])
+  }, [projectId, branch, only])
 
-  const cpuNow = data ? latest(data.series, 'cpu') : {}
-  const memNow = data ? latest(data.series, 'memory') : {}
+  const cpuNow = data ? latest(data.series, 'cpu', only) : {}
+  const memNow = data ? latest(data.series, 'memory', only) : {}
   const instances = [...new Set([...Object.keys(cpuNow), ...Object.keys(memNow)])].sort()
 
   return (
-    <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
-      <h1 className="text-[32px] leading-12 font-semibold">Observability</h1>
-
+    <div className="flex flex-col gap-4">
       {!data && !error && (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="h-24 animate-pulse rounded-lg bg-alpha-8" />
-          ))}
+          {[0, 1, 2].map((i) => <div key={i} className="h-24 animate-pulse rounded-lg bg-alpha-8" />)}
         </div>
       )}
-
       {error && (
-        <div className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-destructive">
-          {error.message}
-        </div>
+        <div className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-destructive">{error.message}</div>
       )}
-
       {data && instances.length === 0 && (
         <div className="rounded-lg border border-border bg-card py-12">
-          <EmptyState
-            icon={Gauge}
-            title="Nothing running."
-            description="Deploy an app to this environment and its live CPU and memory land here."
-          />
+          <EmptyState icon={Gauge} title="Nothing running."
+            description={service
+              ? 'Metrics appear while this service is running; a sleeping service has none.'
+              : 'Deploy an app to this environment and its live CPU and memory land here.'} />
         </div>
       )}
-
       {instances.length > 0 && (
         <>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {instances.map((name) => (
-              <div key={name} className="rounded-lg border border-border bg-card p-4">
-                <p className="text-xs tracking-wide text-muted-foreground uppercase">{name}</p>
-                <div className="mt-2 flex items-baseline gap-4">
-                  <span className="text-[28px] font-bold tabular-nums">
-                    {(cpuNow[name] ?? 0).toFixed(1)}<span className="text-sm font-medium text-muted-foreground"> % cpu</span>
-                  </span>
-                  <span className="text-sm font-medium text-muted-foreground tabular-nums">
-                    {fmtBytes(memNow[name] ?? 0)}
-                  </span>
+          {!service && (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {instances.map((name) => (
+                <div key={name} className="rounded-lg border border-border bg-card p-4">
+                  <p className="text-xs tracking-wide text-muted-foreground uppercase">{name}</p>
+                  <div className="mt-2 flex items-baseline gap-4">
+                    <span className="text-[28px] font-bold tabular-nums">
+                      {(cpuNow[name] ?? 0).toFixed(1)}<span className="text-sm font-medium text-muted-foreground"> % cpu</span>
+                    </span>
+                    <span className="text-sm font-medium text-muted-foreground tabular-nums">{fmtBytes(memNow[name] ?? 0)}</span>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
-          <SeriesChart title="CPU" unit="%" snapshots={history.current.cpu}
-            format={(v) => `${v.toFixed(1)}%`} />
-          <SeriesChart title="Memory" unit="bytes" snapshots={history.current.memory}
-            format={fmtBytes} />
+              ))}
+            </div>
+          )}
+          <SeriesChart title="CPU" unit="%" snapshots={history.current.cpu} format={(v) => `${v.toFixed(1)}%`} />
+          <SeriesChart title="Memory" unit="bytes" snapshots={history.current.memory} format={fmtBytes} />
         </>
       )}
-
       <p className="text-xs text-muted-foreground">
-        Live container telemetry via docker stats, sampled every 5s while this page is open — not billing
+        Live container telemetry via docker stats, sampled every 5s while this is open — not billing
         (usage metering is cloud-only).
       </p>
+    </div>
+  )
+}
+
+export function Usage() {
+  const { projectId, branch } = useParams() as { projectId: string; branch: string }
+  return (
+    <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
+      <h1 className="text-[32px] leading-12 font-semibold">Observability</h1>
+      <LiveMetrics projectId={projectId} branch={branch} />
     </div>
   )
 }

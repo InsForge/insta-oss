@@ -4,7 +4,6 @@ import { usePoll } from './hooks'
 import { AuthGate } from './components/AuthGate'
 import { Layout } from './components/Layout'
 import { Services } from './pages/Services'
-import { ServiceDetail } from './pages/ServiceDetail'
 import { Templates } from './pages/Templates'
 import { Environments } from './pages/Environments'
 import { Logs } from './pages/Logs'
@@ -53,6 +52,12 @@ function ProjectShell() {
   return <Layout />
 }
 
+/** `services/<id>`: the old detail page's links open the console-style overlay instead. */
+function ServiceLink() {
+  const { projectId, branch, sid } = useParams()
+  return <Navigate to={`/p/${projectId}/${branch}/services?service=${encodeURIComponent(sid ?? '')}`} replace />
+}
+
 /** `/p/<id>`: the project switcher's target, which lands on that project's default environment. */
 function ProjectIndex() {
   const { projectId } = useParams()
@@ -74,7 +79,7 @@ export default function App() {
           <Route index element={<Navigate to="services" replace />} />
           <Route path="services" element={<Services />} />
           {/* Branch-scoped, opaque service id (decision 49); the `:` in it is path-safe. */}
-          <Route path="services/:sid" element={<ServiceDetail />} />
+          <Route path="services/:sid" element={<ServiceLink />} />
           <Route path="templates" element={<Templates />} />
           <Route path="env" element={<Environments />} />
           {/* pre-rename bookmarks */}
