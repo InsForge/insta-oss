@@ -409,6 +409,23 @@ detect_ip() {
   if ! valid_ip "$_ip"; then _ip=$(route_src) || _ip=''; fi
   if valid_ip "$_ip"; then printf '%s' "$_ip"; fi
 }
+# cloud_public_ip: the public IPv4 the cloud provider's metadata service reports for this VM, or
+# nothing. AWS (IMDSv2, a token first, as Ubuntu 24.04 AMIs require), GCP, Azure, one second each:
+# off a cloud the link-local address does not answer and this costs at most a few seconds once.
+cloud_public_ip() {
+  _cip=''
+  _tok=$(curl -fsS --max-time 1 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null) || _tok=''
+  if [ -n "$_tok" ]; then
+    _cip=$(curl -fsS --max-time 1 -H "X-aws-ec2-metadata-token: $_tok" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null) || _cip=''
+  fi
+  if ! valid_ip "$_cip"; then
+    _cip=$(curl -fsS --max-time 1 -H 'Metadata-Flavor: Google' http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip 2>/dev/null) || _cip=''
+  fi
+  if ! valid_ip "$_cip"; then
+    _cip=$(curl -fsS --max-time 1 -H 'Metadata: true' 'http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text' 2>/dev/null) || _cip=''
+  fi
+  if valid_ip "$_cip"; then printf '%s' "$_cip"; fi
+}
 PUBLIC_IP=$(resolve INSTA_OSS_PUBLIC_IP '' '')
 if [ -z "$PUBLIC_IP" ] && [ -z "$PRINT" ]; then PUBLIC_IP=$(detect_ip); fi
 if [ -n "$PUBLIC_IP" ] && ! valid_ip "$PUBLIC_IP"; then die "INSTA_OSS_PUBLIC_IP must be a dotted IPv4 address (got '$PUBLIC_IP')"; fi
@@ -1194,11 +1211,18 @@ if [ -n "$PUBLIC_IP" ] && [ "$DOMAIN" = "$(printf '%s' "$PUBLIC_IP" | tr . -).ss
   elif ! ip_is_local "$PUBLIC_IP"; then
     # The address the internet sees is on no interface here: a cloud box with a floating or elastic
     # IP (fine, DNS points at it) or a laptop VM behind a home router (not fine, nothing forwards).
-    # The script cannot tell those apart, so it says what to check.
-    _lan=$(route_src)
-    NAT_NOTE="$PUBLIC_IP is not an address of this box (NAT), so those URLs answer only if $PUBLIC_IP forwards 80 and 443 here."
-    [ -z "$_lan" ] || NAT_NOTE="$NAT_NOTE On a laptop VM re-run with --domain $(printf '%s' "$_lan" | tr . -).sslip.io, which points at this box."
-    warn "$NAT_NOTE"
+    # The provider's metadata service tells those apart: when it reports this same address, it is
+    # the provider's own 1:1 mapping, which always forwards, and the only thing left to check is
+    # the provider's firewall. Telling an EC2 operator to "re-run on a laptop VM" was wrong advice.
+    if [ "$(cloud_public_ip)" = "$PUBLIC_IP" ]; then
+      NAT_NOTE="$PUBLIC_IP is this cloud VM's public address, mapped by the provider: make sure its security group or firewall allows 80 and 443 (and the database lanes you use)."
+      log "$NAT_NOTE"
+    else
+      _lan=$(route_src)
+      NAT_NOTE="$PUBLIC_IP is not an address of this box (NAT), so those URLs answer only if $PUBLIC_IP forwards 80 and 443 here."
+      [ -z "$_lan" ] || NAT_NOTE="$NAT_NOTE On a laptop VM re-run with --domain $(printf '%s' "$_lan" | tr . -).sslip.io, which points at this box."
+      warn "$NAT_NOTE"
+    fi
   fi
 fi
 

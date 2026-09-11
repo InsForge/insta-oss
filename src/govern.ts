@@ -1,6 +1,10 @@
 // HITL circuit breaker — same semantics as the platform: gate sensitive actions at the
 // credential boundary. decision ∈ allow|deny|approve; grants are one-shot (consumed per gate);
-// `approve --always` flips the project policy to allow. Defaults: project.delete → approve.
+// `approve --always` flips the project policy to allow. Defaults: every action → allow, which is
+// the cloud's posture since platform #267 (project.delete, service.remove and db.restore were all
+// flipped from approve): governance is opt-in per project (`insta policy set <action> approve`).
+// A default of approve here made a plain `insta project delete` stop at "approval required" on
+// this daemon while the same command simply worked on the cloud.
 import { randomUUID } from 'node:crypto'
 import { mutate, loadState } from './state'
 import type { Approval, Decision, GatedAction } from './types'
@@ -15,7 +19,7 @@ const DEFAULTS: Record<GatedAction, Decision> = {
   'storage.write': 'allow',
   'storage.delete': 'allow',
   deploy: 'allow',
-  'project.delete': 'approve',
+  'project.delete': 'allow',
   'branch.delete': 'allow',
   'service.add': 'allow',
   'service.remove': 'allow',
