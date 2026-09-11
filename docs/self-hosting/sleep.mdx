@@ -5,8 +5,10 @@ description: "Idle services stop, traffic starts them again, and one box holds f
 
 A self-hosted box follows the hosted platform's defaults. Compute on a project's default branch is
 always-on, so production never waits for a cold start, and managed Redis, MySQL and MongoDB follow
-the same default. Postgres, and every service on the other branches, scale to zero. Either can be
-switched per service, from the CLI, the API or the console.
+the same default. Postgres, and every service on the other branches, scale to zero. Compute,
+Postgres and managed databases can each be switched either way: compute and Postgres from the CLI,
+and any compute or managed database from the console or the API. Storage has no such setting; a
+bucket is always available.
 
 A service that scales to zero is stopped, not paused, when it goes idle: it holds no memory and no
 CPU, its disk is untouched, and the next request starts it again in a second or two. That is what
@@ -149,11 +151,16 @@ insta compute limits web --memory 512mb
 ```
 
 <Note>
-The defaults match the hosted platform: compute is always-on and scale-to-zero is opt-in, and
-Postgres scales to zero. The one addition for a single box is that branch clones scale to zero
-unless a service is explicitly always-on, so forking a project does not start every app it has.
-Switch a service off with `insta compute always-on off web`, or turn everything back to
-scale-to-zero with `INSTA_OSS_ALWAYS_ON_DEFAULT=0`.
+The defaults match the hosted platform: compute on the default branch is always-on and
+scale-to-zero is opt-in, managed Redis, MySQL and MongoDB follow the same default, and Postgres
+scales to zero. The one addition for a single box is that branch clones scale to zero unless a
+service is explicitly always-on, so forking a project does not start every app it has. Switch a
+service off with `insta compute always-on off web`; send `{"enabled": null}` to
+`PUT /projects/<id>/services/<sid>/always-on` to put it back on the default; or set
+`INSTA_OSS_ALWAYS_ON_DEFAULT=0` to make default-branch services scale to zero too. A service
+that becomes always-on while it is asleep, and was not stopped by hand, is woken by the next sweep
+(every 30 seconds by default, `INSTA_OSS_SWEEP_SEC`); with the sweeper off
+(`INSTA_OSS_SCHEDULER=0`) it stays asleep until its next request.
 </Note>
 
 ## Tuning
@@ -173,7 +180,7 @@ Set these in `/etc/instacloud/instad.env`, then `cd /etc/instacloud && docker co
 | `INSTA_OSS_RAM_FLOOR_PCT` | 15 | free-memory floor for pressure eviction, 0 disables it |
 | `INSTA_OSS_MEM_BUDGET_MB` | unset | assumed total memory, needed for eviction on macOS |
 | `INSTA_OSS_WAKE_PROTECT_SEC` | 60 | how long after a wake a service cannot be evicted |
-| `INSTA_OSS_ALWAYS_ON_DEFAULT` | 1 | compute on the default branch is always-on unless switched off; set to 0 to make it scale to zero too. Branch clones and Postgres scale to zero either way |
+| `INSTA_OSS_ALWAYS_ON_DEFAULT` | 1 | compute and managed Redis, MySQL and MongoDB on the default branch are always-on unless switched off; set to 0 to make them scale to zero too. Branch clones and Postgres scale to zero either way. An upgraded box keeps the value its `instad.env` already has, and every installer before this default wrote 0, so set it to 1 there yourself |
 | `INSTA_OSS_SCHEDULER` | 1 | set to 0 to turn the sweeper off, so nothing sleeps on a timer |
 
 An idle window of 0 turns sleeping off for that kind of service without turning off the sweeper.

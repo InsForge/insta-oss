@@ -467,10 +467,15 @@ export class Scheduler {
     this.timer.unref?.()
   }
 
+  /** Wakes the sweep starts without awaiting (the always-on pass); `stop()` waits for them. */
+  private background = new Set<Promise<void>>()
+
   async stop(): Promise<void> {
     this.stopped = true
     if (this.timer) { clearInterval(this.timer); this.timer = undefined }
     await this.sweepInFlight?.catch(() => undefined)
+    // After the sweep, which is what adds to this set, so nothing it started is missed.
+    await Promise.allSettled([...this.background])
   }
 
   /** Boot: one snapshot, a fresh idle window for every service, and the sleep marks reconciled with
@@ -544,6 +549,28 @@ export class Scheduler {
           console.warn(`warn: sleep ${batch[n].key} failed: ${e instanceof Error ? e.message : String(e)}`)
         }
       }
+    }
+    // An always-on service that is asleep is brought back up. The setting only takes a service out
+    // of the sleep and eviction passes, so a service already asleep when it became always-on
+    // (switched on, or the default turned on over an existing box) stayed asleep until its next
+    // request while every view called it always-on. Through the ordinary wake, so it makes room
+    // and queues behind any operation on the key; not awaited, so one slow image does not hold the
+    // sweep, and a wake in flight reads `starting`, so the next pass does not start a second one.
+    // The targets are read again HERE, not taken from the top of the sweep: the idle phase above
+    // awaits stops and can run for minutes, and a setting switched meanwhile must win in both
+    // directions. Checked once more under the key's lock, because the grant can come later still.
+    for (const t of this.targets()) {
+      if (!t.alwaysOn || t.desiredState !== 'running' || this.busy(t.key) || this.stateOf(t.key) !== 'asleep') continue
+      const woke = this.withOp([t.key], async () => {
+        const cur = this.targetOf(t.key)
+        if (!cur?.alwaysOn || cur.desiredState !== 'running' || this.stateOf(t.key) !== 'asleep') return
+        await this.wake(t.key, { door: 'api' })
+      }).catch((e: unknown) => {
+        console.warn(`warn: always-on wake ${t.key} failed: ${e instanceof Error ? e.message : String(e)}`)
+      })
+      // Tracked so `stop()` waits for it: shutdown must not cut off a wake that is evicting or starting.
+      this.background.add(woke)
+      void woke.finally(() => { this.background.delete(woke) })
     }
     // Re-read BEFORE the pressure pass, not once for the whole sweep. The sleep phase above
     // awaits a stop per candidate and each can burn its grace (10 s compute, 30 s databases), so

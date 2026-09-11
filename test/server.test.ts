@@ -4330,7 +4330,66 @@ test('the always-on default: main is always-on like the cloud, a branch clone sc
   await engine.setAlwaysOn(project.id, 'cp-web', true)
   expect(on(branches().main, 'cp-web')).toBe(true)
   expect(on(branches().feat, 'cp-web')).toBe(true)
+  // null clears the setting: back to the default on both kinds of branch, so switching a service
+  // on and back is not a one-way pin on every clone.
+  await engine.setAlwaysOn(project.id, 'cp-web', null)
+  expect(on(branches().main, 'cp-web')).toBe(true)
+  expect(on(branches().feat, 'cp-web')).toBe(false)
+  expect(engine.getProject(project.id)!.serviceSettings?.['cp-web']?.alwaysOn).toBeUndefined()
+  // A managed database's create reports what the branch it lands on will do, as compute's does.
+  expect((await engine.addManagedService(project.id, 'redis', 'queue', {})).always_on).toBe(true)
+  expect((await engine.addManagedService(project.id, 'redis', 'scratch', { branch: 'feat' })).always_on).toBe(false)
 })
+
+test('PUT always-on takes null to follow the default again, and refuses anything else that is not a boolean', async () => {
+  const cfg = testConfig({ INSTA_OSS_ALWAYS_ON_DEFAULT: '1' })
+  const engine = makeEngine(cfg)
+  const a = buildServer(engine, cfg)
+  const { project } = await engine.createProject('demo')
+  await engine.addComputeService(project.id, 'web')
+  const setOn = async (enabled: unknown) =>
+    a.inject({ method: 'PUT', url: `/projects/${project.id}/services/cp-web/always-on`, payload: { enabled } })
+  expect((await setOn(false)).json().service.always_on).toBe(false)
+  expect((await setOn(null)).json().service.always_on).toBe(true)
+  const bad = await setOn('yes')
+  expect(bad.statusCode).toBe(400)
+  expect(bad.json().error).toBe('enabled must be a boolean, or null to follow the default')
+})
+
+test('at the shipped default the sweep keeps main up and sleeps a clone, and wakes main once it is back on the default', async () => {
+  // The suites pin INSTA_OSS_ALWAYS_ON_DEFAULT off, so no other sweep test runs the shipped
+  // default with no explicit setting: that is the case every fresh install is in.
+  const engine = makeEngine(testConfig({
+    INSTA_OSS_ALWAYS_ON_DEFAULT: '1', INSTA_OSS_IDLE_COMPUTE_SEC: '1', INSTA_OSS_IDLE_DB_SEC: '1', INSTA_OSS_CREATE_GRACE_SEC: '0',
+  }))
+  app = buildServer(engine)
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'feat', port: 3000 })
+  await new Promise((r) => { setTimeout(r, 1_100) })
+  calls.length = 0
+  await engine.scheduler.sweep()
+  expect(calls).not.toContain('runtime.stop:io-demo-main-app-default:10')
+  expect(calls).toContain('runtime.stop:io-demo-feat-app-default:10')
+
+  // Switched to scale-to-zero, main sleeps like the clone did...
+  await put(`/projects/${id}/services/cp-default/always-on`, { enabled: false })
+  await new Promise((r) => { setTimeout(r, 1_100) })
+  calls.length = 0
+  await engine.scheduler.sweep()
+  expect(calls).toContain('runtime.stop:io-demo-main-app-default:10')
+
+  // ...and put back on the default, the next sweep starts it: no request needed.
+  await put(`/projects/${id}/services/cp-default/always-on`, { enabled: null })
+  calls.length = 0
+  await engine.scheduler.sweep()
+  for (let i = 0; i < 40 && !calls.includes('runtime.start:io-demo-main-app-default'); i++) {
+    await new Promise((r) => { setTimeout(r, 50) })
+  }
+  expect(calls).toContain('runtime.start:io-demo-main-app-default')
+  expect(calls).not.toContain('runtime.start:io-demo-feat-app-default')
+}, 20_000)
 
 test('adding compute reports the always-on the NAMED branch will actually have', async () => {
   // The 201 used to report the daemon-wide default, so an untouched create on a preview branch

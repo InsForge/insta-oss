@@ -113,6 +113,75 @@ test('sweep table: each of running, alwaysOn, desiredState, stamp age, create gr
   expect(t.sleptAt).toBeTypeOf('number')      // the baseline above really did sleep
 })
 
+test('the sweep wakes an always-on service that is asleep, and only that one', async () => {
+  // Always-on used to only take a service OUT of the sweep, so one already asleep when it became
+  // always-on (switched on, or the default turned on over an existing box) stayed asleep until
+  // its next request while every view called it always-on.
+  const h = harness()
+  const on = h.add(K, { alwaysOn: true, sleptAt: Date.now() })
+  const off = h.add(K2, { sleptAt: Date.now() })
+  const held = h.add('11111111-1111-1111-1111-111111111111:cp-job', {
+    alwaysOn: true, sleptAt: Date.now(), desiredState: 'stopped', container: 'io-x-app-job',
+  })
+  await h.sched.refreshStates()               // the snapshot stateOf answers from
+  expect(h.sched.stateOf(K)).toBe('asleep')
+  await h.sched.sweep()
+  await h.sched.withOp([K], async () => { /* granted only once the wake has let the key go */ })
+  expect(calls).toContain(`runtime.start:${on.container}`)
+  expect(h.sched.stateOf(K)).toBe('running')
+  // Not always-on: it stays asleep until traffic. Stopped by hand: a stop is a standing intent.
+  expect(calls).not.toContain(`runtime.start:${off.container}`)
+  expect(calls).not.toContain(`runtime.start:${held.container}`)
+})
+
+test('the always-on wake reads the setting as it is after the idle phase, not as the sweep began', async () => {
+  // The idle phase awaits stops, which can take minutes. A setting switched while it runs must win
+  // in both directions: switched to scale-to-zero, the service is NOT started; switched to
+  // always-on, it is, in this same sweep. The engine hands back new target objects after every
+  // state change, so the switch is a replaced object, not a mutated one.
+  const h = harness()
+  h.add('11111111-1111-1111-1111-111111111111:cp-busy', { container: 'io-x-app-busy' })
+  const was = h.add(K, { alwaysOn: true, sleptAt: Date.now() })
+  const now = h.add(K2, { sleptAt: Date.now() })
+  vi.advanceTimersByTime(301_000)
+  let entered = false
+  let open = (): void => {}
+  const gate = new Promise<void>((r) => { open = () => { r() } })
+  const realStop = h.runtime.stop.bind(h.runtime)
+  h.runtime.stop = async (c, g) => { entered = true; await gate; return realStop(c, g) }
+
+  const sweep = h.sched.sweep()
+  for (let i = 0; i < 1000 && !entered; i++) await Promise.resolve()
+  expect(entered).toBe(true)              // the idle phase is blocked inside its stop
+  h.targets.set(K, { ...was, alwaysOn: false })
+  h.targets.set(K2, { ...now, alwaysOn: true })
+  open()
+  await sweep
+  await h.sched.withOp([K, K2], async () => { /* granted only once any wake has let go */ })
+
+  expect(calls).not.toContain(`runtime.start:${was.container}`)
+  expect(calls).toContain(`runtime.start:${now.container}`)
+})
+
+test('stop() waits for a wake the sweep started in the background', async () => {
+  // The sweep does not await its always-on wakes, so shutdown has to: exiting while one is
+  // evicting or starting would leave docker mid-change with nothing holding the key.
+  const h = harness()
+  const t = h.add(K, { alwaysOn: true, sleptAt: Date.now() })
+  let open = (): void => {}
+  const gate = new Promise<void>((r) => { open = () => { r() } })
+  const realStart = h.runtime.start.bind(h.runtime)
+  h.runtime.start = async (c) => { await gate; return realStart(c) }
+  await h.sched.sweep()
+  let stopped = false
+  const stopping = h.sched.stop().then(() => { stopped = true })
+  for (let i = 0; i < 100; i++) await Promise.resolve()
+  expect(stopped).toBe(false)             // the wake is still inside docker start
+  open()
+  await stopping
+  expect(calls).toContain(`runtime.start:${t.container}`)
+})
+
 test('an operation in flight on the key makes it no sweep candidate, and sleep refuses without queueing', async () => {
   const h = harness()
   const t = h.add(K)

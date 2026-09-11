@@ -15,7 +15,7 @@ export type ServiceKey = string
 export interface ServiceLimits { cpu: number; memoryMb: number }
 /** Project-level per-service settings keyed by service id (cp-<group> | rd-/my-/mo-<name>). Postgres settings are per branch (Branch.databases[id]). */
 export interface ServiceSettings {
-  alwaysOn?: boolean            // undefined = cfg.sleep.alwaysOnDefault
+  alwaysOn?: boolean            // undefined = the default: cfg.sleep.alwaysOnDefault on the default branch, scale-to-zero elsewhere
   limits?: ServiceLimits        // undefined = no cgroup ceiling
   createdAt?: number
   port?: number                 // WP5: default listen port recorded by services add / template deploy

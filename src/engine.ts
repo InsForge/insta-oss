@@ -1993,14 +1993,14 @@ export class Engine {
    *
    *  Branch-scoped for the reason spelled out on `addDbService`: fanning out meant an agent adding
    *  a redis on its own branch also got one, with its own credentials, on `main`. */
-  async addManagedService(projectId: string, type: ManagedDbType, name: string, opts: { branch?: string } = {}): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
+  async addManagedService(projectId: string, type: ManagedDbType, name: string, opts: { branch?: string } = {}): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number; always_on: boolean }> {
     // The branch key outside the provision chain, the order every other taker uses (decision 52,
     // `addKeys`): an add that runs inside a queued branch create's window changes what that
     // create will fork, out from under the key set it already enqueued.
     return this.withOp(this.addKeys(projectId, opts.branch), () => this.addManagedServiceLocked(projectId, type, name, opts))
   }
 
-  private async addManagedServiceLocked(projectId: string, type: ManagedDbType, name: string, opts: { branch?: string } = {}): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number }> {
+  private async addManagedServiceLocked(projectId: string, type: ManagedDbType, name: string, opts: { branch?: string } = {}): Promise<{ id: string; type: string; name: string; status: string; port: number; volume_gib: number; always_on: boolean }> {
     // Inside the engine-wide provision chain, exactly like its postgres and storage siblings.
     // Without it the `existing` check and the append that follows it were check-then-act across
     // every provisioning await: two concurrent first adds of the same managed service, on two
@@ -2069,7 +2069,8 @@ export class Engine {
       // server-mode MySQL, which take a per-service port.
       this.router.invalidate()                                          // WP2
       this.emit(projectId, b.name, 'resource', 'service.added', { type, name })
-      return this.managedRow(entry)
+      // What the branch it landed on will do, through the rule the list and the scheduler use.
+      return { ...this.managedRow(entry), always_on: this.effectiveAlwaysOn(this.getProject(projectId)!, b, entry.id) }
     })
   }
 
@@ -3842,9 +3843,12 @@ export class Engine {
 
   // ---- always-on and limits (the cloud's two service knobs) --------------------------------------
 
-  /** `PUT /projects/:id/services/:sid/always-on`. No container action: the flag only takes the
-   *  service out of the sweep (and, once off, lets the next idle window stop it). */
-  async setAlwaysOn(projectId: string, serviceId: string, enabled: boolean): Promise<{ service: ServiceRow | undefined }> {
+  /** `PUT /projects/:id/services/:sid/always-on`. A boolean pins the service on every branch; `null`
+   *  clears the setting, so it follows the default again (always-on on the default branch while
+   *  INSTA_OSS_ALWAYS_ON_DEFAULT is on, scale-to-zero on every other branch). No container action
+   *  here: the sweep stops a service that is no longer always-on once it goes idle, and wakes one
+   *  that became always-on while it was asleep. */
+  async setAlwaysOn(projectId: string, serviceId: string, enabled: boolean | null): Promise<{ service: ServiceRow | undefined }> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
     const svc = this.serviceOf(projectId, serviceId)
@@ -3854,7 +3858,10 @@ export class Engine {
     mutate((s) => {
       const p = s.projects[projectId]
       p.serviceSettings ??= {}
-      p.serviceSettings[serviceId] = { ...p.serviceSettings[serviceId], alwaysOn: enabled }
+      const next = { ...p.serviceSettings[serviceId] }
+      if (enabled === null) delete next.alwaysOn
+      else next.alwaysOn = enabled
+      p.serviceSettings[serviceId] = next
     })
     this.emit(projectId, null, 'resource', 'service.alwaysOn', { service: serviceId, enabled })
     return { service: (await this.services(projectId)).find((x) => x.id === serviceId) }
