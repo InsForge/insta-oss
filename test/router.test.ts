@@ -25,6 +25,10 @@ import type { State } from '../src/state'
 import { makeEngine, resetFakes, serverConfig, testConfig } from './fakes'
 import type { Branch, Project } from '../src/types'
 
+// The TLS cases mint pairs with the openssl CLI, which `npm test` does not require: where it is
+// absent they skip by name, as the README says, rather than fail.
+const hasOpenssl = spawnSync('sh', ['-c', 'command -v openssl'], { encoding: 'utf8' }).status === 0
+
 // ---- fakes -------------------------------------------------------------------------------------
 
 class FakeUpstream implements UpstreamLike {
@@ -1081,7 +1085,7 @@ test('a SUPPLIED certificate is served for every host, and nothing is ever issue
 })
 
 
-test('a renewal with the SAME mtime is still picked up by the lanes, and healthz agrees', async () => {
+test.skipIf(!hasOpenssl)('a renewal with the SAME mtime is still picked up by the lanes, and healthz agrees', async () => {
   // The documented renewal is an atomic rename, and a rename changes the inode without
   // necessarily changing the mtime: renewal and configuration tools routinely preserve
   // timestamps. The lane contexts were cached on the certificate's mtime ALONE, so they went on
@@ -1161,7 +1165,7 @@ test('a renewal with the SAME mtime is still picked up by the lanes, and healthz
   }
 })
 
-test('a broken certificate says so ONCE, however many handshakes arrive', async () => {
+test.skipIf(!hasOpenssl)('a broken certificate says so ONCE, however many handshakes arrive', async () => {
   // These lanes are publicly reachable and the traffic is not the operator's: one public
   // hostname on a live box drew 141 scanner requests in fifteen minutes. A degraded
   // certificate plus ordinary client retries plus that traffic is unbounded log writes at the
@@ -1317,7 +1321,7 @@ test('a certificate that STOPS being readable goes absent, and does not keep its
   }
 })
 
-test('a REPLACED certificate is judged on its own merits, not silenced by the last one', () => {
+test.skipIf(!hasOpenssl)('a REPLACED certificate is judged on its own merits, not silenced by the last one', () => {
   // The operator sequence, not a unit of the limiter: they see "expires in N days", replace the
   // file, and land on another near-expiry certificate -- the wrong file from the CA, last
   // year's bundle, a renewal that did not renew. Under a limiter that spans the change they
@@ -1410,7 +1414,7 @@ test('the expiry warning is said once, then stays quiet for hours', () => {
 })
 
 
-test('the beat PARSES only when the file moved: an unchanged certificate costs a stat', () => {
+test.skipIf(!hasOpenssl)('the beat PARSES only when the file moved: an unchanged certificate costs a stat', () => {
   // The cache was defeating itself. `refresh()` cleared the stamp before `sync()` could compare
   // it, so every sweep re-read and re-parsed a certificate that had not changed -- a full
   // synchronous read and X509 parse on the event loop every 30 s, for the lifetime of the
@@ -1466,7 +1470,7 @@ test('the beat PARSES only when the file moved: an unchanged certificate costs a
   }
 })
 
-test('a MALFORMED file is parsed once, and replacing it with a good one is still noticed', () => {
+test.skipIf(!hasOpenssl)('a MALFORMED file is parsed once, and replacing it with a good one is still noticed', () => {
   // The negative result has to be cached too. Without that, the one case where an operator has
   // a broken file -- the wrong file copied in, a truncated write, a key pasted over a
   // certificate -- was the case that did the most work: a full read and a failed parse on every
@@ -1514,7 +1518,7 @@ test('a MALFORMED file is parsed once, and replacing it with a good one is still
   }
 })
 
-test('a RENAMED certificate is picked up by the beat, and the request path reads nothing', () => {
+test.skipIf(!hasOpenssl)('a RENAMED certificate is picked up by the beat, and the request path reads nothing', () => {
   // The way a renewal actually happens, and the way it was measured on a live box: write the new
   // pair alongside, rename over the live names. The file check lives on the daemon's beat, not
   // on the request path -- `/healthz` is unauthenticated and a scanner sets its rate, so a
