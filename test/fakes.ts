@@ -134,7 +134,9 @@ export const data: DataDirOps = {
 /** A fresh local-mode Config on its own tmp data dir (scheduler ticker off). */
 export function testConfig(over: Record<string, string> = {}): Config {
   const dir = mkdtempSync(join(tmpdir(), 'io-cfg-'))
-  return loadConfig({ INSTA_OSS_MODE: 'local', INSTA_OSS_DATA_DIR: dir, INSTA_OSS_STATE: join(dir, 'state.json'), INSTA_OSS_SCHEDULER: '0', ...over }, [])
+  // INSTA_OSS_ALWAYS_ON_DEFAULT is pinned OFF: the suites exercise sleep, eviction and wake, which
+  // only happen to a service that is allowed to sleep. The always-on default has tests of its own.
+  return loadConfig({ INSTA_OSS_MODE: 'local', INSTA_OSS_DATA_DIR: dir, INSTA_OSS_STATE: join(dir, 'state.json'), INSTA_OSS_SCHEDULER: '0', INSTA_OSS_ALWAYS_ON_DEFAULT: '0', ...over }, [])
 }
 
 /** Server-mode twin: example.test, auth on, a fixed secret (no file I/O). */

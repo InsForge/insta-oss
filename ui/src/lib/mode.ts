@@ -11,6 +11,9 @@ export interface Boot {
   /** What `insta login --api-url` should be told (server: https://api.<domain>). */
   apiUrl: string
   consoleUrl: string
+  /** Whether a new compute service is always-on unless switched off (the daemon's
+   *  INSTA_OSS_ALWAYS_ON_DEFAULT, on by default like the hosted platform). */
+  alwaysOnDefault: boolean
 }
 
 export type BootWindow = {
@@ -46,7 +49,10 @@ export function readBoot(
       setupRequired: injected.setupRequired === true,
       apiUrl: injected.apiUrl ?? origin,
       consoleUrl: injected.consoleUrl ?? origin,
+      // An older daemon injects no such field; the daemon's own default is on, so that is what a
+      // missing field means.
+      alwaysOnDefault: injected.alwaysOnDefault !== false,
     }
   }
-  return { mode: asMode(fallbackMode), setupRequired: false, apiUrl: origin, consoleUrl: origin }
+  return { mode: asMode(fallbackMode), setupRequired: false, apiUrl: origin, consoleUrl: origin, alwaysOnDefault: true }
 }

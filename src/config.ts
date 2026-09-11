@@ -266,7 +266,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, argv: readonly 
       wakeProtectSec: int(env, 'INSTA_OSS_WAKE_PROTECT_SEC', 60),
       ramFloorPct: int(env, 'INSTA_OSS_RAM_FLOOR_PCT', 15, 0, 90),
       memBudgetMb,
-      alwaysOnDefault: bool(env, 'INSTA_OSS_ALWAYS_ON_DEFAULT', false),
+      // ON, like the hosted platform: a new compute service (and a managed database) stays up
+      // unless it is switched to scale-to-zero. Postgres is unaffected and keeps the cloud's own
+      // default, scale-to-zero, through its per-branch `scaleToZero` setting.
+      alwaysOnDefault: bool(env, 'INSTA_OSS_ALWAYS_ON_DEFAULT', true),
     },
     data: {
       helperImage: str(env, 'INSTA_OSS_HELPER_IMAGE', 'node:22-alpine'),

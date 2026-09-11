@@ -1067,6 +1067,9 @@ export function buildServer(
       const boot = JSON.stringify({
         mode: cfg.mode,
         setupRequired: cfg.auth.enabled && !loadState().identity?.admin,
+        // What a new service gets when nobody says otherwise, so the dashboard's switch starts
+        // there instead of sending its own opinion on every create.
+        alwaysOnDefault: cfg.sleep.alwaysOnDefault,
         apiUrl: cfg.apiUrl,
         consoleUrl: cfg.consoleUrl,
       }).replace(/</g, '\\u003c')
