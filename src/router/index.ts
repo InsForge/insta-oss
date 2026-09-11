@@ -212,6 +212,16 @@ export class Router {
 
   // ---- start / stop ----------------------------------------------------------------------------
 
+  /** On the daemon's sweep beat: the lanes' no-SNI default follows a renewed certificate (a
+   *  replaced supplied pair, or an `api.` certificate the edge renewed) without waiting for a
+   *  route change, which is all that used to run `reconcile`. Never asks the edge to issue. */
+  async refreshCertificates(): Promise<void> {
+    if (this.stopped) return
+    try { await this.refreshDefaultContext() } catch (e) {
+      this.log(`router: refreshing the default certificate failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   async start(): Promise<void> {
     const server = this.cfg.mode === 'server'
     if (server) {
@@ -311,13 +321,22 @@ export class Router {
    *  attempt: on a fresh box nothing has asked the edge for `api.<domain>` yet, so every reconcile
    *  looks again and the SNI lanes already listening are updated in place. Only the start attempt
    *  asks the edge to issue; a later one reads the store, so a box whose ACME is failing does not
-   *  pay a 15 s handshake on every service it adds. */
+   *  pay a 15 s handshake on every service it adds.
+   *
+   *  And every look FOLLOWS a renewal. This used to return as soon as a context existed, so the
+   *  no-SNI default was the certificate the process booted with, forever: a renewed supplied pair
+   *  (or an ACME `api.` certificate Caddy renewed) reached every SNI client while libpq before 14
+   *  and older JDBC drivers, which send no SNI, kept the old one until it expired. `certFor` is
+   *  cached on the files' stamp and hands back the SAME context while nothing moved, so an
+   *  identical object is the cheap "unchanged" and only a real change is pushed to the lanes. */
   private async refreshDefaultContext(issue = false): Promise<void> {
-    if (this.cfg.mode !== 'server' || this.defaultContext) return
+    if (this.cfg.mode !== 'server') return
     const host = `api.${this.cfg.domain}`
     if (!issue && !this.certs.certExists(host)) return
     const ctx = await this.certs.certFor(host)
-    if (!ctx) return
+    // Null (the pair became unreadable) keeps the context already held: a client still completes
+    // its handshake and is told why, rather than getting an alert.
+    if (!ctx || ctx === this.defaultContext) return
     this.defaultContext = ctx
     const material = this.certs.materialFor(host)
     if (!material) return

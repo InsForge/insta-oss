@@ -204,6 +204,14 @@ async function main(): Promise<void> {
     const timer = setInterval(() => { certWatch.refresh(); certWatch.maybeWarn() }, cfg.sleep.sweepSec * 1000)
     timer.unref?.()
   }
+  // The same beat moves the database lanes' no-SNI default onto a renewed certificate. Without it
+  // that default was whatever the process booted with until a route happened to change, so an
+  // old libpq or JDBC client got an opaque alert after the original expired instead of being told
+  // to send SNI. Every mode: Caddy renews an ACME `api.` certificate too.
+  if (cfg.mode === 'server') {
+    const certTimer = setInterval(() => { void router.refreshCertificates() }, cfg.sleep.sweepSec * 1000)
+    certTimer.unref?.()
+  }
 
   if (cfg.mode === 'server') {
     console.log(`instad ${cfg.version} mode=server api=${cfg.apiUrl} console=${cfg.consoleUrl} data=${cfg.dataDir}`)

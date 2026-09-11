@@ -340,8 +340,10 @@ What you take on:
   cd /etc/instacloud && docker compose --env-file instad.env restart edge
   ```
 
-  The daemon needs nothing: its lanes re-read the file on the next handshake, and `healthz`
-  reports the new certificate within one sweep interval (30 s by default, `INSTA_OSS_SWEEP_SEC`).
+  The daemon needs nothing: its lanes re-read the file on the next handshake that sends SNI (every
+  current client), the default they hand a client that sends none (libpq before 14, older JDBC,
+  which are then told to send it) follows on the daemon's next beat, and `healthz` reports the
+  new certificate within that same sweep interval (30 s by default, `INSTA_OSS_SWEEP_SEC`).
   That lag is deliberate: `/healthz` is public and unauthenticated, so the request path reads no
   file and makes no syscall, and the daemon's own beat is what looks at the disk. Both were
   measured after a real rename. The edge needs its process restarted, because Caddy loads certificates when it

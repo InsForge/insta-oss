@@ -923,6 +923,79 @@ test('a name under the bucket suffix that no bucket owns is refused for certific
   }
 })
 
+test.skipIf(!hasOpenssl)('a client that sends NO SNI is handed the RENEWED certificate, not the one the daemon booted with', async () => {
+  // libpq before 14 and older JDBC drivers send no SNI. They are refused either way (the pg lane
+  // answers 08P01 telling them to send it), but the handshake has to complete on the DEFAULT
+  // context for them to be told. That default was set once at start and never looked at again,
+  // so after a renewal SNI clients got the new certificate and these got the one the process
+  // booted with -- an opaque alert once it expired, instead of the readable error.
+  const dir = mkdtempSync(join(tmpdir(), 'io-nosni-renew-'))
+  const mint = (crt: string, key: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${key} -out ${crt} -subj '/CN=*.router.test' -addext 'subjectAltName=DNS:*.router.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  const fingerprintOf = (crt: string): string =>
+    spawnSync('sh', ['-c', `openssl x509 -in ${crt} -noout -fingerprint -sha256`], { encoding: 'utf8' }).stdout.trim().split('=')[1]
+  const freePort = async (): Promise<number> => {
+    const s = createNetServer()
+    const p = await listenEphemeral(s)
+    await new Promise<void>((r) => s.close(() => r()))
+    return p
+  }
+  const crt = join(dir, 'wildcard.crt')
+  const key = join(dir, 'wildcard.key')
+  mint(crt, key, 30)
+  const [pgPort, redisPort, mongoPort] = [await freePort(), await freePort(), await freePort()]
+  const cfg = serverConfig({
+    INSTA_OSS_DOMAIN: 'router.test', INSTA_OSS_TLS_CERT_FILE: crt, INSTA_OSS_TLS_KEY_FILE: key,
+    INSTA_OSS_LANE_PG_PORT: String(pgPort), INSTA_OSS_LANE_REDIS_PORT: String(redisPort), INSTA_OSS_LANE_MONGO_PORT: String(mongoPort),
+  })
+  const router = new Router({
+    cfg, table: () => buildTable(EMPTY, cfg, () => { /* quiet */ }),
+    stateOf: () => 'running', wake: async () => { /* nothing sleeps here */ },
+    touch: () => { /* no scheduler */ }, beginHold: () => { /* idem */ }, endHold: () => { /* idem */ },
+    upstream: new FakeUpstream(),
+    certs: new Certs({ certDir: null, supplied: { crt, key }, issue: async () => { throw new Error('nothing may be issued here') }, log: () => { /* quiet */ } }),
+    log: () => { /* quiet */ },
+  })
+  // What a no-SNI client is handed: the pg negotiation, then a handshake with no servername.
+  const presented = async (): Promise<string> => {
+    const raw = netConnect({ host: '127.0.0.1', port: pgPort })
+    await new Promise<void>((r) => raw.once('connect', () => r()))
+    raw.write(SSL_REQUEST)
+    await new Promise<Buffer>((r) => { raw.once('data', (d: Buffer) => r(d)) })
+    const t = tlsConnect({ socket: raw, rejectUnauthorized: false })
+    await new Promise<void>((r, j) => { t.once('secureConnect', () => r()); t.once('error', j) })
+    const fp = t.getPeerCertificate().fingerprint256
+    t.destroy()
+    return fp
+  }
+  try {
+    await router.start()
+    const first = fingerprintOf(crt)
+    expect(await presented()).toBe(first)
+
+    // The renewal as the docs describe it: a new pair written alongside, renamed over the old.
+    mint(join(dir, 'next.crt'), join(dir, 'next.key'), 90)
+    renameSync(join(dir, 'next.crt'), crt)
+    renameSync(join(dir, 'next.key'), key)
+    const second = fingerprintOf(crt)
+    expect(second).not.toBe(first)
+
+    // One beat later, which is what the daemon runs on its sweep interval.
+    await router.refreshCertificates()
+    expect(await presented()).toBe(second)
+    // ...and an unchanged pair costs nothing more: the same certificate, beat after beat.
+    await router.refreshCertificates()
+    expect(await presented()).toBe(second)
+  } finally {
+    await router.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // ---- write classes: what actually rebuilds the table --------------------------------------------
 
 test('an audit event does not rebuild the route table; a real service change does', async () => {
