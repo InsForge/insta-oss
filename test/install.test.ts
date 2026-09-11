@@ -81,7 +81,10 @@ test('--print-env writes every key loadConfig reads plus the stack-only keys, wi
     INSTA_OSS_IDLE_COMPUTE_SEC: '300',
     INSTA_OSS_IDLE_DB_SEC: '600',
     INSTA_OSS_RAM_FLOOR_PCT: '15',
-    INSTA_OSS_ALWAYS_ON_DEFAULT: '0',
+    // On, like the daemon's own default: a fresh install's default-branch compute is always-on.
+    // An upgrade keeps whatever its instad.env already says (precedence: env, then the existing
+    // file, then this), so a running box's behaviour does not change underneath it.
+    INSTA_OSS_ALWAYS_ON_DEFAULT: '1',
   })
   // derived-while-empty keys stay empty so the daemon computes them from DOMAIN and DATA_DIR
   for (const k of ['INSTA_OSS_STATE', 'INSTA_OSS_GARAGE_CONFIG', 'INSTA_OSS_S3_HOST_ENDPOINT', 'INSTA_OSS_API_URL', 'INSTA_OSS_CONSOLE_URL', 'INSTA_OSS_TLS_CERT_DIR']) expect(env[k]).toBe('')
@@ -619,6 +622,23 @@ test('systemd is detected by whether it runs the box, not by systemctl being on 
   expect(script).toContain('elif have service && [ -x /etc/init.d/docker ]; then service docker restart')
   // an installed but stopped daemon is started before the stack is touched
   expect(script).toContain('log "Docker is installed but not answering: starting it"')
+})
+
+test('an upgrade keeps the always-on default its instad.env already has', () => {
+  // Every install before this default flipped wrote INSTA_OSS_ALWAYS_ON_DEFAULT=0. Re-running the
+  // installer must not turn those boxes always-on underneath their operators: always-on services
+  // are never evicted, so a silent flip changes how much memory a running box holds.
+  const cfg = mkdtempSync(join(tmpdir(), 'io-upg-'))
+  try {
+    writeFileSync(join(cfg, 'instad.env'), 'INSTA_OSS_DOMAIN=example.test\nINSTA_OSS_ALWAYS_ON_DEFAULT=0\n')
+    expect(parseEnv(run(['--print-env'], { IO_CFG_DIR: cfg })).INSTA_OSS_ALWAYS_ON_DEFAULT).toBe('0')
+    // ...and it is the existing file doing that, not the default: without the key the same
+    // upgrade renders the new default.
+    writeFileSync(join(cfg, 'instad.env'), 'INSTA_OSS_DOMAIN=example.test\n')
+    expect(parseEnv(run(['--print-env'], { IO_CFG_DIR: cfg })).INSTA_OSS_ALWAYS_ON_DEFAULT).toBe('1')
+  } finally {
+    rmSync(cfg, { recursive: true, force: true })
+  }
 })
 
 test('.env is symlinked to instad.env so a plain docker compose in $CFG interpolates', () => {

@@ -360,6 +360,11 @@ test('the SPA shell carries window.__INSTA_OSS__ and setupRequired flips after s
   expect(before.body).toContain('"setupRequired":true')
   expect(before.body).toContain('"mode":"server"')
   expect(before.body).toContain(`"consoleUrl":"${c.consoleUrl}"`)
+  // The dashboard's always-on switch starts from the daemon's default, so the shell carries it:
+  // off here (the suites pin it off), on for a daemon on its own default.
+  expect(before.body).toContain('"alwaysOnDefault":false')
+  const on = serverConfig({ INSTA_OSS_UI_DIST: uiDist, INSTA_OSS_ALWAYS_ON_DEFAULT: '1' })
+  expect((await buildServer(makeEngine(on), on).inject({ method: 'GET', url: '/' })).body).toContain('"alwaysOnDefault":true')
   await a.inject({ method: 'POST', url: '/api/auth/sign-up/email', payload: { email: EMAIL, password: PASSWORD } })
   const after = await a.inject({ method: 'GET', url: '/' })
   expect(after.body).toContain('"setupRequired":false')

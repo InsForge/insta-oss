@@ -1738,10 +1738,15 @@ export class Engine {
    *  destroyed) — but never detached. */
   addComputeService(
     projectId: string, name: string, volumeGib?: number,
-    opts: { alwaysOn?: boolean; port?: number; templateDeploymentId?: string; templateCode?: string } = {},
+    opts: { alwaysOn?: boolean; port?: number; templateDeploymentId?: string; templateCode?: string; branch?: string } = {},
   ): ServiceRow {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
+    // A named branch that does not exist is a 404 before anything is registered, as it is for every
+    // other service type: a create from a stale branch page must not register a project-wide group.
+    if (opts.branch !== undefined && !this.listBranches(projectId).some((b) => b.name === opts.branch)) {
+      throw new Error(`branch "${opts.branch}" not found`)
+    }
     this.assertServiceName(name)
     const groups = new Set(project.computeGroups ?? [])
     for (const b of this.listBranches(projectId)) for (const g of Object.keys(b.apps)) groups.add(g)
@@ -1767,9 +1772,15 @@ export class Engine {
       ;(pr.serviceSettings ??= {})[`cp-${name}`] = settings
     })
     this.emit(projectId, null, 'resource', 'service.added', { type: 'compute', name, ...(volumeGib !== undefined ? { volumeGib } : {}) })
+    // The group is project-level, but whether it sleeps is per branch (`effectiveAlwaysOn`), so the
+    // reply reports the branch the request named, else the default branch, through the same rule
+    // the services list and the scheduler use. The daemon-wide default alone told a preview
+    // branch "always on" for a service that branch then put to sleep.
+    const branches = this.listBranches(projectId)
+    const target = (opts.branch !== undefined ? branches.find((b) => b.name === opts.branch) : undefined) ?? branches.find((b) => b.isDefault)
     return {
       id: `cp-${name}`, type: 'compute', name, status: 'ready', volume_gib: volumeGib ?? null,
-      always_on: opts.alwaysOn ?? this.cfg.sleep.alwaysOnDefault,
+      always_on: target ? this.effectiveAlwaysOn(this.getProject(projectId)!, target, `cp-${name}`) : (opts.alwaysOn ?? false),
       ...(opts.port !== undefined ? { port: opts.port } : {}),
       ...(opts.templateDeploymentId !== undefined ? { template_deployment_id: opts.templateDeploymentId } : {}),
       ...(opts.templateCode !== undefined ? { template_code: opts.templateCode } : {}),
@@ -3662,11 +3673,18 @@ export class Engine {
   }
 
   /** Whether a service opts out of sleep. Compute and managed databases carry the per-service
-   *  setting (else `INSTA_OSS_ALWAYS_ON_DEFAULT`); postgres carries the inverse of its own
-   *  per-branch `scaleToZero`, which is what `PATCH database/settings` writes. */
+   *  setting; without one, the DEFAULT branch follows `INSTA_OSS_ALWAYS_ON_DEFAULT` (on, like the
+   *  hosted platform, so production never cold-starts) and every other branch scales to zero.
+   *  That split is what keeps one box able to hold many branches: were the default applied to
+   *  every clone, each fork would start all of its apps running, and always-on services are never
+   *  evicted, so a handful of branches would fill memory with nothing able to make room. An
+   *  explicit setting wins on every branch. Postgres carries the inverse of its own per-branch
+   *  `scaleToZero`, which is what `PATCH database/settings` writes: scale-to-zero unless set. */
   effectiveAlwaysOn(project: Project, branch: Branch, serviceId: string): boolean {
     if (serviceId.startsWith('pg-')) return !(branch.databases?.[serviceId]?.scaleToZero ?? true)
-    return project.serviceSettings?.[serviceId]?.alwaysOn ?? this.cfg.sleep.alwaysOnDefault
+    const explicit = project.serviceSettings?.[serviceId]?.alwaysOn
+    if (explicit !== undefined) return explicit
+    return branch.isDefault ? this.cfg.sleep.alwaysOnDefault : false
   }
 
   /** Bookkeeping after a deploy replaced the container: asleep from birth, honouring a standing

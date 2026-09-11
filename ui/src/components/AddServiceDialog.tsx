@@ -1,8 +1,11 @@
 import { useState } from 'react'
+import { useAuth } from './AuthGate'
 import {
   Button, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch,
 } from '@insforge/ui'
 import { api, type ServiceType } from '../api'
+import { usePoll } from '../hooks'
+import { alwaysOnChoice, canSubmitCompute } from '../lib/alwaysOn'
 import type { PendingApproval } from './ApprovalPrompt'
 import { ErrorNote, Field, Modal } from './ui'
 
@@ -27,7 +30,16 @@ export function AddServiceDialog({ projectId, branch, onClose, onDone, onApprova
   const [name, setName] = useState('')
   const [image, setImage] = useState('')
   const [port, setPort] = useState('8080')
-  const [alwaysOn, setAlwaysOn] = useState(false)
+  // The Always on switch shows what the daemon will actually do (lib/alwaysOn.ts decides). Untouched,
+  // a service is always-on on the DEFAULT branch when the daemon's default is on and scales to zero
+  // on any other branch, and nothing is sent; an explicit value pins the service on every branch.
+  // Until the branch list says which branch this is, an untouched compute create is held back: the
+  // screen could not show what it would do.
+  const { boot } = useAuth()
+  const { data: branches, error: branchesError } = usePoll(() => api.branches(projectId), [projectId])
+  const isDefaultBranch = branches ? branches.find((b) => b.name === branch)?.is_default === true : undefined
+  const [picked, setPicked] = useState<boolean | null>(null)
+  const choice = alwaysOnChoice({ picked, bootDefault: boot.alwaysOnDefault, isDefaultBranch })
   const [withVolume, setWithVolume] = useState(false)
   const [volumeGib, setVolumeGib] = useState('1')
   const [isPublic, setIsPublic] = useState(false)
@@ -40,14 +52,17 @@ export function AddServiceDialog({ projectId, branch, onClose, onDone, onApprova
   const portOk = type !== 'compute' || !image.trim() || (Number.isInteger(portNum) && portNum > 0 && portNum < 65536)
   const volOk = type !== 'compute' || !withVolume || (Number.isInteger(Number(volumeGib)) && Number(volumeGib) >= 1)
   const valid = nameOk && portOk && volOk
+  const computeReady = type !== 'compute' || canSubmitCompute(choice)
 
   const submit = async () => {
     if (!valid) return setError(nameOk ? 'check the port and volume size' : 'Names are lower-case letters, digits and hyphens (max 39).')
+    // The Enter key reaches here too, not only the button.
+    if (!computeReady) return setError('Choose Always on or off first.')
     setBusy(true); setError(undefined)
     const body: Parameters<typeof api.addService>[1] = { type, name: n, branch }
     if (type === 'compute') {
       if (image.trim()) { body.image = image.trim(); body.port = portNum }
-      body.alwaysOn = alwaysOn
+      if (choice.send !== undefined) body.alwaysOn = choice.send
       if (withVolume) body.volumeGib = Number(volumeGib)
     }
     if (type === 'storage') body.public = isPublic
@@ -68,7 +83,7 @@ export function AddServiceDialog({ projectId, branch, onClose, onDone, onApprova
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={submit} disabled={busy || !valid}>{busy ? 'Adding' : 'Add'}</Button>
+          <Button variant="primary" onClick={submit} disabled={busy || !valid || !computeReady}>{busy ? 'Adding' : 'Add'}</Button>
         </>
       }
     >
@@ -99,9 +114,14 @@ export function AddServiceDialog({ projectId, branch, onClose, onDone, onApprova
             <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
               <div>
                 <p className="text-sm font-medium">Always on</p>
-                <p className="text-xs text-muted-foreground">Off: sleeps when idle and wakes on request</p>
+                <p className="text-xs text-muted-foreground">
+                  {choice.known
+                    ? 'Off: sleeps when idle and wakes on request'
+                    : branchesError ? "Couldn't read this branch: choose on or off." : 'Checking this branch…'}
+                </p>
               </div>
-              <Switch checked={alwaysOn} onCheckedChange={setAlwaysOn} aria-label="Always on" />
+              {/* Always enabled: an explicit choice is known whatever the branch lookup does. */}
+              <Switch checked={choice.value} onCheckedChange={setPicked} aria-label="Always on" />
             </div>
             <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
               <div>
@@ -133,7 +153,10 @@ export function AddServiceDialog({ projectId, branch, onClose, onDone, onApprova
 
         {(type === 'postgres' || type === 'redis' || type === 'mysql' || type === 'mongodb') && (
           <p className="text-xs text-muted-foreground">
-            A private instance per environment with fresh credentials, bound into apps as env vars. It sleeps when idle and wakes on the next connection.
+            A private instance per environment with fresh credentials, bound into apps as env vars.{' '}
+            {type !== 'postgres' && boot.alwaysOnDefault && isDefaultBranch === true
+              ? 'It stays up on this branch.'
+              : 'It sleeps when idle and wakes on the next connection.'}
           </p>
         )}
         <ErrorNote error={error} />

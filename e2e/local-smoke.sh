@@ -259,6 +259,9 @@ OK "both forks of a live source streamed, as the at-rest rule requires"
 STEP "7. sleep and wake"
 WEBC=$(svc_container "$REF" web)
 PGC=$(pg_container "$REF" db)
+# Compute is always-on by default, like the hosted platform; switching it to scale-to-zero is the
+# user's toggle, so it is the first thing this step exercises. Postgres scales to zero by default.
+insta compute always-on off web >/dev/null || FAIL "always-on off (switch to scale-to-zero) failed"
 wait_for 90 sh -c "[ \"\$(docker inspect -f '{{.State.Status}}' $WEBC)\" = exited ]" \
   || FAIL "$WEBC never slept, state is $(cstate "$WEBC")"
 wait_for 90 sh -c "[ \"\$(docker inspect -f '{{.State.Status}}' $PGC)\" = exited ]" \

@@ -11,6 +11,9 @@ export interface Boot {
   /** What `insta login --api-url` should be told (server: https://api.<domain>). */
   apiUrl: string
   consoleUrl: string
+  /** Whether a new compute service is always-on unless switched off (the daemon's
+   *  INSTA_OSS_ALWAYS_ON_DEFAULT, on by default like the hosted platform). */
+  alwaysOnDefault: boolean
 }
 
 export type BootWindow = {
@@ -22,9 +25,15 @@ declare global {
   interface Window { __INSTA_OSS__?: Partial<Boot> | null }
 }
 
+// Literal `import.meta.env.VITE_*`, never an alias: Vite fills these in only where that exact text
+// appears. Read through a cast or a key looked up at runtime, a build with VITE_INSTA_MODE and
+// VITE_INSTA_ALWAYS_ON_DEFAULT set carried neither (checked by grepping the bundle for a marker).
 function envMode(): string | undefined {
-  const meta = import.meta as unknown as { env?: Record<string, string | undefined> }
-  return meta.env?.VITE_INSTA_MODE
+  return import.meta.env.VITE_INSTA_MODE
+}
+
+function envAlwaysOn(): string | undefined {
+  return import.meta.env.VITE_INSTA_ALWAYS_ON_DEFAULT
 }
 
 function asMode(v: unknown): RunMode {
@@ -37,6 +46,7 @@ function asMode(v: unknown): RunMode {
 export function readBoot(
   win: BootWindow | undefined = typeof window === 'undefined' ? undefined : (window as BootWindow),
   fallbackMode: string | undefined = envMode(),
+  fallbackAlwaysOn: string | undefined = envAlwaysOn(),
 ): Boot {
   const origin = win?.location?.origin ?? ''
   const injected = win?.__INSTA_OSS__
@@ -46,7 +56,15 @@ export function readBoot(
       setupRequired: injected.setupRequired === true,
       apiUrl: injected.apiUrl ?? origin,
       consoleUrl: injected.consoleUrl ?? origin,
+      // ON only when the daemon says so. A shell without the field comes from a daemon older than
+      // the field, and that daemon's default was OFF: reading a missing field as on made the add
+      // dialog show "Always on" for a service that daemon then created scale-to-zero.
+      alwaysOnDefault: injected.alwaysOnDefault === true,
     }
   }
-  return { mode: asMode(fallbackMode), setupRequired: false, apiUrl: origin, consoleUrl: origin }
+  // No shell means the Vite dev server, which proxies to a daemon it cannot ask; the value comes
+  // from VITE_INSTA_ALWAYS_ON_DEFAULT (set it to 0 for a daemon running INSTA_OSS_ALWAYS_ON_DEFAULT=0),
+  // and unset it matches the daemon's own default, on.
+  const alwaysOnDefault = fallbackAlwaysOn === undefined || !['0', 'false'].includes(fallbackAlwaysOn.trim().toLowerCase())
+  return { mode: asMode(fallbackMode), setupRequired: false, apiUrl: origin, consoleUrl: origin, alwaysOnDefault }
 }

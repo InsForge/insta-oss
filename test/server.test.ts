@@ -29,7 +29,7 @@ function fakeDocker(args: string[] = []): Promise<Buffer> {
 import { docker as dockerFn } from '../src/docker'
 import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
-import type { ComputeAdapter, StorageAdapter } from '../src/types'
+import type { Branch, ComputeAdapter, StorageAdapter } from '../src/types'
 import { mutate } from '../src/state'
 import { calls, data, db, compute, storage, managed, makeEngine, resetFakes, runtime, serverConfig, testConfig } from './fakes'
 import { SuppliedCertWatch, suppliedCert, suppliedFiles } from '../src/router/certs'
@@ -4300,6 +4300,59 @@ test('branch create: the clone starts asleep and its databases sleep, unless the
   expect(calls).not.toContain('runtime.stop:io-demo-main-pg-db:30')
 })
 
+test('the always-on default: main is always-on like the cloud, a branch clone scales to zero, an explicit setting wins', async () => {
+  // The suites pin INSTA_OSS_ALWAYS_ON_DEFAULT off; this one runs on the daemon's own default.
+  // Everything that decides sleep (deploy, the clone's start, the scheduler's targets) reads
+  // `effectiveAlwaysOn`, so the rule is asserted there, on both kinds of branch.
+  const engine = makeEngine(testConfig({ INSTA_OSS_ALWAYS_ON_DEFAULT: '1' }))
+  const { project } = await engine.createProject('demo')
+  await engine.addComputeService(project.id, 'web')
+  await engine.addDbService(project.id, 'db', {})
+  await engine.addManagedService(project.id, 'redis', 'cache', {})
+  await engine.createBranch(project.id, 'feat', 'main')
+  const branches = (): { main: Branch; feat: Branch } => {
+    const all = engine.listBranches(project.id)
+    return { main: all.find((b) => b.isDefault)!, feat: all.find((b) => b.name === 'feat')! }
+  }
+  const on = (branch: Branch, sid: string): boolean => engine.effectiveAlwaysOn(engine.getProject(project.id)!, branch, sid)
+
+  // No setting: production is always-on, the preview clone is not, and postgres scales to zero.
+  expect(on(branches().main, 'cp-web')).toBe(true)
+  expect(on(branches().feat, 'cp-web')).toBe(false)
+  expect(on(branches().main, 'pg-db')).toBe(false)
+  // A managed database follows the compute default, not postgres's: up on main, asleep on a clone.
+  expect(on(branches().main, 'rd-cache')).toBe(true)
+  expect(on(branches().feat, 'rd-cache')).toBe(false)
+  // The toggle: switched to scale-to-zero, main sleeps like any other service...
+  await engine.setAlwaysOn(project.id, 'cp-web', false)
+  expect(on(branches().main, 'cp-web')).toBe(false)
+  // ...and explicitly always-on, it holds on every branch, clones included.
+  await engine.setAlwaysOn(project.id, 'cp-web', true)
+  expect(on(branches().main, 'cp-web')).toBe(true)
+  expect(on(branches().feat, 'cp-web')).toBe(true)
+})
+
+test('adding compute reports the always-on the NAMED branch will actually have', async () => {
+  // The 201 used to report the daemon-wide default, so an untouched create on a preview branch
+  // answered always_on: true while that branch's services list, and its scheduler, said false.
+  const cfg = testConfig({ INSTA_OSS_ALWAYS_ON_DEFAULT: '1' })
+  const engine = makeEngine(cfg)
+  const a = buildServer(engine, cfg)
+  const { project } = await engine.createProject('demo')
+  await engine.createBranch(project.id, 'feat', 'main')
+  const add = async (body: Record<string, unknown>) =>
+    (await a.inject({ method: 'POST', url: `/projects/${project.id}/services`, payload: { type: 'compute', ...body } })).json().service
+  // On the preview branch, untouched: it will scale to zero there, and the 201 says so.
+  expect((await add({ name: 'web', branch: 'feat' })).always_on).toBe(false)
+  const featRows = (await a.inject({ method: 'GET', url: `/projects/${project.id}/services?branch=feat` })).json().services
+  expect(featRows.find((r: { name: string }) => r.name === 'web').always_on).toBe(false)
+  // On the default branch (named or not), the same untouched create is always-on.
+  expect((await add({ name: 'api' })).always_on).toBe(true)
+  expect((await add({ name: 'worker', branch: 'main' })).always_on).toBe(true)
+  // An explicit value is reported as given, wherever it is created.
+  expect((await add({ name: 'pinned', branch: 'feat', alwaysOn: true })).always_on).toBe(true)
+})
+
 test('database management wakes a sleeping instance; observability answers 503 and runs no SQL', async () => {
   const { engine, id } = await wp3Project()
   const bid = await branchId(id)
@@ -4700,6 +4753,14 @@ test('an unknown ?branch on a service add is a 404, not a silent write to the de
   expect(r.statusCode).toBe(404)
   expect(r.json().error).toBe('branch "nope" not found')
   expect(calls.filter((c) => c.startsWith('db.provision:'))).toEqual([])
+  expect(names(await listOn(id, 'main'))).toEqual(['db', 'store'])
+})
+
+test('an unknown ?branch on a compute add is a 404 too, and registers no project-wide group', async () => {
+  const id = await createProject()
+  const r = await post(`/projects/${id}/services`, { type: 'compute', name: 'web', branch: 'nope' })
+  expect(r.statusCode).toBe(404)
+  expect(r.json().error).toBe('branch "nope" not found')
   expect(names(await listOn(id, 'main'))).toEqual(['db', 'store'])
 })
 
