@@ -29,7 +29,7 @@ function fakeDocker(args: string[] = []): Promise<Buffer> {
 import { docker as dockerFn } from '../src/docker'
 import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
-import type { ComputeAdapter, StorageAdapter } from '../src/types'
+import type { Branch, ComputeAdapter, StorageAdapter } from '../src/types'
 import { mutate } from '../src/state'
 import { calls, data, db, compute, storage, managed, makeEngine, resetFakes, runtime, serverConfig, testConfig } from './fakes'
 import { SuppliedCertWatch, suppliedCert, suppliedFiles } from '../src/router/certs'
@@ -4283,6 +4283,34 @@ test('branch create: the clone starts asleep and its databases sleep, unless the
   expect(calls).toContain('runtime.stop:io-demo-keep-pg-db:30')
   // main's own instance keeps running, though: its always-on is what the flag was set on.
   expect(calls).not.toContain('runtime.stop:io-demo-main-pg-db:30')
+})
+
+test('the always-on default: main is always-on like the cloud, a branch clone scales to zero, an explicit setting wins', async () => {
+  // The suites pin INSTA_OSS_ALWAYS_ON_DEFAULT off; this one runs on the daemon's own default.
+  // Everything that decides sleep (deploy, the clone's start, the scheduler's targets) reads
+  // `effectiveAlwaysOn`, so the rule is asserted there, on both kinds of branch.
+  const engine = makeEngine(testConfig({ INSTA_OSS_ALWAYS_ON_DEFAULT: '1' }))
+  const { project } = await engine.createProject('demo')
+  await engine.addComputeService(project.id, 'web')
+  await engine.addDbService(project.id, 'db', {})
+  await engine.createBranch(project.id, 'feat', 'main')
+  const branches = (): { main: Branch; feat: Branch } => {
+    const all = engine.listBranches(project.id)
+    return { main: all.find((b) => b.isDefault)!, feat: all.find((b) => b.name === 'feat')! }
+  }
+  const on = (branch: Branch, sid: string): boolean => engine.effectiveAlwaysOn(engine.getProject(project.id)!, branch, sid)
+
+  // No setting: production is always-on, the preview clone is not, and postgres scales to zero.
+  expect(on(branches().main, 'cp-web')).toBe(true)
+  expect(on(branches().feat, 'cp-web')).toBe(false)
+  expect(on(branches().main, 'pg-db')).toBe(false)
+  // The toggle: switched to scale-to-zero, main sleeps like any other service...
+  await engine.setAlwaysOn(project.id, 'cp-web', false)
+  expect(on(branches().main, 'cp-web')).toBe(false)
+  // ...and explicitly always-on, it holds on every branch, clones included.
+  await engine.setAlwaysOn(project.id, 'cp-web', true)
+  expect(on(branches().main, 'cp-web')).toBe(true)
+  expect(on(branches().feat, 'cp-web')).toBe(true)
 })
 
 test('database management wakes a sleeping instance; observability answers 503 and runs no SQL', async () => {

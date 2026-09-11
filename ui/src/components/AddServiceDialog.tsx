@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useAuth } from './AuthGate'
 import {
   Button, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch,
 } from '@insforge/ui'
@@ -27,7 +28,13 @@ export function AddServiceDialog({ projectId, branch, onClose, onDone, onApprova
   const [name, setName] = useState('')
   const [image, setImage] = useState('')
   const [port, setPort] = useState('8080')
-  const [alwaysOn, setAlwaysOn] = useState(false)
+  // Starts where the daemon's default is (on, like the hosted platform), and is sent ONLY when the
+  // user flips it: an explicit value pins the service on every branch, while an untouched one
+  // leaves the default branch always-on and lets branch clones scale to zero.
+  const { boot } = useAuth()
+  const [alwaysOn, setAlwaysOnState] = useState(boot.alwaysOnDefault)
+  const [alwaysOnTouched, setAlwaysOnTouched] = useState(false)
+  const setAlwaysOn = (v: boolean): void => { setAlwaysOnState(v); setAlwaysOnTouched(true) }
   const [withVolume, setWithVolume] = useState(false)
   const [volumeGib, setVolumeGib] = useState('1')
   const [isPublic, setIsPublic] = useState(false)
@@ -47,7 +54,7 @@ export function AddServiceDialog({ projectId, branch, onClose, onDone, onApprova
     const body: Parameters<typeof api.addService>[1] = { type, name: n, branch }
     if (type === 'compute') {
       if (image.trim()) { body.image = image.trim(); body.port = portNum }
-      body.alwaysOn = alwaysOn
+      if (alwaysOnTouched) body.alwaysOn = alwaysOn
       if (withVolume) body.volumeGib = Number(volumeGib)
     }
     if (type === 'storage') body.public = isPublic

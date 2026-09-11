@@ -3662,11 +3662,18 @@ export class Engine {
   }
 
   /** Whether a service opts out of sleep. Compute and managed databases carry the per-service
-   *  setting (else `INSTA_OSS_ALWAYS_ON_DEFAULT`); postgres carries the inverse of its own
-   *  per-branch `scaleToZero`, which is what `PATCH database/settings` writes. */
+   *  setting; without one, the DEFAULT branch follows `INSTA_OSS_ALWAYS_ON_DEFAULT` (on, like the
+   *  hosted platform, so production never cold-starts) and every other branch scales to zero.
+   *  That split is what keeps one box able to hold many branches: were the default applied to
+   *  every clone, each fork would start all of its apps running, and always-on services are never
+   *  evicted, so a handful of branches would fill memory with nothing able to make room. An
+   *  explicit setting wins on every branch. Postgres carries the inverse of its own per-branch
+   *  `scaleToZero`, which is what `PATCH database/settings` writes: scale-to-zero unless set. */
   effectiveAlwaysOn(project: Project, branch: Branch, serviceId: string): boolean {
     if (serviceId.startsWith('pg-')) return !(branch.databases?.[serviceId]?.scaleToZero ?? true)
-    return project.serviceSettings?.[serviceId]?.alwaysOn ?? this.cfg.sleep.alwaysOnDefault
+    const explicit = project.serviceSettings?.[serviceId]?.alwaysOn
+    if (explicit !== undefined) return explicit
+    return branch.isDefault ? this.cfg.sleep.alwaysOnDefault : false
   }
 
   /** Bookkeeping after a deploy replaced the container: asleep from birth, honouring a standing

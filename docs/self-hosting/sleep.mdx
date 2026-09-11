@@ -3,12 +3,13 @@ title: "Sleep and wake"
 description: "Idle services stop, traffic starts them again, and one box holds far more projects than it has memory for."
 ---
 
-Every compute service and every database on a self-hosted box scales to zero by default. An idle
-service is stopped, not paused: it holds no memory and no CPU, its disk is untouched, and the next
-request starts it again in a second or two.
+A self-hosted box follows the hosted platform's defaults. Compute on a project's default branch is
+always-on, so production never waits for a cold start. Databases, and every service on the other
+branches, scale to zero. Either can be switched per service, from the CLI, the API or the console.
 
-That is what lets one machine hold dozens of branches. The disk is the only thing every branch
-keeps.
+A service that scales to zero is stopped, not paused, when it goes idle: it holds no memory and no
+CPU, its disk is untouched, and the next request starts it again in a second or two. That is what
+lets one machine hold dozens of branches. The disk is the only thing every branch keeps.
 
 ## What counts as activity
 
@@ -147,9 +148,11 @@ insta compute limits web --memory 512mb
 ```
 
 <Note>
-This is the one deliberate difference from the hosted platform. There, compute is always-on by
-default and scale-to-zero is opt-in. Here it is the other way round, because the whole point of one
-box is that idle things cost nothing.
+The defaults match the hosted platform: compute is always-on and scale-to-zero is opt-in, and
+Postgres scales to zero. The one addition for a single box is that branch clones scale to zero
+unless a service is explicitly always-on, so forking a project does not start every app it has.
+Switch a service off with `insta compute always-on off web`, or turn everything back to
+scale-to-zero with `INSTA_OSS_ALWAYS_ON_DEFAULT=0`.
 </Note>
 
 ## Tuning
@@ -169,7 +172,7 @@ Set these in `/etc/instacloud/instad.env`, then `cd /etc/instacloud && docker co
 | `INSTA_OSS_RAM_FLOOR_PCT` | 15 | free-memory floor for pressure eviction, 0 disables it |
 | `INSTA_OSS_MEM_BUDGET_MB` | unset | assumed total memory, needed for eviction on macOS |
 | `INSTA_OSS_WAKE_PROTECT_SEC` | 60 | how long after a wake a service cannot be evicted |
-| `INSTA_OSS_ALWAYS_ON_DEFAULT` | 0 | set to 1 to make every new service always-on |
+| `INSTA_OSS_ALWAYS_ON_DEFAULT` | 1 | compute on the default branch is always-on unless switched off; set to 0 to make it scale to zero too. Branch clones and Postgres scale to zero either way |
 | `INSTA_OSS_SCHEDULER` | 1 | set to 0 to turn the sweeper off, so nothing sleeps on a timer |
 
 An idle window of 0 turns sleeping off for that kind of service without turning off the sweeper.
