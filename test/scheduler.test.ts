@@ -113,6 +113,27 @@ test('sweep table: each of running, alwaysOn, desiredState, stamp age, create gr
   expect(t.sleptAt).toBeTypeOf('number')      // the baseline above really did sleep
 })
 
+test('the sweep wakes an always-on service that is asleep, and only that one', async () => {
+  // Always-on used to only take a service OUT of the sweep, so one already asleep when it became
+  // always-on (switched on, or the default turned on over an existing box) stayed asleep until
+  // its next request while every view called it always-on.
+  const h = harness()
+  const on = h.add(K, { alwaysOn: true, sleptAt: Date.now() })
+  const off = h.add(K2, { sleptAt: Date.now() })
+  const held = h.add('11111111-1111-1111-1111-111111111111:cp-job', {
+    alwaysOn: true, sleptAt: Date.now(), desiredState: 'stopped', container: 'io-x-app-job',
+  })
+  await h.sched.refreshStates()               // the snapshot stateOf answers from
+  expect(h.sched.stateOf(K)).toBe('asleep')
+  await h.sched.sweep()
+  await h.sched.withOp([K], async () => { /* granted only once the wake has let the key go */ })
+  expect(calls).toContain(`runtime.start:${on.container}`)
+  expect(h.sched.stateOf(K)).toBe('running')
+  // Not always-on: it stays asleep until traffic. Stopped by hand: a stop is a standing intent.
+  expect(calls).not.toContain(`runtime.start:${off.container}`)
+  expect(calls).not.toContain(`runtime.start:${held.container}`)
+})
+
 test('an operation in flight on the key makes it no sweep candidate, and sleep refuses without queueing', async () => {
   const h = harness()
   const t = h.add(K)

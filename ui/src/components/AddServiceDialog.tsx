@@ -1,10 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useAuth } from './AuthGate'
 import {
   Button, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch,
 } from '@insforge/ui'
-import { api, type ServiceType } from '../api'
-import { usePoll } from '../hooks'
+import { api, type BranchInfo, type ServiceType } from '../api'
 import { alwaysOnChoice, canSubmitCompute } from '../lib/alwaysOn'
 import type { PendingApproval } from './ApprovalPrompt'
 import { ErrorNote, Field, Modal } from './ui'
@@ -36,8 +35,21 @@ export function AddServiceDialog({ projectId, branch, onClose, onDone, onApprova
   // Until the branch list says which branch this is, an untouched compute create is held back: the
   // screen could not show what it would do.
   const { boot } = useAuth()
-  const { data: branches, error: branchesError } = usePoll(() => api.branches(projectId), [projectId])
-  const isDefaultBranch = branches ? branches.find((b) => b.name === branch)?.is_default === true : undefined
+  // Read once: whether a branch is the default does not change while the dialog is open.
+  const [branches, setBranches] = useState<BranchInfo[]>()
+  const [branchesError, setBranchesError] = useState<Error>()
+  useEffect(() => {
+    let alive = true
+    api.branches(projectId).then(
+      (b) => { if (alive) setBranches(b) },
+      (e: unknown) => { if (alive) setBranchesError(e instanceof Error ? e : new Error(String(e))) },
+    )
+    return () => { alive = false }
+  }, [projectId])
+  // A branch missing from the list is unknown, not a preview branch.
+  const current = branches?.find((b) => b.name === branch)
+  const isDefaultBranch = current ? current.is_default === true : undefined
+  const branchUnreadable = branchesError !== undefined || (branches !== undefined && current === undefined)
   const [picked, setPicked] = useState<boolean | null>(null)
   const choice = alwaysOnChoice({ picked, bootDefault: boot.alwaysOnDefault, isDefaultBranch })
   const [withVolume, setWithVolume] = useState(false)
@@ -117,7 +129,7 @@ export function AddServiceDialog({ projectId, branch, onClose, onDone, onApprova
                 <p className="text-xs text-muted-foreground">
                   {choice.known
                     ? 'Off: sleeps when idle and wakes on request'
-                    : branchesError ? "Couldn't read this branch: choose on or off." : 'Checking this branch…'}
+                    : branchUnreadable ? "Couldn't read this branch: choose on or off." : 'Checking this branch…'}
                 </p>
               </div>
               {/* Always enabled: an explicit choice is known whatever the branch lookup does. */}

@@ -545,6 +545,18 @@ export class Scheduler {
         }
       }
     }
+    // An always-on service that is asleep is brought back up. The setting only takes a service out
+    // of the sleep and eviction passes, so a service already asleep when it became always-on
+    // (switched on, or the default turned on over an existing box) stayed asleep until its next
+    // request while every view called it always-on. Through the ordinary wake, so it makes room
+    // and queues behind any operation on the key; not awaited, so one slow image does not hold the
+    // sweep, and a wake in flight reads `starting`, so the next pass does not start a second one.
+    for (const t of targets) {
+      if (!t.alwaysOn || t.desiredState !== 'running' || this.busy(t.key) || this.stateOf(t.key) !== 'asleep') continue
+      void this.wake(t.key, { door: 'api' }).catch((e: unknown) => {
+        console.warn(`warn: always-on wake ${t.key} failed: ${e instanceof Error ? e.message : String(e)}`)
+      })
+    }
     // Re-read BEFORE the pressure pass, not once for the whole sweep. The sleep phase above
     // awaits a stop per candidate and each can burn its grace (10 s compute, 30 s databases), so
     // with a dozen candidates this line is reached minutes after the sweep's own read -- past

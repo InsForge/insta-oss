@@ -930,8 +930,9 @@ export function buildServer(
   // ---- region C (WP3 scheduler) ----
   // The two service knobs the scheduler makes real: the cgroup ceiling (`insta compute limits`) and
   // the opt-out from sleep (`insta compute always-on`). Both resolve the branch from a qualified sid
-  // first (decision 49) and then act on the BARE service id, because limits and always-on are
-  // project-level settings that apply to the service on every branch.
+  // first (decision 49) and then act on the BARE service id, because limits and an explicit
+  // always-on are project-level settings that apply to the service on every branch. With no
+  // explicit always-on the branch decides (`effectiveAlwaysOn`), and `null` goes back to that.
   const sidOf = (req: { params: unknown; query: unknown }): string => {
     const { id, sid } = req.params as { id: string; sid: string }
     return engine.resolveSid(id, sid, (req.query as { branch?: string }).branch).serviceId
@@ -968,8 +969,11 @@ export function buildServer(
     const { id } = req.params as { id: string }
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     const { enabled } = (req.body ?? {}) as { enabled?: unknown }
-    if (typeof enabled !== 'boolean') return reply.code(400).send({ error: 'enabled must be a boolean' })
-    try { return await engine.setAlwaysOn(id, sidOf(req), enabled) } catch (e) { return limitsFail(e, reply) }
+    // A boolean pins the service on every branch; null clears it back to the default.
+    if (enabled !== null && typeof enabled !== 'boolean') {
+      return reply.code(400).send({ error: 'enabled must be a boolean, or null to follow the default' })
+    }
+    try { return await engine.setAlwaysOn(id, sidOf(req), enabled as boolean | null) } catch (e) { return limitsFail(e, reply) }
   })
   // ---- end region C ----
 
