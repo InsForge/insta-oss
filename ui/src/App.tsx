@@ -53,6 +53,13 @@ function ProjectShell() {
   return <Layout />
 }
 
+/** `/p/<id>`: the project switcher's target, which lands on that project's default environment. */
+function ProjectIndex() {
+  const { projectId } = useParams()
+  if (!projectId) return <Navigate to="/" replace />
+  return <ProjectRedirect projectId={projectId} />
+}
+
 export default function App() {
   return (
     <AuthGate>
@@ -62,6 +69,7 @@ export default function App() {
         <Route path="/setup" element={<Setup />} />
         <Route path="/login" element={<Login />} />
         <Route path="/account/tokens" element={<Tokens />} />
+        <Route path="/p/:projectId" element={<ProjectIndex />} />
         <Route path="/p/:projectId/:branch" element={<ProjectShell />}>
           <Route index element={<Navigate to="services" replace />} />
           <Route path="services" element={<Services />} />
@@ -75,7 +83,9 @@ export default function App() {
           <Route path="secrets" element={<Secrets />} />
           <Route path="database" element={<DatabaseInsight />} />
           <Route path="operations" element={<Operations />} />
-          <Route path="usage" element={<Usage />} />
+          {/* The console's Observability entry; `usage` stays for bookmarks. */}
+          <Route path="observability" element={<Usage />} />
+          <Route path="usage" element={<Navigate to="../observability" replace />} />
           <Route path="approvals" element={<Approvals />} />
           <Route path="settings" element={<Settings />} />
         </Route>

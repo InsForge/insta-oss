@@ -2,12 +2,13 @@
 @import "@insforge/ui/styles.css";
 
 /*
- * Map @insforge/ui design tokens (defined in styles.css above) to Tailwind v4
- * theme colors — same mapping as insta-frontend's globals.css. RGB-triplet
- * tokens are wrapped in rgb(); alpha tokens are already full colors.
- * (Font: the package's Inter-first stack; no webfont bundled — the dashboard
- * must work offline, so we take the system fallback when Inter isn't local.)
+ * The cloud console's globals.css (InsForge/insta-frontend src/app/globals.css), minus what needs
+ * Next (next/font) or a cloud-only feature (identity-mark palette, Quick Start motion). Keep the
+ * two in step: the self-hosted dashboard is meant to look like the console.
  */
+
+/* Dark mode is class-based (`.dark` on <html>), so `dark:` utilities key off the class too. */
+@custom-variant dark (&:where(.dark, .dark *));
 
 /* InstaCloud brand: primary actions are black (white in dark mode), per Figma. */
 :root {
@@ -15,6 +16,26 @@
 }
 .dark {
   --primary: var(--insforge-white);
+}
+
+/* InstaCloud brand accent: emerald per theme — light #059669, dark #6EE7B7. */
+:root {
+  --theme: var(--insforge-emerald-600);
+}
+.dark {
+  --theme: var(--insforge-emerald-300);
+}
+
+/*
+ * special/page — per the design library: light #E8E8E8 (semantic-3), dark #161616 (semantic-0).
+ * The kit still maps light --page to semantic-1, which leaves the canvas indistinguishable from
+ * the chrome.
+ */
+:root {
+  --page: var(--semantic-3);
+}
+.dark {
+  --page: var(--semantic-0);
 }
 
 @theme inline {
@@ -26,6 +47,7 @@
   --color-disabled: rgb(var(--disabled));
   --color-inverse: rgb(var(--inverse));
   --color-primary: rgb(var(--primary));
+  --color-theme: rgb(var(--theme));
   --color-success: rgb(var(--success));
   --color-destructive: rgb(var(--destructive));
   --color-warning: rgb(var(--warning));
@@ -57,9 +79,49 @@
   --color-alpha-inverse-16: var(--alpha-inverse-16);
 }
 
+/*
+ * InstaCloud is squared: zero the whole Tailwind radius scale so every `rounded*` utility, ours
+ * and @insforge/ui's, renders square. `rounded-full` is untouched (calc(infinity*1px), not a
+ * variable), so dots, pills, switches and spinners stay circular.
+ */
+:root {
+  --radius-xs: 0;
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-2xl: 0;
+  --radius-3xl: 0;
+  --radius-4xl: 0;
+}
+
+/* The bare `rounded` utility and the kit Toast's `rounded-[8px]` inline their radius instead of
+ * reading a variable. Attribute selectors, unlayered, so they win over the layered originals. */
+[class~="rounded"],
+[class~="rounded-[8px]"] {
+  border-radius: 0;
+}
+
 body {
-  background: rgb(var(--page));
+  /* semantic-1, matching the console's center containers; --page is the recessed canvas. */
+  background: rgb(var(--semantic-1));
   color: rgb(var(--foreground));
   font-family: var(--insforge-font);
   -webkit-font-smoothing: antialiased;
+}
+
+/* The kit's menu items ship `gap-1`, which sets icons too close to their labels (console rule). */
+[role="menuitem"],
+[role="menuitemcheckbox"],
+[role="menuitemradio"] {
+  gap: 0.5rem;
+}
+
+/*
+ * Filled actions carry the theme accent (emerald), not black: the kit's primary Button ships
+ * `bg-primary`, repainted here rather than remapping --primary so `text-primary` keeps meaning the
+ * default foreground (console rule).
+ */
+[class~="bg-primary"] {
+  background-color: rgb(var(--theme));
 }

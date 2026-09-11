@@ -129,7 +129,7 @@ export function Usage() {
 
   return (
     <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
-      <h1 className="text-[32px] leading-12 font-bold">Usage</h1>
+      <h1 className="text-[32px] leading-12 font-semibold">Observability</h1>
 
       {!data && !error && (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">

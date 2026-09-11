@@ -6,6 +6,18 @@
     <meta name="color-scheme" content="light dark" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>insta-oss</title>
+    <script>
+      // The stored theme before first paint (lib/theme.ts owns it after that); dark by default,
+      // like the console.
+      try {
+        var t = localStorage.getItem('insta_theme') || 'dark'
+        if (t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches)) {
+          document.documentElement.classList.add('dark')
+        }
+      } catch (e) {
+        document.documentElement.classList.add('dark')
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
