@@ -1,7 +1,7 @@
 code: n8n
 version: 1.3.2
 maintainer: official
-sourceRepo: InsForge/instacloud-oss
+sourceRepo: InsForge/insta-oss
 
 # Sustainable Use License: reference the official image only, and never rebuild or rebrand it.
 upstream:

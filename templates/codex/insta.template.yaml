@@ -1,7 +1,7 @@
 code: codex
 version: 0.8.2
 maintainer: official
-sourceRepo: InsForge/instacloud-oss
+sourceRepo: InsForge/insta-oss
 
 upstream:
   repo: openai/codex

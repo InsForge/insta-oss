@@ -4,7 +4,7 @@
 code: tpl-hello
 version: 0.1.0
 maintainer: official
-sourceRepo: InsForge/instacloud-oss
+sourceRepo: InsForge/insta-oss
 
 upstream:
   repo: traefik/whoami
