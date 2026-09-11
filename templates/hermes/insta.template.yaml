@@ -1,7 +1,7 @@
 code: hermes
 version: 2.3.2
 maintainer: official
-sourceRepo: InsForge/insta-oss
+sourceRepo: InsForge/instacloud-oss
 
 upstream:
   repo: NousResearch/hermes-agent

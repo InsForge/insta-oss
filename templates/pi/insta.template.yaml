@@ -1,7 +1,7 @@
 code: pi
 version: 0.8.2
 maintainer: official
-sourceRepo: InsForge/insta-oss
+sourceRepo: InsForge/instacloud-oss
 
 upstream:
   repo: earendil-works/pi

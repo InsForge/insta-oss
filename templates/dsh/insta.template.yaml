@@ -1,7 +1,7 @@
 code: dsh
 version: 0.4.2
 maintainer: official
-sourceRepo: InsForge/insta-oss
+sourceRepo: InsForge/instacloud-oss
 
 # Code is `dsh`, not `deepseek-harness`: upstream's BRAND_GUIDELINES.md asks projects not to
 # put the "DeepSeek Harness" trademark in a project name and recommends the DSH abbreviation.

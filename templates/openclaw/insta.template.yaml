@@ -1,7 +1,7 @@
 code: openclaw
 version: 0.3.2
 maintainer: official
-sourceRepo: InsForge/insta-oss
+sourceRepo: InsForge/instacloud-oss
 
 # Wraps the official image only to replace the CMD (see ./Dockerfile); everything else is stock.
 upstream:

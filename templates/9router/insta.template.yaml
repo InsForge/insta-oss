@@ -1,7 +1,7 @@
 code: 9router
 version: 1.2.2
 maintainer: official
-sourceRepo: InsForge/insta-oss
+sourceRepo: InsForge/instacloud-oss
 
 upstream:
   repo: decolua/9router
