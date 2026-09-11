@@ -34,6 +34,8 @@
 #   --print-env | --print-compose | --print-caddyfile | --print-daemon-json | --print-firewall
 #   --print-ssh-advice               render one file (or the ssh advisory) to stdout and exit:
 #                                    no root, no side effects
+#   --print-domain-note              print whether the auto domain resolves to this box (a cloud VM's
+#                                    provider mapping, or NAT that has to forward 80 and 443) and exit
 #   -y                               accepted; the script never prompts
 # Every other INSTA_OSS_* variable present in the environment is written into instad.env as is.
 # Precedence for every value: flag, then environment, then the existing instad.env, then default.
@@ -154,7 +156,7 @@ while [ $# -gt 0 ]; do
     --data-img-gib=*) F_IMG_GIB=${1#*=}; shift ;;
     --data-dir) need "$@"; F_DATA_DIR=$2; shift 2 ;;
     --data-dir=*) F_DATA_DIR=${1#*=}; shift ;;
-    --print-env|--print-compose|--print-caddyfile|--print-daemon-json|--print-firewall|--print-ssh-advice) PRINT=${1#--print-}; shift ;;
+    --print-env|--print-compose|--print-caddyfile|--print-daemon-json|--print-firewall|--print-ssh-advice|--print-domain-note) PRINT=${1#--print-}; shift ;;
     -y|--yes) shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown flag $1 (run with --help)" ;;
@@ -408,6 +410,53 @@ detect_ip() {
   if ! valid_ip "$_ip"; then _ip=$(curl -4 -fsS --max-time 5 https://ifconfig.me/ip 2>/dev/null) || _ip=''; fi
   if ! valid_ip "$_ip"; then _ip=$(route_src) || _ip=''; fi
   if valid_ip "$_ip"; then printf '%s' "$_ip"; fi
+}
+# cloud_public_ip: the public IPv4 the cloud provider's metadata service reports for this VM, or
+# nothing. AWS (IMDSv2, a token first, as Ubuntu 24.04 AMIs require), GCP, Azure, one second each:
+# off a cloud the link-local address does not answer and this costs at most a few seconds once.
+cloud_public_ip() {
+  _cip=''
+  # --noproxy '*': the metadata service is link-local and must be asked directly. Through an
+  # http_proxy the answer would come from the proxy, which could claim any address it liked.
+  _tok=$(curl -fsS --noproxy '*' --max-time 1 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null) || _tok=''
+  if [ -n "$_tok" ]; then
+    _cip=$(curl -fsS --noproxy '*' --max-time 1 -H "X-aws-ec2-metadata-token: $_tok" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null) || _cip=''
+  fi
+  if ! valid_ip "$_cip"; then
+    _cip=$(curl -fsS --noproxy '*' --max-time 1 -H 'Metadata-Flavor: Google' http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip 2>/dev/null) || _cip=''
+  fi
+  if ! valid_ip "$_cip"; then
+    _cip=$(curl -fsS --noproxy '*' --max-time 1 -H 'Metadata: true' 'http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text' 2>/dev/null) || _cip=''
+  fi
+  if valid_ip "$_cip"; then printf '%s' "$_cip"; fi
+}
+# nat_decide: whether the auto domain (an sslip.io name made from the detected address) resolves
+# to THIS box, decided once and shared by the install (section 6) and --print-domain-note, which
+# exists so the decision can be tested without installing anything. Sets NAT_NOTE (repeated next to
+# the setup URL at the end), NAT_MSG (said now) and NAT_LEVEL (warn, log or empty).
+nat_decide() {
+  NAT_NOTE=''; NAT_MSG=''; NAT_LEVEL=''
+  [ -n "$PUBLIC_IP" ] && [ "$DOMAIN" = "$(printf '%s' "$PUBLIC_IP" | tr . -).sslip.io" ] || return 0
+  if private_ip "$PUBLIC_IP"; then
+    NAT_LEVEL=warn
+    NAT_MSG="$PUBLIC_IP is a private address: certificates fall back to the internal issuer until a public name points here"
+  elif ! ip_is_local "$PUBLIC_IP"; then
+    # The address the internet sees is on no interface here: a cloud box with a floating or elastic
+    # IP (fine, DNS points at it) or a laptop VM behind a home router (not fine, nothing forwards).
+    # The provider's metadata service tells those apart: when it reports this same address, it is
+    # the provider's own 1:1 mapping, which always forwards, and the only thing left to check is
+    # the provider's firewall. Telling an EC2 operator to "re-run on a laptop VM" was wrong advice.
+    if [ "$(cloud_public_ip)" = "$PUBLIC_IP" ]; then
+      NAT_LEVEL=log
+      NAT_NOTE="$PUBLIC_IP is this cloud VM's public address, mapped by the provider: make sure its security group or firewall allows 80 and 443 (and the database lanes you use)."
+    else
+      NAT_LEVEL=warn
+      _lan=$(route_src)
+      NAT_NOTE="$PUBLIC_IP is not an address of this box (NAT), so those URLs answer only if $PUBLIC_IP forwards 80 and 443 here."
+      [ -z "$_lan" ] || NAT_NOTE="$NAT_NOTE On a laptop VM re-run with --domain $(printf '%s' "$_lan" | tr . -).sslip.io, which points at this box."
+    fi
+    NAT_MSG=$NAT_NOTE
+  fi
 }
 PUBLIC_IP=$(resolve INSTA_OSS_PUBLIC_IP '' '')
 if [ -z "$PUBLIC_IP" ] && [ -z "$PRINT" ]; then PUBLIC_IP=$(detect_ip); fi
@@ -909,6 +958,7 @@ case $PRINT in
   daemon-json) render_daemon_json; exit 0 ;;
   firewall) render_firewall; exit 0 ;;
   ssh-advice) ssh_advice; exit 0 ;;
+  domain-note) nat_decide; [ -z "$NAT_MSG" ] || printf '%s: %s\n' "$NAT_LEVEL" "$NAT_MSG"; exit 0 ;;
 esac
 
 # ---- 2. install or upgrade ----
@@ -1188,19 +1238,11 @@ else
 fi
 # The checks below are about the sslip.io name derived from the detected address, on a re-run as
 # much as on the first install: an upgrade is often the run an operator actually reads.
-if [ -n "$PUBLIC_IP" ] && [ "$DOMAIN" = "$(printf '%s' "$PUBLIC_IP" | tr . -).sslip.io" ]; then
-  if private_ip "$PUBLIC_IP"; then
-    warn "$PUBLIC_IP is a private address: certificates fall back to the internal issuer until a public name points here"
-  elif ! ip_is_local "$PUBLIC_IP"; then
-    # The address the internet sees is on no interface here: a cloud box with a floating or elastic
-    # IP (fine, DNS points at it) or a laptop VM behind a home router (not fine, nothing forwards).
-    # The script cannot tell those apart, so it says what to check.
-    _lan=$(route_src)
-    NAT_NOTE="$PUBLIC_IP is not an address of this box (NAT), so those URLs answer only if $PUBLIC_IP forwards 80 and 443 here."
-    [ -z "$_lan" ] || NAT_NOTE="$NAT_NOTE On a laptop VM re-run with --domain $(printf '%s' "$_lan" | tr . -).sslip.io, which points at this box."
-    warn "$NAT_NOTE"
-  fi
-fi
+nat_decide
+case $NAT_LEVEL in
+  warn) warn "$NAT_MSG" ;;
+  log) log "$NAT_MSG" ;;
+esac
 
 # ---- 7. secrets and files ----
 mkdir -p "$CFG"

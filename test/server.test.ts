@@ -137,8 +137,22 @@ test('secrets returns the branch bundle (seam) and is gateable', async () => {
   expect(gatedRes.json()).toMatchObject({ status: 'approval_required', action: 'secrets.read' })
 })
 
-test('project.delete defaults to approve: 202 → approve → retry succeeds → grant consumed', async () => {
+test('project.delete defaults to allow, like the cloud: a plain delete just works', async () => {
+  // The cloud flipped every governance default to allow in platform #267. This daemon still
+  // defaulted project.delete to approve, so the same `insta project delete` stopped at
+  // "approval required" here and simply worked there.
   const id = await createProject()
+  expect((await get(`/projects/${id}/policy`)).json().policy['project.delete']).toBe('allow')
+  const del = await app.inject({ method: 'DELETE', url: `/projects/${id}` })
+  expect(del.statusCode).toBe(200)
+  expect(del.json().teardown).toMatchObject({ failed: 0 })
+  expect(del.json().teardown.destroyed).toBeGreaterThan(0)
+  expect((await get('/orgs/local/projects')).json().projects).toHaveLength(0)
+})
+
+test('project.delete opted into approve: 202 → approve → retry succeeds → grant consumed', async () => {
+  const id = await createProject()
+  await app.inject({ method: 'PUT', url: `/projects/${id}/policy/project.delete`, payload: { decision: 'approve' } })
   const first = await app.inject({ method: 'DELETE', url: `/projects/${id}` })
   expect(first.statusCode).toBe(202)
   const approvalId = first.json().approvalId
@@ -159,6 +173,7 @@ test('project.delete defaults to approve: 202 → approve → retry succeeds →
 
 test('approve --always flips the policy to allow (no more prompts)', async () => {
   const id = await createProject()
+  await app.inject({ method: 'PUT', url: `/projects/${id}/policy/project.delete`, payload: { decision: 'approve' } })
   const first = await app.inject({ method: 'DELETE', url: `/projects/${id}` })
   await post(`/projects/${id}/approvals/${first.json().approvalId}/approve`, { always: true })
   expect((await get(`/projects/${id}/policy`)).json().policy['project.delete']).toBe('allow')

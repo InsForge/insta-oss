@@ -636,6 +636,56 @@ test('an auto domain that resolves somewhere other than this box says so', () =>
   expect(script).toContain('[ -z "$NAT_NOTE" ] || log "  Note:     $NAT_NOTE"')
 })
 
+/** A fake `curl` at the front of PATH playing the cloud metadata service. `aws` answers the IMDSv2
+ *  token and public-ipv4, `gcp` answers only Google's path, `none` answers nothing; every call is
+ *  logged so the test sees HOW the script asked, not just what it printed. */
+function fakeCurl(mode: 'aws' | 'gcp' | 'none', ip: string): { PATH: string; dir: string; log: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'io-curlbin-'))
+  const log = join(dir, 'calls.log')
+  writeFileSync(join(dir, 'curl'), `#!/bin/sh
+printf '%s\\n' "$*" >> '${log}'
+case "$*" in
+  *169.254.169.254/latest/api/token*) [ '${mode}' = aws ] && { printf 'tok123'; exit 0; }; exit 7 ;;
+  *169.254.169.254/latest/meta-data/public-ipv4*) [ '${mode}' = aws ] && { printf '${ip}'; exit 0; }; exit 7 ;;
+  *computeMetadata*) [ '${mode}' = gcp ] && { printf '${ip}'; exit 0; }; exit 7 ;;
+  *) exit 7 ;;
+esac
+`, { mode: 0o755 })
+  return { PATH: `${dir}:${process.env.PATH ?? '/usr/bin:/bin'}`, dir, log }
+}
+
+test('the domain note tells a cloud VM from a box behind a router, by asking the metadata service', () => {
+  // A cloud VM's public IP is on no interface, so every EC2 install used to print the laptop
+  // advice. The metadata service is what separates the two, and this drives the real decision
+  // (--print-domain-note runs the same nat_decide the install does) through each answer it can get.
+  const note = (mode: 'aws' | 'gcp' | 'none', reported: string): { out: string; calls: string } => {
+    const f = fakeCurl(mode, reported)
+    try {
+      const r = tryRun(['--print-domain-note'], { INSTA_OSS_PUBLIC_IP: '203.0.113.7', PATH: f.PATH })
+      return { out: `${r.stdout}${r.stderr}`, calls: existsSync(f.log) ? readFileSync(f.log, 'utf8') : '' }
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true })
+    }
+  }
+  // AWS reports this very address: the provider's own mapping, so the note is about the firewall.
+  const aws = note('aws', '203.0.113.7')
+  expect(aws.out).toContain("log: 203.0.113.7 is this cloud VM's public address")
+  expect(aws.out).not.toContain('On a laptop VM')
+  expect(aws.calls).toMatch(/-X PUT http:\/\/169\.254\.169\.254\/latest\/api\/token/)
+  // ...and every metadata request bypassed any proxy, which could otherwise answer for it.
+  const meta = aws.calls.split('\n').filter((l) => l.includes('169.254.169.254'))
+  expect(meta.length).toBeGreaterThan(0)
+  for (const line of meta) expect(line).toContain('--noproxy *')
+  // No AWS token, Google answers: the fallback order reaches it.
+  expect(note('gcp', '203.0.113.7').out).toContain("this cloud VM's public address")
+  // The provider reports a DIFFERENT address: not this box's mapping, so the NAT warning stays.
+  expect(note('aws', '198.51.100.9').out).toContain('warn: 203.0.113.7 is not an address of this box (NAT)')
+  // No metadata at all: a laptop VM or a home router, and the old warning is unchanged.
+  const none = note('none', '203.0.113.7')
+  expect(none.out).toContain('is not an address of this box (NAT)')
+  expect(none.out).not.toContain('cloud VM')
+})
+
 test('the fstab line makes docker.service wait for the data mount (decision 56)', () => {
   expect(script).toContain('"$IMG $DATA xfs loop,nofail,x-systemd.required-by=docker.service,x-systemd.before=docker.service 0 0"')
   expect(script).toContain('mkfs.xfs -q -m reflink=1')
