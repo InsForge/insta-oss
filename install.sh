@@ -281,6 +281,13 @@ if [ "$TLS" = custom ]; then
     # An ancestor of the data directory (`/var/lib` for the default `/var/lib/instacloud`) masks
     # that mount instead of overlapping it: same defect, other direction.
     case $DATA in "$_d"/*) _why="contains the data directory $DATA, so mounting it would hide the data mount inside the container" ;; esac
+    # The configuration directory holds instad.env, and instad.env holds INSTA_OSS_SECRET, the
+    # daemon's signing secret. Every TLS directory is mounted into the EDGE as well, which has no
+    # use for that secret, so this would turn a compromise of the edge into a compromise of the
+    # daemon. Refused, and so is anything containing it; a child such as $CFG/tls holds only the
+    # pair and is the recommended home.
+    case $_d in "$CFG") _why="is the configuration directory, which holds instad.env and the daemon's INSTA_OSS_SECRET: mounting it would put that secret inside the edge container" ;; esac
+    case $CFG in "$_d"/*) _why="contains the configuration directory $CFG, which holds instad.env and the daemon's INSTA_OSS_SECRET: mounting it would put that secret inside the edge container" ;; esac
     case $_d in
       /bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
         _why="is a system directory the container images own, and mounting it would replace theirs" ;;
@@ -414,6 +421,14 @@ if [ "$TLS" = custom ]; then
     if [ -z "$_cpub" ] || [ "$_cpub" != "$_kpub" ]; then
       die "'$TLS_KEY' is not the key for '$TLS_CERT' (their public keys differ): the edge would fail to load the pair and crash-loop"
     fi
+    # The PURPOSE. A certificate whose extended key usage is restricted to client authentication
+    # loads, is served, and passes the fingerprint probe below (which uses -k, because a private
+    # CA may not be in this host's trust store), and then every client rejects it as a server
+    # certificate. `-purpose` answers from the certificate alone, with no trust chain: "SSL server
+    # : No" for a clientAuth-only EKU, "Yes" for serverAuth and for a certificate with no EKU at
+    # all, which is unrestricted.
+    openssl x509 -in "$TLS_CERT" -noout -purpose 2>/dev/null | grep -q '^SSL server : Yes' ||
+      die "'$TLS_CERT' is not usable as a TLS server certificate (its extended key usage does not allow server authentication): every client would reject it. Ask for a certificate with serverAuth, or with no EKU restriction"
     # BOTH boundaries. `-checkend 0` proves only that notAfter is in the future, so a
     # future-dated certificate passed it, installed cleanly, and was then rejected by every
     # browser and every psql client while the install said it had worked.

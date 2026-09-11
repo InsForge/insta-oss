@@ -220,6 +220,11 @@ test('--tls custom refuses a half-configured pair, and the paths it cannot mount
     [['--tls', 'custom', '--tls-cert', '/var/lib/c.crt', '--tls-key', '/var/lib/k.key'], 'contains the data directory'],
     [['--tls', 'custom', '--tls-cert', '/c.crt', '--tls-key', '/k.key'], 'is the filesystem root'],
     [['--tls', 'custom', '--tls-cert', '/etc/c.crt', '--tls-key', '/etc/k.key'], 'is a system directory'],
+    // The configuration directory holds instad.env, INSTA_OSS_SECRET included, and every TLS
+    // directory is mounted into the edge too: this would hand the daemon's signing secret to a
+    // container with no use for it. Its tls/ child, the recommended home, is fine (below).
+    [['--tls', 'custom', '--tls-cert', '/etc/instacloud/c.crt', '--tls-key', '/etc/instacloud/k.key'], 'is the configuration directory'],
+    [['--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/c.crt', '--tls-key', '/etc/instacloud/k.key'], 'is the configuration directory'],
     // ...and the key alone is enough to fail it: both directories are mounted, so both are checked.
     [['--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/c.crt', '--tls-key', '/var/lib/instacloud/k.key'], 'is inside the data directory'],
   ]
@@ -323,6 +328,12 @@ test.skipIf(!hasOpenssl)('--tls custom checks the pair can actually serve, befor
       // wildcard breaks storage for every app on the box while the install reports success.
       [noS3, key, 'does not carry the SAN DNS:*.s3.example.test'],
     ]
+    // Right names, right key, right dates, and the wrong PURPOSE: an extended key usage of
+    // clientAuth only. It loads and is served, the -k fingerprint probe accepts it, and every
+    // client then rejects it as a server certificate, while the install said it was serving.
+    const clientOnly = join(dir, 'client-only.crt')
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${clientOnly} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:*.s3.example.test,DNS:example.test' -addext 'extendedKeyUsage=clientAuth' 2>/dev/null`)
+    bad.push([clientOnly, key, 'is not usable as a TLS server certificate'])
     for (const [c, k, says] of bad) {
       // A --print-* run over files that EXIST checks them too, which is how this runs without
       // root: the checks are skipped only when there is nothing to read.
