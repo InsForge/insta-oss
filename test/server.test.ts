@@ -4341,6 +4341,15 @@ test('the always-on default: main is always-on like the cloud, a branch clone sc
   expect((await engine.addManagedService(project.id, 'redis', 'scratch', { branch: 'feat' })).always_on).toBe(false)
 })
 
+test('every branch row carries created_at (the console’s Environments Created column)', async () => {
+  app = buildServer(makeEngine(testConfig()))
+  const id = await createProject()
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  const branches = (await get(`/projects/${id}/branches`)).json().branches as Array<{ name: string; created_at?: string }>
+  expect(branches.map((b) => b.name).sort()).toEqual(['feat', 'main'])
+  for (const b of branches) expect(Number.isNaN(Date.parse(b.created_at ?? '')), b.name).toBe(false)
+})
+
 test('every service row carries created_at, the time the service was created (the console’s Created column)', async () => {
   const engine = makeEngine(testConfig())
   const { project } = await engine.createProject('demo')

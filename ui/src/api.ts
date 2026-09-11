@@ -9,7 +9,7 @@ import type { DomainResult } from './lib/domains'
 import type { TemplateVariable } from './lib/templateVars'
 
 export type Project = { id: string; name: string; status: string }
-export type BranchInfo = { id: string; name: string; is_default: boolean; status: string }
+export type BranchInfo = { id: string; name: string; is_default: boolean; status: string; created_at?: string }
 export type ServiceType = 'postgres' | 'storage' | 'compute' | 'redis' | 'mysql' | 'mongodb'
 export type Service = {
   /** Opaque and branch-scoped (decision 49): `<branchId>:<serviceId>` off the default branch. */
@@ -142,8 +142,11 @@ export const api = {
   operations: async (p: string, limit = 50) =>
     (await get<{ operations: Operation[] }>(`/projects/${p}/operations?limit=${limit}`)).operations,
 
-  setSecret: (p: string, name: string, value: string, branch?: string) =>
-    call<{ ok: boolean }>('PUT', `/projects/${p}/secrets/${encodeURIComponent(name)}`, branch ? { value, branch } : { value }),
+  /** `service` binds an environment-scoped secret to one service (`<type>/<name>`, as the CLI's
+   *  `--service` sends it); omitted, the secret is shared by the environment or the project. */
+  setSecret: (p: string, name: string, value: string, branch?: string, service?: string) =>
+    call<{ ok: boolean }>('PUT', `/projects/${p}/secrets/${encodeURIComponent(name)}`,
+      { value, ...(branch ? { branch } : {}), ...(branch && service ? { service } : {}) }),
   unsetSecret: (p: string, name: string, branch?: string) =>
     call<{ ok: boolean }>('DELETE', `/projects/${p}/secrets/${encodeURIComponent(name)}${qs({ branch })}`),
   renameService: (p: string, sid: string, name: string, branch?: string) =>

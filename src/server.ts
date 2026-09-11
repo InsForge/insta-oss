@@ -230,7 +230,11 @@ export function buildServer(
 
   app.get('/projects/:id/branches', async (req) => ({
     branches: engine.listBranches((req.params as { id: string }).id)
-      .map((b) => ({ id: b.id, name: b.name, is_default: b.isDefault, status: b.status })),
+      .map((b) => ({
+        id: b.id, name: b.name, is_default: b.isDefault, status: b.status,
+        // The console's Created column. Every branch the engine creates stamps it.
+        ...(b.createdAt ? { created_at: new Date(b.createdAt).toISOString() } : {}),
+      })),
   }))
 
   app.post('/projects/:id/branches', async (req, reply) => {

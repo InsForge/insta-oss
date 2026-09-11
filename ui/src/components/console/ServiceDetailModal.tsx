@@ -12,7 +12,9 @@
 // the console does not have; Custom Domain only in server mode; changes apply immediately.
 
 import { useEffect, useState } from 'react'
-import { Button, CopyButton, Input, Switch } from '@insforge/ui'
+import {
+  Button, CopyButton, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch,
+} from '@insforge/ui'
 import { RotateCw, X } from 'lucide-react'
 import { api, type Service } from '../../api'
 import { usePoll } from '../../hooks'
@@ -24,7 +26,7 @@ import { ErrorNote, hrefFor } from '../ui'
 import { LogsPanel } from '../../pages/Logs'
 import { DatabasePanel } from '../../pages/DatabaseInsight'
 import { LiveMetrics } from '../../pages/Usage'
-import { ComputeResources, PgResources, VolumeSection } from '../../pages/ServiceDetail'
+import { VolumeSection } from '../../pages/ServiceDetail'
 import { DeleteServiceDialog, RestartServiceDialog } from './ServiceDialogs'
 import { SettingsCard, SettingsRow } from './SettingsRow'
 import { SideTabs, TopTabs } from './Tabs'
@@ -243,9 +245,9 @@ function GeneralSettings({ projectId, branch, service, onDone, onError, onApprov
       </SettingsCard>
 
       {service.type === 'compute' || MANAGED.has(service.type)
-        ? <ComputeResources projectId={projectId} branch={branch} service={service} onApproval={onApproval} />
+        ? <InstanceLimitCard {...ctx} />
         : service.type === 'postgres'
-          ? <PgResources projectId={projectId} branch={branch} group={service.name} onApproval={onApproval} />
+          ? <PgInstanceLimitCard {...ctx} />
           : null}
 
       <SettingsCard>
@@ -369,6 +371,104 @@ function RuntimeRow({ projectId, branch, service, onDone, onError, onApproval }:
         {desired === 'running' && <Button variant="secondary" size="sm" disabled={busy} onClick={() => { void run('suspend') }}>Suspend</Button>}
       </div>
     </SettingsRow>
+  )
+}
+
+const CPU_LADDER = [1, 2, 4, 6, 8]
+
+/** The console's Instance Limit, as label-left rows: the service's ceiling on the provider grid
+ *  (`GET|PUT …/limits`). Self-host divergence: a CPU select and a memory field instead of the
+ *  console's coupled sliders, and no plan upgrade (there is no plan). */
+function InstanceLimitCard({ projectId, branch, service, onApproval }: Ctx) {
+  const { data, error, reload } = usePoll(() => api.limits(projectId, service.id, branch), [projectId, service.id, branch], 30000)
+  const [cpu, setCpu] = useState<string>()
+  const [memory, setMemory] = useState<string>()
+  const [busy, setBusy] = useState(false)
+  const [saveError, setSaveError] = useState<string>()
+  if (!data) return error ? <p className="text-sm text-destructive">{error.message}</p> : null
+
+  const cap = data.cap
+  const cpuValue = cpu ?? String(data.limits.cpu)
+  const memValue = memory ?? String(data.limits.memoryMb)
+  const memNum = Number(memValue)
+  const valid = Number.isInteger(memNum) && memNum >= 256 && memNum % 256 === 0 && memNum <= cap.memoryMb
+  const dirty = Number(cpuValue) !== data.limits.cpu || memNum !== data.limits.memoryMb
+
+  const save = async () => {
+    if (!valid) return setSaveError(`Memory is 256 MB to ${cap.memoryMb} MB, in steps of 256.`)
+    setBusy(true); setSaveError(undefined)
+    const r = await api.setLimits(projectId, service.id, { memoryMb: memNum, cpu: Number(cpuValue) }, branch)
+    setBusy(false)
+    if (r.kind === 'error') return setSaveError(r.error)
+    if (r.kind === 'approval') return onApproval({ ...r, retry: () => { void save() } })
+    setCpu(undefined); setMemory(undefined)
+    reload()
+  }
+
+  return (
+    <SettingsCard title="Instance Limit">
+      <SettingsRow label="CPU" hint="The most vCPU this service may use.">
+        <Select value={cpuValue} onValueChange={setCpu}>
+          <SelectTrigger className="w-40" aria-label="CPU ceiling"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {CPU_LADDER.filter((c) => c <= cap.cpu).map((c) => <SelectItem key={c} value={String(c)}>{c} vCPU</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </SettingsRow>
+      <SettingsRow label="Memory" hint={`The most memory this service may use, in steps of 256 MB, up to ${cap.memoryMb} MB. Applied on the next start.`}>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <Input className="w-40" inputMode="numeric" aria-label="Memory ceiling" value={memValue} onChange={(e) => setMemory(e.target.value)} />
+            <span className="text-sm text-muted-foreground">MB</span>
+            <Button variant="secondary" size="sm" disabled={busy || !dirty} onClick={() => { void save() }}>Save</Button>
+          </div>
+          {saveError && <p className="text-sm text-destructive">{saveError}</p>}
+        </div>
+      </SettingsRow>
+    </SettingsCard>
+  )
+}
+
+/** Postgres states its ceiling as quantities (`PATCH database/settings {cpu, memory}`), as the CLI
+ *  and the cloud send them. */
+function PgInstanceLimitCard({ projectId, branch, service, onApproval }: Ctx) {
+  const { data, reload } = usePoll(() => api.dbInstance(projectId, branch, service.name), [projectId, branch, service.name], 30000)
+  const [cpu, setCpu] = useState<string>()
+  const [memory, setMemory] = useState<string>()
+  const [busy, setBusy] = useState(false)
+  const [saveError, setSaveError] = useState<string>()
+  const cpuValue = cpu ?? (data?.cpuMilli ? `${data.cpuMilli}m` : '')
+  const memValue = memory ?? (data?.memoryMib ? `${data.memoryMib}Mi` : '')
+  const dirty = cpu !== undefined || memory !== undefined
+
+  const save = async () => {
+    setBusy(true); setSaveError(undefined)
+    const patch: { cpu?: string; memory?: string } = {}
+    if (cpuValue) patch.cpu = cpuValue
+    if (memValue) patch.memory = memValue
+    const r = await api.dbSettings(projectId, branch, patch, service.name)
+    setBusy(false)
+    if (r.kind === 'error') return setSaveError(r.error)
+    if (r.kind === 'approval') return onApproval({ ...r, retry: () => { void save() } })
+    setCpu(undefined); setMemory(undefined)
+    reload()
+  }
+
+  return (
+    <SettingsCard title="Instance Limit">
+      <SettingsRow label="CPU" hint="Milli-cores, like 1000m.">
+        <Input className="w-40 font-mono" aria-label="CPU" placeholder="1000m" value={cpuValue} onChange={(e) => setCpu(e.target.value)} />
+      </SettingsRow>
+      <SettingsRow label="Memory" hint="Mebibytes, like 1024Mi.">
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <Input className="w-40 font-mono" aria-label="Memory" placeholder="1024Mi" value={memValue} onChange={(e) => setMemory(e.target.value)} />
+            <Button variant="secondary" size="sm" disabled={busy || !dirty} onClick={() => { void save() }}>Save</Button>
+          </div>
+          {saveError && <p className="text-sm text-destructive">{saveError}</p>}
+        </div>
+      </SettingsRow>
+    </SettingsCard>
   )
 }
 
