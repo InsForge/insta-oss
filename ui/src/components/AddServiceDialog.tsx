@@ -39,6 +39,9 @@ export function AddServiceDialog({ projectId, branch, onClose, onDone, onApprova
   const [branches, setBranches] = useState<BranchInfo[]>()
   const [branchesError, setBranchesError] = useState<Error>()
   useEffect(() => {
+    // Another project's list says nothing about this one: back to unknown until this one answers.
+    setBranches(undefined)
+    setBranchesError(undefined)
     let alive = true
     api.branches(projectId).then(
       (b) => { if (alive) setBranches(b) },
