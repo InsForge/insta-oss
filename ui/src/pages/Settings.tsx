@@ -25,7 +25,9 @@ function DecisionToggle({ value, onChange }: { value: Decision; onChange: (d: De
         <button key={d} type="button" aria-pressed={value === d} title={HINT[d]} onClick={() => onChange(d)}
           className={cn('h-8 w-24 px-2 text-[13px] capitalize transition-colors',
             value === d
-              ? d === 'deny' ? 'bg-destructive text-inverse' : d === 'approve' ? 'bg-warning text-inverse' : 'bg-success text-inverse'
+              ? d === 'deny' ? 'bg-destructive/15 font-medium text-destructive'
+                : d === 'approve' ? 'bg-warning/15 font-medium text-warning'
+                : 'bg-success/15 font-medium text-success'
               : 'text-muted-foreground hover:bg-alpha-4 hover:text-foreground')}>
           {d}
         </button>

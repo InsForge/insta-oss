@@ -5,6 +5,7 @@ import { Moon, ScrollText } from 'lucide-react'
 import { api, type LogLine } from '../api'
 import { usePoll } from '../hooks'
 import { healthFor } from '../lib/status'
+import { ConsolePage } from '../components/console/ConsolePage'
 
 type Component = 'compute' | 'db'
 
@@ -106,15 +107,14 @@ export function Logs() {
   const { projectId, branch } = useParams() as { projectId: string; branch: string }
   const [component, setComponent] = useState<Component>('compute')
   return (
-    <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
-      <div className="flex items-center justify-between gap-3">
-        <h1 className="text-[32px] leading-12 font-semibold">Logs</h1>
+    <ConsolePage title="Logs"
+      action={
         <Tabs value={component} onValueChange={setComponent}>
           <Tab value="compute">App</Tab>
           <Tab value="db">Database</Tab>
         </Tabs>
-      </div>
+      }>
       <LogsPanel projectId={projectId} branch={branch} component={component} />
-    </div>
+    </ConsolePage>
   )
 }

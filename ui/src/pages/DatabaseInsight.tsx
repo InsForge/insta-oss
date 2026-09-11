@@ -4,6 +4,7 @@ import { Button, EmptyState } from '@insforge/ui'
 import { Database, Moon } from 'lucide-react'
 import { api } from '../api'
 import { usePoll } from '../hooks'
+import { ConsolePage } from '../components/console/ConsolePage'
 
 function fmtBytes(n: number): string {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GiB`
@@ -149,8 +150,7 @@ export function DatabaseInsight() {
   const pg = useMemo(() => (services ?? []).find((s) => s.type === 'postgres'), [services])
 
   return (
-    <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
-      <h1 className="text-[32px] leading-12 font-semibold">Database</h1>
+    <ConsolePage title="Database">
       {services && !pg ? (
         <EmptyState icon={Database} title="No Postgres in this environment"
           description="Add a postgres service on the Service page and this page fills in." />
@@ -164,6 +164,6 @@ export function DatabaseInsight() {
             </div>
           } />
       ) : null}
-    </div>
+    </ConsolePage>
   )
 }

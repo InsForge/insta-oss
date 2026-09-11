@@ -6,6 +6,7 @@ import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YA
 import { api, type MetricSeries } from '../api'
 import { usePoll } from '../hooks'
 import { labelMatches } from './Logs'
+import { ConsolePage } from '../components/console/ConsolePage'
 
 // The one sanctioned hex exception: the chart series palette (Figma observability design).
 const SERIES_COLORS = ['#10b981', '#ec4899', '#3b82f6']
@@ -179,9 +180,9 @@ export function LiveMetrics({ projectId, branch, service }: { projectId: string;
 export function Usage() {
   const { projectId, branch } = useParams() as { projectId: string; branch: string }
   return (
-    <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
-      <h1 className="text-[32px] leading-12 font-semibold">Observability</h1>
+    <ConsolePage title="Observability"
+      subtitle={<>Live CPU and memory for <span className="font-medium">{branch}</span>&apos;s containers</>}>
       <LiveMetrics projectId={projectId} branch={branch} />
-    </div>
+    </ConsolePage>
   )
 }
