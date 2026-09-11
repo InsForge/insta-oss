@@ -417,7 +417,7 @@ openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
 ONE_OUT=$( ( cd "$ROOT" && INSTA_OSS_TLS=custom sh install.sh -y \
     --tls-cert "$E2E_TLS_DIR/one.crt" --tls-key "$E2E_TLS_DIR/one.key" ) 2>&1 ) && \
   FAIL "a certificate without DNS:*.s3.$DOMAIN was accepted: bucket URLs would fail hostname verification for every app"
-printf '%s\n' "$ONE_OUT" | grep -q "does not carry the SAN DNS:\*.s3.$DOMAIN" \
+printf '%s\n' "$ONE_OUT" | grep -Fq "does not carry the SAN DNS:*.s3.$DOMAIN" \
   || FAIL "the refusal did not name the missing SAN: $ONE_OUT"
 rm -f "$E2E_TLS_DIR/one.crt" "$E2E_TLS_DIR/one.key"
 OK "a single-wildcard certificate is refused, naming DNS:*.s3.$DOMAIN"

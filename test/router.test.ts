@@ -996,6 +996,81 @@ test.skipIf(!hasOpenssl)('a client that sends NO SNI is handed the RENEWED certi
   }
 })
 
+test.skipIf(!hasOpenssl)('a renewal whose bytes cannot be read yet is RETRIED, so the redis and mongo lanes do not keep the old default', async () => {
+  // The context and the bytes are two reads of a pair someone else replaces. When the bytes
+  // failed after the context had been committed, every later beat saw the same context, took the
+  // "nothing moved" exit and never read the bytes again: pg (which uses the context) moved to the
+  // renewal while redis and mongo (which take bytes through setSecureContext) kept the old one.
+  const dir = mkdtempSync(join(tmpdir(), 'io-nosni-bytes-'))
+  const mint = (crt: string, key: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${key} -out ${crt} -subj '/CN=*.router.test' -addext 'subjectAltName=DNS:*.router.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  const fingerprintOf = (crt: string): string =>
+    spawnSync('sh', ['-c', `openssl x509 -in ${crt} -noout -fingerprint -sha256`], { encoding: 'utf8' }).stdout.trim().split('=')[1]
+  const freePort = async (): Promise<number> => {
+    const s = createNetServer()
+    const p = await listenEphemeral(s)
+    await new Promise<void>((r) => s.close(() => r()))
+    return p
+  }
+  // One read of the bytes fails, as when the renewal tool has the pair half-replaced.
+  class FlakyCerts extends Certs {
+    failNext = false
+    override materialFor(host: string): { cert: Buffer; key: Buffer } | null {
+      if (this.failNext) { this.failNext = false; return null }
+      return super.materialFor(host)
+    }
+  }
+  const crt = join(dir, 'wildcard.crt')
+  const key = join(dir, 'wildcard.key')
+  mint(crt, key, 30)
+  const [pgPort, redisPort, mongoPort] = [await freePort(), await freePort(), await freePort()]
+  const cfg = serverConfig({
+    INSTA_OSS_DOMAIN: 'router.test', INSTA_OSS_TLS_CERT_FILE: crt, INSTA_OSS_TLS_KEY_FILE: key,
+    INSTA_OSS_LANE_PG_PORT: String(pgPort), INSTA_OSS_LANE_REDIS_PORT: String(redisPort), INSTA_OSS_LANE_MONGO_PORT: String(mongoPort),
+  })
+  const certs = new FlakyCerts({ certDir: null, supplied: { crt, key }, issue: async () => { throw new Error('nothing may be issued here') }, log: () => { /* quiet */ } })
+  const router = new Router({
+    cfg, table: () => buildTable(EMPTY, cfg, () => { /* quiet */ }),
+    stateOf: () => 'running', wake: async () => { /* nothing sleeps here */ },
+    touch: () => { /* no scheduler */ }, beginHold: () => { /* idem */ }, endHold: () => { /* idem */ },
+    upstream: new FakeUpstream(), certs, log: () => { /* quiet */ },
+  })
+  // A TLS lane client with no SNI: a bare IP sends none. The lane closes it after the handshake,
+  // which is when the certificate it was handed is readable.
+  const presented = async (port: number): Promise<string> => {
+    const t = tlsConnect({ host: '127.0.0.1', port, rejectUnauthorized: false })
+    t.on('error', () => { /* the lane closes a no-SNI client once the handshake is done */ })
+    await new Promise<void>((r) => t.once('secureConnect', () => r()))
+    const fp = t.getPeerCertificate().fingerprint256
+    t.destroy()
+    return fp
+  }
+  try {
+    await router.start()
+    const first = fingerprintOf(crt)
+    expect(await presented(redisPort)).toBe(first)
+
+    mint(join(dir, 'next.crt'), join(dir, 'next.key'), 90)
+    renameSync(join(dir, 'next.crt'), crt)
+    renameSync(join(dir, 'next.key'), key)
+    const second = fingerprintOf(crt)
+    expect(second).not.toBe(first)
+
+    certs.failNext = true
+    await router.refreshCertificates()   // the bytes could not be read on this beat...
+    await router.refreshCertificates()   // ...so the next one has to try again
+    expect(await presented(redisPort)).toBe(second)
+    expect(await presented(mongoPort)).toBe(second)
+  } finally {
+    await router.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // ---- write classes: what actually rebuilds the table --------------------------------------------
 
 test('an audit event does not rebuild the route table; a real service change does', async () => {

@@ -337,9 +337,15 @@ export class Router {
     // Null (the pair became unreadable) keeps the context already held: a client still completes
     // its handshake and is told why, rather than getting an alert.
     if (!ctx || ctx === this.defaultContext) return
-    this.defaultContext = ctx
+    // Nothing is committed until BOTH reads have succeeded. They are two reads of a pair someone
+    // else replaces: committing the context first and then failing on the bytes left every later
+    // beat on the "nothing moved" exit above, so pg (which reads the context) moved while redis and
+    // mongo (which take the bytes) kept the old default for good. Uncommitted, a failed read is
+    // simply tried again on the next beat; and if the two reads straddle a rename, the next beat
+    // sees a changed context and brings both back together.
     const material = this.certs.materialFor(host)
     if (!material) return
+    this.defaultContext = ctx
     this.defaultMaterial = material
     for (const s of this.tlsLanes) {
       try { s.setSecureContext(material) } catch { /* closing: a lane opened later gets it at creation */ }
