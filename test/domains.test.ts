@@ -3,6 +3,7 @@
 // did so against the real system resolver, so the one property the CLI depends on most, that the
 // envelope carries NO `ssl` key, was pinned nowhere. DNS is the fake resolver from `test/fakes.ts`.
 import { test, expect, beforeEach } from 'vitest'
+import { join } from 'node:path'
 import { buildServer } from '../src/server'
 import { dnsRecords, makeEngine, resetFakes, serverConfig, testConfig } from './fakes'
 import type { FastifyInstance } from 'fastify'
@@ -91,6 +92,38 @@ test('server mode with no certificate store to read does not report a domain rea
   expect((b.dns as { status: string }[])[0].status).toBe('ok')
   expect(b.configured).toBe(false)
   expect(b.status).toBe('pending')
+})
+
+test('with a SUPPLIED certificate, a custom domain is ready only if that certificate covers it', async () => {
+  // `--tls custom` has no certificate store to walk: nothing is issued, so the question is
+  // whether the operator's certificate covers the name, and the certificate answers it. A name
+  // inside their wildcard reads ready; one outside it reads pending, which is the truth in a
+  // mode where no certificate will appear for it on its own.
+  const base = serverConfig({ INSTA_OSS_DOMAIN: 'example.test' })
+  const cfg = {
+    ...base,
+    tls: {
+      ...base.tls,
+      certFile: join('test', 'fixtures', 'local', 'router.test', 'router.test.crt'),
+      keyFile: join('test', 'fixtures', 'local', 'router.test', 'router.test.key'),
+    },
+  }
+  const engine2 = makeEngine(cfg)
+  const { project } = await engine2.createProject('demo2')
+  await engine2.deploy(project.id, 'main', { image: 'app:1', port: 3000, group: 'web' })
+  dnsRecords.set('api.example.test', { a: ['203.0.113.7'] })
+  // The fixture certificate's SANs are router.test, api.router.test and pg-db-demo-main.router.test.
+  for (const host of ['router.test', 'nope.test']) dnsRecords.set(host, { a: ['203.0.113.7'] })
+
+  const covered = await engine2.setComputeDomain(project.id, { hostname: 'router.test', group: 'web' }) as unknown as Record<string, unknown>
+  expect((covered.dns as { status: string }[])[0].status).toBe('ok')
+  expect(covered.configured).toBe(true)
+  expect(covered.status).toBe('ready')
+
+  const outside = await engine2.setComputeDomain(project.id, { hostname: 'nope.test', group: 'web' }) as unknown as Record<string, unknown>
+  expect((outside.dns as { status: string }[])[0].status).toBe('ok')
+  expect(outside.configured).toBe(false)
+  expect(outside.status).toBe('pending')
 })
 
 test('an unattached name reads `not added` with an empty dns list, never a 404', async () => {

@@ -4,8 +4,36 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { loadConfig, isDaemonHost, CONFIG_KEYS } from '../src/config'
+import { suppliedFiles } from '../src/router/certs'
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'io-cfg-'))
+
+test('a supplied certificate is the PAIR: half of one is refused, naming the missing half', () => {
+  // With only the certificate set, the router served no supplied certificate and went on
+  // issuing per hostname, while `/healthz` reported a supplied certificate: the endpoint
+  // asserted the exact property the box was not providing, in the field an operator would use
+  // to confirm it. The installer refuses this combination; a hand-edited `instad.env` does not
+  // go through the installer, so it is refused here too, at boot, with the missing key named.
+  expect(() => loadConfig({ INSTA_OSS_TLS_CERT_FILE: '/etc/tls/full.pem' }, []))
+    .toThrow(/INSTA_OSS_TLS_KEY_FILE is required when the other is set/)
+  expect(() => loadConfig({ INSTA_OSS_TLS_KEY_FILE: '/etc/tls/key.pem' }, []))
+    .toThrow(/INSTA_OSS_TLS_CERT_FILE is required when the other is set/)
+  // ...and as the same KIND of error as every other refusal in `loadConfig`. `ConfigError` is
+  // not exported, so this asserts what a caller discriminating on it would see: a bad
+  // configuration, not an unexpected crash from somewhere in the loader.
+  const kinds = ['INSTA_OSS_TLS_CERT_FILE', 'INSTA_OSS_MODE'].map((k) => {
+    try { loadConfig({ [k]: k.endsWith('FILE') ? '/etc/tls/full.pem' : 'nonsense' }, []); return 'no throw' } catch (e) { return (e as Error).constructor.name }
+  })
+  expect(kinds[0]).toBe(kinds[1])
+
+  // Both halves load, and neither half is not a supplied certificate at all.
+  const both = loadConfig({ INSTA_OSS_TLS_CERT_FILE: '/etc/tls/full.pem', INSTA_OSS_TLS_KEY_FILE: '/etc/tls/key.pem' }, [])
+  expect(both.tls).toMatchObject({ certFile: '/etc/tls/full.pem', keyFile: '/etc/tls/key.pem' })
+  expect(suppliedFiles(both)).toEqual({ crt: '/etc/tls/full.pem', key: '/etc/tls/key.pem' })
+  const neither = loadConfig({}, [])
+  expect(neither.tls).toMatchObject({ certFile: null, keyFile: null })
+  expect(suppliedFiles(neither)).toBeNull()
+})
 
 test('local defaults: 127.0.0.1:8080, ~/.insta-oss, no auth, localhost domain, scheduler on', () => {
   const cfg = loadConfig({}, [])
@@ -23,7 +51,8 @@ test('local defaults: 127.0.0.1:8080, ~/.insta-oss, no auth, localhost domain, s
   expect(cfg.trustProxy).toBe(false)
   expect(cfg.auth).toMatchObject({ enabled: false, secret: '', sessionTtlSec: 604800, sessionUpdateAgeSec: 86400, cookieSecure: false, cookieName: 'better-auth.session_token' })
   expect(cfg.lanes).toEqual({ bind: '127.0.0.1', pgPort: 5432, redisPort: 6379, mongoPort: 27017, portRange: [20000, 20999], idleSec: 900, probeWindowMs: 8000, readyWindowMs: 30000, touchDebounceMs: 5000 })
-  expect(cfg.tls).toEqual({ certDir: null, edgePort: 443 })
+  // No supplied certificate unless `--tls custom` set one: local mode terminates no TLS.
+  expect(cfg.tls).toEqual({ certDir: null, edgePort: 443, certFile: null, keyFile: null })
   expect(cfg.sleep).toEqual({ enabled: true, idleComputeSec: 300, idleDbSec: 600, sweepSec: 30, createGraceSec: 600, stopGraceSec: 10, stopGraceDbSec: 30, wakeTimeoutSec: 60, wakeProtectSec: 60, ramFloorPct: 15, memBudgetMb: null, alwaysOnDefault: false })
   expect(cfg.data).toEqual({ helperImage: 'node:22-alpine', fork: 'auto', migrate: true, sweepOrphans: false })
   expect(cfg.services).toEqual({ maxPerType: 5 })

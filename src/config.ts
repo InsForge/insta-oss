@@ -52,6 +52,11 @@ export interface Config {
   tls: {
     certDir: string | null        // INSTA_OSS_TLS_CERT_DIR     server <dataDir>/caddy/data/caddy/certificates | local null
     edgePort: number              // INSTA_OSS_EDGE_PORT        443 (the router handshakes here to trigger issuance)
+    /** A certificate the OPERATOR supplied, covering `*.<domain>` (`--tls custom`). When it is
+     *  set, no lane ever asks the edge to issue anything: this pair is served for every SNI, and
+     *  a service hostname therefore reaches no certificate transparency log. */
+    certFile: string | null       // INSTA_OSS_TLS_CERT_FILE    unset
+    keyFile: string | null        // INSTA_OSS_TLS_KEY_FILE     unset
   }
   sleep: {
     enabled: boolean              // INSTA_OSS_SCHEDULER        true (ticker); wake/sleep on demand work regardless
@@ -81,6 +86,20 @@ export interface Config {
   }
 }
 
+/** A supplied certificate is the PAIR or nothing. Half of one is refused rather than ignored:
+ *  with only the certificate set, the router would go on issuing per-hostname certificates while
+ *  `/healthz` reported a supplied one, so the endpoint would assert the very property the box
+ *  was not providing. The installer refuses the same combination; this catches a hand-edited
+ *  `instad.env`, at boot, with a legible message rather than at a browser. */
+function suppliedPair(certFile: string, keyFile: string): { certFile: string | null; keyFile: string | null } {
+  if (certFile && keyFile) return { certFile, keyFile }
+  if (certFile || keyFile) {
+    const missing = certFile ? 'INSTA_OSS_TLS_KEY_FILE' : 'INSTA_OSS_TLS_CERT_FILE'
+    throw new ConfigError(`${missing} is required when the other is set: a supplied certificate is the pair or nothing (see --tls custom)`)
+  }
+  return { certFile: null, keyFile: null }
+}
+
 /** Every INSTA_OSS_* key loadConfig reads (test/install.test.ts asserts install.sh writes each). */
 export const CONFIG_KEYS: readonly string[] = [
   'INSTA_OSS_MODE', 'INSTA_OSS_VERSION', 'INSTA_OSS_LISTEN_HOST', 'INSTA_OSS_PORT', 'INSTA_OSS_DATA_DIR', 'INSTA_OSS_STATE',
@@ -89,7 +108,7 @@ export const CONFIG_KEYS: readonly string[] = [
   'INSTA_OSS_AUTH', 'INSTA_OSS_SECRET', 'INSTA_OSS_SESSION_TTL_SEC',
   'INSTA_OSS_LANE_BIND', 'INSTA_OSS_LANE_PG_PORT', 'INSTA_OSS_LANE_REDIS_PORT', 'INSTA_OSS_LANE_MONGO_PORT', 'INSTA_OSS_LANE_PORT_RANGE',
   'INSTA_OSS_LANE_IDLE_SEC', 'INSTA_OSS_PROBE_WINDOW_MS', 'INSTA_OSS_READY_WINDOW_MS', 'INSTA_OSS_TOUCH_DEBOUNCE_MS',
-  'INSTA_OSS_TLS_CERT_DIR', 'INSTA_OSS_EDGE_PORT',
+  'INSTA_OSS_TLS_CERT_DIR', 'INSTA_OSS_EDGE_PORT', 'INSTA_OSS_TLS_CERT_FILE', 'INSTA_OSS_TLS_KEY_FILE',
   'INSTA_OSS_SCHEDULER', 'INSTA_OSS_IDLE_COMPUTE_SEC', 'INSTA_OSS_IDLE_DB_SEC', 'INSTA_OSS_SWEEP_SEC', 'INSTA_OSS_CREATE_GRACE_SEC',
   'INSTA_OSS_STOP_GRACE_SEC', 'INSTA_OSS_STOP_GRACE_DB_SEC', 'INSTA_OSS_WAKE_TIMEOUT_SEC', 'INSTA_OSS_WAKE_PROTECT_SEC',
   'INSTA_OSS_RAM_FLOOR_PCT', 'INSTA_OSS_MEM_BUDGET_MB', 'INSTA_OSS_ALWAYS_ON_DEFAULT',
@@ -233,6 +252,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, argv: readonly 
     tls: {
       certDir: str(env, 'INSTA_OSS_TLS_CERT_DIR', '') || (server ? join(dataDir, 'caddy', 'data', 'caddy', 'certificates') : null),
       edgePort: int(env, 'INSTA_OSS_EDGE_PORT', 443, 1, 65535),
+      ...suppliedPair(str(env, 'INSTA_OSS_TLS_CERT_FILE', ''), str(env, 'INSTA_OSS_TLS_KEY_FILE', '')),
     },
     sleep: {
       enabled: bool(env, 'INSTA_OSS_SCHEDULER', true),

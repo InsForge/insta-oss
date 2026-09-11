@@ -11,7 +11,7 @@ import type { SecureContext, Server as TlsServer } from 'node:tls'
 import { isDaemonHost, type Config } from '../config'
 import { loadState, mutate, onSave, stateRev } from '../state'
 import type { ManagedDbType, ServiceKey } from '../types'
-import { Certs, triggerIssuance } from './certs'
+import { Certs, suppliedFiles, triggerIssuance } from './certs'
 import type { ServiceState, UpstreamLike } from './deps'
 import { HttpLane, sendJson } from './http'
 import { createInternalServer } from './internal'
@@ -95,7 +95,10 @@ export class Router {
     this.cfg = deps.cfg
     this.log = deps.log ?? ((m) => console.warn(m))
     this.apiHandler = deps.apiHandler
-    this.certs = deps.certs ?? new Certs({ certDir: this.cfg.tls.certDir, issue: triggerIssuance(this.cfg), log: this.log })
+    // `--tls custom`: the operator's pair is what every lane presents, and nothing is ever
+    // issued. The `issue` seam is still passed for the acme and internal modes.
+    const supplied = suppliedFiles(this.cfg)
+    this.certs = deps.certs ?? new Certs({ certDir: this.cfg.tls.certDir, supplied, issue: triggerIssuance(this.cfg), log: this.log })
     this.http = new HttpLane({
       cfg: this.cfg, upstream: deps.upstream, stateOf: deps.stateOf, wake: deps.wake,
       touch: (k) => this.deps.touch(k), beginHold: (k) => this.hold(k), endHold: (k) => this.release(k),
@@ -209,6 +212,16 @@ export class Router {
 
   // ---- start / stop ----------------------------------------------------------------------------
 
+  /** On the daemon's sweep beat: the lanes' no-SNI default follows a renewed certificate (a
+   *  replaced supplied pair, or an `api.` certificate the edge renewed) without waiting for a
+   *  route change, which is all that used to run `reconcile`. Never asks the edge to issue. */
+  async refreshCertificates(): Promise<void> {
+    if (this.stopped) return
+    try { await this.refreshDefaultContext() } catch (e) {
+      this.log(`router: refreshing the default certificate failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   async start(): Promise<void> {
     const server = this.cfg.mode === 'server'
     if (server) {
@@ -308,16 +321,31 @@ export class Router {
    *  attempt: on a fresh box nothing has asked the edge for `api.<domain>` yet, so every reconcile
    *  looks again and the SNI lanes already listening are updated in place. Only the start attempt
    *  asks the edge to issue; a later one reads the store, so a box whose ACME is failing does not
-   *  pay a 15 s handshake on every service it adds. */
+   *  pay a 15 s handshake on every service it adds.
+   *
+   *  And every look FOLLOWS a renewal. This used to return as soon as a context existed, so the
+   *  no-SNI default was the certificate the process booted with, forever: a renewed supplied pair
+   *  (or an ACME `api.` certificate Caddy renewed) reached every SNI client while libpq before 14
+   *  and older JDBC drivers, which send no SNI, kept the old one until it expired. `certFor` is
+   *  cached on the files' stamp and hands back the SAME context while nothing moved, so an
+   *  identical object is the cheap "unchanged" and only a real change is pushed to the lanes. */
   private async refreshDefaultContext(issue = false): Promise<void> {
-    if (this.cfg.mode !== 'server' || this.defaultContext) return
+    if (this.cfg.mode !== 'server') return
     const host = `api.${this.cfg.domain}`
     if (!issue && !this.certs.certExists(host)) return
     const ctx = await this.certs.certFor(host)
-    if (!ctx) return
-    this.defaultContext = ctx
+    // Null (the pair became unreadable) keeps the context already held: a client still completes
+    // its handshake and is told why, rather than getting an alert.
+    if (!ctx || ctx === this.defaultContext) return
+    // Nothing is committed until BOTH reads have succeeded. They are two reads of a pair someone
+    // else replaces: committing the context first and then failing on the bytes left every later
+    // beat on the "nothing moved" exit above, so pg (which reads the context) moved while redis and
+    // mongo (which take the bytes) kept the old default for good. Uncommitted, a failed read is
+    // simply tried again on the next beat; and if the two reads straddle a rename, the next beat
+    // sees a changed context and brings both back together.
     const material = this.certs.materialFor(host)
     if (!material) return
+    this.defaultContext = ctx
     this.defaultMaterial = material
     for (const s of this.tlsLanes) {
       try { s.setSecureContext(material) } catch { /* closing: a lane opened later gets it at creation */ }

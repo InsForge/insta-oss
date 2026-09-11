@@ -19,7 +19,15 @@
 #   (no flag)                        INSTA_OSS_IMAGE                ghcr.io/insforge/instacloud (a tag
 #                                    here is the version: build your own with
 #                                    `docker build -t instacloud:dev .`)
-#   --tls acme|internal              INSTA_OSS_TLS                  acme (internal = Caddy's own CA)
+#   --tls acme|internal|custom       INSTA_OSS_TLS                  acme (internal = Caddy's own CA,
+#                                    custom = serve a certificate you supply, see --tls-cert)
+#   --tls-cert <path>                INSTA_OSS_TLS_CERT_FILE        with --tls custom: a certificate
+#   --tls-key <path>                 INSTA_OSS_TLS_KEY_FILE         covering *.<domain> AND
+#                                    *.s3.<domain> (buckets are addressed
+#                                    <bucket>.s3.<domain>), and its key.
+#                                    Nothing is ever issued in this mode, so no service hostname
+#                                    reaches a certificate transparency log and a public compute
+#                                    service can actually sleep.
 #   --data-img-gib <n>               INSTA_OSS_DATA_IMG_GIB         free space minus 5 GiB
 #   --data-dir <path>                INSTA_OSS_DATA_DIR             /var/lib/instacloud (the flag is
 #                                    required to CHANGE the data dir of an existing install)
@@ -55,6 +63,34 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # /run/systemd/system exists only while systemd is PID 1.
 systemd_running() { have systemctl && [ -d /run/systemd/system ]; }
 randhex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+# The path a symlink chain ends at, or the path itself. Plain `readlink`, one component at a
+# time: `readlink -f` is GNU-only and this also has to run on a developer's macOS while the suite
+# does. Bounded, so a link that points at itself stops rather than spinning.
+resolve_link() {
+  _p=$1
+  _n=0
+  while [ -L "$_p" ] && [ "$_n" -lt 8 ]; do
+    _t=$(readlink "$_p") || break
+    case $_t in
+      /*) _p=$_t ;;
+      *) _p=$(dirname "$_p")/$_t ;;
+    esac
+    _n=$((_n + 1))
+  done
+  # Normalise LEXICALLY (`pwd -L`), so `/a/b/../c` is mounted as `/a/c` and `..` means the parent
+  # of the path as written. That is how the containers resolve the link: from the link's own
+  # mounted directory, never through a host symlink between the two. When a directory on the way
+  # is itself a symlink (an /etc/letsencrypt kept on another volume), the PHYSICAL path is one the
+  # containers never see and the link would dangle there; docker resolves a mount source's own
+  # symlinks, so mounting the lexical path is what makes it resolve.
+  _d=$(cd -L "$(dirname "$_p")" 2>/dev/null && pwd -L) || { printf '%s' "$_p"; return 0; }
+  printf '%s/%s' "$_d" "$(basename "$_p")"
+}
+
+# The directory a bind mount of DIR actually attaches, since docker resolves a source's symlinks:
+# what the overlap checks have to judge as well as the path written in compose.yml.
+phys_dir() { (cd -P "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
+
 # A NEWLINE walks through a `grep -Eq '^...$'` check, because grep tests each LINE: `^` and `$`
 # anchor a line, never the string, so a value whose FIRST line is well shaped passes and carries
 # everything after the newline with it. That is not theoretical here: every checked value is
@@ -98,7 +134,7 @@ usage() {
 }
 
 # ---- flags ----
-PRINT=''; F_DOMAIN=''; F_EMAIL=''; F_VERSION=''; F_TLS=''; F_IMG_GIB=''; F_DATA_DIR=''
+PRINT=''; F_DOMAIN=''; F_EMAIL=''; F_VERSION=''; F_TLS=''; F_IMG_GIB=''; F_DATA_DIR=''; F_TLS_CERT=''; F_TLS_KEY=''
 need() { if [ $# -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value"; fi; }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -106,6 +142,10 @@ while [ $# -gt 0 ]; do
     --domain=*) F_DOMAIN=${1#*=}; shift ;;
     --email) need "$@"; F_EMAIL=$2; shift 2 ;;
     --email=*) F_EMAIL=${1#*=}; shift ;;
+    --tls-cert) need "$@"; F_TLS_CERT=$2; shift 2 ;;
+    --tls-cert=*) F_TLS_CERT=${1#*=}; shift ;;
+    --tls-key) need "$@"; F_TLS_KEY=$2; shift 2 ;;
+    --tls-key=*) F_TLS_KEY=${1#*=}; shift ;;
     --version) need "$@"; F_VERSION=$2; shift 2 ;;
     --version=*) F_VERSION=${1#*=}; shift ;;
     --tls) need "$@"; F_TLS=$2; shift 2 ;;
@@ -190,7 +230,124 @@ if [ -z "$VERSION" ] && [ -z "$PRINT" ]; then VERSION=$(latest_release || true);
 [ -n "$VERSION" ] || VERSION=latest
 
 TLS=$(resolve INSTA_OSS_TLS "$F_TLS" acme)
-case $TLS in acme|internal) ;; *) die "--tls must be acme or internal (got '$TLS')" ;; esac
+case $TLS in acme|internal|custom) ;; *) die "--tls must be acme, internal or custom (got '$TLS')" ;; esac
+
+# `custom` is the mode that buys the cloud's property. `acme` and `internal` both issue a
+# certificate PER HOSTNAME on demand, so deploying a service publishes its exact hostname: with an
+# ACME issuer it lands in the public certificate transparency logs within minutes, and measured on
+# a live box, credential scanners then arrive every 1 to 3 minutes against a 300 s idle timer, so
+# the compute service never sleeps. A certificate the operator supplies for `*.<domain>` is served
+# for every name under it, nothing is ever issued, and no hostname is ever published.
+TLS_CERT=$(resolve INSTA_OSS_TLS_CERT_FILE "$F_TLS_CERT" '')
+TLS_KEY=$(resolve INSTA_OSS_TLS_KEY_FILE "$F_TLS_KEY" '')
+if [ "$TLS" = custom ]; then
+  { [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ]; } ||
+    die "--tls custom needs both --tls-cert <path> and --tls-key <path> (or INSTA_OSS_TLS_CERT_FILE and INSTA_OSS_TLS_KEY_FILE): the certificate has to carry *.<your domain> AND *.s3.<your domain>, since it is served for every name under them and nothing is issued"
+  for _f in "$TLS_CERT" "$TLS_KEY"; do
+    case $_f in /?*) ;; *) die "--tls-cert and --tls-key must be absolute paths (got '$_f')" ;; esac
+    shaped "$_f" '^/[A-Za-z0-9._/-]*$' ||
+      die "'$_f' is not a plain absolute path: it is mounted into two containers and written into compose.yml, so it may hold only letters, digits, dot, dash, underscore and /"
+    # A path that is not there yet is fine for the print modes, which render files and touch
+    # nothing; a real install refuses rather than bringing a stack up that cannot serve TLS.
+    if [ -z "$PRINT" ] && [ ! -r "$_f" ]; then die "cannot read '$_f': --tls custom serves this file, so the install stops here rather than starting an edge with no certificate"; fi
+  done
+  # The directories are what gets mounted (see `tls_mounts`), so they are resolved here, once --
+  # and so are SYMLINKS, because the commonest real source of these files is certbot, whose
+  # `live/<domain>/fullchain.pem` is a relative link into `../../archive/<domain>/`. Mounting
+  # only the link's own directory puts a dangling link inside both containers: valid on the
+  # host, unreadable where it is used. Refusing that layout would refuse the standard one, so
+  # the target's directory is mounted too and the configured path keeps pointing at the link,
+  # which then resolves inside the container exactly as it does outside. A renewal that
+  # re-points the link at `fullchain2.pem` stays visible for the same reason.
+  TLS_CERT_DIR=$(dirname "$TLS_CERT")
+  TLS_KEY_DIR=$(dirname "$TLS_KEY")
+  TLS_CERT_REAL=$(resolve_link "$TLS_CERT")
+  TLS_KEY_REAL=$(resolve_link "$TLS_KEY")
+  TLS_CERT_REAL_DIR=$(dirname "$TLS_CERT_REAL")
+  TLS_KEY_REAL_DIR=$(dirname "$TLS_KEY_REAL")
+  # ...and WHERE they live decides whether the stack can start at all, because each of these
+  # directories becomes a bind mount at the same path inside both containers.
+  #
+  # Two shapes break it. A pair kept inside the data directory puts a read-only mount inside the
+  # read-write one the daemon owns (or, one level up, a mount of `/var/lib` ON TOP of the mount
+  # of `/var/lib/instacloud`, which hides the data the daemon is being started to serve). And a
+  # directory that the images themselves own -- `/etc`, `/usr`, `/var` and the rest -- replaces
+  # that directory inside the container with the host's, so the edge loses its own `/etc` and
+  # Caddy never starts.
+  #
+  # REFUSED rather than worked around. Mounting these at some other destination inside the
+  # container is the alternative, and it would cost the property that makes this simple: one
+  # path, in instad.env, valid on the host and identically valid in both containers, which is
+  # how the daemon reads the same file for the database lanes that the edge serves. Translating
+  # paths per container to accommodate a certificate stored in the one directory a data
+  # migration moves wholesale is a worse trade than saying so here, with the fix in the message.
+  # ONE link is followed. Only the link's directory and its target's are mounted, so in a chain
+  # (live -> links -> archive) the middle hop does not exist inside the containers and the
+  # configured path dangles there, while it reads fine here and passes every check below.
+  # Refused before anything is written or restarted; certbot's live/ links are a single hop.
+  for _f in "$TLS_CERT" "$TLS_KEY"; do
+    [ -L "$_f" ] || continue
+    _t=$(readlink "$_f") || die "cannot read the symlink '$_f'"
+    case $_t in /*) _tp=$_t ;; *) _tp=$(dirname "$_f")/$_t ;; esac
+    [ ! -L "$_tp" ] ||
+      die "'$_f' is a symlink to '$_t', which is itself a symlink. Only one link is followed inside the containers (the link's directory and its target's are mounted, nothing between), so a chain would dangle there while it reads fine here. Point --tls-cert and --tls-key at a link whose target is the real file, as certbot's live/ links are, or at the file itself"
+  done
+  # The directories written into compose.yml are the four below, and two of them come from where
+  # a symlink LEADS rather than from the flag, so they get the flag's shape check too.
+  for _d in "$TLS_CERT_DIR" "$TLS_KEY_DIR" "$TLS_CERT_REAL_DIR" "$TLS_KEY_REAL_DIR"; do
+    shaped "$_d" '^/[A-Za-z0-9._/-]*$' ||
+      die "the TLS directory '$_d' (where --tls-cert or --tls-key leads) is not a plain absolute path: it is written into compose.yml and mounted into two containers, so it may hold only letters, digits, dot, dash, underscore and /"
+  done
+  # ...and the overlap checks judge each of them twice: as written, and as the directory docker
+  # actually attaches, since a bind mount resolves its source's symlinks. A path that looks
+  # harmless can land inside the data directory or on the configuration directory.
+  for _d in "$TLS_CERT_DIR" "$TLS_KEY_DIR" "$TLS_CERT_REAL_DIR" "$TLS_KEY_REAL_DIR" \
+    "$(phys_dir "$TLS_CERT_DIR")" "$(phys_dir "$TLS_KEY_DIR")" "$(phys_dir "$TLS_CERT_REAL_DIR")" "$(phys_dir "$TLS_KEY_REAL_DIR")"; do
+    _why=''
+    case $_d in
+      /) _why='is the filesystem root, which would be mounted over the whole container' ;;
+      "$DATA"|"$DATA"/*) _why="is inside the data directory $DATA, which is already mounted read-write into the daemon" ;;
+    esac
+    # An ancestor of the data directory (`/var/lib` for the default `/var/lib/instacloud`) masks
+    # that mount instead of overlapping it: same defect, other direction.
+    case $DATA in "$_d"/*) _why="contains the data directory $DATA, so mounting it would hide the data mount inside the container" ;; esac
+    # The configuration directory holds instad.env, and instad.env holds INSTA_OSS_SECRET, the
+    # daemon's signing secret. Every TLS directory is mounted into the EDGE as well, which has no
+    # use for that secret, so this would turn a compromise of the edge into a compromise of the
+    # daemon. Refused, and so is anything containing it; a child such as $CFG/tls holds only the
+    # pair and is the recommended home.
+    case $_d in "$CFG") _why="is the configuration directory, which holds instad.env and the daemon's INSTA_OSS_SECRET: mounting it would put that secret inside the edge container" ;; esac
+    case $CFG in "$_d"/*) _why="contains the configuration directory $CFG, which holds instad.env and the daemon's INSTA_OSS_SECRET: mounting it would put that secret inside the edge container" ;; esac
+    # ...and against where the data and configuration directories really ARE. Resolving only the
+    # candidate was half a check: with /etc/instacloud a symlink to /srv/instacloud, a pair under
+    # /srv/instacloud is the same directory by another name, matched neither spelling, and was
+    # mounted into the edge with the daemon's secret in it. Both forms, both directions.
+    _dp=$(phys_dir "$DATA")
+    _cp=$(phys_dir "$CFG")
+    case $_d in "$_dp"|"$_dp"/*) _why="is inside the data directory $DATA (really $_dp), which is already mounted read-write into the daemon" ;; esac
+    case $_dp in "$_d"/*) _why="contains the data directory $DATA (really $_dp), so mounting it would hide the data mount inside the container" ;; esac
+    case $_d in "$_cp") _why="is the configuration directory $CFG (really $_cp), which holds instad.env and the daemon's INSTA_OSS_SECRET: mounting it would put that secret inside the edge container" ;; esac
+    case $_cp in "$_d"/*) _why="contains the configuration directory $CFG (really $_cp), which holds instad.env and the daemon's INSTA_OSS_SECRET: mounting it would put that secret inside the edge container" ;; esac
+    case $_d in
+      /bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
+        _why="is a system directory the container images own, and mounting it would replace theirs" ;;
+    esac
+    [ -z "$_why" ] ||
+      die "the TLS directory '$_d' $_why. Keep the pair in a directory of its own outside $DATA, for example /etc/instacloud/tls, and pass those paths to --tls-cert and --tls-key"
+  done
+elif [ -n "$TLS_CERT" ] || [ -n "$TLS_KEY" ]; then
+  # A flag or an environment variable is a REQUEST, and nothing in this mode would serve it, so it
+  # stops. A value that only the previous install left in instad.env is not a request: it is how a
+  # box moves BACK from custom to acme or internal, and refusing there would strand it in custom
+  # mode for good. So that case is cleared, out loud.
+  if [ -n "$F_TLS_CERT" ] || [ -n "$F_TLS_KEY" ] || [ -n "$(envval INSTA_OSS_TLS_CERT_FILE)" ] || [ -n "$(envval INSTA_OSS_TLS_KEY_FILE)" ]; then
+    die "--tls-cert and --tls-key only apply with --tls custom (this run resolved --tls $TLS); nothing would serve them"
+  fi
+  # `warn`, not `log`: `log` writes to stdout, which in a --print-* mode IS the rendered file.
+  warn "--tls $TLS: dropping the supplied certificate this install was previously using (this mode issues its own)"
+  TLS_CERT=''
+  TLS_KEY=''
+fi
 EMAIL=$(resolve INSTA_OSS_ACME_EMAIL "$F_EMAIL" '')
 # Empty is legitimate (the ACME account is then registered without a contact), so only a value
 # that IS set has to be one: it is rendered into the Caddyfile, where a malformed address fails
@@ -279,6 +436,113 @@ shaped "$DOMAIN" '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}
   die "'$DOMAIN' is not a hostname: it must be dot-separated labels of a-z, 0-9 and inner hyphens, 1-63 characters each, with at least two labels and no empty label (a leading dot, a double dot or a bare name all fail here rather than after the install)"
 DOMAIN_CHANGED=0
 [ -n "$OLD_DOMAIN" ] && [ "$OLD_DOMAIN" != "$DOMAIN" ] && DOMAIN_CHANGED=1
+
+# The supplied pair is checked HERE, after the domain, because one of the checks is whether the
+# certificate covers the names this install will serve. Everything else about it was validated
+# with the flags above.
+if [ "$TLS" = custom ]; then
+  # ...and the pair is CHECKED before anything starts. Readable and syntactically safe is not the
+  # same as able to serve: a mismatched key, a malformed PEM or a perfectly good certificate for
+  # another domain leaves Caddy crash-looping while this script exits 0 and says it is serving
+  # your certificate. That is the third time this installer has reported success over a
+  # configuration that cannot work, so this is the check rather than another warning.
+  #
+  # Run whenever both files can be READ, in any mode: a --print-* run over real files checks them
+  # too (which is also how the suite exercises this without root), and a --print-* run over paths
+  # that do not exist yet renders as before, since there is nothing to check.
+  check_tls_pair() {
+    openssl x509 -in "$TLS_CERT" -noout >/dev/null 2>&1 ||
+      die "'$TLS_CERT' is not a PEM certificate openssl can read"
+    openssl pkey -in "$TLS_KEY" -noout >/dev/null 2>&1 ||
+      die "'$TLS_KEY' is not a PEM private key openssl can read"
+    _cpub=$(openssl x509 -in "$TLS_CERT" -noout -pubkey 2>/dev/null)
+    _kpub=$(openssl pkey -in "$TLS_KEY" -pubout 2>/dev/null)
+    # An explicit `if`: `A && B || C` reads as if-then-else and is not one (shellcheck SC2015).
+    if [ -z "$_cpub" ] || [ "$_cpub" != "$_kpub" ]; then
+      die "'$TLS_KEY' is not the key for '$TLS_CERT' (their public keys differ): the edge would fail to load the pair and crash-loop"
+    fi
+    # The PURPOSE. A certificate whose extended key usage is restricted to client authentication
+    # loads, is served, and passes the fingerprint probe below (which uses -k, because a private
+    # CA may not be in this host's trust store), and then every client rejects it as a server
+    # certificate. `-purpose` answers from the certificate alone, with no trust chain: "SSL server
+    # : No" for a clientAuth-only EKU, "Yes" for serverAuth and for a certificate with no EKU at
+    # all, which is unrestricted.
+    openssl x509 -in "$TLS_CERT" -noout -purpose 2>/dev/null | grep -q '^SSL server : Yes' ||
+      die "'$TLS_CERT' is not usable as a TLS server certificate (its extended key usage does not allow server authentication): every client would reject it. Ask for a certificate with serverAuth, or with no EKU restriction"
+    # BOTH boundaries. `-checkend 0` proves only that notAfter is in the future, so a
+    # future-dated certificate passed it, installed cleanly, and was then rejected by every
+    # browser and every psql client while the install said it had worked.
+    openssl x509 -in "$TLS_CERT" -noout -checkend 0 >/dev/null 2>&1 ||
+      die "'$TLS_CERT' has already expired ($(openssl x509 -in "$TLS_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)); replace it before installing"
+    _nb=$(openssl x509 -in "$TLS_CERT" -noout -startdate 2>/dev/null | cut -d= -f2)
+    # GNU date on the boxes this installs on; the BSD form is for a developer running the suite
+    # on macOS. A date neither can parse is a warning, not a refusal: an unreadable timestamp
+    # must not block an install the way an invalid certificate does.
+    _nbs=$(date -u -d "$_nb" +%s 2>/dev/null || date -j -f '%b %d %T %Y %Z' "$_nb" +%s 2>/dev/null || printf '')
+    if [ -z "$_nbs" ]; then
+      warn "could not read the start date of '$TLS_CERT' ($_nb); its notBefore was not checked"
+    elif [ "$_nbs" -gt "$(date -u +%s)" ]; then
+      die "'$TLS_CERT' is not valid yet (notBefore $_nb): it would be rejected by every client until then, and the install would still have said it worked"
+    fi
+    # The WILDCARD, explicitly, and this is the point of the mode rather than a detail. Sampling
+    # names cannot establish the property: a certificate carrying exactly api, console and one
+    # made-up service name passed, and then the first real service got a hostname-invalid
+    # certificate. What this mode promises is arbitrary FUTURE hostnames with nothing issued, and
+    # only `*.$DOMAIN` promises that.
+    _sans=$(openssl x509 -in "$TLS_CERT" -noout -ext subjectAltName 2>/dev/null | tr -d ' ' | tr '\n' ',')
+    [ -n "$_sans" ] || _sans=$(openssl x509 -in "$TLS_CERT" -noout -text 2>/dev/null |
+      grep -A1 'Subject Alternative Name' | tr -d ' ' | tr '\n' ',')
+    # TWO wildcards, because this box serves two label depths under $DOMAIN and a wildcard
+    # matches exactly ONE label. Every service name is a single label -- `web-<ref>.$DOMAIN`,
+    # `pg-db-<ref>.$DOMAIN`, `s3.$DOMAIN`, `api` and `console` -- and `*.$DOMAIN` covers all of
+    # them. Buckets are not: the object store is addressed virtual-hosted as
+    # `<bucket>.s3.$DOMAIN`, which `*.$DOMAIN` does NOT match, and `AWS_ENDPOINT_URL_S3` is
+    # injected into every deployed app while the AWS SDKs send virtual-hosted by default. Under
+    # acme those names get their own certificate on demand; here nothing is issued, by design,
+    # so a certificate without `*.s3.$DOMAIN` means storage fails hostname verification for
+    # every app on the box, with this script reporting success.
+    #
+    # grep -F, not a `case` glob: the `*` in `DNS:*.` is a wildcard to `case` and would match any
+    # single-label SAN, which is the opposite of the check. And -i, because DNS names are
+    # case-insensitive (RFC 4343) and TLS name matching is: a certificate carrying
+    # `DNS:*.Example.Com` covers exactly the same names as one carrying `DNS:*.example.com`, and
+    # every client would accept it. $DOMAIN is already lower-cased by the shape check above, so
+    # the case that varies is the one inside the certificate, which this install does not own.
+    for _w in "*.$DOMAIN" "*.s3.$DOMAIN"; do
+      printf '%s' ",$_sans," | grep -qiF ",DNS:$_w," ||
+        die "'$TLS_CERT' does not carry the SAN DNS:$_w. --tls custom issues nothing, so this one certificate has to cover every name this box serves, and that is TWO wildcards: DNS:*.$DOMAIN for the api, console, compute and database hostnames, and DNS:*.s3.$DOMAIN for the bucket URLs your apps are handed (a wildcard matches one label, so *.$DOMAIN does not cover <bucket>.s3.$DOMAIN). Ask for both on the same certificate (it has: $(printf '%s' "$_sans" | sed 's/,$//'))"
+    done
+    # ...and the two names an operator is handed. A wildcard covers both; this names which one is
+    # missing when it does not. The OUTPUT, not the exit status: `x509 -checkhost` prints "does
+    # match" or "does NOT match" in every version that has the flag, and returns 1 for a miss
+    # only in newer ones (OpenSSL 3.0 on an Ubuntu runner returns 0 either way).
+    for _h in "api.$DOMAIN" "console.$DOMAIN"; do
+      _hostout=$(openssl x509 -in "$TLS_CERT" -noout -checkhost "$_h" 2>/dev/null || true)
+      case $_hostout in
+        *'does match'*) ;;
+        *) die "'$TLS_CERT' does not cover $_h, which this install prints as its own URL (subject $(openssl x509 -in "$TLS_CERT" -noout -subject 2>/dev/null | cut -d= -f2-))" ;;
+      esac
+    done
+    # The bare domain is not covered by a wildcard and is not fatal: nothing here is served on it
+    # by default, but an operator who points it at this box will get a name mismatch.
+    _apexout=$(openssl x509 -in "$TLS_CERT" -noout -checkhost "$DOMAIN" 2>/dev/null || true)
+    case $_apexout in
+      *'does match'*) ;;
+      *) warn "'$TLS_CERT' does not cover the bare $DOMAIN (a wildcard does not): anything served on it will be a name mismatch" ;;
+    esac
+    openssl x509 -in "$TLS_CERT" -noout -checkend 1814400 >/dev/null 2>&1 ||
+      warn "'$TLS_CERT' expires within 21 days ($(openssl x509 -in "$TLS_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)): nothing renews a supplied certificate, and the daemon will keep saying so"
+  }
+  if [ -r "$TLS_CERT" ] && [ -r "$TLS_KEY" ]; then
+    if have openssl; then
+      check_tls_pair
+    elif [ -z "$PRINT" ] && pkg_install openssl >/dev/null 2>&1 && have openssl; then
+      check_tls_pair
+    elif [ -z "$PRINT" ]; then
+      die "openssl is required to check the certificate --tls custom is about to serve, and it could not be installed"
+    fi
+  fi
+fi
 
 SECRET=$(resolve INSTA_OSS_SECRET '' '')
 [ -n "$SECRET" ] || SECRET=$(randhex 32)
@@ -397,6 +661,11 @@ EOF
   log '# --- stack only (compose.yml and this script; the daemon ignores them) ---'
   emit INSTA_OSS_IMAGE "$IMAGE"
   emit INSTA_OSS_TLS "$TLS"
+  # The daemon reads these too: the database lanes present a certificate of their own, and with a
+  # supplied pair they present THAT instead of asking the edge to issue one per hostname, which
+  # would publish the name through a different door.
+  emit INSTA_OSS_TLS_CERT_FILE "$TLS_CERT"
+  emit INSTA_OSS_TLS_KEY_FILE "$TLS_KEY"
   emit INSTA_OSS_ACME_EMAIL "$EMAIL"
   emit INSTA_OSS_CA_FILE "$CA_FILE"
   emit INSTA_OSS_DATA_IMG_GIB "$(resolve INSTA_OSS_DATA_IMG_GIB "$F_IMG_GIB" '')"
@@ -442,7 +711,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # identical path on both sides: every bind mount the daemon emits is valid on the host
-      - $DATA:$DATA
+      - $DATA:$DATA$(tls_mounts)
   edge:
     image: caddy:2.11.4
     container_name: io-edge
@@ -453,7 +722,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # certificate store; the daemon reads it (INSTA_OSS_TLS_CERT_DIR) for the database lanes
       - $DATA/caddy/data:/data
-      - $DATA/caddy/config:/config
+      - $DATA/caddy/config:/config$(tls_mounts)
   garage:
     image: dxflrs/garage:v2.3.0
     container_name: io-garage
@@ -469,14 +738,46 @@ services:
 EOF
 }
 
+# The supplied certificate, mounted read-only at the SAME path on both sides, in both containers:
+# the edge serves it and the daemon presents it on the database lanes, and one path in instad.env
+# is then valid in either place, exactly as the data directory already works. Empty in every other
+# mode, so the compose file is unchanged there.
+#
+# The DIRECTORIES are mounted, not the two files, and that is the whole of the renewal story. A
+# file bind mount resolves to an inode at mount time, and every renewal tool replaces a
+# certificate by writing a new file and renaming it over the old name (or by moving a symlink):
+# the directory entry changes, the inode does not, and a container with the FILE mounted keeps
+# reading the old certificate until it is recreated. `docker compose restart edge` restarts the
+# process without recreating the mount, so it does not help either. With the directory mounted,
+# the name is resolved through the mount on every open, so a rename inside it is visible
+# immediately: the daemon's next handshake re-reads the new file and the edge picks it up on a
+# restart. One mount when both files share a directory, which is the usual case.
+tls_mounts() {
+  [ "$TLS" = custom ] || return 0
+  _seen=''
+  for _d in "$TLS_CERT_DIR" "$TLS_KEY_DIR" "$TLS_CERT_REAL_DIR" "$TLS_KEY_REAL_DIR"; do
+    case " $_seen " in *" $_d "*) continue ;; esac
+    _seen="$_seen $_d"
+    printf '\n      - %s:%s:ro' "$_d" "$_d"
+  done
+}
+
 # Caddyfile with concrete values (Caddy has no env placeholders for an omitted email line).
 render_caddyfile() {
   printf '{\n\tadmin off\n'
-  [ -z "$EMAIL" ] || printf '\temail %s\n' "$EMAIL"
-  printf '\ton_demand_tls {\n\t\task http://127.0.0.1:%s/tls/ask\n\t}\n}\n' "$INTERNAL_PORT"
-  printf 'https:// {\n\ttls {\n\t\ton_demand\n'
-  [ "$TLS" = internal ] || printf '\t\tissuer acme\n'
-  printf '\t\tissuer internal\n\t}\n'
+  # No email and no `on_demand_tls` block in custom mode: there is no issuer to contact and
+  # nothing to ask about. `on_demand` appearing ANYWHERE in this file is what would reopen the
+  # leak, so the mode that exists to prevent it emits none of that machinery at all.
+  if [ "$TLS" = custom ]; then
+    printf '}\n'
+    printf 'https:// {\n\ttls %s %s\n' "$TLS_CERT" "$TLS_KEY"
+  else
+    [ -z "$EMAIL" ] || printf '\temail %s\n' "$EMAIL"
+    printf '\ton_demand_tls {\n\t\task http://127.0.0.1:%s/tls/ask\n\t}\n}\n' "$INTERNAL_PORT"
+    printf 'https:// {\n\ttls {\n\t\ton_demand\n'
+    [ "$TLS" = internal ] || printf '\t\tissuer acme\n'
+    printf '\t\tissuer internal\n\t}\n'
+  fi
   printf '\tencode zstd gzip\n'
   printf '\treverse_proxy 127.0.0.1:%s {\n' "$PORT"
   printf '\t\theader_up X-Forwarded-Proto https\n\t\theader_up X-Forwarded-Host {host}\n\t\tflush_interval -1\n\t}\n}\n'
@@ -955,6 +1256,61 @@ fi
 # first, the internal CA as the fallback the Caddyfile lists after it).
 CERT_DIR=$DATA/caddy/data/caddy/certificates
 cert_present() { [ -n "$(find "$CERT_DIR" -type f -name "api.$DOMAIN.crt" 2>/dev/null | head -n 1)" ]; }
+# ...and in custom mode there is nothing to wait for: the certificate is already on disk, the edge
+# serves it for every name, and the store this polls stays empty by design. Waiting four minutes
+# for a file that will never appear, and then warning about it, would be the install telling an
+# operator something is wrong when the mode is working exactly as asked.
+if [ "$TLS" = custom ]; then
+  # MANDATORY, not decorative. The old form probed with `-k`, swallowed the result with
+  # `|| true`, and then logged that it was serving your certificate whatever had happened -- so a
+  # pair the edge could not load left Caddy crash-looping while this script exited 0 saying it
+  # worked. Two things have to hold: the edge answers, and what it answers with is the
+  # certificate this install was given.
+  # The FINGERPRINT, not the serial. A serial is unique only within one issuer, issuers reuse
+  # them, and nothing stops an unrelated certificate carrying the same number -- so comparing
+  # serials would let a stale or foreign certificate satisfy the check that exists to establish
+  # that the edge is serving THIS file. A SHA-256 digest of the DER is the certificate's
+  # identity, and this probe is the one place in the script whose whole job is not to report
+  # success it has not established.
+  _ours=$(openssl x509 -in "$TLS_CERT" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+  _served=''
+  _t=0
+  while [ "$_t" -lt 60 ]; do
+    # `--noproxy '*'`: this probe is pinned to loopback on purpose, and an https_proxy in the
+    # environment would otherwise send it elsewhere -- at best failing a good install, at worst
+    # verifying the PROXY's certificate instead of the one being checked.
+    if curl -sk --noproxy '*' --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 10 -o /dev/null "https://api.$DOMAIN/healthz"; then
+      _served=$(printf '' | openssl s_client -connect 127.0.0.1:443 -servername "api.$DOMAIN" 2>/dev/null |
+        openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+      [ -n "$_served" ] && break
+    fi
+    _t=$((_t + 5))
+    sleep 5
+  done
+  if [ -z "$_served" ]; then
+    compose logs --tail=30 edge 2>&1 || true
+    die "the edge never answered https://api.$DOMAIN with a certificate after 60 s (see the log above): --tls custom has nothing else to fall back on, so this is a failed install rather than a warning"
+  fi
+  if [ "$_served" != "$_ours" ]; then
+    compose logs --tail=30 edge 2>&1 || true
+    die "the edge is serving a different certificate (SHA-256 $_served) from the one in $TLS_CERT (SHA-256 $_ours) (see the log above)"
+  fi
+  # `-k` proved it is OUR certificate (the fingerprint above) and nothing about whether a client will
+  # accept it. Two of the three cases can be checked from here and are: a certificate that is its
+  # own trust anchor (self-signed, what an internal box usually has) verifies against itself, and
+  # a publicly-issued one verifies against the system store -- either way including the HOSTNAME,
+  # which is the part `-k` throws away. The third, a private CA this box does not trust but your
+  # clients do, cannot be verified from here and is a legitimate configuration, so it is a
+  # precise warning rather than a failed install.
+  if curl -sS --noproxy '*' --cacert "$TLS_CERT" --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 10 -o /dev/null "https://api.$DOMAIN/healthz" 2>/dev/null; then
+    log "the supplied certificate verifies for api.$DOMAIN against itself"
+  elif curl -sS --noproxy '*' --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 10 -o /dev/null "https://api.$DOMAIN/healthz" 2>/dev/null; then
+    log "the supplied certificate verifies for api.$DOMAIN against this box's trust store"
+  else
+    warn "the edge is serving your certificate, but neither the certificate itself nor this box's trust store verifies it for api.$DOMAIN: fine if it is issued by a private CA your clients trust, and a browser error if it is not"
+  fi
+  log "serving the supplied certificate $TLS_CERT for *.$DOMAIN and *.s3.$DOMAIN (nothing is issued, so no hostname is published)"
+else
 # The internal issuer is local and answers in seconds; ACME does not, and four minutes covers a
 # first issuance plus one retry. Past that the edge keeps trying on its own, so this is a warning.
 if [ "$TLS" = internal ]; then CERT_WAIT=60; else CERT_WAIT=240; fi
@@ -966,7 +1322,8 @@ if [ "$TLS" = internal ]; then CERT_WAIT=60; else CERT_WAIT=240; fi
 _started=$(date +%s)
 _tries=0
 while :; do
-  curl -sk --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 60 -o /dev/null "https://api.$DOMAIN/healthz" || true
+  # Pinned to loopback, so an https_proxy in the environment must not answer it.
+  curl -sk --noproxy '*' --resolve "api.$DOMAIN:443:127.0.0.1" --max-time 60 -o /dev/null "https://api.$DOMAIN/healthz" || true
   if cert_present; then break; fi
   _tries=$((_tries + 1))
   if [ "$(( $(date +%s) - _started ))" -ge "$CERT_WAIT" ]; then break; fi
@@ -977,6 +1334,7 @@ if cert_present; then
   log "certificate issued for api.$DOMAIN"
 else
   warn "no certificate for api.$DOMAIN after ${CERT_WAIT}s: the edge keeps retrying, and the database lanes start presenting it the moment it lands"
+fi
 fi
 if [ "$TLS" = internal ]; then
   _root=$DATA/caddy/data/caddy/pki/authorities/local/root.crt

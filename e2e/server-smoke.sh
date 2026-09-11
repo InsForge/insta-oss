@@ -351,7 +351,201 @@ docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$PGC" \
   | grep -q '/var/lib/instacloud/pg/' || FAIL "postgres is not on a data-dir bind mount"
 OK "upgrade is idempotent and data survived"
 
-STEP "11. teardown"
+STEP "11. tls custom: one supplied certificate, and no per-host issuance"
+# The parity break this mode closes. `acme` and `internal` both issue a certificate PER HOSTNAME
+# on demand, so deploying a service publishes its exact hostname; measured on a live box, an ACME
+# issuance put the hostname into the public certificate transparency logs and credential scanners
+# arrived within minutes and kept arriving every 1 to 3 minutes, against a 300 s idle timer, so
+# the compute service never slept. The cloud serves one wildcard and publishes nothing. What has
+# to be true here is negative -- nothing issued, nothing published -- so this step asserts the
+# absence of issuance rather than the presence of a certificate.
+E2E_TLS_DIR=/etc/instacloud/e2e-tls
+CADDYFILE=/etc/instacloud/Caddyfile
+CERT_STORE=/var/lib/instacloud/caddy/data/caddy/certificates
+mkdir -p "$E2E_TLS_DIR"
+# TWO wildcards. A wildcard matches exactly one label, and this box serves two depths: every
+# service name is `<label>.$DOMAIN`, and every bucket is `<bucket>.s3.$DOMAIN`, which
+# `*.$DOMAIN` does NOT match. `AWS_ENDPOINT_URL_S3=https://s3.$DOMAIN` is injected into every
+# deployed app and the SDKs address buckets virtual-hosted by default, so a single-wildcard
+# certificate breaks storage for every app on the box in a mode that issues nothing.
+openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
+  -keyout "$E2E_TLS_DIR/wild.key" -out "$E2E_TLS_DIR/wild.crt" \
+  -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:*.s3.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
+  || FAIL "could not mint a wildcard certificate for *.$DOMAIN"
+chmod 600 "$E2E_TLS_DIR/wild.key"
+BEFORE=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
+
+curl_k_ok() { curl -sS -k -o /dev/null -f "$1"; }
+# The certificate's IDENTITY is a digest of it, not its serial: serials are unique only within
+# one issuer and are reused, so two different certificates can carry the same number and a
+# serial comparison would pass on one of them.
+served_fp() {
+  openssl s_client -connect "127.0.0.1:443" -servername "$1" </dev/null 2>/dev/null \
+    | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2
+}
+file_fp() { openssl x509 -in "$1" -noout -fingerprint -sha256 | cut -d= -f2; }
+# After the definitions: a POSIX sh function does not exist until the line defining it has run,
+# and a call above it dies with "not found" -- which neither `sh -n` nor shellcheck reports.
+OURS=$(file_fp "$E2E_TLS_DIR/wild.crt")
+# `healthz` carries the supplied certificate's own notAfter, so this asks the daemon WHICH file
+# it is reading rather than trusting a log line. The renewal below has a different validity, so
+# the two dates distinguish the old certificate from the new one.
+healthz_notafter() {
+  curl -sS -k "https://api.$DOMAIN/healthz" 2>/dev/null | sed -n 's/.*"notAfter":"\([^"]*\)".*/\1/p'
+}
+healthz_moved_from() {
+  _was=$1
+  _now=$(healthz_notafter)
+  [ -n "$_now" ] || return 1
+  [ "$_now" != "$_was" ]
+}
+healthz_matches_file() {
+  _na=$(curl -sS -k "https://api.$DOMAIN/healthz" 2>/dev/null | sed -n 's/.*"notAfter":"\([^"]*\)".*/\1/p')
+  [ -n "$_na" ] || return 1
+  _want=$(date -u -d "$(openssl x509 -in "$E2E_TLS_DIR/wild.crt" -noout -enddate | cut -d= -f2)" +%s 2>/dev/null) || return 1
+  _got=$(date -u -d "$_na" +%s 2>/dev/null) || return 1
+  [ "$_want" = "$_got" ]
+}
+
+# ...and one wildcard is refused BEFORE anything is touched, naming the SAN that is missing.
+# This is the shape that reached a live box: a certificate that looks complete, covers every
+# service hostname, and silently does not cover the bucket URLs the apps are given.
+openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
+  -keyout "$E2E_TLS_DIR/one.key" -out "$E2E_TLS_DIR/one.crt" \
+  -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
+  || FAIL "could not mint the single-wildcard certificate"
+ONE_OUT=$( ( cd "$ROOT" && INSTA_OSS_TLS=custom sh install.sh -y \
+    --tls-cert "$E2E_TLS_DIR/one.crt" --tls-key "$E2E_TLS_DIR/one.key" ) 2>&1 ) && \
+  FAIL "a certificate without DNS:*.s3.$DOMAIN was accepted: bucket URLs would fail hostname verification for every app"
+printf '%s\n' "$ONE_OUT" | grep -Fq "does not carry the SAN DNS:*.s3.$DOMAIN" \
+  || FAIL "the refusal did not name the missing SAN: $ONE_OUT"
+rm -f "$E2E_TLS_DIR/one.crt" "$E2E_TLS_DIR/one.key"
+OK "a single-wildcard certificate is refused, naming DNS:*.s3.$DOMAIN"
+
+( cd "$ROOT" && INSTA_OSS_TLS=custom sh install.sh -y \
+    --tls-cert "$E2E_TLS_DIR/wild.crt" --tls-key "$E2E_TLS_DIR/wild.key" ) 2>&1 | tee -a "$INSTALL_LOG"
+grep -q "tls $E2E_TLS_DIR/wild.crt $E2E_TLS_DIR/wild.key" "$CADDYFILE" \
+  || FAIL "the Caddyfile does not serve the supplied certificate"
+if grep -q on_demand "$CADDYFILE"; then FAIL "the Caddyfile still configures on-demand issuance"; fi
+for c in io-instad io-edge; do
+  [ "$(cstate $c)" = "running" ] || FAIL "$c is not running after the custom-tls install, state $(cstate $c)"
+done
+wait_for 120 curl_k_ok "https://api.$DOMAIN/healthz" || FAIL "the edge did not answer api.$DOMAIN after the custom-tls install"
+OK "the stack came up serving the supplied certificate"
+
+# The two names an operator is handed, and a service hostname, all answer with OUR certificate.
+for host in "api.$DOMAIN" "console.$DOMAIN" "$(url_host "$URL")"; do
+  [ "$(served_fp "$host")" = "$OURS" ] || FAIL "$host is not served the supplied certificate"
+done
+# ...and a hostname that has NEVER existed on this box: served the same certificate, and the
+# store Caddy writes issued certificates into gains nothing. That is the whole property.
+NEVER="zz-never-$RUN.$DOMAIN"
+[ "$(served_fp "$NEVER")" = "$OURS" ] || FAIL "$NEVER is not served the supplied certificate"
+sleep 5
+AFTER=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
+[ "$AFTER" = "$BEFORE" ] || FAIL "the certificate store grew from $BEFORE to $AFTER: something was issued"
+if docker logs io-edge 2>&1 | tail -200 | grep -q "certificate obtained successfully"; then
+  FAIL "the edge obtained a certificate in custom mode"
+fi
+OK "a never-seen hostname is served without issuing anything"
+
+# The BUCKET vhost, which is the name a single wildcard does not cover. Two labels in front of
+# the domain, addressed by every AWS SDK by default, and the reason this mode needs the second
+# wildcard. Verified, not just served: `--cacert` with the certificate itself makes curl check
+# the HOSTNAME, which is exactly what `-k` throws away and what was failing.
+BUCKET=$(printf '%s\n' "$SECRETS" | sed -n 's/^BUCKET_NAME="\(.*\)"$/\1/p')
+[ -n "$BUCKET" ] || FAIL "no BUCKET_NAME in the printed secrets"
+VHOST=$BUCKET.s3.$DOMAIN
+[ "$(served_fp "$VHOST")" = "$OURS" ] || FAIL "$VHOST is not served the supplied certificate"
+curl -sS -o /dev/null --cacert "$E2E_TLS_DIR/wild.crt" --resolve "$VHOST:443:127.0.0.1" "https://$VHOST/" \
+  || FAIL "$VHOST does not VERIFY against the supplied certificate: a bucket URL fails hostname verification"
+OK "the bucket vhost $VHOST verifies against the supplied certificate"
+
+# The database lane presents a certificate too, and it is the other door issuance would publish a
+# hostname through: the daemon triggers issuance by handshaking the edge with the wanted
+# servername, so a wildcard at the edge alone would not have closed this.
+PGHOST_NAME=pg-db-$SLUG-main.$DOMAIN
+# `-starttls postgres` is how the lane's TLS is reached without a client library. It needs
+# OpenSSL 1.1.1 or newer; where it is missing the check is SKIPPED loudly rather than passing
+# quietly, because a silent skip of exactly this check is how the leak would come back.
+if openssl s_client -help 2>&1 | grep -q 'starttls'; then
+  LANE_FP=$(openssl s_client -connect "127.0.0.1:5432" -starttls postgres -servername "$PGHOST_NAME" </dev/null 2>/dev/null \
+    | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+  [ -n "$LANE_FP" ] || FAIL "the pg lane did not complete a TLS handshake for $PGHOST_NAME"
+  [ "$LANE_FP" = "$OURS" ] || FAIL "the pg lane presented SHA-256 '$LANE_FP', not the supplied certificate '$OURS'"
+  AFTER=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$AFTER" = "$BEFORE" ] || FAIL "the pg lane handshake made something issue a certificate"
+  OK "the database lane presents the supplied certificate and issues nothing"
+else
+  printf 'SKIP %s\n' "openssl has no -starttls: the database lane certificate check did not run" 1>&2
+fi
+
+# RENEWAL, done the way a renewal tool does it: write the new pair alongside and rename it over
+# the old name. This is the test that catches the mount being wrong. A file bind mount resolves to
+# an inode at mount time, so with the FILES mounted the containers keep reading the old
+# certificate after the rename and the documented procedure is a lie that expires with the
+# certificate. With the DIRECTORY mounted, the name is resolved through the mount on every open.
+openssl req -x509 -newkey rsa:2048 -sha256 -days 3 -nodes \
+  -keyout "$E2E_TLS_DIR/next.key" -out "$E2E_TLS_DIR/next.crt" \
+  -subj "/CN=*.$DOMAIN" -addext "subjectAltName=DNS:*.$DOMAIN,DNS:*.s3.$DOMAIN,DNS:$DOMAIN" >/dev/null 2>&1 \
+  || FAIL "could not mint the renewal certificate"
+NEXT=$(file_fp "$E2E_TLS_DIR/next.crt")
+# What `healthz` says BEFORE the rename, so the assertion after it is that the number MOVED. A
+# check that only reads it once passes against a cache that never invalidates, which is exactly
+# what a live-box renewal caught: same notAfter, same daysLeft, only secondsLeft ticking.
+HEALTHZ_BEFORE=$(healthz_notafter)
+[ -n "$HEALTHZ_BEFORE" ] || FAIL "healthz is not reporting a certificate before the renewal"
+[ "$NEXT" != "$OURS" ] || FAIL "the renewal certificate is byte-identical to the first one"
+chmod 600 "$E2E_TLS_DIR/next.key"
+# ...and with the OLD timestamps put back on the new files. A rename changes the inode and need
+# not change the mtime, and renewal and configuration tools routinely preserve timestamps, so a
+# cache keyed on mtime alone serves the replaced certificate for the life of the process. The
+# lane cache was exactly that, while `/healthz` was not, so the endpoint reported the renewal
+# and psql was still handed the old file. `touch -r` reproduces that on a real box.
+touch -r "$E2E_TLS_DIR/wild.crt" "$E2E_TLS_DIR/next.crt"
+touch -r "$E2E_TLS_DIR/wild.key" "$E2E_TLS_DIR/next.key"
+mv -f "$E2E_TLS_DIR/next.crt" "$E2E_TLS_DIR/wild.crt"
+mv -f "$E2E_TLS_DIR/next.key" "$E2E_TLS_DIR/wild.key"
+
+# The DAEMON needs nothing: it re-stats the path per handshake, and with the directory mounted it
+# now resolves to the new file. `healthz` follows on its own beat.
+LANE_AFTER=""
+if openssl s_client -help 2>&1 | grep -q 'starttls'; then
+  LANE_AFTER=$(openssl s_client -connect "127.0.0.1:5432" -starttls postgres -servername "$PGHOST_NAME" </dev/null 2>/dev/null \
+    | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+  [ "$LANE_AFTER" = "$NEXT" ] || FAIL "after the rename the pg lane still presents '$LANE_AFTER', not the renewed '$NEXT'"
+fi
+wait_for 90 healthz_moved_from "$HEALTHZ_BEFORE" || FAIL "healthz still reports the certificate it read before the rename"
+healthz_matches_file || FAIL "healthz reports a notAfter that is not the file's"
+OK "healthz followed the renewal: $HEALTHZ_BEFORE -> $(healthz_notafter)"
+
+# The two have to AGREE. Divergence is the actual harm: an operator confirms a renewal on the
+# endpoint while the lanes go on presenting the old certificate to every psql client.
+if [ -n "$LANE_AFTER" ]; then
+  [ "$LANE_AFTER" = "$NEXT" ] || FAIL "healthz reports the renewal but the pg lane presents '$LANE_AFTER'"
+  OK "healthz and the database lane report the same certificate after the renewal"
+fi
+OK "the daemon and its lanes pick up a renamed certificate with no restart"
+
+# The EDGE needs its process restarted (Caddy loads certificates at config load and does not
+# watch the file), and that is all it needs now: the mount does not have to be recreated.
+( cd /etc/instacloud && docker compose --env-file instad.env restart edge ) >/dev/null 2>&1 \
+  || FAIL "could not restart the edge"
+wait_for 90 curl_k_ok "https://api.$DOMAIN/healthz" || FAIL "the edge did not come back after the restart"
+[ "$(served_fp "api.$DOMAIN")" = "$NEXT" ] \
+  || FAIL "after a restart the edge still serves the old certificate: the documented renewal does not work"
+AFTER=$(find "$CERT_STORE" -name '*.crt' 2>/dev/null | wc -l | tr -d ' ')
+[ "$AFTER" = "$BEFORE" ] || FAIL "the renewal made something issue a certificate"
+OK "the edge serves the renewed certificate after a plain restart"
+
+# ...and back, because a box has to be able to leave this mode: the leftover paths in instad.env
+# are not a request nothing can serve, they are the previous install.
+( cd "$ROOT" && sh install.sh -y ) 2>&1 | tee -a "$INSTALL_LOG"
+grep -q on_demand "$CADDYFILE" || FAIL "on-demand issuance did not come back with --tls $TLS"
+wait_for 120 curl_healthz || FAIL "the daemon did not come back after leaving custom mode"
+OK "the install moves back out of custom mode"
+
+STEP "12. teardown"
 allow_delete || FAIL "could not set project.delete to allow"
 insta project delete --yes >/dev/null 2>&1 || insta project delete >/dev/null \
   || FAIL "project delete failed"

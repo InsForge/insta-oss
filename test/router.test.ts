@@ -3,14 +3,15 @@
 // service waits for exactly one wake, the waiting keeps the service awake through ONE shared timer,
 // and every failure mode has a readable answer instead of a dropped connection.
 import { test, expect, beforeEach, afterEach, vi } from 'vitest'
-import { cpSync, mkdirSync, mkdtempSync } from 'node:fs'
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer as createHttpServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { connect as netConnect, createServer as createNetServer, type Server as NetServer } from 'node:net'
 import { connect as tlsConnect, type SecureContext } from 'node:tls'
 import { Router } from '../src/router'
-import { Certs, findCertFiles } from '../src/router/certs'
+import { Certs, findCertFiles, suppliedCert, warnExpiring, SuppliedCertWatch, CERT_WARN_DAYS, WARN_EVERY_MS } from '../src/router/certs'
 import { createPgLane, errorResponse, PG_ERRORS } from '../src/router/pg'
 import { createSniLane } from '../src/router/tls'
 import { buildTable, type Route } from '../src/router/table'
@@ -23,6 +24,10 @@ import type { Config } from '../src/config'
 import type { State } from '../src/state'
 import { makeEngine, resetFakes, serverConfig, testConfig } from './fakes'
 import type { Branch, Project } from '../src/types'
+
+// The TLS cases mint pairs with the openssl CLI, which `npm test` does not require: where it is
+// absent they skip by name, as the README says, rather than fail.
+const hasOpenssl = spawnSync('sh', ['-c', 'command -v openssl'], { encoding: 'utf8' }).status === 0
 
 // ---- fakes -------------------------------------------------------------------------------------
 
@@ -918,6 +923,154 @@ test('a name under the bucket suffix that no bucket owns is refused for certific
   }
 })
 
+test.skipIf(!hasOpenssl)('a client that sends NO SNI is handed the RENEWED certificate, not the one the daemon booted with', async () => {
+  // libpq before 14 and older JDBC drivers send no SNI. They are refused either way (the pg lane
+  // answers 08P01 telling them to send it), but the handshake has to complete on the DEFAULT
+  // context for them to be told. That default was set once at start and never looked at again,
+  // so after a renewal SNI clients got the new certificate and these got the one the process
+  // booted with -- an opaque alert once it expired, instead of the readable error.
+  const dir = mkdtempSync(join(tmpdir(), 'io-nosni-renew-'))
+  const mint = (crt: string, key: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${key} -out ${crt} -subj '/CN=*.router.test' -addext 'subjectAltName=DNS:*.router.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  const fingerprintOf = (crt: string): string =>
+    spawnSync('sh', ['-c', `openssl x509 -in ${crt} -noout -fingerprint -sha256`], { encoding: 'utf8' }).stdout.trim().split('=')[1]
+  const freePort = async (): Promise<number> => {
+    const s = createNetServer()
+    const p = await listenEphemeral(s)
+    await new Promise<void>((r) => s.close(() => r()))
+    return p
+  }
+  const crt = join(dir, 'wildcard.crt')
+  const key = join(dir, 'wildcard.key')
+  mint(crt, key, 30)
+  const [pgPort, redisPort, mongoPort] = [await freePort(), await freePort(), await freePort()]
+  const cfg = serverConfig({
+    INSTA_OSS_DOMAIN: 'router.test', INSTA_OSS_TLS_CERT_FILE: crt, INSTA_OSS_TLS_KEY_FILE: key,
+    INSTA_OSS_LANE_PG_PORT: String(pgPort), INSTA_OSS_LANE_REDIS_PORT: String(redisPort), INSTA_OSS_LANE_MONGO_PORT: String(mongoPort),
+  })
+  const router = new Router({
+    cfg, table: () => buildTable(EMPTY, cfg, () => { /* quiet */ }),
+    stateOf: () => 'running', wake: async () => { /* nothing sleeps here */ },
+    touch: () => { /* no scheduler */ }, beginHold: () => { /* idem */ }, endHold: () => { /* idem */ },
+    upstream: new FakeUpstream(),
+    certs: new Certs({ certDir: null, supplied: { crt, key }, issue: async () => { throw new Error('nothing may be issued here') }, log: () => { /* quiet */ } }),
+    log: () => { /* quiet */ },
+  })
+  // What a no-SNI client is handed: the pg negotiation, then a handshake with no servername.
+  const presented = async (): Promise<string> => {
+    const raw = netConnect({ host: '127.0.0.1', port: pgPort })
+    await new Promise<void>((r) => raw.once('connect', () => r()))
+    raw.write(SSL_REQUEST)
+    await new Promise<Buffer>((r) => { raw.once('data', (d: Buffer) => r(d)) })
+    const t = tlsConnect({ socket: raw, rejectUnauthorized: false })
+    await new Promise<void>((r, j) => { t.once('secureConnect', () => r()); t.once('error', j) })
+    const fp = t.getPeerCertificate().fingerprint256
+    t.destroy()
+    return fp
+  }
+  try {
+    await router.start()
+    const first = fingerprintOf(crt)
+    expect(await presented()).toBe(first)
+
+    // The renewal as the docs describe it: a new pair written alongside, renamed over the old.
+    mint(join(dir, 'next.crt'), join(dir, 'next.key'), 90)
+    renameSync(join(dir, 'next.crt'), crt)
+    renameSync(join(dir, 'next.key'), key)
+    const second = fingerprintOf(crt)
+    expect(second).not.toBe(first)
+
+    // One beat later, which is what the daemon runs on its sweep interval.
+    await router.refreshCertificates()
+    expect(await presented()).toBe(second)
+    // ...and an unchanged pair costs nothing more: the same certificate, beat after beat.
+    await router.refreshCertificates()
+    expect(await presented()).toBe(second)
+  } finally {
+    await router.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(!hasOpenssl)('a renewal whose bytes cannot be read yet is RETRIED, so the redis and mongo lanes do not keep the old default', async () => {
+  // The context and the bytes are two reads of a pair someone else replaces. When the bytes
+  // failed after the context had been committed, every later beat saw the same context, took the
+  // "nothing moved" exit and never read the bytes again: pg (which uses the context) moved to the
+  // renewal while redis and mongo (which take bytes through setSecureContext) kept the old one.
+  const dir = mkdtempSync(join(tmpdir(), 'io-nosni-bytes-'))
+  const mint = (crt: string, key: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${key} -out ${crt} -subj '/CN=*.router.test' -addext 'subjectAltName=DNS:*.router.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  const fingerprintOf = (crt: string): string =>
+    spawnSync('sh', ['-c', `openssl x509 -in ${crt} -noout -fingerprint -sha256`], { encoding: 'utf8' }).stdout.trim().split('=')[1]
+  const freePort = async (): Promise<number> => {
+    const s = createNetServer()
+    const p = await listenEphemeral(s)
+    await new Promise<void>((r) => s.close(() => r()))
+    return p
+  }
+  // One read of the bytes fails, as when the renewal tool has the pair half-replaced.
+  class FlakyCerts extends Certs {
+    failNext = false
+    override materialFor(host: string): { cert: Buffer; key: Buffer } | null {
+      if (this.failNext) { this.failNext = false; return null }
+      return super.materialFor(host)
+    }
+  }
+  const crt = join(dir, 'wildcard.crt')
+  const key = join(dir, 'wildcard.key')
+  mint(crt, key, 30)
+  const [pgPort, redisPort, mongoPort] = [await freePort(), await freePort(), await freePort()]
+  const cfg = serverConfig({
+    INSTA_OSS_DOMAIN: 'router.test', INSTA_OSS_TLS_CERT_FILE: crt, INSTA_OSS_TLS_KEY_FILE: key,
+    INSTA_OSS_LANE_PG_PORT: String(pgPort), INSTA_OSS_LANE_REDIS_PORT: String(redisPort), INSTA_OSS_LANE_MONGO_PORT: String(mongoPort),
+  })
+  const certs = new FlakyCerts({ certDir: null, supplied: { crt, key }, issue: async () => { throw new Error('nothing may be issued here') }, log: () => { /* quiet */ } })
+  const router = new Router({
+    cfg, table: () => buildTable(EMPTY, cfg, () => { /* quiet */ }),
+    stateOf: () => 'running', wake: async () => { /* nothing sleeps here */ },
+    touch: () => { /* no scheduler */ }, beginHold: () => { /* idem */ }, endHold: () => { /* idem */ },
+    upstream: new FakeUpstream(), certs, log: () => { /* quiet */ },
+  })
+  // A TLS lane client with no SNI: a bare IP sends none. The lane closes it after the handshake,
+  // which is when the certificate it was handed is readable.
+  const presented = async (port: number): Promise<string> => {
+    const t = tlsConnect({ host: '127.0.0.1', port, rejectUnauthorized: false })
+    t.on('error', () => { /* the lane closes a no-SNI client once the handshake is done */ })
+    await new Promise<void>((r) => t.once('secureConnect', () => r()))
+    const fp = t.getPeerCertificate().fingerprint256
+    t.destroy()
+    return fp
+  }
+  try {
+    await router.start()
+    const first = fingerprintOf(crt)
+    expect(await presented(redisPort)).toBe(first)
+
+    mint(join(dir, 'next.crt'), join(dir, 'next.key'), 90)
+    renameSync(join(dir, 'next.crt'), crt)
+    renameSync(join(dir, 'next.key'), key)
+    const second = fingerprintOf(crt)
+    expect(second).not.toBe(first)
+
+    certs.failNext = true
+    await router.refreshCertificates()   // the bytes could not be read on this beat...
+    await router.refreshCertificates()   // ...so the next one has to try again
+    expect(await presented(redisPort)).toBe(second)
+    expect(await presented(mongoPort)).toBe(second)
+  } finally {
+    await router.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // ---- write classes: what actually rebuilds the table --------------------------------------------
 
 test('an audit event does not rebuild the route table; a real service change does', async () => {
@@ -1044,4 +1197,520 @@ test('both wake timeouts classify as a timeout through the TEXT branch, not only
   // rewrite a `timeout` into their own one-line answer, and the api door is re-entrant and
   // therefore never bounded, so nobody at a CLI reads it.
   expect(waiting).not.toContain('insta compute')
+})
+
+
+// ---- a supplied certificate (--tls custom) ------------------------------------------------------
+
+test('a SUPPLIED certificate is served for every host, and nothing is ever issued', async () => {
+  // The database lanes are the other door. `certFor` triggers issuance for a host the store does
+  // not hold, and triggering issuance IS a TLS handshake to the edge with that servername --
+  // which is exactly what publishes the hostname to certificate transparency. So a wildcard at
+  // the edge alone would not have closed the leak: a psql connection with SNI
+  // `pg-db-demo-main.<domain>` would have reopened it.
+  const crt = join('test', 'fixtures', 'local', 'router.test', 'router.test.crt')
+  const key = join('test', 'fixtures', 'local', 'router.test', 'router.test.key')
+  let issued = 0
+  const certs = new Certs({ certDir: null, supplied: { crt, key }, issue: async () => { issued++ } })
+  expect(await certs.certFor('api.router.test')).not.toBeNull()
+  // A hostname that has never existed on this box: served, and still nothing asked for.
+  expect(await certs.certFor('web-demo-feat.router.test')).not.toBeNull()
+  expect(certs.certExists('anything.router.test')).toBe(true)
+  expect(certs.materialFor('anything.router.test')).not.toBeNull()
+  expect(issued).toBe(0)
+
+  // Without a supplied pair, the store-and-issue behaviour is exactly as before.
+  const store = new Certs({ certDir: mkdtempSync(join(tmpdir(), 'io-certs-')), issue: async () => { issued++ } })
+  expect(await store.certFor('web-demo-feat.router.test')).toBeNull()
+  expect(issued).toBe(1)
+
+  // ...and a supplied pair that cannot be read answers "no certificate" rather than falling back
+  // to issuing one, because issuing is the thing this mode exists to prevent.
+  const gone = new Certs({ certDir: null, supplied: { crt: '/nope/x.crt', key: '/nope/x.key' }, issue: async () => { issued++ }, log: () => { /* quiet */ } })
+  expect(await gone.certFor('api.router.test')).toBeNull()
+  expect(gone.certExists('api.router.test')).toBe(false)
+  expect(issued).toBe(1)
+})
+
+
+test.skipIf(!hasOpenssl)('a renewal with the SAME mtime is still picked up by the lanes, and healthz agrees', async () => {
+  // The documented renewal is an atomic rename, and a rename changes the inode without
+  // necessarily changing the mtime: renewal and configuration tools routinely preserve
+  // timestamps. The lane contexts were cached on the certificate's mtime ALONE, so they went on
+  // presenting the old certificate for the life of the process -- while `/healthz`, whose watch
+  // had been hardened separately, reported the new one. The endpoint an operator checks to
+  // confirm a renewal landed said yes while `psql` was still being handed the old file.
+  //
+  // One mechanism, two implementations, one of them hardened: both sides derive their identity
+  // from `fileStamp` now, so they cannot drift again.
+  const dir = mkdtempSync(join(tmpdir(), 'io-renew-mtime-'))
+  const mint = (crt: string, key: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${key} -out ${crt} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  const serialOf = (crt: string): string =>
+    spawnSync('sh', ['-c', `openssl x509 -in ${crt} -noout -serial`], { encoding: 'utf8' }).stdout.trim()
+  try {
+    const crt = join(dir, 'wildcard.crt')
+    const key = join(dir, 'wildcard.key')
+    mint(crt, key, 30)
+    const first = serialOf(crt)
+    // A whole-second timestamp, so putting it back after the rename restores it EXACTLY:
+    // `utimesSync` cannot express the sub-millisecond precision a fresh write has, and the
+    // trap being reproduced is an identical mtime, not an approximately identical one.
+    const fixed = new Date(Math.floor(Date.now() / 1000) * 1000 - 86_400_000)
+    utimesSync(crt, fixed, fixed)
+    utimesSync(key, fixed, fixed)
+    const before = statSync(crt)
+
+    const certs = new Certs({ certDir: null, supplied: { crt, key }, issue: async () => { throw new Error('nothing may be issued here') } })
+    const watch = new SuppliedCertWatch(crt)
+    const ctx1 = await certs.certFor('pg-db-demo-main.example.test')
+    expect(ctx1).not.toBeNull()
+    const notAfterBefore = watch.current()!.notAfter
+
+    // The renewal, with the certificate's timestamps put back exactly as they were. Everything
+    // else about the file is different: contents, size, inode.
+    mint(join(dir, 'next.crt'), join(dir, 'next.key'), 90)
+    const second = serialOf(join(dir, 'next.crt'))
+    expect(second).not.toBe(first)
+    renameSync(join(dir, 'next.crt'), crt)
+    renameSync(join(dir, 'next.key'), key)
+    utimesSync(crt, fixed, fixed)
+    utimesSync(key, fixed, fixed)
+    expect(statSync(crt).mtimeMs).toBe(before.mtimeMs)          // the trap, reproduced exactly
+
+    // The lane hands back a DIFFERENT context, built from the file that is there now.
+    const ctx2 = await certs.certFor('pg-db-demo-main.example.test')
+    expect(ctx2).not.toBe(ctx1)
+    expect(certs.materialFor('pg-db-demo-main.example.test')!.cert.toString())
+      .toBe(readFileSync(crt).toString())
+
+    // ...and the two answers agree, which is the property the divergence destroyed: the field an
+    // operator reads to confirm a renewal and the certificate the lanes actually present.
+    watch.refresh()
+    expect(watch.current()!.notAfter).not.toBe(notAfterBefore)
+    expect(watch.current()!.notAfter).toBe(suppliedCert(crt)!.notAfter)
+    expect(watch.current()!.daysLeft).toBeGreaterThan(80)
+
+    // An unchanged pair is still cached: the fix must not turn every handshake into a read.
+    const ctx3 = await certs.certFor('pg-db-demo-main.example.test')
+    expect(ctx3).toBe(ctx2)
+
+    // A KEY-only change counts too. A pair whose halves no longer belong together is a
+    // handshake failure, so the stamp covers both files rather than only the certificate.
+    mint(join(dir, 'other.crt'), join(dir, 'other.key'), 90)
+    const keyBefore = statSync(key)
+    renameSync(join(dir, 'other.key'), key)
+    utimesSync(key, fixed, fixed)
+    expect(statSync(key).mtimeMs).toBe(keyBefore.mtimeMs)
+    const ctx4 = await certs.certFor('pg-db-demo-main.example.test')
+    expect(ctx4).not.toBe(ctx3)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(!hasOpenssl)('a broken certificate says so ONCE, however many handshakes arrive', async () => {
+  // These lanes are publicly reachable and the traffic is not the operator's: one public
+  // hostname on a live box drew 141 scanner requests in fifteen minutes. A degraded
+  // certificate plus ordinary client retries plus that traffic is unbounded log writes at the
+  // moment the operator most needs to read their logs. The expiry warning was throttled for
+  // this exact reason; this is its failure-path twin, and it is throttled the same way rather
+  // than by a second mechanism.
+  const dir = mkdtempSync(join(tmpdir(), 'io-noisy-'))
+  try {
+    const crt = join(dir, 'wildcard.crt')
+    const key = join(dir, 'wildcard.key')
+    const said: string[] = []
+    const certs = new Certs({ certDir: null, supplied: { crt, key }, log: (m) => { said.push(m) } })
+
+    // FAILURE 1: the pair is not there at all. Two hundred handshakes, one line.
+    for (let i = 0; i < 200; i++) expect(await certs.certFor(`h${i % 7}.example.test`)).toBeNull()
+    expect(said).toHaveLength(1)
+    expect(said[0]).toContain('cannot be read')
+
+    // FAILURE 2, different: the files exist and are not a certificate. New failure, so it
+    // speaks at once -- nothing is silenced on its first occurrence -- and then goes quiet.
+    writeFileSync(crt, 'not a certificate\n')
+    writeFileSync(key, 'not a key\n')
+    for (let i = 0; i < 200; i++) expect(await certs.certFor(`h${i % 7}.example.test`)).toBeNull()
+    expect(said).toHaveLength(2)
+    expect(said[1]).toContain('unreadable certificate')
+
+    // RECOVERY, announced once: a log that simply goes quiet cannot be told from one nobody is
+    // asking any more.
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${key} -out ${crt} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+    for (let i = 0; i < 200; i++) expect(await certs.certFor(`h${i % 7}.example.test`)).not.toBeNull()
+    expect(said).toHaveLength(3)
+    expect(said[2]).toContain('loads again')
+
+    // ...and a failure AFTER a recovery is not swallowed by the keys the last one left behind.
+    rmSync(crt)
+    for (let i = 0; i < 50; i++) expect(await certs.certFor('h0.example.test')).toBeNull()
+    expect(said).toHaveLength(4)
+    expect(said[3]).toContain('cannot be read')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a supplied certificate reports what it has left, and says so under three weeks', () => {
+  // The one certificate in this stack nothing renews. This cannot renew it either and does not
+  // try: it makes the number visible, so the failure is not announced by a browser.
+  const crt = join('test', 'fixtures', 'local', 'router.test', 'router.test.crt')
+  const cert = suppliedCert(crt)!
+  expect(cert.path).toBe(crt)
+  expect(Date.parse(cert.notAfter)).toBeGreaterThan(0)
+  expect(cert.daysLeft).toBe(Math.floor(cert.secondsLeft / 86_400))
+
+  // No file, an unreadable file and a file that is not a certificate all answer null, which is
+  // what `healthz` then omits -- itself worth alerting on, and never a false reassurance.
+  expect(suppliedCert(null)).toBeNull()
+  expect(suppliedCert('/nope/missing.crt')).toBeNull()
+  expect(suppliedCert(join('test', 'fixtures', 'local', 'router.test', 'router.test.key'))).toBeNull()
+
+  // The warning is a function of the clock, so it is tested against a clock: the fixture's own
+  // notAfter, moved backwards and forwards around the threshold.
+  const at = Date.parse(cert.notAfter)
+  const said: string[] = []
+  const log = (m: string): void => { said.push(m) }
+  const day = 86_400_000
+  expect(warnExpiring(suppliedCert(crt, at - (CERT_WARN_DAYS + 1) * day), log)).toBe(false)
+  expect(warnExpiring(suppliedCert(crt, at - (CERT_WARN_DAYS - 1) * day), log)).toBe(true)
+  expect(said[0]).toMatch(/expires in \d+ days? /)
+  expect(said[0]).toContain('Nothing renews a supplied certificate')
+  expect(warnExpiring(suppliedCert(crt, at + day), log)).toBe(true)
+  expect(said[1]).toContain('EXPIRED')
+  expect(said[1]).toContain('restart the edge')
+  // Nothing supplied: nothing said, in every other TLS mode.
+  expect(warnExpiring(null, log)).toBe(false)
+  expect(said).toHaveLength(2)
+})
+
+
+test('the certificate watch reads on its own beat, not per request', () => {
+  // `/healthz` is unauthenticated and polled continuously (load balancers, monitors, the
+  // installer's wait loop, and on a live box the scanners). A `readFileSync` per request is a
+  // handle anyone can pull on to stall the event loop, and a slow mount makes each read
+  // arbitrarily long: the same class as the pre-auth lane denial of service closed in #97,
+  // reintroduced through a health check.
+  const crt = join('test', 'fixtures', 'local', 'router.test', 'router.test.crt')
+  const real = suppliedCert(crt)!
+  const at = Date.parse(real.notAfter)
+  let reads = 0
+  const read = (path: string, now: number): ReturnType<typeof suppliedCert> => { reads++; return suppliedCert(path, now) }
+
+  const watch = new SuppliedCertWatch(crt, { read })
+  expect(reads).toBe(1)                                       // the constructor's own
+  for (let i = 0; i < 50; i++) expect(watch.current()).not.toBeNull()
+  expect(reads).toBe(1)                                       // ...and not one more
+  // The beat looks at the file; it does not re-read it. On an unchanged certificate that is a
+  // stat and nothing else, which is the whole point of a cache keyed on change rather than on
+  // time. What a moved file costs is asserted in the test below.
+  for (let i = 0; i < 100; i++) watch.refresh()
+  expect(reads).toBe(1)
+
+  // The clock stays live even though the file is not re-read: what is left is computed per call.
+  const far = watch.current(at - 40 * 86_400_000)!
+  const near = watch.current(at - 5 * 86_400_000)!
+  expect(far.daysLeft).toBe(40)
+  expect(near.daysLeft).toBe(5)
+  expect(reads).toBe(1)
+})
+
+test('a certificate that STOPS being readable goes absent, and does not keep its last value', () => {
+  // The property that had to survive the caching: a cached 172 days is not a certificate. Done
+  // to the FILE rather than to a boolean, because the cache is keyed on what the file looks
+  // like now: replaced badly, removed, and (where the process is not root) chmod'ed away, which
+  // is why the stamp carries mode and ctime and not only mtime, size and inode.
+  const src = readFileSync(join('test', 'fixtures', 'local', 'router.test', 'router.test.crt'))
+  const dir = mkdtempSync(join(tmpdir(), 'io-unreadable-'))
+  const crt = join(dir, 'live.crt')
+  try {
+    writeFileSync(crt, src)
+    const watch = new SuppliedCertWatch(crt)
+    expect(watch.current()).not.toBeNull()
+
+    // Replaced by something that is not a certificate: the daemon reports nothing, not the last
+    // good value it happens to remember.
+    writeFileSync(crt, 'this is not a certificate\n')
+    watch.refresh()
+    expect(watch.current()).toBeNull()
+
+    // ...and it comes back when the file does.
+    writeFileSync(crt, src)
+    watch.refresh()
+    expect(watch.current()).not.toBeNull()
+
+    // Unreadable without any change to the CONTENT. Skipped only where the check cannot mean
+    // anything, which is as root: root reads a 000 file, so the certificate stays readable and
+    // the assertion would be about the test environment rather than the code.
+    if (process.getuid?.() !== 0) {
+      chmodSync(crt, 0o000)
+      watch.refresh()
+      expect(watch.current()).toBeNull()
+      chmodSync(crt, 0o600)
+      watch.refresh()
+      expect(watch.current()).not.toBeNull()
+    }
+
+    // Gone entirely.
+    rmSync(crt)
+    watch.refresh()
+    expect(watch.current()).toBeNull()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(!hasOpenssl)('a REPLACED certificate is judged on its own merits, not silenced by the last one', () => {
+  // The operator sequence, not a unit of the limiter: they see "expires in N days", replace the
+  // file, and land on another near-expiry certificate -- the wrong file from the CA, last
+  // year's bundle, a renewal that did not renew. Under a limiter that spans the change they
+  // hear nothing for six hours, at the moment they are most likely to read silence as
+  // confirmation that they fixed it.
+  const dir = mkdtempSync(join(tmpdir(), 'io-relimit-'))
+  const mint = (out: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${join(dir, 'k.pem')} -out ${out} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  try {
+    const live = join(dir, 'live.crt')
+    const next = join(dir, 'next.crt')
+    mint(live, 12)
+    const said: string[] = []
+    const watch = new SuppliedCertWatch(live, { log: (m) => { said.push(m) } })
+    const t0 = Date.now()
+
+    expect(watch.maybeWarn(t0)).toBe(true)
+    expect(said[0]).toMatch(/expires in (11|12) days/)
+    // The limiter still does its job for the file that has not changed: a couple of hours of
+    // sweeps say nothing more.
+    for (let i = 1; i <= 240; i++) { watch.refresh(t0 + i * 30_000); expect(watch.maybeWarn(t0 + i * 30_000)).toBe(false) }
+    expect(said).toHaveLength(1)
+
+    // They replace it, and what they installed is also nearly expired.
+    mint(next, 4)
+    renameSync(next, live)
+    const at = t0 + 241 * 30_000                                // minutes later, not six hours
+    watch.refresh(at)
+    expect(watch.maybeWarn(at)).toBe(true)
+    expect(said).toHaveLength(2)
+    expect(said[1]).toMatch(/expires in (3|4) days/)
+
+    // ...and the new one then earns its own quiet, which is what the limiter is for.
+    for (let i = 1; i <= 240; i++) { watch.refresh(at + i * 30_000); expect(watch.maybeWarn(at + i * 30_000)).toBe(false) }
+    expect(said).toHaveLength(2)
+
+    // The other side of it: the SAME certificate rewritten in place -- a config manager that
+    // reinstalls it every few minutes, a sync that copies rather than compares -- moves the
+    // stamp and must not earn a new warning each time, or the limiter is defeated by another
+    // door. So the reset is keyed on the expiry, not on the file having changed.
+    const flap = at + 241 * 30_000
+    const bytes = readFileSync(live)
+    for (let i = 1; i <= 20; i++) {
+      writeFileSync(join(dir, 'copy.crt'), bytes)
+      renameSync(join(dir, 'copy.crt'), live)
+      watch.refresh(flap + i * 30_000)
+      expect(watch.maybeWarn(flap + i * 30_000), `rewrite ${i}`).toBe(false)
+    }
+    expect(said).toHaveLength(2)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the expiry warning is said once, then stays quiet for hours', () => {
+  // Fired every sweep it is tens of thousands of identical lines between the day it starts and
+  // the day the certificate is replaced, which is a log nobody reads and so a warning nobody
+  // sees. `warnExpiring`'s boolean exists for this and was being discarded.
+  const crt = join('test', 'fixtures', 'local', 'router.test', 'router.test.crt')
+  const at = Date.parse(suppliedCert(crt)!.notAfter)
+  const said: string[] = []
+  const watch = new SuppliedCertWatch(crt, { read: (path, now) => suppliedCert(path, now), log: (m) => { said.push(m) } })
+
+  // Comfortably in date: nothing said, and nothing stamped, so the first real warning is not
+  // swallowed by a limiter that had already started.
+  const wellBefore = at - 60 * 86_400_000
+  for (let i = 0; i < 10; i++) expect(watch.maybeWarn(wellBefore + i * 30_000)).toBe(false)
+  expect(said).toEqual([])
+
+  // Inside the window: once, then quiet across a couple of hours of sweeps (240 of them).
+  const inside = at - (CERT_WARN_DAYS - 1) * 86_400_000
+  expect(watch.maybeWarn(inside)).toBe(true)
+  for (let i = 1; i <= 240; i++) expect(watch.maybeWarn(inside + i * 30_000), `sweep ${i}`).toBe(false)
+  expect(said).toHaveLength(1)
+
+  // ...and again once the interval has passed.
+  expect(watch.maybeWarn(inside + WARN_EVERY_MS + 1)).toBe(true)
+  expect(said).toHaveLength(2)
+
+  // Past the date it is louder, and obeys the same limiter.
+  const after = at + WARN_EVERY_MS + 2
+  expect(watch.maybeWarn(after)).toBe(true)
+  expect(said[2]).toContain('EXPIRED')
+  for (let i = 1; i <= 240; i++) expect(watch.maybeWarn(after + i * 30_000)).toBe(false)
+  expect(said).toHaveLength(3)
+})
+
+
+test.skipIf(!hasOpenssl)('the beat PARSES only when the file moved: an unchanged certificate costs a stat', () => {
+  // The cache was defeating itself. `refresh()` cleared the stamp before `sync()` could compare
+  // it, so every sweep re-read and re-parsed a certificate that had not changed -- a full
+  // synchronous read and X509 parse on the event loop every 30 s, for the lifetime of the
+  // daemon, which is most of the work that moving this off the request path existed to avoid.
+  // The stat is the check; the parse is what the stat has to earn.
+  const dir = mkdtempSync(join(tmpdir(), 'io-stamp-'))
+  const mint = (out: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${join(dir, 'k.pem')} -out ${out} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  try {
+    const live = join(dir, 'live.crt')
+    const next = join(dir, 'next.crt')
+    mint(live, 30)
+    let parses = 0
+    const watch = new SuppliedCertWatch(live, { read: (path, now) => { parses++; return suppliedCert(path, now) } })
+
+    // Boot: parsed once, and the value is there.
+    expect(parses).toBe(1)
+    expect(watch.current()!.daysLeft).toBeGreaterThanOrEqual(29)
+
+    // A day of sweeps on an unchanged file: not one more parse, and the answer does not drift.
+    const at = watch.current()!.notAfter
+    for (let i = 0; i < 2880; i++) watch.refresh()
+    expect(parses).toBe(1)
+    expect(watch.current()!.notAfter).toBe(at)
+
+    // A renewal moves the file, so the next beat parses exactly once more.
+    mint(next, 90)
+    renameSync(next, live)
+    watch.refresh()
+    expect(parses).toBe(2)
+    expect(watch.current()!.notAfter).not.toBe(at)
+    for (let i = 0; i < 100; i++) watch.refresh()
+    expect(parses).toBe(2)
+
+    // Unreadable: the value goes, and no parse is attempted on a file that cannot be stat'd.
+    rmSync(live)
+    watch.refresh()
+    expect(watch.current()).toBeNull()
+    expect(parses).toBe(2)
+
+    // ...and the stamp went with it, so the file coming back is parsed even though a renamed
+    // file can carry the same mtime, size and inode as the one that was there before.
+    mint(live, 45)
+    watch.refresh()
+    expect(parses).toBe(3)
+    expect(watch.current()!.daysLeft).toBeGreaterThanOrEqual(44)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(!hasOpenssl)('a MALFORMED file is parsed once, and replacing it with a good one is still noticed', () => {
+  // The negative result has to be cached too. Without that, the one case where an operator has
+  // a broken file -- the wrong file copied in, a truncated write, a key pasted over a
+  // certificate -- was the case that did the most work: a full read and a failed parse on every
+  // beat, forever, because only a SUCCESSFUL parse counted as cached.
+  //
+  // And the edge that matters more than the saving: the file they then fix has to be picked up.
+  // That is the sequence an operator actually performs once they realise, so it is the sequence
+  // asserted here rather than reasoned about.
+  const dir = mkdtempSync(join(tmpdir(), 'io-malformed-'))
+  try {
+    const live = join(dir, 'live.crt')
+    const good = join(dir, 'good.crt')
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 60 -keyout ${join(dir, 'k.pem')} -out ${good} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+
+    // Readable, and not a certificate.
+    writeFileSync(live, '-----BEGIN CERTIFICATE-----\nnot base64 at all\n-----END CERTIFICATE-----\n')
+    let parses = 0
+    const watch = new SuppliedCertWatch(live, { read: (path, now) => { parses++; return suppliedCert(path, now) } })
+    expect(watch.current()).toBeNull()
+    expect(parses).toBe(1)
+
+    // A day of sweeps: asked once, not 2880 times.
+    for (let i = 0; i < 2880; i++) watch.refresh()
+    expect(parses).toBe(1)
+    expect(watch.current()).toBeNull()
+
+    // ...and the fix lands. The stamp moves, so the beat looks again, and the field appears.
+    renameSync(good, live)
+    watch.refresh()
+    expect(parses).toBe(2)
+    expect(watch.current()!.daysLeft).toBeGreaterThanOrEqual(59)
+
+    // Back to broken, in place: still noticed, and still asked only once.
+    writeFileSync(live, 'not even a PEM header\n')
+    watch.refresh()
+    expect(watch.current()).toBeNull()
+    expect(parses).toBe(3)
+    for (let i = 0; i < 100; i++) watch.refresh()
+    expect(parses).toBe(3)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(!hasOpenssl)('a RENAMED certificate is picked up by the beat, and the request path reads nothing', () => {
+  // The way a renewal actually happens, and the way it was measured on a live box: write the new
+  // pair alongside, rename over the live names. The file check lives on the daemon's beat, not
+  // on the request path -- `/healthz` is unauthenticated and a scanner sets its rate, so a
+  // request must not touch the filesystem at all, not even to stat it. `refresh()` is that
+  // beat, and it is what has to notice the rename.
+  const dir = mkdtempSync(join(tmpdir(), 'io-renew-'))
+  const mint = (out: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${join(dir, 'k.pem')} -out ${out} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  try {
+    const live = join(dir, 'live.crt')
+    const next = join(dir, 'next.crt')
+    mint(live, 30)
+    const watch = new SuppliedCertWatch(live)
+    const before = watch.current()!
+    expect(before.daysLeft).toBeGreaterThanOrEqual(29)
+
+    mint(next, 90)
+    renameSync(next, live)                                    // atomic, over the live name
+    // Not yet: no request looks at the file.
+    expect(watch.current()!.notAfter).toBe(before.notAfter)
+    watch.refresh()                                           // ...the beat does
+    const after = watch.current()!
+    expect(after.notAfter).not.toBe(before.notAfter)
+    expect(after.daysLeft).toBeGreaterThan(before.daysLeft + 55)
+
+    // ...and the warning reads the same source, so the log and the endpoint cannot disagree.
+    const said: string[] = []
+    const w2 = new SuppliedCertWatch(live, { log: (m) => { said.push(m) } })
+    expect(w2.maybeWarn()).toBe(false)                        // 90 days: nothing to say
+    mint(next, 10)
+    renameSync(next, live)
+    w2.refresh()                                              // the same beat feeds both
+    expect(w2.maybeWarn()).toBe(true)                         // 10 days: said, from the new file
+    expect(said[0]).toMatch(/expires in (9|10) days/)
+
+    // A file that goes away is absent again, cache or no cache.
+    rmSync(live)
+    watch.refresh()
+    expect(watch.current()).toBeNull()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

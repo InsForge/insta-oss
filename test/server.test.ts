@@ -2,8 +2,9 @@
 // Fake adapters (test/fakes.ts) — no Docker needed. docker() is mocked (engine only uses it for
 // networks and the ps snapshots). Package regions sit at the END of this file (contract 00 §1.3).
 import { test, expect, afterEach, beforeEach, vi } from 'vitest'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, renameSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
 // `dockerCall` is the same seam with a handle on the child: the scheduler's runtime verbs go
@@ -31,6 +32,7 @@ import { Engine } from '../src/engine'
 import type { ComputeAdapter, StorageAdapter } from '../src/types'
 import { mutate } from '../src/state'
 import { calls, data, db, compute, storage, managed, makeEngine, resetFakes, runtime, serverConfig, testConfig } from './fakes'
+import { SuppliedCertWatch, suppliedCert, suppliedFiles } from '../src/router/certs'
 
 let app: ReturnType<typeof buildServer>
 /** The engine `app` is built on: tests that spy on an engine method need THIS instance. */
@@ -825,6 +827,104 @@ test('a rename whose UNDO also fails names what is stuck, and the retry finishes
   }
   const rows = (await get(`/projects/${id}/services?branch=feat`)).json().services as Array<{ name: string; runtime?: string }>
   expect(rows.find((x) => x.name === 'api')?.runtime).not.toBe('none')
+})
+
+test('healthz carries what a supplied certificate has left, and nothing when there is none', async () => {
+  // `--tls custom` is the only mode whose certificate nothing renews, so `healthz` carries the
+  // remaining lifetime unconditionally: a monitor alerts on the margin its operator wants rather
+  // than on the 21 days the daemon warns at. Absent in every other mode.
+  expect((await get('/healthz')).json()).toEqual({ ok: true })
+
+  const crt = join('test', 'fixtures', 'local', 'router.test', 'router.test.crt')
+  const base = testConfig()
+  const cfg = { ...base, tls: { ...base.tls, certFile: crt, keyFile: crt } }
+  const withCert = buildServer(makeEngine(cfg), cfg)
+  const body = (await withCert.inject({ method: 'GET', url: '/healthz' })).json() as {
+    ok: boolean; certificate?: { notAfter: string; daysLeft: number; secondsLeft: number }
+  }
+  expect(body.ok).toBe(true)
+  expect(Date.parse(body.certificate!.notAfter)).toBeGreaterThan(0)
+  expect(body.certificate!.daysLeft).toBe(Math.floor(body.certificate!.secondsLeft / 86_400))
+
+  // A path that cannot be read reports NOTHING rather than a reassuring number.
+  const broken = { ...base, tls: { ...base.tls, certFile: '/nope/missing.crt', keyFile: '/nope/missing.key' } }
+  expect((await buildServer(makeEngine(broken), broken).inject({ method: 'GET', url: '/healthz' })).json()).toEqual({ ok: true })
+
+  // HALF a pair is not a supplied certificate. With only the certificate configured the router
+  // serves nothing supplied and goes on issuing per hostname, so an endpoint that reported one
+  // would assert the exact property the box was not providing -- in the field an operator reads
+  // to confirm it. Config refuses this combination outright; the endpoint is gated on the pair
+  // as well, because the two must never disagree about what the box is doing.
+  for (const half of [{ certFile: crt, keyFile: null }, { certFile: null, keyFile: crt }]) {
+    const cfgHalf = { ...base, tls: { ...base.tls, ...half } }
+    expect(suppliedFiles(cfgHalf)).toBeNull()
+    expect((await buildServer(makeEngine(cfgHalf), cfgHalf).inject({ method: 'GET', url: '/healthz' })).json()).toEqual({ ok: true })
+  }
+
+  // ...and the endpoint does NO file I/O per request. It is unauthenticated and polled
+  // continuously, so a read per hit is a handle anyone can pull on to stall the event loop.
+  let reads = 0
+  const watch = new SuppliedCertWatch(crt, { read: (path, at) => { reads++; return suppliedCert(path, at) } })
+  const polled = buildServer(makeEngine(cfg), cfg, { certWatch: watch })
+  expect(reads).toBe(1)
+  for (let i = 0; i < 25; i++) {
+    expect((await polled.inject({ method: 'GET', url: '/healthz' })).statusCode).toBe(200)
+  }
+  expect(reads).toBe(1)
+})
+
+/** These cases mint a certificate with the `openssl` CLI: Node parses X.509 but cannot issue
+ *  it, and a fixture cannot be "30 days from now" a year after it was committed. Declared and
+ *  skipped by name where openssl is absent (see the README), rather than failing at the spawn. */
+const hasOpenssl = spawnSync('sh', ['-c', 'command -v openssl'], { encoding: 'utf8' }).status === 0
+
+test.skipIf(!hasOpenssl)('healthz follows a RENEWED certificate, the way a renewal actually happens', async () => {
+  // Measured on a live box: after writing the new pair alongside and renaming it over the live
+  // names, `/healthz` kept reporting the OLD certificate -- same notAfter, same daysLeft, only
+  // secondsLeft ticking down. A cache invalidated by time reports the certificate it read at
+  // boot, and after a renewal it is wrong in the REASSURING direction, on the one field whose
+  // purpose is to warn before an expiry. This is that procedure, end to end through the route.
+  const dir = mkdtempSync(join(tmpdir(), 'io-healthz-tls-'))
+  const mint = (out: string, days: number): void => {
+    const r = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days ${days} -keyout ${join(dir, 'k.pem')} -out ${out} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  try {
+    const live = join(dir, 'live.crt')
+    mint(live, 30)
+    const base = testConfig()
+    const cfg = { ...base, tls: { ...base.tls, certFile: live, keyFile: join(dir, 'k.pem') } }
+    // The watch the daemon refreshes on its beat. The request path reads nothing, so the test
+    // drives the beat the way main.ts's timer does.
+    const watch = new SuppliedCertWatch(live)
+    const app2 = buildServer(makeEngine(cfg), cfg, { certWatch: watch })
+    const read = async (): Promise<{ notAfter: string; daysLeft: number }> =>
+      ((await app2.inject({ method: 'GET', url: '/healthz' })).json() as { certificate: { notAfter: string; daysLeft: number } }).certificate
+
+    const before = await read()
+    // Not an exact day count: `-days 30` lands on the boundary and a second of elapsed time
+    // decides 29 vs 30. What matters is that the number MOVES with the file.
+    expect(before.daysLeft).toBeGreaterThanOrEqual(29)
+    expect(before.daysLeft).toBeLessThanOrEqual(30)
+
+    mint(join(dir, 'next.crt'), 90)
+    renameSync(join(dir, 'next.crt'), live)
+    watch.refresh()
+
+    const after = await read()
+    expect(after.notAfter).not.toBe(before.notAfter)          // it MOVED
+    expect(after.daysLeft).toBeGreaterThan(before.daysLeft + 55)
+
+    // ...and a certificate that goes away takes the field with it rather than leaving the last
+    // good number in place.
+    rmSync(live)
+    watch.refresh()
+    expect((await app2.inject({ method: 'GET', url: '/healthz' })).json()).toEqual({ ok: true })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('a volume delete on a SUSPENDED service succeeds, and leaves it suspended', async () => {

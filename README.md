@@ -213,6 +213,11 @@ run mode, and what answers 501 with guidance instead of pretending.
 
 ## Tests
 
+`npm test` needs no Docker. It does use the `openssl` CLI for the TLS cases (Node can parse an
+X.509 certificate but not issue one, and these cases mint pairs with particular SANs and
+validity windows); where openssl is absent those cases are skipped by name and the rest of the
+suite runs.
+
 ```bash
 npm test                                       # contract tests, fake adapters, no Docker
 RUN_DOCKER_TESTS=1 npx vitest run test/clone-isolation.int.test.ts   # one Docker file at a time

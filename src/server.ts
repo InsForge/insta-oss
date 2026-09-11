@@ -9,6 +9,7 @@ import fastifyStatic from '@fastify/static'
 import { registerAuth } from './auth'
 import { loadConfig, type Config } from './config'
 import { LifecycleFailedError } from './engine'
+import { SuppliedCertWatch, suppliedFiles } from './router/certs'
 import type { Engine, Teardown } from './engine'
 import * as govern from './govern'
 import { isManagedDbType, parseServiceId } from './manageddb'
@@ -43,7 +44,15 @@ export function isApiPath(url: string): boolean {
 
 /** `serverFactory` is forwarded straight into Fastify() so the router (WP2) can hand it the shared
  *  listener; undefined until then. `cfg` is the boot config (tests pass their own). */
-export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { serverFactory?: FastifyServerFactory } = {}): FastifyInstance {
+export function buildServer(
+  engine: Engine,
+  cfg: Config = loadConfig(),
+  opts: { serverFactory?: FastifyServerFactory; certWatch?: SuppliedCertWatch } = {},
+): FastifyInstance {
+  // main.ts passes the watch it refreshes on the daemon's beat; a server built without one (local
+  // mode, tests) reads once at construction and answers from that. Either way `/healthz` does no
+  // file I/O per request, which is what matters for a public unauthenticated endpoint.
+  const certWatch = opts.certWatch ?? new SuppliedCertWatch(suppliedFiles(cfg)?.crt ?? null)
   // 'loopback', not `true`. The only proxy in front of the daemon is the edge, on 127.0.0.1, and it
   // APPENDS the peer to X-Forwarded-For. `trustProxy: true` trusts the whole chain and takes its
   // LEFTMOST entry, which is whatever the remote client wrote, so `req.ip` was forgeable from
@@ -82,7 +91,16 @@ export function buildServer(engine: Engine, cfg: Config = loadConfig(), opts: { 
     return true
   }
 
-  app.get('/healthz', async () => ({ ok: true }))
+  // `healthz` carries what a SUPPLIED certificate has left (`--tls custom`), unconditionally and
+  // in seconds as well as days: nothing renews that certificate, so its expiry is the one failure
+  // in this stack that would otherwise reach an operator through their users. The number is here
+  // rather than a threshold, so a monitor alerts on the margin that operator wants; the daemon
+  // says so on its own under CERT_WARN_DAYS. Absent in every other mode, and absent when the file
+  // cannot be read, which is itself worth alerting on.
+  app.get('/healthz', async () => {
+    const cert = certWatch.current()
+    return { ok: true, ...(cert ? { certificate: { notAfter: cert.notAfter, daysLeft: cert.daysLeft, secondsLeft: cert.secondsLeft } } : {}) }
+  })
   app.get('/orgs', async () => ({ orgs: [LOCAL_ORG] }))
   app.post('/orgs', async (_req, reply) => notCloud(reply, 'org management'))
   app.get('/orgs/:id/billing', async (_req, reply) => notCloud(reply, 'billing'))

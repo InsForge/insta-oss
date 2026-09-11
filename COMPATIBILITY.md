@@ -32,7 +32,7 @@ domain. See [self-hosting](https://docs.instacloud.com/self-hosting/overview).
 | `compute limits <group> --memory --cpu` | implemented, on the cloud grid and cap (8 vCPU, 8192 MiB) |
 | `compute always-on on\|off <group>` | implemented. Self-hosted compute defaults to scale-to-zero, the opposite of the cloud default, because idle services on one box should cost nothing |
 | `compute set-domain <host> [--group] [--branch]` | binds your own hostname and prints the DNS record to create (a `CNAME` to `api.<domain>`); the certificate is issued on the first request. Local mode routes the alias but issues nothing |
-| `compute check-domain <host>` | reports whether the record resolves and whether the host is being served. The envelope carries no `ssl` field in either mode |
+| `compute check-domain <host>` | reports whether the record resolves and whether the host is being served. The envelope carries no `ssl` field in either mode. With `--tls custom` the certificate half of `configured` is answered by the supplied certificate itself, so a name it does not cover reads `pending`: nothing will issue one for it |
 | `compute remove-domain <host>` | unbinds it |
 | `db url [--group] [--branch]` | server: the public DSN, `pg-<name>-<ref>.<domain>:5432` with `sslmode=require`, routed by SNI; local: `127.0.0.1:<port>`. A sleeping database wakes on connect. `--branch feat` returns feat's DSN |
 | `db connect` | opens `psql` against that DSN |

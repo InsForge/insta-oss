@@ -1,8 +1,8 @@
 // Project/branch lifecycle over local containers. Mirrors the platform model:
 // project → branches (main = default); branch create = provision new stack + copy data +
 // redeploy the same app image(s); compute = the user's custom image(s), one per group.
-import { randomBytes, randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { randomBytes, randomUUID, X509Certificate } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
 import { cpus, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { loadConfig, type Config } from './config'
@@ -14,7 +14,7 @@ import * as observe from './observe'
 import { loadState, mutate } from './state'
 import type { Branch, Project, DatabaseAdapter, ComputeAdapter, StorageAdapter, ManagedDbAdapter, ManagedDbType, ObservedComponent, ObjectListing, AuditEvent, UserSecret, DataDirOps, PgTarget, ServiceKey, ServiceLimits, ServiceSettings } from './types'
 // ---- region WP2 (router): the router's pure modules feed the seams at the end of this class ----
-import { findCertFiles } from './router/certs'
+import { findCertFiles, suppliedFiles } from './router/certs'
 import { checkDns, domainResult, DomainError, mapLimit, normalizeHostname, notAdded, ourAddresses, systemResolver, type ComputeDomainResult, type Resolver } from './router/domains'
 import { assertHostLabel, bucketsOf, buildTable, databasesOf, hostFor as fqdnFor, hostOnly, labelFor, RESERVED_LABELS, type HostKind } from './router/table'
 import type { State } from './state'
@@ -3279,6 +3279,16 @@ export class Engine {
    *  is the safe direction for this question. */
   private domainCertOk(hostname: string): boolean {
     if (this.cfg.mode !== 'server') return true
+    // `--tls custom`: there is no store to walk, because nothing is issued. The question is
+    // whether the operator's certificate covers this name, and the certificate answers it -- so
+    // a custom domain inside their wildcard reads `ready` and one outside it reads `pending`,
+    // which is the truth in a mode where no certificate will appear for it on its own.
+    // The PAIR: with only one half configured the router serves no supplied certificate and
+    // issues per hostname, so this must not answer from a file nothing is serving.
+    const supplied = suppliedFiles(this.cfg)
+    if (supplied) {
+      try { return new X509Certificate(readFileSync(supplied.crt)).checkHost(hostname) !== undefined } catch { return false }
+    }
     if (!this.cfg.tls.certDir) return false
     return findCertFiles(this.cfg.tls.certDir, hostname) !== null
   }

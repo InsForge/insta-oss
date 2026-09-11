@@ -28,6 +28,7 @@ import { TemplateCatalog } from './templates/catalog'
 // ---- end region WP5 ----
 // ---- region WP2 (router) ----
 import { laneReallocator, Router } from './router'
+import { SuppliedCertWatch, suppliedFiles } from './router/certs'
 import { engineRouterDeps, routerUpstream } from './router/deps'
 import { buildTable } from './router/table'
 // ---- end region WP2 ----
@@ -173,7 +174,10 @@ async function main(): Promise<void> {
   engine.router = router
   // ---- end region WP2 (router) ----
 
-  const app = buildServer(engine, cfg, { serverFactory: (handler) => { router.attach(handler); return router.httpServer } })
+  // One watch: `/healthz` answers from it and the beat below refreshes it, so the public
+  // endpoint never reads the file itself.
+  const certWatch = new SuppliedCertWatch(suppliedFiles(cfg)?.crt ?? null)
+  const app = buildServer(engine, cfg, { certWatch, serverFactory: (handler) => { router.attach(handler); return router.httpServer } })
   await app.listen({ host: cfg.listenHost, port: cfg.port })
 
   // ---- region WP2 (start) ----
@@ -187,6 +191,27 @@ async function main(): Promise<void> {
   // which `engine.booting` kept the sweep out of).
   engine.scheduler.start()
   // ---- end region WP3 (start) ----
+
+  // A supplied certificate (`--tls custom`) is the one certificate in this stack that nothing
+  // renews, so it is the one whose expiry would otherwise be announced by a browser. Said at
+  // boot and then on the sweep's own beat, and only when it is close: the number itself is on
+  // `healthz` unconditionally for a monitor to read. This starts nothing and changes nothing.
+  if (suppliedFiles(cfg)) {
+    certWatch.maybeWarn()
+    // This beat is also what `/healthz` answers from: the request path reads no file and makes
+    // no syscall, so an unauthenticated poll costs nothing however fast it comes, and the
+    // reported certificate follows a renewal within one interval.
+    const timer = setInterval(() => { certWatch.refresh(); certWatch.maybeWarn() }, cfg.sleep.sweepSec * 1000)
+    timer.unref?.()
+  }
+  // The same beat moves the database lanes' no-SNI default onto a renewed certificate. Without it
+  // that default was whatever the process booted with until a route happened to change, so an
+  // old libpq or JDBC client got an opaque alert after the original expired instead of being told
+  // to send SNI. Every mode: Caddy renews an ACME `api.` certificate too.
+  if (cfg.mode === 'server') {
+    const certTimer = setInterval(() => { void router.refreshCertificates() }, cfg.sleep.sweepSec * 1000)
+    certTimer.unref?.()
+  }
 
   if (cfg.mode === 'server') {
     console.log(`instad ${cfg.version} mode=server api=${cfg.apiUrl} console=${cfg.consoleUrl} data=${cfg.dataDir}`)

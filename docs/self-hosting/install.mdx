@@ -118,11 +118,15 @@ script. The build needs about 1 GiB of free memory and a minute on a 2 vCPU box.
 11. Pulls and starts the stack: `docker compose --env-file instad.env up -d --remove-orphans`.
 12. Waits on `http://127.0.0.1:8080/healthz` for up to 60 seconds. On timeout it prints the tail of
     `docker compose logs instad` and exits 1.
-13. Asks the edge for the certificate for `api.<domain>` over loopback and waits until the file
-    appears in the store, up to 4 minutes with a public CA and 60 seconds with the internal issuer.
-    A certificate that has not landed by then is a warning, not a failure: the edge keeps retrying
-    on its own, and the database lanes start presenting it the moment it lands. With
-    `INSTA_OSS_TLS=internal` the root CA is then copied to `/var/lib/instacloud/edge/ca.pem`.
+13. Checks the certificate, in the way that mode calls for. Under `acme` and `internal` it asks
+    the edge for `api.<domain>` over loopback and waits until the file appears in the store, up to
+    4 minutes with a public CA and 60 seconds with the internal issuer. A certificate that has not
+    landed by then is a warning, not a failure: the edge keeps retrying on its own, and the
+    database lanes start presenting it the moment it lands. With `INSTA_OSS_TLS=internal` the root
+    CA is then copied to `/var/lib/instacloud/edge/ca.pem`. Under `custom` there is nothing to wait
+    for, so it probes instead: the edge has to answer `api.<domain>` with the serial of the
+    certificate you supplied, and a pair the edge cannot load fails the install rather than
+    leaving it crash-looping behind a success message.
 
 Then it prints two lines you need:
 
@@ -139,7 +143,7 @@ Open the setup URL to create the admin account. See [set up access](/self-hostin
 | --- | --- |
 | `/etc/instacloud/instad.env` | every `INSTA_OSS_*` setting, mode 600 |
 | `/etc/instacloud/compose.yml` | the three services `io-instad`, `io-edge`, `io-garage` |
-| `/etc/instacloud/Caddyfile` | the edge configuration, including on-demand TLS |
+| `/etc/instacloud/Caddyfile` | the edge configuration: on-demand TLS under `acme` and `internal`, and under `custom` the supplied pair with no on-demand machinery at all |
 | `/etc/instacloud/.env` | a symlink to `instad.env`, so a plain `docker compose` in that directory interpolates the same values |
 | `/var/lib/instacloud` | all data: `state.json`, `pg/`, `vol/`, `md/`, `garage/`, `caddy/`, `edge/ca.pem` |
 | `/var/lib/instacloud.img` | the XFS loop image, only when one was needed |
@@ -155,10 +159,12 @@ Postgres containers against empty directories.
 | Flag | Env | What |
 | --- | --- | --- |
 | `--domain <host>` | `INSTA_OSS_DOMAIN` | your own apex, instead of the automatic sslip.io name |
-| `--email <addr>` | `INSTA_OSS_ACME_EMAIL` | the ACME account address |
+| `--email <addr>` | `INSTA_OSS_ACME_EMAIL` | the ACME account address. Written into the Caddyfile under `acme` and `internal`, and omitted under `custom`, which contacts no issuer |
 | `--version <vX.Y.Z>` | `INSTA_OSS_VERSION` | pin the image; omit for the newest release |
 | | `INSTA_OSS_IMAGE` | the daemon image, `name` or `name:tag`; a tag here is the version. Use it to run an image you built yourself |
-| `--tls acme\|internal` | `INSTA_OSS_TLS` | public certificates, or an internal issuer for a private box |
+| `--tls acme\|internal\|custom` | `INSTA_OSS_TLS` | public certificates, an internal issuer for a private box, or one wildcard you supply. See [TLS and what your domain costs you](#tls-and-what-your-domain-costs-you) |
+| `--tls-cert <path>` | `INSTA_OSS_TLS_CERT_FILE` | with `--tls custom`: the certificate to serve, which must carry `*.<domain>` and `*.s3.<domain>` |
+| `--tls-key <path>` | `INSTA_OSS_TLS_KEY_FILE` | with `--tls custom`: its private key. Both are required together |
 | `--data-img-gib <n>` | `INSTA_OSS_DATA_IMG_GIB` | size of the loop image when one is created |
 | `--data-dir <path>` | `INSTA_OSS_DATA_DIR` | required to change the data directory of an existing install |
 | `--print-firewall` | | print the firewall rules and exit |
@@ -251,6 +257,130 @@ pressure. The daemon reads `/proc/spl/kstat/zfs/arcstats` and adds back the part
 release (`size` minus `c_min`), so a warm ARC does not read as a full machine. You do not need to
 cap `zfs_arc_max` to keep the daemon from evicting; cap it if you want the ARC smaller for its own
 sake.
+
+## TLS and what your domain costs you
+
+Three modes, and the choice decides whether scale-to-zero holds for public compute services.
+
+| `--tls` | What the edge serves | What gets published |
+|---|---|---|
+| `acme` (default) | a certificate per hostname, issued on demand by Let's Encrypt | every hostname you deploy, to the public certificate transparency logs |
+| `internal` | a certificate per hostname from Caddy's own CA | nothing, but no browser trusts it without installing the root |
+| `custom` | one certificate you supply, for `*.<domain>` and `*.s3.<domain>` | nothing |
+
+### The cost of the auto sslip.io domain
+
+If you do not pass `--domain`, the installer derives one from your public IPv4 address
+(`<a-b-c-d>.sslip.io`) and `--tls acme` then issues a certificate per hostname. That is an
+evaluation convenience, and it has a measured consequence:
+
+- Certificate transparency is public and indexed. Every service you deploy publishes its exact
+  hostname within minutes of its first request.
+- Scanners read those logs. On a live box, a freshly issued service hostname drew 141 requests
+  from a credential scanner probing `/.env`, `/.env.local`, `/config.js` and `/settings.js`
+  within about 15 minutes, and then kept arriving every 1 to 3 minutes.
+- The idle timer for compute is 300 seconds and any request resets it. So a public compute
+  service on this configuration **never sleeps**. Scale-to-zero still holds for databases, whose
+  lanes are not discoverable this way, but not for the thing you point a browser at.
+
+That is not a warning about a risk; it is what happens. Use it to try the product, and use a
+domain of your own for anything you leave running.
+
+### `--tls custom`: a wildcard you supply
+
+With a certificate for `*.example.com` the edge serves it for every name under it and issues
+nothing, which is what the managed cloud does. No hostname is ever published, so nothing arrives
+to find it, so an idle compute service reaches its timer and sleeps.
+
+```bash
+sh install.sh --domain example.com --tls custom \
+  --tls-cert /etc/instacloud/tls/wildcard.crt \
+  --tls-key  /etc/instacloud/tls/wildcard.key
+```
+
+The certificate must carry **two** SANs, `*.<domain>` and `*.s3.<domain>`, because a wildcard
+matches exactly one label and this box serves two depths. Every service name is one label
+(`api.<domain>`, `console.<domain>`, `web-<ref>.<domain>`, `pg-db-<ref>.<domain>`,
+`s3.<domain>`), and every bucket is two: `<bucket>.s3.<domain>`, which is how the AWS SDKs
+address a bucket by default and what `AWS_ENDPOINT_URL_S3` resolves to inside every deployed
+app. In the other two modes those names get a certificate of their own on demand. This mode
+issues nothing, deliberately, so one certificate has to cover them. Ask your CA for both on the
+same certificate:
+
+```
+subjectAltName = DNS:*.example.com, DNS:*.s3.example.com, DNS:example.com
+```
+
+The installer checks all of it before it starts anything: the PEM has to parse, the key has to
+match the certificate, it must be inside BOTH its validity dates, it must carry both wildcards
+(sampling a few names cannot promise the arbitrary future hostnames this mode exists to serve),
+and it must cover `api.<domain>` and `console.<domain>`. A pair that cannot serve fails the
+install rather than leaving the edge crash-looping behind a success message. The post-install
+probe is part of that: the edge has to answer with **that** certificate before this prints
+anything reassuring.
+
+The **directory** holding the pair is mounted read-only into the edge and the daemon (the same
+path on both sides), not the two files, and the daemon presents the same certificate on the
+database lanes, so nothing anywhere asks for a per-hostname certificate. Keep the pair in a
+directory of its own, such as `/etc/instacloud/tls`: everything beside it is visible to both
+containers. The installer refuses a directory that would collide with the stack's own mounts,
+which means the data directory, anything inside it, any directory that contains it, and the
+system directories the images own.
+
+What you take on:
+
+- **Renewal is yours, and the daemon will not let it fail silently.** Nothing renews a supplied
+  certificate. Write the new pair into the same directory and move it over the old names, which
+  is what renewal tooling does:
+
+  ```bash
+  # your tool writes wildcard.crt.new / wildcard.key.new into /etc/instacloud/tls, then:
+  mv -f /etc/instacloud/tls/wildcard.crt.new /etc/instacloud/tls/wildcard.crt
+  mv -f /etc/instacloud/tls/wildcard.key.new /etc/instacloud/tls/wildcard.key
+  cd /etc/instacloud && docker compose --env-file instad.env restart edge
+  ```
+
+  The daemon needs nothing: its lanes re-read the file on the next handshake that sends SNI (every
+  current client), the default they hand a client that sends none (libpq before 14, older JDBC,
+  which are then told to send it) follows on the daemon's next beat, and `healthz` reports the
+  new certificate within that same sweep interval (30 s by default, `INSTA_OSS_SWEEP_SEC`).
+  That lag is deliberate: `/healthz` is public and unauthenticated, so the request path reads no
+  file and makes no syscall, and the daemon's own beat is what looks at the disk. Both were
+  measured after a real rename. The edge needs its process restarted, because Caddy loads certificates when it
+  loads its config and does not watch the file. Nothing needs the containers RECREATED, which is
+  why the directory is what gets mounted: a bind-mounted FILE stays attached to the inode it
+  resolved at mount time, so a rename over it would be invisible inside the container and the
+  edge would keep serving the old certificate until it expired.
+
+  Symlinks are followed: certbot's `live/<domain>/fullchain.pem` points into
+  `archive/<domain>/`, and the installer mounts both directories, so the link resolves inside
+  the containers and a renewal that re-points it stays visible. Point `--tls-cert` at the
+  `live/` path, not the `archive/` one. ONE link is followed, because only the link's directory
+  and its target's are mounted: a link to another link is refused, since the middle hop would
+  not exist inside the containers. A symlinked directory on the way (an `/etc/letsencrypt` kept
+  on another volume) is fine; the target is mounted at the path the link leads to.
+
+  The daemon logs a warning at boot and every few hours once the certificate is inside 21 days,
+  says something louder once it has expired, and `GET /healthz` carries the remaining lifetime
+  unconditionally so you can alert on your own margin:
+
+  ```bash
+  curl -s https://api.example.com/healthz
+  # {"ok":true,"certificate":{"notAfter":"2027-03-01T00:00:00.000Z","daysLeft":172,"secondsLeft":14860800}}
+  ```
+
+  The `certificate` object is absent in the other TLS modes, and absent if the file cannot be
+  read, which is worth alerting on too.
+- **A custom domain outside your wildcard has no certificate.** `insta compute domain` still
+  attaches the hostname and routes it, and `insta compute check-domain` reports it as `pending`
+  rather than `ready` because the certificate does not cover it. Add it as a SAN to the
+  certificate you supply, or keep that name on `--tls acme`.
+- **Issuance for the wildcard itself is not automated here.** A DNS-01 wildcard order needs a
+  Caddy build with your DNS provider's plugin, and the stock `caddy:2.11.4` image this stack runs
+  has none. Get the certificate however you already get certificates and hand it over.
+
+Moving back is a re-run: `sh install.sh --tls acme` drops the supplied pair and restores
+on-demand issuance.
 
 ## Uninstall
 

@@ -4,10 +4,24 @@
 // Everything that needs Docker lives in compose.int.test.ts and image.int.test.ts.
 import { test, expect } from 'vitest'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { X509Certificate } from 'node:crypto'
 import { CONFIG_KEYS } from '../src/config'
+
+/** The certificate tests mint their fixtures with the `openssl` CLI. Node cannot do it: the
+ *  runtime parses X.509 (`crypto.X509Certificate`) and has no API for ISSUING one, so a
+ *  self-signed pair with the SANs and the validity windows these cases need would take a new
+ *  dependency, and this project takes none. Committed fixtures are not an answer either, since
+ *  what is under test is a certificate 30 days out, one 90 days out and one already expired,
+ *  and two of those stop being true with time.
+ *
+ *  So the requirement is declared rather than assumed: `openssl` is needed for these cases,
+ *  the README says so, and where it is absent they are SKIPPED by name instead of failing at
+ *  the first spawn. CI has it, and so does every box this installs on -- the installer
+ *  requires it too. */
+const hasOpenssl = spawnSync('sh', ['-c', 'command -v openssl'], { encoding: 'utf8' }).status === 0
 
 const ROOT = join(__dirname, '..')
 const SCRIPT = join(ROOT, 'install.sh')
@@ -95,7 +109,7 @@ test('--print-env: precedence flag > environment > default; --version strips the
 })
 
 test('--print-env rejects a bad --tls, a relative --data-dir, a malformed domain and an unknown flag', () => {
-  expect(tryRun(['--print-env', '--tls', 'selfsigned'], { INSTA_OSS_DOMAIN: 'x.test' })).toMatchObject({ status: 1, stderr: expect.stringContaining('--tls must be acme or internal') })
+  expect(tryRun(['--print-env', '--tls', 'selfsigned'], { INSTA_OSS_DOMAIN: 'x.test' })).toMatchObject({ status: 1, stderr: expect.stringContaining('--tls must be acme, internal or custom') })
   expect(tryRun(['--print-env', '--data-dir', 'relative/dir'], { INSTA_OSS_DOMAIN: 'x.test' })).toMatchObject({ status: 1, stderr: expect.stringContaining('absolute path') })
   expect(tryRun(['--print-env'], { INSTA_OSS_DOMAIN: 'bad_domain!' })).toMatchObject({ status: 1, stderr: expect.stringContaining('is not a hostname') })
   expect(tryRun(['--print-env'], { INSTA_OSS_PUBLIC_IP: 'not-an-ip' })).toMatchObject({ status: 1, stderr: expect.stringContaining('INSTA_OSS_PUBLIC_IP') })
@@ -130,6 +144,366 @@ test('a domain that is not a HOSTNAME is refused before anything is written', ()
     expect(parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: good })).INSTA_OSS_DOMAIN, good).toBe(good)
   }
   expect(parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: 'Example.TEST.' })).INSTA_OSS_DOMAIN).toBe('example.test')
+})
+
+test('--tls custom serves a supplied certificate and emits NO on-demand issuance', () => {
+  // The parity break this mode exists for: `acme` and `internal` both issue a certificate per
+  // HOSTNAME on demand, so deploying a service publishes its exact hostname, and measured on a
+  // live box the credential scanners then arrive every 1 to 3 minutes against a 300 s idle
+  // timer, so a public compute service never sleeps. The cloud serves one wildcard and publishes
+  // nothing. What must therefore be true of this file is negative: no `on_demand` anywhere.
+  const args = ['--print-caddyfile', '--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/wild.crt', '--tls-key', '/etc/instacloud/tls/wild.key']
+  const caddy = run(args, { INSTA_OSS_DOMAIN: 'example.test' })
+  expect(caddy).toContain('tls /etc/instacloud/tls/wild.crt /etc/instacloud/tls/wild.key')
+  expect(caddy).not.toContain('on_demand')
+  expect(caddy).not.toContain('issuer acme')
+  expect(caddy).not.toContain('tls/ask')
+  expect(caddy).not.toContain('email')
+  // ...and the routing half is unchanged, so this is a certificate change and nothing else.
+  expect(caddy).toContain('reverse_proxy 127.0.0.1:8080')
+  expect(caddy).toContain('redir https://{host}{uri} permanent')
+
+  // The default modes keep exactly what they had.
+  for (const mode of ['acme', 'internal']) {
+    const other = run(['--print-caddyfile', '--tls', mode], { INSTA_OSS_DOMAIN: 'example.test' })
+    expect(other, mode).toContain('on_demand')
+    expect(other, mode).toContain('ask http://127.0.0.1:8081/tls/ask')
+  }
+
+  // Both containers get the pair, read-only, at the same path on both sides: the edge serves it
+  // and the daemon presents it on the database lanes, which is the other door issuance would
+  // otherwise publish a hostname through.
+  const compose = run(['--print-compose', '--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/wild.crt', '--tls-key', '/etc/instacloud/tls/wild.key'], { INSTA_OSS_DOMAIN: 'example.test' })
+  // The DIRECTORY, not the two files, and this is the renewal story rather than a detail: a file
+  // bind mount resolves to an inode at mount time, and every renewal tool replaces a certificate
+  // by renaming a new file over the old name, so a container with the FILE mounted keeps reading
+  // the old inode until it is recreated. With the directory mounted the name is resolved through
+  // the mount on every open. Once per container, and once more when the key lives elsewhere.
+  expect(compose.match(/- \/etc\/instacloud\/tls:\/etc\/instacloud\/tls:ro/g)).toHaveLength(2)
+  expect(compose).not.toContain('wild.crt:/etc/instacloud/tls/wild.crt')
+  const split = run(['--print-compose', '--tls', 'custom', '--tls-cert', '/etc/pki/live/wild.crt', '--tls-key', '/etc/pki/keys/wild.key'], { INSTA_OSS_DOMAIN: 'example.test' })
+  expect(split.match(/- \/etc\/pki\/live:\/etc\/pki\/live:ro/g)).toHaveLength(2)
+  expect(split.match(/- \/etc\/pki\/keys:\/etc\/pki\/keys:ro/g)).toHaveLength(2)
+  // No mounts at all in the other modes.
+  expect(run(['--print-compose'], { INSTA_OSS_DOMAIN: 'example.test' })).not.toContain(':ro\n      - /etc')
+
+  // ...and the daemon is told, because it is the daemon that answers the lanes.
+  const env = parseEnv(run(['--print-env', '--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/wild.crt', '--tls-key', '/etc/instacloud/tls/wild.key'], { INSTA_OSS_DOMAIN: 'example.test' }))
+  expect(env).toMatchObject({
+    INSTA_OSS_TLS: 'custom',
+    INSTA_OSS_TLS_CERT_FILE: '/etc/instacloud/tls/wild.crt',
+    INSTA_OSS_TLS_KEY_FILE: '/etc/instacloud/tls/wild.key',
+  })
+  expect(parseEnv(run(['--print-env'], { INSTA_OSS_DOMAIN: 'example.test' })).INSTA_OSS_TLS_CERT_FILE).toBe('')
+})
+
+test('--tls custom refuses a half-configured pair, and the paths it cannot mount', () => {
+  const dom = { INSTA_OSS_DOMAIN: 'example.test' }
+  const cases: Array<[string[], string]> = [
+    [['--tls', 'custom'], 'needs both --tls-cert'],
+    [['--tls', 'custom', '--tls-cert', '/x/c.crt'], 'needs both --tls-cert'],
+    [['--tls', 'custom', '--tls-key', '/x/k.key'], 'needs both --tls-cert'],
+    [['--tls', 'custom', '--tls-cert', 'rel/c.crt', '--tls-key', '/x/k.key'], 'must be absolute paths'],
+    [['--tls', 'custom', '--tls-cert', '/x/c crt', '--tls-key', '/x/k.key'], 'not a plain absolute path'],
+    // A pair with nothing to serve it is a silent no-op otherwise: the operator asked for
+    // something the resolved mode does not do.
+    [['--tls-cert', '/x/c.crt', '--tls-key', '/x/k.key'], 'only apply with --tls custom'],
+    [['--tls', 'internal', '--tls-cert', '/x/c.crt', '--tls-key', '/x/k.key'], 'only apply with --tls custom'],
+    // ...and from the environment, which is the same request by another route.
+    [['--tls', 'internal'], 'only apply with --tls custom'],
+    [['--tls', 'nonsense'], '--tls must be acme, internal or custom'],
+    // WHERE the pair lives decides whether the stack can start, because each directory becomes a
+    // bind mount at the same path inside both containers. Inside the data directory it lands
+    // inside the read-write mount the daemon owns; one level up it lands ON TOP of it and hides
+    // the data the daemon was started to serve; a system directory replaces the container's own.
+    [['--tls', 'custom', '--tls-cert', '/var/lib/instacloud/tls/c.crt', '--tls-key', '/var/lib/instacloud/tls/k.key'], 'is inside the data directory'],
+    [['--tls', 'custom', '--tls-cert', '/var/lib/c.crt', '--tls-key', '/var/lib/k.key'], 'contains the data directory'],
+    [['--tls', 'custom', '--tls-cert', '/c.crt', '--tls-key', '/k.key'], 'is the filesystem root'],
+    [['--tls', 'custom', '--tls-cert', '/etc/c.crt', '--tls-key', '/etc/k.key'], 'is a system directory'],
+    // The configuration directory holds instad.env, INSTA_OSS_SECRET included, and every TLS
+    // directory is mounted into the edge too: this would hand the daemon's signing secret to a
+    // container with no use for it. Its tls/ child, the recommended home, is fine (below).
+    [['--tls', 'custom', '--tls-cert', '/etc/instacloud/c.crt', '--tls-key', '/etc/instacloud/k.key'], 'is the configuration directory'],
+    [['--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/c.crt', '--tls-key', '/etc/instacloud/k.key'], 'is the configuration directory'],
+    // ...and the key alone is enough to fail it: both directories are mounted, so both are checked.
+    [['--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/c.crt', '--tls-key', '/var/lib/instacloud/k.key'], 'is inside the data directory'],
+  ]
+  for (const [args, says] of cases) {
+    // The last case is the environment form of the one above it.
+    const env = says === 'only apply with --tls custom' && args.length === 2
+      ? { ...dom, INSTA_OSS_TLS_CERT_FILE: '/x/c.crt', INSTA_OSS_TLS_KEY_FILE: '/x/k.key' }
+      : dom
+    const r = tryRun(['--print-env', ...args], env)
+    expect(r.status, args.join(' ')).toBe(1)
+    expect(r.stderr, args.join(' ')).toContain(says)
+  }
+
+  // ...and the directory the docs recommend is not refused, which is the other half of the check.
+  expect(tryRun(['--print-compose', '--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/c.crt', '--tls-key', '/etc/instacloud/tls/k.key'], dom).status).toBe(0)
+
+  // ...and the same two directories under another NAME. /etc/instacloud, or the data directory,
+  // can itself be a symlink, and a path through its target is the same directory: comparing only
+  // how the paths are spelt let a pair beside instad.env into the edge.
+  const alias = mkdtempSync(join(tmpdir(), 'io-alias-'))
+  try {
+    mkdirSync(join(alias, 'cfg-real'))
+    symlinkSync(join(alias, 'cfg-real'), join(alias, 'cfg'))
+    mkdirSync(join(alias, 'data-real', 'tls'), { recursive: true })
+    symlinkSync(join(alias, 'data-real'), join(alias, 'data'))
+    const viaCfg = tryRun(['--print-env', '--tls', 'custom',
+      '--tls-cert', join(alias, 'cfg-real', 'c.crt'), '--tls-key', join(alias, 'cfg-real', 'k.key'),
+    ], { ...dom, IO_CFG_DIR: join(alias, 'cfg') })
+    expect(viaCfg.status, viaCfg.stderr).toBe(1)
+    expect(viaCfg.stderr).toContain('is the configuration directory')
+    const viaData = tryRun(['--print-env', '--tls', 'custom',
+      '--tls-cert', join(alias, 'data-real', 'tls', 'c.crt'), '--tls-key', join(alias, 'data-real', 'tls', 'k.key'),
+    ], { ...dom, INSTA_OSS_DATA_DIR: join(alias, 'data') })
+    expect(viaData.status, viaData.stderr).toBe(1)
+    expect(viaData.stderr).toContain('is inside the data directory')
+  } finally {
+    rmSync(alias, { recursive: true, force: true })
+  }
+
+  // A value that only the PREVIOUS install left in instad.env is not a request: it is how a box
+  // moves back from custom to acme or internal, and refusing there would strand it in custom
+  // mode for good. It is cleared, out loud, and the render is a plain internal one.
+  const cfg = mkdtempSync(join(tmpdir(), 'io-cfg-'))
+  try {
+    writeFileSync(join(cfg, 'instad.env'), [
+      'INSTA_OSS_DOMAIN=example.test',
+      'INSTA_OSS_TLS=custom',
+      'INSTA_OSS_TLS_CERT_FILE=/x/c.crt',
+      'INSTA_OSS_TLS_KEY_FILE=/x/k.key',
+      '',
+    ].join('\n'))
+    const back = tryRun(['--print-caddyfile', '--tls', 'internal'], { IO_CFG_DIR: cfg })
+    expect(back.status).toBe(0)
+    expect(back.stderr).toContain('dropping the supplied certificate')
+    expect(back.stdout).toContain('on_demand')
+    expect(back.stdout).not.toContain('/x/c.crt')
+    // ...and the keys are blanked in instad.env rather than left pointing at a file nothing
+    // serves.
+    const env2 = parseEnv(run(['--print-env', '--tls', 'internal'], { IO_CFG_DIR: cfg }))
+    expect(env2.INSTA_OSS_TLS_CERT_FILE).toBe('')
+    expect(env2.INSTA_OSS_TLS_KEY_FILE).toBe('')
+  } finally {
+    rmSync(cfg, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(!hasOpenssl)('--tls custom checks the pair can actually serve, before anything starts', () => {
+  // Readable and syntactically safe is not the same as able to serve. A mismatched key, a
+  // malformed PEM, an expired certificate or a perfectly good certificate for another domain all
+  // used to pass, leaving Caddy crash-looping while the install exited 0 saying it was serving
+  // your certificate. Third instance of one pattern in this script: success reported over a
+  // configuration that cannot work.
+  const dir = mkdtempSync(join(tmpdir(), 'io-tls-'))
+  const openssl = (args: string, input?: string): void => {
+    const r = spawnSync('sh', ['-c', args], { encoding: 'utf8', input })
+    if (r.status !== 0) throw new Error(`openssl failed: ${args}\n${r.stderr}`)
+  }
+  const key = join(dir, 'k.pem')
+  const other = join(dir, 'other.pem')
+  const wild = join(dir, 'wild.crt')
+  const apex = join(dir, 'apex.crt')
+  const wrong = join(dir, 'wrong.crt')
+  const sampled = join(dir, 'sampled.crt')
+  const future = join(dir, 'future.crt')
+  const noS3 = join(dir, 'no-s3.crt')
+  const shouty = join(dir, 'shouty.crt')
+  // Committed rather than minted: OpenSSL only grew `req -not_before/-not_after` in 3.5, and the
+  // CI runner's 3.0 cannot mint an expired certificate at all. The fixture is the portable way
+  // to exercise the installer's refusal, and it is a self-signed pair for a test domain.
+  const expired = join(ROOT, 'test', 'fixtures', 'tls', 'expired.crt')
+  const expiredKey = join(ROOT, 'test', 'fixtures', 'tls', 'expired.key')
+  const mismatched = join(dir, 'mismatched.crt')
+  const junk = join(dir, 'junk.crt')
+  try {
+    openssl(`openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${key} -out ${wild} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:*.s3.example.test,DNS:example.test' 2>/dev/null`)
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${apex} -subj '/CN=example.test' -addext 'subjectAltName=DNS:example.test' 2>/dev/null`)
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${wrong} -subj '/CN=*.elsewhere.test' -addext 'subjectAltName=DNS:*.elsewhere.test' 2>/dev/null`)
+    openssl(`openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${other} -out ${mismatched} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test' 2>/dev/null`)
+    // The regression for the check that only SAMPLED names: exactly the three that were sampled
+    // and nothing else. It passed, and then the first real service, on a hostname nobody had
+    // enumerated, got a certificate that did not cover it.
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${sampled} -subj '/CN=api.example.test' -addext 'subjectAltName=DNS:api.example.test,DNS:console.example.test,DNS:web-example-main.example.test' 2>/dev/null`)
+    // One wildcard, which looks like the whole answer and is not: `*.example.test` matches ONE
+    // label, and buckets are addressed `<bucket>.s3.example.test`, which is two.
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${noS3} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:example.test' 2>/dev/null`)
+    // A certificate whose SANs are capitalised. DNS names are case-insensitive (RFC 4343) and so
+    // is TLS name matching, so this covers exactly the same hostnames and every client accepts
+    // it; a case-sensitive comparison here refused a certificate that works.
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${shouty} -subj '/CN=*.Example.Test' -addext 'subjectAltName=DNS:*.Example.Test,DNS:*.S3.Example.Test,DNS:Example.Test' 2>/dev/null`)
+    writeFileSync(junk, 'this is not a certificate\n')
+
+    const bad: Array<[string, string, string]> = [
+      [junk, key, 'not a PEM certificate'],
+      [wild, junk, 'not a PEM private key'],
+      [mismatched, key, 'is not the key for'],
+      [expired, expiredKey, 'has already expired'],
+      [apex, key, 'does not carry the SAN DNS:*.example.test'],
+      [wrong, key, 'does not carry the SAN DNS:*.example.test'],
+      // Sampling cannot establish "every hostname this box will ever deploy".
+      [sampled, key, 'does not carry the SAN DNS:*.example.test'],
+      // ...and neither does one wildcard. `AWS_ENDPOINT_URL_S3=https://s3.<domain>` goes into
+      // every deployed app, the SDKs address buckets virtual-hosted by default, and under
+      // `custom` nothing is issued for those names, so a certificate without the second
+      // wildcard breaks storage for every app on the box while the install reports success.
+      [noS3, key, 'does not carry the SAN DNS:*.s3.example.test'],
+    ]
+    // Right names, right key, right dates, and the wrong PURPOSE: an extended key usage of
+    // clientAuth only. It loads and is served, the -k fingerprint probe accepts it, and every
+    // client then rejects it as a server certificate, while the install said it was serving.
+    const clientOnly = join(dir, 'client-only.crt')
+    openssl(`openssl req -x509 -key ${key} -sha256 -days 30 -out ${clientOnly} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:*.s3.example.test,DNS:example.test' -addext 'extendedKeyUsage=clientAuth' 2>/dev/null`)
+    bad.push([clientOnly, key, 'is not usable as a TLS server certificate'])
+    for (const [c, k, says] of bad) {
+      // A --print-* run over files that EXIST checks them too, which is how this runs without
+      // root: the checks are skipped only when there is nothing to read.
+      const r = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', c, '--tls-key', k], { INSTA_OSS_DOMAIN: 'example.test' })
+      expect(r.status, says).toBe(1)
+      expect(r.stderr, says).toContain(says)
+    }
+    // A certificate that is not valid YET. `-checkend 0` only proves notAfter is in the future,
+    // so this installed cleanly and was then rejected by every client, while the install said it
+    // had worked. Skipped where openssl cannot date a certificate forward (`req -not_before`
+    // arrived in 3.5), rather than silently not testing it.
+    const mintDated = (dates: string, out: string): { status: number | null; out: string } => {
+      const r = spawnSync('sh', ['-c',
+        `openssl req -x509 -key ${key} -sha256 ${dates} -out ${out} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:*.s3.example.test' 2>&1`,
+      ], { encoding: 'utf8' })
+      return { status: r.status, out: `${r.stdout}${r.stderr}` }
+    }
+    const dated = mintDated('-not_before 20990101000000Z -not_after 20990201000000Z', future)
+    if (dated.status === 0) {
+      const r = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', future, '--tls-key', key], { INSTA_OSS_DOMAIN: 'example.test' })
+      expect(r.status).toBe(1)
+      expect(r.stderr).toContain('is not valid yet')
+    } else {
+      // The skip has to be able to tell "this openssl has no -not_before" (3.5 added it) from
+      // "the command is broken". Sending stderr to /dev/null and then asserting it is defined
+      // could not: it passed for a typo, a wrong flag or any other failure, and silently did not
+      // test the refusal at all, under a comment claiming the opposite. Matching the WORDING
+      // cannot either, which CI showed: OpenSSL 3.0 answers an unknown flag with nothing but
+      // "req: Use -help for summary.". So the control is the same command with `-days` in place
+      // of the two date flags. If that succeeds, the flags are the only difference and the skip
+      // is honest; if it fails too, openssl itself is the problem here and this says so loudly
+      // rather than quietly testing nothing.
+      const control = mintDated('-days 30', join(dir, 'control.crt'))
+      expect(control.status, `openssl req fails for a reason other than -not_before, so the not-yet-valid refusal was NOT exercised. With the dates: ${dated.out} Without them: ${control.out}`).toBe(0)
+    }
+
+    // WHY the second wildcard, checked the way a TLS client checks it rather than asserted. A
+    // wildcard matches exactly one label, so the certificate that carries only `*.example.test`
+    // covers every service hostname and NOT the bucket URLs this box hands to every deployed
+    // app. `AWS_ENDPOINT_URL_S3` is injected as `https://s3.<domain>` and the AWS SDKs address
+    // buckets virtual-hosted by default; under `custom` there is no on-demand issuance to cover
+    // them, by design, so the certificate is the only place this can be fixed.
+    const bucketHost = 'my-bucket.s3.example.test'
+    // `checkHost` answers with the SAN that matched, so the assertions name the entry.
+    expect(new X509Certificate(readFileSync(noS3)).checkHost(bucketHost)).toBeUndefined()
+    expect(new X509Certificate(readFileSync(noS3)).checkHost('web-shop-main.example.test')).toBe('*.example.test')
+    expect(new X509Certificate(readFileSync(wild)).checkHost(bucketHost)).toBe('*.s3.example.test')
+
+    // The capitalised pair is accepted, for the same reason a browser would accept it.
+    const caps = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', shouty, '--tls-key', key], { INSTA_OSS_DOMAIN: 'example.test' })
+    expect(caps.status, caps.stderr).toBe(0)
+
+    // ...and the pair that can serve gets past the certificate checks, failing later for the
+    // reason a non-root run always fails.
+    const ok = tryRun(['--print-env', '--tls', 'custom', '--tls-cert', wild, '--tls-key', key], { INSTA_OSS_DOMAIN: 'example.test' })
+    expect(ok.status, ok.stderr).toBe(0)
+    expect(parseEnv(ok.stdout).INSTA_OSS_TLS).toBe('custom')
+    // ...and a path that does not exist yet still renders, because there is nothing to check.
+    expect(tryRun(['--print-env', '--tls', 'custom', '--tls-cert', '/nope/c.crt', '--tls-key', '/nope/k.key'], { INSTA_OSS_DOMAIN: 'example.test' }).status).toBe(0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(!hasOpenssl)('a symlinked certificate mounts the directory it RESOLVES to as well', () => {
+  // certbot's `live/<domain>/fullchain.pem` is a relative link into `../../archive/<domain>/`,
+  // which is the commonest real source of these files. Mounting only the link's own directory
+  // puts a dangling link inside both containers: valid on the host, unreadable where it is
+  // used. Refusing the standard layout would be a poor trade, so the target's directory is
+  // mounted too and the configured path keeps pointing at the link.
+  const root = mkdtempSync(join(tmpdir(), 'io-le-'))
+  try {
+    mkdirSync(join(root, 'archive', 'example.test'), { recursive: true })
+    mkdirSync(join(root, 'live', 'example.test'), { recursive: true })
+    // Real files behind the links: the validation above them is reachable now, and a placeholder
+    // would fail as "not a PEM certificate" rather than testing the mount.
+    const mint = spawnSync('sh', ['-c',
+      `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${join(root, 'archive', 'example.test', 'privkey1.pem')} -out ${join(root, 'archive', 'example.test', 'fullchain1.pem')} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:*.s3.example.test,DNS:example.test' 2>/dev/null`,
+    ], { encoding: 'utf8' })
+    if (mint.status !== 0) throw new Error(`openssl failed: ${mint.stderr}`)
+    symlinkSync('../../archive/example.test/fullchain1.pem', join(root, 'live', 'example.test', 'fullchain.pem'))
+    symlinkSync('../../archive/example.test/privkey1.pem', join(root, 'live', 'example.test', 'privkey.pem'))
+
+    const compose = run(['--print-compose', '--tls', 'custom',
+      '--tls-cert', join(root, 'live', 'example.test', 'fullchain.pem'),
+      '--tls-key', join(root, 'live', 'example.test', 'privkey.pem'),
+    ], { INSTA_OSS_DOMAIN: 'example.test' })
+    // Both directories, in both containers: the link's, so the configured path exists, and the
+    // target's, so it resolves. (A temp dir on macOS is itself a symlink under /var, so the
+    // rendered paths are compared by suffix rather than by the string that was passed in.)
+    for (const dir of ['/live/example.test:', '/archive/example.test:']) {
+      expect(compose.split('\n').filter((l) => l.includes(dir) && l.trim().endsWith(':ro')), dir).toHaveLength(2)
+    }
+    // ...and the Caddyfile still names the link, not the target, so a renewal that re-points it
+    // needs no reinstall.
+    const caddy = run(['--print-caddyfile', '--tls', 'custom',
+      '--tls-cert', join(root, 'live', 'example.test', 'fullchain.pem'),
+      '--tls-key', join(root, 'live', 'example.test', 'privkey.pem'),
+    ], { INSTA_OSS_DOMAIN: 'example.test' })
+    expect(caddy).toContain('/live/example.test/fullchain.pem')
+    expect(caddy).not.toContain('fullchain1.pem')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(!hasOpenssl)('a link the containers cannot follow is refused, and one through a symlinked directory is mounted where it leads', () => {
+  // Only the link's directory and its target's are mounted, so inside the containers nothing
+  // between them exists. Both layouts below read fine on the host.
+  const root = mkdtempSync(join(tmpdir(), 'io-le2-'))
+  const mint = (crt: string, key: string): void => {
+    const r = spawnSync('sh', ['-c', `openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 30 -keyout ${key} -out ${crt} -subj '/CN=*.example.test' -addext 'subjectAltName=DNS:*.example.test,DNS:*.s3.example.test,DNS:example.test' 2>/dev/null`], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`openssl failed: ${r.stderr}`)
+  }
+  try {
+    // A CHAIN, live -> links -> archive: the middle hop is not mounted, so the configured path
+    // dangles inside both containers. Refused before anything is written or restarted.
+    for (const d of ['live', 'links', 'archive']) mkdirSync(join(root, d), { recursive: true })
+    mint(join(root, 'archive', 'cert.pem'), join(root, 'archive', 'key.pem'))
+    symlinkSync('../archive/cert.pem', join(root, 'links', 'cert.pem'))
+    symlinkSync('../links/cert.pem', join(root, 'live', 'cert.pem'))
+    const chained = tryRun(['--print-compose', '--tls', 'custom',
+      '--tls-cert', join(root, 'live', 'cert.pem'), '--tls-key', join(root, 'archive', 'key.pem'),
+    ], { INSTA_OSS_DOMAIN: 'example.test' })
+    expect(chained.status).toBe(1)
+    expect(chained.stderr).toContain('is itself a symlink')
+
+    // A symlinked DIRECTORY on the way (le -> real, as when /etc/letsencrypt lives on another
+    // volume). Inside the container the certbot link is walked from <root>/le/live/x, so it lands
+    // in <root>/le/archive/x: that is what has to be mounted, not the physical directory the host
+    // reaches through the symlink.
+    mkdirSync(join(root, 'real', 'live', 'x'), { recursive: true })
+    mkdirSync(join(root, 'real', 'archive', 'x'), { recursive: true })
+    mint(join(root, 'real', 'archive', 'x', 'fullchain1.pem'), join(root, 'real', 'archive', 'x', 'privkey1.pem'))
+    symlinkSync('../../archive/x/fullchain1.pem', join(root, 'real', 'live', 'x', 'fullchain.pem'))
+    symlinkSync('../../archive/x/privkey1.pem', join(root, 'real', 'live', 'x', 'privkey.pem'))
+    symlinkSync(join(root, 'real'), join(root, 'le'))
+    const compose = run(['--print-compose', '--tls', 'custom',
+      '--tls-cert', join(root, 'le', 'live', 'x', 'fullchain.pem'),
+      '--tls-key', join(root, 'le', 'live', 'x', 'privkey.pem'),
+    ], { INSTA_OSS_DOMAIN: 'example.test' })
+    const mounts = compose.split('\n').filter((l) => l.trim().endsWith(':ro'))
+    expect(mounts.some((l) => l.includes('/le/archive/x:')), mounts.join('\n')).toBe(true)
+    expect(mounts.some((l) => l.includes('/real/archive/x:')), mounts.join('\n')).toBe(false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('an ACME email is an email, or absent', () => {
