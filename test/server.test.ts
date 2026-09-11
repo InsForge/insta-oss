@@ -4293,6 +4293,7 @@ test('the always-on default: main is always-on like the cloud, a branch clone sc
   const { project } = await engine.createProject('demo')
   await engine.addComputeService(project.id, 'web')
   await engine.addDbService(project.id, 'db', {})
+  await engine.addManagedService(project.id, 'redis', 'cache', {})
   await engine.createBranch(project.id, 'feat', 'main')
   const branches = (): { main: Branch; feat: Branch } => {
     const all = engine.listBranches(project.id)
@@ -4304,6 +4305,9 @@ test('the always-on default: main is always-on like the cloud, a branch clone sc
   expect(on(branches().main, 'cp-web')).toBe(true)
   expect(on(branches().feat, 'cp-web')).toBe(false)
   expect(on(branches().main, 'pg-db')).toBe(false)
+  // A managed database follows the compute default, not postgres's: up on main, asleep on a clone.
+  expect(on(branches().main, 'rd-cache')).toBe(true)
+  expect(on(branches().feat, 'rd-cache')).toBe(false)
   // The toggle: switched to scale-to-zero, main sleeps like any other service...
   await engine.setAlwaysOn(project.id, 'cp-web', false)
   expect(on(branches().main, 'cp-web')).toBe(false)

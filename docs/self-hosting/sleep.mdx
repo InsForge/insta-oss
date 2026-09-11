@@ -4,8 +4,9 @@ description: "Idle services stop, traffic starts them again, and one box holds f
 ---
 
 A self-hosted box follows the hosted platform's defaults. Compute on a project's default branch is
-always-on, so production never waits for a cold start. Databases, and every service on the other
-branches, scale to zero. Either can be switched per service, from the CLI, the API or the console.
+always-on, so production never waits for a cold start, and managed Redis, MySQL and MongoDB follow
+the same default. Postgres, and every service on the other branches, scale to zero. Either can be
+switched per service, from the CLI, the API or the console.
 
 A service that scales to zero is stopped, not paused, when it goes idle: it holds no memory and no
 CPU, its disk is untouched, and the next request starts it again in a second or two. That is what

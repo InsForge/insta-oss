@@ -624,6 +624,23 @@ test('systemd is detected by whether it runs the box, not by systemctl being on 
   expect(script).toContain('log "Docker is installed but not answering: starting it"')
 })
 
+test('an upgrade keeps the always-on default its instad.env already has', () => {
+  // Every install before this default flipped wrote INSTA_OSS_ALWAYS_ON_DEFAULT=0. Re-running the
+  // installer must not turn those boxes always-on underneath their operators: always-on services
+  // are never evicted, so a silent flip changes how much memory a running box holds.
+  const cfg = mkdtempSync(join(tmpdir(), 'io-upg-'))
+  try {
+    writeFileSync(join(cfg, 'instad.env'), 'INSTA_OSS_DOMAIN=example.test\nINSTA_OSS_ALWAYS_ON_DEFAULT=0\n')
+    expect(parseEnv(run(['--print-env'], { IO_CFG_DIR: cfg })).INSTA_OSS_ALWAYS_ON_DEFAULT).toBe('0')
+    // ...and it is the existing file doing that, not the default: without the key the same
+    // upgrade renders the new default.
+    writeFileSync(join(cfg, 'instad.env'), 'INSTA_OSS_DOMAIN=example.test\n')
+    expect(parseEnv(run(['--print-env'], { IO_CFG_DIR: cfg })).INSTA_OSS_ALWAYS_ON_DEFAULT).toBe('1')
+  } finally {
+    rmSync(cfg, { recursive: true, force: true })
+  }
+})
+
 test('.env is symlinked to instad.env so a plain docker compose in $CFG interpolates', () => {
   // compose interpolates ${VAR} from the shell and from .env in the project directory, never from
   // env_file, so without this every documented bare command there resolved the image to ':'.

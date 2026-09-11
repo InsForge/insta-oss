@@ -114,7 +114,9 @@ export function AddServiceDialog({ projectId, branch, onClose, onDone, onApprova
                 <p className="text-sm font-medium">Always on</p>
                 <p className="text-xs text-muted-foreground">Off: sleeps when idle and wakes on request</p>
               </div>
-              <Switch checked={alwaysOn} onCheckedChange={setAlwaysOn} aria-label="Always on" />
+              {/* Disabled until the branch list says whether this is the default branch: before then
+                  the switch cannot show what an untouched create will do. */}
+              <Switch checked={alwaysOn} onCheckedChange={setAlwaysOn} disabled={branches === undefined} aria-label="Always on" />
             </div>
             <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
               <div>
