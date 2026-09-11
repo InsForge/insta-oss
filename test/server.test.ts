@@ -4317,6 +4317,27 @@ test('the always-on default: main is always-on like the cloud, a branch clone sc
   expect(on(branches().feat, 'cp-web')).toBe(true)
 })
 
+test('adding compute reports the always-on the NAMED branch will actually have', async () => {
+  // The 201 used to report the daemon-wide default, so an untouched create on a preview branch
+  // answered always_on: true while that branch's services list, and its scheduler, said false.
+  const cfg = testConfig({ INSTA_OSS_ALWAYS_ON_DEFAULT: '1' })
+  const engine = makeEngine(cfg)
+  const a = buildServer(engine, cfg)
+  const { project } = await engine.createProject('demo')
+  await engine.createBranch(project.id, 'feat', 'main')
+  const add = async (body: Record<string, unknown>) =>
+    (await a.inject({ method: 'POST', url: `/projects/${project.id}/services`, payload: { type: 'compute', ...body } })).json().service
+  // On the preview branch, untouched: it will scale to zero there, and the 201 says so.
+  expect((await add({ name: 'web', branch: 'feat' })).always_on).toBe(false)
+  const featRows = (await a.inject({ method: 'GET', url: `/projects/${project.id}/services?branch=feat` })).json().services
+  expect(featRows.find((r: { name: string }) => r.name === 'web').always_on).toBe(false)
+  // On the default branch (named or not), the same untouched create is always-on.
+  expect((await add({ name: 'api' })).always_on).toBe(true)
+  expect((await add({ name: 'worker', branch: 'main' })).always_on).toBe(true)
+  // An explicit value is reported as given, wherever it is created.
+  expect((await add({ name: 'pinned', branch: 'feat', alwaysOn: true })).always_on).toBe(true)
+})
+
 test('database management wakes a sleeping instance; observability answers 503 and runs no SQL', async () => {
   const { engine, id } = await wp3Project()
   const bid = await branchId(id)

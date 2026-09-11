@@ -1738,7 +1738,7 @@ export class Engine {
    *  destroyed) — but never detached. */
   addComputeService(
     projectId: string, name: string, volumeGib?: number,
-    opts: { alwaysOn?: boolean; port?: number; templateDeploymentId?: string; templateCode?: string } = {},
+    opts: { alwaysOn?: boolean; port?: number; templateDeploymentId?: string; templateCode?: string; branch?: string } = {},
   ): ServiceRow {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
@@ -1767,9 +1767,15 @@ export class Engine {
       ;(pr.serviceSettings ??= {})[`cp-${name}`] = settings
     })
     this.emit(projectId, null, 'resource', 'service.added', { type: 'compute', name, ...(volumeGib !== undefined ? { volumeGib } : {}) })
+    // The group is project-level, but whether it sleeps is per branch (`effectiveAlwaysOn`), so the
+    // reply reports the branch the request named, else the default branch, through the same rule
+    // the services list and the scheduler use. The daemon-wide default alone told a preview
+    // branch "always on" for a service that branch then put to sleep.
+    const branches = this.listBranches(projectId)
+    const target = (opts.branch !== undefined ? branches.find((b) => b.name === opts.branch) : undefined) ?? branches.find((b) => b.isDefault)
     return {
       id: `cp-${name}`, type: 'compute', name, status: 'ready', volume_gib: volumeGib ?? null,
-      always_on: opts.alwaysOn ?? this.cfg.sleep.alwaysOnDefault,
+      always_on: target ? this.effectiveAlwaysOn(this.getProject(projectId)!, target, `cp-${name}`) : (opts.alwaysOn ?? false),
       ...(opts.port !== undefined ? { port: opts.port } : {}),
       ...(opts.templateDeploymentId !== undefined ? { template_deployment_id: opts.templateDeploymentId } : {}),
       ...(opts.templateCode !== undefined ? { template_code: opts.templateCode } : {}),

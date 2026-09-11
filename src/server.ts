@@ -394,9 +394,12 @@ export function buildServer(
       if (isManagedDbType(body.type!)) return engine.addManagedService(id, body.type as 'redis' | 'mysql' | 'mongodb', body.name!, on)
       // volumeGib (compute only) attaches a persistent /data volume (also attachable later via
       // PUT …/volume, and deletable via DELETE …/volume — cloud parity).
+      // `branch` does not decide where a compute group lives (it is project-level, above); it
+      // decides which branch's always-on the 201 reports, since that differs per branch.
       return engine.addComputeService(id, body.name!, body.volumeGib, {
         ...(body.alwaysOn !== undefined ? { alwaysOn: body.alwaysOn } : {}),
         ...(body.port !== undefined ? { port: body.port } : {}),
+        ...(body.branch !== undefined ? { branch: body.branch } : {}),
       })
     }
     if (!['postgres', 'storage', 'compute'].includes(body.type) && !isManagedDbType(body.type)) {

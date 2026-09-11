@@ -25,9 +25,15 @@ declare global {
   interface Window { __INSTA_OSS__?: Partial<Boot> | null }
 }
 
-function envVar(name: string): string | undefined {
-  const meta = import.meta as unknown as { env?: Record<string, string | undefined> }
-  return meta.env?.[name]
+// Literal `import.meta.env.VITE_*`, never an alias: Vite fills these in only where that exact text
+// appears. Read through a cast or a key looked up at runtime, a build with VITE_INSTA_MODE and
+// VITE_INSTA_ALWAYS_ON_DEFAULT set carried neither (checked by grepping the bundle for a marker).
+function envMode(): string | undefined {
+  return import.meta.env.VITE_INSTA_MODE
+}
+
+function envAlwaysOn(): string | undefined {
+  return import.meta.env.VITE_INSTA_ALWAYS_ON_DEFAULT
 }
 
 function asMode(v: unknown): RunMode {
@@ -39,8 +45,8 @@ function asMode(v: unknown): RunMode {
  *  the same way, so a partial injection never yields `undefined` URLs. */
 export function readBoot(
   win: BootWindow | undefined = typeof window === 'undefined' ? undefined : (window as BootWindow),
-  fallbackMode: string | undefined = envVar('VITE_INSTA_MODE'),
-  fallbackAlwaysOn: string | undefined = envVar('VITE_INSTA_ALWAYS_ON_DEFAULT'),
+  fallbackMode: string | undefined = envMode(),
+  fallbackAlwaysOn: string | undefined = envAlwaysOn(),
 ): Boot {
   const origin = win?.location?.origin ?? ''
   const injected = win?.__INSTA_OSS__
