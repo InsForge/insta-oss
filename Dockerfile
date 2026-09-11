@@ -46,7 +46,7 @@ COPY package.json tsconfig.json ./
 COPY src ./src
 COPY templates ./templates
 COPY --from=ui /app/ui/dist ./ui/dist
-LABEL org.opencontainers.image.source=https://github.com/InsForge/insta-oss \
+LABEL org.opencontainers.image.source=https://github.com/InsForge/instacloud-oss \
       org.opencontainers.image.version=${VERSION} \
       org.opencontainers.image.title=instacloud \
       org.opencontainers.image.description="InstaCloud open source runtime: one daemon over Docker, branchable and serverless on a single node" \

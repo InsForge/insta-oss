@@ -12,7 +12,7 @@ branch  = a disposable, fully isolated clone of all three
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 [Install on a VPS](#install-on-a-vps) · [Run on your laptop](#run-on-your-laptop) ·
-[insta CLI](https://github.com/InsForge/insta-cli) · [Hosted InstaCloud](https://instacloud.com) ·
+[insta CLI](https://github.com/InsForge/instacloud-cli) · [Hosted InstaCloud](https://instacloud.com) ·
 [Discord](https://discord.com/invite/MPxwj5xVvW)
 
 ## Install on a VPS
@@ -33,7 +33,7 @@ published for that tag too. Build it on the box and point the installer at it:
 
 ```bash
 curl -fsSL https://get.docker.com | sudo sh          # only when the box has no Docker yet
-git clone https://github.com/InsForge/insta-oss.git && cd insta-oss
+git clone https://github.com/InsForge/instacloud-oss.git && cd instacloud-oss
 sudo docker build -t instacloud:dev .
 sudo INSTA_OSS_IMAGE=instacloud:dev sh install.sh
 ```
@@ -66,7 +66,7 @@ Full details, including firewalls, reflinks and your own domain:
 Prerequisites: Docker (running) and Node 22 or newer. No cloud account, no API keys, no auth.
 
 ```bash
-git clone https://github.com/InsForge/insta-oss.git && cd insta-oss
+git clone https://github.com/InsForge/instacloud-oss.git && cd instacloud-oss
 npm install
 npm run build:ui        # optional: the dashboard, served by the daemon itself
 npm run dev             # the daemon on http://127.0.0.1:8080  (INSTA_OSS_PORT to change)

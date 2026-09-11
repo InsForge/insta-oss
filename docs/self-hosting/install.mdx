@@ -30,7 +30,7 @@ curl -fsSL https://get.instacloud.com | sh
 The raw URL is the documented fallback:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/InsForge/insta-oss/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | sh
 ```
 
 ## Build the image yourself
@@ -44,8 +44,8 @@ installer at it with `INSTA_OSS_IMAGE`:
 
 ```bash
 curl -fsSL https://get.docker.com | sudo sh          # only when the box has no Docker yet
-git clone https://github.com/InsForge/insta-oss.git
-cd insta-oss
+git clone https://github.com/InsForge/instacloud-oss.git
+cd instacloud-oss
 sudo docker build -t instacloud:dev .
 sudo INSTA_OSS_IMAGE=instacloud:dev sh install.sh
 ```
@@ -428,7 +428,7 @@ to run when it did not. Two things are left behind on purpose:
 No installer, no domain, no auth:
 
 ```bash
-git clone https://github.com/InsForge/insta-oss.git && cd insta-oss
+git clone https://github.com/InsForge/instacloud-oss.git && cd instacloud-oss
 npm install
 npm run build:ui                     # the dashboard, served by the daemon itself
 npm run dev                          # the daemon on http://127.0.0.1:8080

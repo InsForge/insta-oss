@@ -83,7 +83,7 @@ because an RGBA file can still be fully opaque.
 | `9router` | `logo.png` 500x500 | yes (corner alpha 0) | fixed orange `#F34E21` | 9router's own mark, taken from the copy at `i.imgur.com/yjb5HvR.png`. Upstream's repo PNG (`images/9router.png`) is a 2940x2594 screenshot of the app, not this mark, so that copy is the only place the asset is available. Please do not "correct" this row to the repo URL |
 
 Logos are served to the gallery from jsDelivr, pinned to the commit that published the template:
-`https://cdn.jsdelivr.net/gh/InsForge/insta-oss@<sha>/templates/<code>/logo.svg`. That URL is
+`https://cdn.jsdelivr.net/gh/InsForge/instacloud-oss@<sha>/templates/<code>/logo.svg`. That URL is
 immutable per published version and cached at the edge, so a gallery loading eight of them costs
 nothing.
 

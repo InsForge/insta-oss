@@ -92,7 +92,7 @@ function TopBar() {
           <span className={cn('size-1.5 rounded-full', health?.ok ? 'bg-success' : 'bg-destructive')} />
           daemon
         </span>
-        <a href="https://github.com/InsForge/insta-oss#readme" target="_blank" rel="noreferrer"
+        <a href="https://github.com/InsForge/instacloud-oss#readme" target="_blank" rel="noreferrer"
           className="rounded-md px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-alpha-4 hover:text-foreground">
           Docs
         </a>
