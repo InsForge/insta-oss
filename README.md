@@ -233,7 +233,7 @@ deliberately do not cover.
 On a laptop:
 
 ```bash
-insta project delete                                        # per project (approval-gated)
+insta project delete                                        # per project (approval is opt-in: insta policy set project.delete approve)
 docker ps -aq --filter name=io- | xargs docker rm -f        # every insta-oss container
 docker volume rm io-garage-meta io-garage-data              # the shared object store data
 rm -rf ~/.insta-oss                                         # daemon state

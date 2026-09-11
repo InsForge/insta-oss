@@ -414,15 +414,17 @@ detect_ip() {
 # off a cloud the link-local address does not answer and this costs at most a few seconds once.
 cloud_public_ip() {
   _cip=''
-  _tok=$(curl -fsS --max-time 1 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null) || _tok=''
+  # --noproxy '*': the metadata service is link-local and must be asked directly. Through an
+  # http_proxy the answer would come from the proxy, which could claim any address it liked.
+  _tok=$(curl -fsS --noproxy '*' --max-time 1 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null) || _tok=''
   if [ -n "$_tok" ]; then
-    _cip=$(curl -fsS --max-time 1 -H "X-aws-ec2-metadata-token: $_tok" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null) || _cip=''
+    _cip=$(curl -fsS --noproxy '*' --max-time 1 -H "X-aws-ec2-metadata-token: $_tok" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null) || _cip=''
   fi
   if ! valid_ip "$_cip"; then
-    _cip=$(curl -fsS --max-time 1 -H 'Metadata-Flavor: Google' http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip 2>/dev/null) || _cip=''
+    _cip=$(curl -fsS --noproxy '*' --max-time 1 -H 'Metadata-Flavor: Google' http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip 2>/dev/null) || _cip=''
   fi
   if ! valid_ip "$_cip"; then
-    _cip=$(curl -fsS --max-time 1 -H 'Metadata: true' 'http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text' 2>/dev/null) || _cip=''
+    _cip=$(curl -fsS --noproxy '*' --max-time 1 -H 'Metadata: true' 'http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text' 2>/dev/null) || _cip=''
   fi
   if valid_ip "$_cip"; then printf '%s' "$_cip"; fi
 }
