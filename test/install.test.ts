@@ -241,6 +241,29 @@ test('--tls custom refuses a half-configured pair, and the paths it cannot mount
   // ...and the directory the docs recommend is not refused, which is the other half of the check.
   expect(tryRun(['--print-compose', '--tls', 'custom', '--tls-cert', '/etc/instacloud/tls/c.crt', '--tls-key', '/etc/instacloud/tls/k.key'], dom).status).toBe(0)
 
+  // ...and the same two directories under another NAME. /etc/instacloud, or the data directory,
+  // can itself be a symlink, and a path through its target is the same directory: comparing only
+  // how the paths are spelt let a pair beside instad.env into the edge.
+  const alias = mkdtempSync(join(tmpdir(), 'io-alias-'))
+  try {
+    mkdirSync(join(alias, 'cfg-real'))
+    symlinkSync(join(alias, 'cfg-real'), join(alias, 'cfg'))
+    mkdirSync(join(alias, 'data-real', 'tls'), { recursive: true })
+    symlinkSync(join(alias, 'data-real'), join(alias, 'data'))
+    const viaCfg = tryRun(['--print-env', '--tls', 'custom',
+      '--tls-cert', join(alias, 'cfg-real', 'c.crt'), '--tls-key', join(alias, 'cfg-real', 'k.key'),
+    ], { ...dom, IO_CFG_DIR: join(alias, 'cfg') })
+    expect(viaCfg.status, viaCfg.stderr).toBe(1)
+    expect(viaCfg.stderr).toContain('is the configuration directory')
+    const viaData = tryRun(['--print-env', '--tls', 'custom',
+      '--tls-cert', join(alias, 'data-real', 'tls', 'c.crt'), '--tls-key', join(alias, 'data-real', 'tls', 'k.key'),
+    ], { ...dom, INSTA_OSS_DATA_DIR: join(alias, 'data') })
+    expect(viaData.status, viaData.stderr).toBe(1)
+    expect(viaData.stderr).toContain('is inside the data directory')
+  } finally {
+    rmSync(alias, { recursive: true, force: true })
+  }
+
   // A value that only the PREVIOUS install left in instad.env is not a request: it is how a box
   // moves back from custom to acme or internal, and refusing there would strand it in custom
   // mode for good. It is cleared, out loud, and the render is a plain internal one.

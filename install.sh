@@ -318,6 +318,16 @@ if [ "$TLS" = custom ]; then
     # pair and is the recommended home.
     case $_d in "$CFG") _why="is the configuration directory, which holds instad.env and the daemon's INSTA_OSS_SECRET: mounting it would put that secret inside the edge container" ;; esac
     case $CFG in "$_d"/*) _why="contains the configuration directory $CFG, which holds instad.env and the daemon's INSTA_OSS_SECRET: mounting it would put that secret inside the edge container" ;; esac
+    # ...and against where the data and configuration directories really ARE. Resolving only the
+    # candidate was half a check: with /etc/instacloud a symlink to /srv/instacloud, a pair under
+    # /srv/instacloud is the same directory by another name, matched neither spelling, and was
+    # mounted into the edge with the daemon's secret in it. Both forms, both directions.
+    _dp=$(phys_dir "$DATA")
+    _cp=$(phys_dir "$CFG")
+    case $_d in "$_dp"|"$_dp"/*) _why="is inside the data directory $DATA (really $_dp), which is already mounted read-write into the daemon" ;; esac
+    case $_dp in "$_d"/*) _why="contains the data directory $DATA (really $_dp), so mounting it would hide the data mount inside the container" ;; esac
+    case $_d in "$_cp") _why="is the configuration directory $CFG (really $_cp), which holds instad.env and the daemon's INSTA_OSS_SECRET: mounting it would put that secret inside the edge container" ;; esac
+    case $_cp in "$_d"/*) _why="contains the configuration directory $CFG (really $_cp), which holds instad.env and the daemon's INSTA_OSS_SECRET: mounting it would put that secret inside the edge container" ;; esac
     case $_d in
       /bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
         _why="is a system directory the container images own, and mounting it would replace theirs" ;;
