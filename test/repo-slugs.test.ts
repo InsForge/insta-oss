@@ -43,7 +43,10 @@ const SKIP_PREFIXES = [
   '.claude/',
 ]
 
-const BINARY = /\.(png|jpe?g|gif|ico|svg|woff2?|ttf|zip|gz|tar|pdf|webp|mp4)$/i
+// No `svg` here on purpose: SVG is text (XML), and the tracked ones include assets/deploy-button.svg
+// and the template logos, any of which could embed a stale repo URL. Skipping them would be the
+// same blind spot this test exists to close.
+const BINARY = /\.(png|jpe?g|gif|ico|woff2?|ttf|zip|gz|tar|pdf|webp|mp4)$/i
 
 const scanned = (): string[] =>
   trackedFiles().filter(
