@@ -198,6 +198,18 @@ test('manifest parity: the refusals the platform makes, one case each', () => {
   expect(parse({ ...base, services: { web: { ...base.services.web, volume: { sizeGib: 20 } } } }).services.web.volume).toBe(true)
 })
 
+// The parser claims to apply the engine's grammar, and it did not: both regexes were local copies
+// permitting a trailing hyphen, which the engine rejects. A code or service name ending in `-`
+// therefore passed validation here and failed partway through DEPLOYMENT, after preliminary state
+// such as the template's branch had already been created. Both now come from src/names.ts.
+test('manifest names are held to the engine grammar, trailing hyphen included', () => {
+  refuses({ ...base, code: 'api-' }, /code/)
+  refuses({ ...base, services: { 'web-': { ...base.services.web } } }, /web-|service name/)
+  // The shapes that were always legal still parse.
+  expect(parse({ ...base, code: 'api-1' }).code).toBe('api-1')
+  expect(Object.keys(parse({ ...base, services: { 'web-1': { ...base.services.web } } }).services)).toEqual(['web-1'])
+})
+
 test('manifestDigest is stable under key reordering and moves with content', () => {
   const a = parse({ code: 'x', version: '1', generated: { t: 'secret:8' }, services: { web: { type: 'web', image: 'i', healthcheck: '/', port: 8080 } } })
   const b = parse({ services: { web: { healthcheck: '/', port: 8080, image: 'i', type: 'web' } }, version: '1', generated: { t: 'secret:8' }, code: 'x' })

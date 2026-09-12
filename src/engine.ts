@@ -9,6 +9,7 @@ import { loadConfig, type Config } from './config'
 import { dataLayout, ensureDirSync, lazyDataDirOps, probedCapabilities } from './datadir'
 import { migrateLegacyData } from './datadir-migrate'
 import { docker } from './docker'
+import { BRANCH_NAME_RE, SERVICE_NAME_RE } from './names'
 import { MANAGED_DB, CANONICAL_MANAGED_KEYS, CANONICAL_KEYS, GARAGE_CONTAINER, suffixBundle, envSuffix, laneBundle, managedServiceId, managedContainerName, isManagedDbType, parseServiceId, pgContainerName, pgServiceId, storageServiceId, bucketName, appContainerName, dataPaths } from './manageddb'
 import * as observe from './observe'
 import { loadState, mutate } from './state'
@@ -35,7 +36,6 @@ const DEFAULT_BRANCH = 'main'
 /** A branch name becomes part of a hostname (`web-demo-<branch>.<domain>`) and of every URL that
  *  addresses the branch, so it is restricted to what both can carry. Enforced on create AND on
  *  rename: they disagreed, and create was the lenient one. */
-export const BRANCH_NAME_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
 function assertBranchName(name: string): void {
   if (!BRANCH_NAME_RE.test(name)) throw new Error('branch name must be lower-kebab (a-z, 0-9, -)')
 }
@@ -45,7 +45,6 @@ function assertBranchName(name: string): void {
  *  compute-rename one refused a trailing hyphen but had no length cap, while add-service and
  *  managed-rename capped at 39 and ALLOWED a trailing hyphen, minting a name whose hostname is not
  *  valid. One rule now, the strict one, matching what the dashboard already enforced. */
-export const SERVICE_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/
 function assertServiceName(name: string): void {
   if (!SERVICE_NAME_RE.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
 }
