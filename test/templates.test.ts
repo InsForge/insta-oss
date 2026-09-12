@@ -727,3 +727,44 @@ test('GET /template-deployments/:id is 404 for an unknown id', async () => {
   expect((await get('/template-deployments/11111111-2222-4333-8444-555555555555')).statusCode).toBe(404)
   expect((await get('/template-deployments/11111111-2222-4333-8444-555555555555')).json().error).toBe('template deployment not found')
 })
+
+// The 39-character branch-name cap opened exactly one gap: `resolveBranch` mints `<code>-2` for the
+// second copy, so a code of 38 or 39 characters is legal on its own but 40 or 41 with the suffix.
+// It used to reach `assertBranchName` and surface as the route's default 400 "branch name must be
+// lower-kebab" - a rule the author's code did not break - AFTER governance had run, so a single-use
+// approval could be consumed by it. The service-name copy path has always refused this case with a
+// purpose-built 409 naming the real cause; the branch path now matches.
+test('a template code too long to suffix is refused by NAME LENGTH, not by the kebab rule', async () => {
+  const id = await project()
+  const code = 'c'.repeat(39)
+  const manifest = { code, version: '1', services: { web: { type: 'web', image: 'nginx:alpine', healthcheck: '/' } } }
+
+  const first = await post(`/projects/${id}/template-deployments`, { manifest })
+  expect(first.statusCode).toBe(202)
+  expect((await get(`/projects/${id}/branches`)).json().branches.map((b: { name: string }) => b.name)).toContain(code)
+
+  const second = await post(`/projects/${id}/template-deployments`, { manifest })
+  expect(second.statusCode).toBe(409)
+  expect(second.json().error).toContain('too long to copy')
+  expect(second.json().error).toContain('39-character branch-name limit')
+  expect(second.json().error).not.toContain('lower-kebab')
+
+  // Nothing was created for the refused attempt.
+  const names = (await get(`/projects/${id}/branches`)).json().branches.map((b: { name: string }) => b.name)
+  expect(names.filter((n: string) => n.startsWith('c')).length).toBe(1)
+})
+
+// The positive half: a normal code still takes a second branch, so the guard above refuses only
+// what it must. A LONG-but-legal code cannot be used here — two long names collide on the
+// truncated resource ref (`branch ... already exists as ...`) well before the cap matters, which is
+// a separate, pre-existing constraint with its own clear error.
+test('a normal code still takes a second branch', async () => {
+  const id = await project()
+  const code = 'demo-app'
+  const manifest = { code, version: '1', services: { web: { type: 'web', image: 'nginx:alpine', healthcheck: '/' } } }
+  expect((await post(`/projects/${id}/template-deployments`, { manifest })).statusCode).toBe(202)
+  expect((await post(`/projects/${id}/template-deployments`, { manifest })).statusCode).toBe(202)
+  const names = (await get(`/projects/${id}/branches`)).json().branches.map((b: { name: string }) => b.name)
+  expect(names).toContain(code)
+  expect(names).toContain(`${code}-2`)
+})

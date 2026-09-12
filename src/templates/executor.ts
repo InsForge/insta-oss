@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import type { Engine } from '../engine'
 import { hostArch } from '../hostarch'
-import { SERVICE_NAME_RE } from '../names'
+import { BRANCH_NAME_RE, SERVICE_NAME_RE } from '../names'
 import { loadState, mutate } from '../state'
 import { parseServiceId } from '../manageddb'
 import type { GatedAction, TemplateDeploymentRecord } from '../types'
@@ -35,6 +35,8 @@ const RUN_LEASE_MS = 10 * 60 * 1000
  *  `<name>-2`, `<name>-3` ... rather than taking the previous copy over. */
 const MAX_TEMPLATE_COPIES = 9
 const MINTED_NAME_MAX = 39
+/** The same cap, for the branch name a template copy mints. */
+const BRANCH_NAME_MAX = 39
 /** The one grammar, not a fourth copy of it. A local pattern here allowed the trailing hyphen
  *  `src/names.ts` rejects; nothing that reaches this check can end in one today (the parser
  *  validates the base and the suffix is '' or '-2'...'-N'), but the comment at the call site
@@ -274,9 +276,25 @@ export class TemplateExecutor {
     const parent = branches.find((b) => b.isDefault) ?? branches[0]
     if (!parent) throw new TemplateError(400, 'project has no branches')
     let name: string | null = null
+    let overlong: string | null = null
     for (let i = 1; i <= MAX_TEMPLATE_COPIES; i++) {
       const candidate = i === 1 ? code : `${code}-${i}`
-      if (!this.engine.getBranchByName(projectId, candidate)) { name = candidate; break }
+      if (this.engine.getBranchByName(projectId, candidate)) continue
+      // The SUFFIX can push a legal code past the branch-name cap: a 38- or 39-character code is
+      // valid, `code-2` is 40 or 41 and `createBranch` refuses it. Caught here, synchronously and
+      // named for what actually happened, rather than reaching `assertBranchName` and surfacing as
+      // "branch name must be lower-kebab" — a rule the user's code did not break. Governance has
+      // already run by this point, so the vague 400 could also consume a single-use approval.
+      // Mirrors the service-name copy path below, which has always refused this the same way.
+      if (!BRANCH_NAME_RE.test(candidate)) { overlong = candidate; break }
+      name = candidate
+      break
+    }
+    if (overlong) {
+      throw new TemplateError(409,
+        `template ${code} is already on a branch and its code is too long to copy - `
+        + `'${overlong}' exceeds the ${BRANCH_NAME_MAX}-character branch-name limit. `
+        + 'Pass branchId explicitly, or shorten the template code')
     }
     if (!name) throw new TemplateError(409, `no free branch name for template ${code} - pass branchId explicitly`)
     const created = await this.engine.createBranch(projectId, name, parent.name)

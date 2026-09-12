@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { clearFallback, readLocal, writeLocal } from './localPref'
+import { clearFallback, readLocal, writeLocal } from './localPrefStore'
 
 // The in-memory fallback is module state by design (one store per page), so each test uses its own
 // key rather than resetting a singleton through a test-only export.

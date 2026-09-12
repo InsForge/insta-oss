@@ -1493,6 +1493,46 @@ test('group keeps a quiet service readable when a noisy sibling would fill the w
   vi.mocked(dockerFn).mockImplementation(fakeDocker)
 })
 
+// The `db` arm of `?group=` is the one the dashboard's change was ABOUT — a postgres service named
+// `pg` is indistinguishable from the branch's default database by container label, which is why the
+// client-side name filter was deleted. Every other component's group arm is covered; this one was
+// only ever exercised WITHOUT a group, so the arm the UI now depends on was untested.
+test('group picks one postgres service out of several, for logs and for metrics', async () => {
+  const id = await createProject()
+  expect((await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics' })).statusCode).toBe(201)
+
+  const seen: string[][] = []
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) => {
+    seen.push(args)
+    if (args[0] === 'logs') return Buffer.from(`2026-07-22T01:00:00.000Z from ${args[args.length - 1]}\n`)
+    if (args[0] === 'stats') {
+      const names = args.filter((a) => a.startsWith('io-'))
+      return Buffer.from(names.map((n) => `{"Name":"${n}","CPUPerc":"1.00%","MemUsage":"10MiB / 4GiB"}`).join('\n') + '\n')
+    }
+    return Buffer.from('')
+  })
+
+  // Unscoped, both database containers are read.
+  const all = (await get(`/projects/${id}/logs?component=db&branch=main&limit=50`)).json()
+  const allInstances = new Set(all.lines.map((l: { instance: string }) => l.instance))
+  expect(allInstances.size).toBeGreaterThan(1)
+
+  // Scoped, exactly the named one.
+  const scoped = (await get(`/projects/${id}/logs?component=db&branch=main&limit=50&group=analytics`)).json()
+  const scopedInstances = [...new Set(scoped.lines.map((l: { instance: string }) => l.instance))] as string[]
+  expect(scopedInstances).toHaveLength(1)
+  expect(scopedInstances[0]).toContain('analytics')
+
+  // And the same narrowing reaches `docker stats`, not just the log tail.
+  seen.length = 0
+  const m = (await get(`/projects/${id}/metrics?component=db&branch=main&group=analytics`)).json()
+  const statsArgs = seen.find((a) => a[0] === 'stats') ?? []
+  expect(statsArgs.filter((a) => a.startsWith('io-'))).toHaveLength(1)
+  expect(m.series.every((s: { labels?: { instance?: string } }) => s.labels?.instance?.includes('analytics'))).toBe(true)
+
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
+})
+
 test('metrics endpoint returns docker-stats series (cpu %, memory bytes)', async () => {
   const id = await createProject()
   await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })

@@ -20,6 +20,7 @@ import { useSearchParams } from 'react-router-dom'
 import { api, obsComponentFor, type Service } from '../../api'
 import { usePoll } from '../../hooks'
 import { effectiveVariables } from '../../lib/effectiveVariables'
+import { MANAGED_TYPES, tabsFor, TAB_LABELS as LABELS, type TabId } from '../../lib/serviceTabs'
 import { LOWER_KEBAB_NAME_ERROR, SERVICE_NAME_RE } from '../../lib/serviceNames'
 import { useAuth } from '../AuthGate'
 import { ApprovalPrompt, type PendingApproval } from '../ApprovalPrompt'
@@ -33,23 +34,6 @@ import { DeleteServiceDialog, RestartServiceDialog } from './ServiceDialogs'
 import { SettingsCard, SettingsRow } from './SettingsRow'
 import { SideTabs, TopTabs } from './Tabs'
 import { ServiceTypeIcon } from './ServiceIcon'
-
-type TabId = 'database' | 'metrics' | 'variables' | 'runtime' | 'volume' | 'settings'
-const LABELS: Record<TabId, string> = {
-  database: 'Database', metrics: 'Metrics', variables: 'Variables', runtime: 'Runtime Logs', volume: 'Volume', settings: 'Settings',
-}
-const MANAGED = new Set(['redis', 'mysql', 'mongodb'])
-
-export function tabsFor(type: string): TabId[] {
-  if (type === 'compute') return ['metrics', 'variables', 'runtime', 'volume', 'settings']
-  if (type === 'postgres') return ['database', 'metrics', 'variables', 'runtime', 'settings']
-  // No Volume for managed databases, unlike the console: the daemon's volume read and write both
-  // refuse every non-compute service, so the tab could only ever show "volumes are only supported
-  // for compute services" and an attach could never succeed. A tab that cannot work is worse than
-  // an absent one. It comes back if and when the daemon grows managed volumes.
-  if (MANAGED.has(type)) return ['metrics', 'variables', 'runtime', 'settings']
-  return ['variables', 'settings']
-}
 
 /** Is a nested dialog OPEN above this overlay?
  *
@@ -325,13 +309,13 @@ function GeneralSettings({ projectId, branch, service, onDone, onError, onApprov
             </div>
           </SettingsRow>
         )}
-        {(service.type === 'compute' || MANAGED.has(service.type)) && <ScaleToZeroRow {...ctx} />}
+        {(service.type === 'compute' || MANAGED_TYPES.has(service.type)) && <ScaleToZeroRow {...ctx} />}
         {service.type === 'postgres' && <DatabaseScaleToZeroRow {...ctx} />}
         {service.type === 'compute' && <RuntimeRow {...ctx} />}
         {service.type === 'storage' && <PublicAccessRow {...ctx} />}
       </SettingsCard>
 
-      {service.type === 'compute' || MANAGED.has(service.type)
+      {service.type === 'compute' || MANAGED_TYPES.has(service.type)
         ? <InstanceLimitCard {...ctx} />
         : service.type === 'postgres'
           ? <PgInstanceLimitCard {...ctx} />
