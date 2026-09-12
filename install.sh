@@ -2,7 +2,6 @@
 # install.sh: install or upgrade InstaCloud open source on one Linux box (root).
 #
 #   curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | sh
 #
 # What it does: installs Docker when missing; gives Docker an address pool large enough for
 # hundreds of branch networks; mounts an XFS reflink volume at /var/lib/instacloud when the root

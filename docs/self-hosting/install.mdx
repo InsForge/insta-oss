@@ -27,9 +27,13 @@ Server mode wants a machine you can point DNS at:
 curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | sh
 ```
 
-It pulls `ghcr.io/insforge/instacloud`, published for linux/amd64 and linux/arm64. A fresh install
-takes the `latest` tag; an upgrade resolves the newest GitHub Release, so pin with
-`--version v0.1.0` when you want a specific one.
+It pulls `ghcr.io/insforge/instacloud`, published for linux/amd64 and linux/arm64.
+
+With no `--version` and no tag on `INSTA_OSS_IMAGE`, the installer asks GitHub for the newest
+published **Release** and installs that, on a first install and on an upgrade alike. The mutable
+`latest` tag is only the fallback, used when that lookup returns nothing. Pin a specific one with
+`--version v0.1.0`. (The `--print-*` modes skip the lookup, so the version they print is the
+fallback rather than what a real run would choose.)
 
 ## Build the image yourself
 
