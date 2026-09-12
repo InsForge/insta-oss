@@ -4,18 +4,44 @@
 // cell. Self-host divergence: there is no projects gallery or in-app project create (a project is
 // made with `insta project create`), so the menu lists projects only.
 
-import type { ReactNode } from 'react'
+import { useEffect, useReducer, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { cn, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@insforge/ui'
 import { Check, ChevronDown } from 'lucide-react'
 import { api } from '../../api'
-import { usePoll } from '../../hooks'
 import { InstaCloudMark } from './BrandMark'
 import { useSidebarCollapsed } from './AppSidebar'
 
+/** ONE poll of the project list for the whole shell.
+ *
+ *  Three components need the same list: the sidebar switcher, the menu nested inside it, and the
+ *  collapsed-rail stand-in in the topbar. Each called its own `usePoll`, so the shell issued three
+ *  identical requests every 30 seconds, and the topbar one ran even while the rail was expanded
+ *  and it rendered nothing. A module-level cache with one in-flight request and a subscriber set
+ *  keeps every caller in step without pulling in a data layer. */
+let cache: Awaited<ReturnType<typeof api.projects>> | undefined
+let lastFetch = 0
+let inflight: Promise<void> | null = null
+const listeners = new Set<() => void>()
+const PROJECTS_TTL = 30_000
+
+function refreshProjects(): void {
+  if (inflight || Date.now() - lastFetch < PROJECTS_TTL) return
+  inflight = api.projects()
+    .then((list) => { cache = list; lastFetch = Date.now(); listeners.forEach((l) => { l() }) })
+    .catch(() => { lastFetch = Date.now() })
+    .finally(() => { inflight = null })
+}
+
 function useProjects() {
-  // Chrome data changes rarely.
-  return usePoll(api.projects, [], 30_000).data
+  const [, bump] = useReducer((n: number) => n + 1, 0)
+  useEffect(() => {
+    listeners.add(bump)
+    refreshProjects()
+    const id = setInterval(refreshProjects, PROJECTS_TTL)
+    return () => { listeners.delete(bump); clearInterval(id) }
+  }, [])
+  return cache
 }
 
 function ProjectSwitcherMenu({ projectId, trigger }: { projectId: string; trigger: ReactNode }) {

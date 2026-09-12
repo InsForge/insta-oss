@@ -163,3 +163,16 @@ body {
 [class~="bg-primary"] {
   background-color: rgb(var(--theme));
 }
+
+/*
+ * The rule above is UNLAYERED, so it outranks every layered Tailwind utility regardless of
+ * specificity: while `bg-primary` is on the element, any hover or active background the kit's
+ * Button adds is suppressed and a filled button looks inert under the cursor. These restate the
+ * accent's own states at the same precedence, so the button responds again.
+ */
+[class~="bg-primary"]:hover:not(:disabled):not([data-disabled]) {
+  background-color: rgb(var(--theme) / 0.9);
+}
+[class~="bg-primary"]:active:not(:disabled):not([data-disabled]) {
+  background-color: rgb(var(--theme) / 0.8);
+}

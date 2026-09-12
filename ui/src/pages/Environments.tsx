@@ -24,9 +24,14 @@ function Th({ children }: { children?: string }) {
   return <th className="px-4 py-3 text-left text-[13px] font-normal text-muted-foreground">{children}</th>
 }
 
-/** One icon per service type the environment carries. */
+/** One icon per service type the environment carries.
+ *
+ *  There is no all-environments service route, so this is one request per row. It used to repeat
+ *  them every 30 seconds purely to redraw icons: an N-environment project issued N requests a
+ *  minute for a set of types that changes only when a service is added or removed. Five minutes is
+ *  plenty for an icon strip, and the Service page is where live state belongs. */
 function ServiceIcons({ projectId, env }: { projectId: string; env: string }) {
-  const { data } = usePoll(() => api.services(projectId, env), [projectId, env], 30_000)
+  const { data } = usePoll(() => api.services(projectId, env), [projectId, env], 300_000)
   if (!data) return <span className="text-sm text-muted-foreground">…</span>
   const types = [...new Set(data.map((s) => s.type))]
   if (types.length === 0) return <span className="text-sm text-muted-foreground">—</span>
