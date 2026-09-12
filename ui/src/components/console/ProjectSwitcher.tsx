@@ -55,7 +55,9 @@ export function ProjectSwitcher({ projectId }: { projectId: string }) {
       <ProjectSwitcherMenu
         projectId={projectId}
         trigger={
-          <button type="button"
+          // Collapsed it is invisible and click-through, but it stayed in the tab order, so a
+          // keyboard user hit an unseeable trigger before reaching the visible topbar one.
+          <button type="button" tabIndex={collapsed ? -1 : undefined} aria-hidden={collapsed || undefined}
             className={cn('flex h-full min-w-0 flex-1 items-center text-left outline-hidden transition-colors focus-visible:bg-alpha-8',
               collapsed && 'pointer-events-none')}>
             <span className={cn('min-w-0 flex-1 truncate text-sm transition-opacity duration-200', collapsed && 'opacity-0')}>{name}</span>

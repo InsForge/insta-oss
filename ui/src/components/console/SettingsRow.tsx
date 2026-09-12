@@ -4,9 +4,12 @@
 import { Children, Fragment, type ReactNode } from 'react'
 
 export function SettingsRow({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  // The 480px label column is the console's desktop shape, but it cannot coexist with a control on
+  // a narrow viewport: the row overflowed and the control sat off-screen inside the modal. Below
+  // the breakpoint the label stacks above its control instead.
   return (
-    <div className="flex items-start gap-6">
-      <div className="flex w-120 shrink-0 flex-col gap-2">
+    <div className="flex flex-col items-stretch gap-2 md:flex-row md:items-start md:gap-6">
+      <div className="flex flex-col gap-2 md:w-120 md:shrink-0">
         <span className="py-1.5 text-sm">{label}</span>
         {hint && <p className="pb-2 text-[13px] text-muted-foreground">{hint}</p>}
       </div>

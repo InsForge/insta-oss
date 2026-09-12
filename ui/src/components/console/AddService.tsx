@@ -261,8 +261,8 @@ function CreateServiceDialog({ projectId, branch, services, flow, onConnectImage
                 <DialogDivider />
               </>
             )}
-            <FormRow label="Service Name" hint="A unique name for your service.">
-              <Input name="name" required autoFocus placeholder={placeholder} value={name}
+            <FormRow htmlFor="svc-name" label="Service Name" hint="A unique name for your service.">
+              <Input id="svc-name" name="name" required autoFocus placeholder={placeholder} value={name}
                 onChange={(e) => { setNameInput(e.target.value); setNameEdited(true) }} />
             </FormRow>
             {type === 'storage' && (
@@ -376,10 +376,10 @@ function DeployImageDialog({ projectId, branch, services, open, onOpenChange, on
         <form onSubmit={onSubmit} className="flex min-h-0 flex-col">
           {step === 'source' ? (
             <DialogBody className="min-h-0 overflow-y-auto">
-              <FormRow label="Image URL" hint="Deploy an image from a public Docker registry.">
+              <FormRow htmlFor="svc-image" label="Image URL" hint="Deploy an image from a public Docker registry.">
                 <div className="relative">
                   <Globe className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input name="image" required autoFocus className="pr-8 pl-8" placeholder="docker.io/insforge/insforge-oss:v2.0.9"
+                  <Input id="svc-image" name="image" required autoFocus className="pr-8 pl-8" placeholder="docker.io/insforge/insforge-oss:v2.0.9"
                     value={image} onChange={(e) => setImage(e.target.value)} />
                 </div>
               </FormRow>
@@ -405,13 +405,13 @@ function DeployImageDialog({ projectId, branch, services, open, onOpenChange, on
                 </div>
               </FormRow>
               <DialogDivider />
-              <FormRow label="Service Name" hint="A unique name for your service.">
-                <Input name="name" required autoFocus placeholder="api" value={name}
+              <FormRow htmlFor="svc-docker-name" label="Service Name" hint="A unique name for your service.">
+                <Input id="svc-docker-name" name="name" required autoFocus placeholder="api" value={name}
                   onChange={(e) => { setNameEdited(true); setNameInput(e.target.value) }} />
               </FormRow>
               <DialogDivider />
-              <FormRow label="Port" hint="The port your app listens on.">
-                <Input name="port" inputMode="numeric" className="w-32" value={port} onChange={(e) => setPort(e.target.value)} />
+              <FormRow htmlFor="svc-port" label="Port" hint="The port your app listens on.">
+                <Input id="svc-port" name="port" inputMode="numeric" className="w-32" value={port} onChange={(e) => setPort(e.target.value)} />
               </FormRow>
               <AdvancedSettings open={advancedOpen} onOpenChange={setAdvancedOpen}>
                 <AlwaysOnRow choice={choice} defaultOn={boot.alwaysOnDefault && isDefaultBranch === true} unreadable={unreadable} onPick={setPicked} />

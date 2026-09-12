@@ -2,7 +2,8 @@
 // label row, each row its own bordered card with an alpha-4 hover wash. Self-host divergence: no
 // Region column (one node), and no attachment rail rows yet.
 
-import { cn } from '@insforge/ui'
+import { useState } from 'react'
+import { Button, cn } from '@insforge/ui'
 import type { RuntimeHealthRow, Service } from '../../api'
 import { usePoll } from '../../hooks'
 import { api } from '../../api'
@@ -72,8 +73,10 @@ export function ServiceTable({ projectId, branch, services, health, isWaking, on
             </span>
             <span className="truncate text-sm">{service.name}</span>
           </div>
-          <div className="max-w-60 min-w-0 flex-1">
-            <ServiceStatusIndicator status={deriveStatus(service, healthFor(health, service.id), isWaking(service.id))} />
+          <div className="max-w-60 min-w-0 flex-1" onClick={(e) => e.stopPropagation()}>
+            <RowStatus projectId={projectId} branch={branch} service={service}
+              status={deriveStatus(service, healthFor(health, service.id), isWaking(service.id))}
+              onWoke={onDone} onError={onError} onApproval={onApproval} />
           </div>
           <div className="max-w-30 min-w-0 flex-1 truncate text-sm">{createdDate(service.created_at ?? service.updated_at)}</div>
           <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -82,6 +85,37 @@ export function ServiceTable({ projectId, branch, services, health, isWaking, on
           </span>
         </div>
       ))}
+    </div>
+  )
+}
+
+/** Status, plus the Wake affordance for a sleeping service.
+ *
+ *  The old list carried a Wake button and this console-parity table dropped it, so a sleeping
+ *  service could only be started by opening its detail view first. Waking is exactly what you want
+ *  from the list, and deriveStatus already says which states allow it. */
+function RowStatus({ projectId, branch, service, status, onWoke, onError, onApproval }: {
+  projectId: string; branch: string; service: Service
+  status: ReturnType<typeof deriveStatus>
+  onWoke: () => void; onError: (m: string) => void; onApproval: (p: NonNullable<PendingApproval>) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const wake = async () => {
+    setBusy(true)
+    const r = await api.lifecycle(projectId, service.id, 'start', branch)
+    setBusy(false)
+    if (r.kind === 'error') return onError(r.error)
+    if (r.kind === 'approval') return onApproval({ ...r, retry: () => { void wake() } })
+    onWoke()
+  }
+  return (
+    <div className="flex items-center gap-2">
+      <ServiceStatusIndicator status={status} />
+      {status.wakeable && (
+        <Button variant="secondary" size="sm" disabled={busy} onClick={() => { void wake() }}>
+          {busy ? 'Waking…' : 'Wake'}
+        </Button>
+      )}
     </div>
   )
 }
