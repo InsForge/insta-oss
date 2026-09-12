@@ -104,9 +104,17 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
       ) ?? [],
     ).filter((el) => el.offsetParent !== null)
 
+    // Restart, Delete and the approval prompt are the kit's Radix Dialog, which PORTALS to
+    // document.body — outside this overlay. Without standing down for them, "focus is outside the
+    // overlay" was true of the nested dialog's own buttons, and this handler dragged focus back
+    // out of it, making its keyboard controls unreachable. Radix traps focus itself, so when one
+    // is open the outer trap has nothing to do.
+    const nestedOpen = () => Array.from(document.querySelectorAll('[role="dialog"],[role="alertdialog"]'))
+      .some((d) => d !== root && !root?.contains(d))
+
     focusable()[0]?.focus()
     const onTab = (e: KeyboardEvent) => {
-      if (e.key !== 'Tab' || !root) return
+      if (e.key !== 'Tab' || !root || nestedOpen()) return
       const items = focusable()
       if (!items.length) return
       const first = items[0]
