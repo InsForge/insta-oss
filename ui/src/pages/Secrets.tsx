@@ -21,7 +21,10 @@ import { ErrorNote } from '../components/ui'
 
 
 type Scope = 'env' | 'project'
-type Row = { name: string; managed: boolean; scope: Scope; service?: string }
+/** `kind` decides both the badge and whether Edit/Delete are offered. 'binding' is platform-owned
+ *  like 'managed', but for a different reason and from a different place, so it says so. */
+type Kind = 'user' | 'managed' | 'binding'
+type Row = { name: string; kind: Kind; scope: Scope; service?: string; from?: string }
 type Group = { key: string; type: string; name: string; rows: Row[] }
 type SortOrder = 'az' | 'za'
 const SORT_LABELS: Record<SortOrder, string> = { az: 'Name (A–Z)', za: 'Name (Z–A)' }
@@ -36,14 +39,24 @@ function grouped(tree: SecretTree, branch: string): { services: Group[]; shared:
     // (REDIS_HOST_CACHE and friends) was badged User and offered Edit and Delete: the daemon
     // refuses to edit a reserved name, and the delete removed no user row because there is none.
     const minted = new Set(s.minted)
+    // A binding is platform-owned too, and editing or deleting one silently does nothing: Delete
+    // calls unsetUserSecret, which never touches a binding, and Edit writes a user row that
+    // `envFor` overrides because bindings are applied last. Both reported success.
+    const bindings = new Map(s.bindings.map((x) => [x.envName, `${x.source}.${x.sourceName}`]))
     return {
       key, type: s.type, name: s.name,
-      rows: s.secrets.map((n) => ({ name: n, managed: minted.has(n), scope: 'env' as const, service: key })),
+      rows: s.secrets.map((n) => ({
+        name: n,
+        kind: (minted.has(n) ? 'managed' : bindings.has(n) ? 'binding' : 'user') as Kind,
+        scope: 'env' as const,
+        service: key,
+        ...(bindings.has(n) ? { from: bindings.get(n) } : {}),
+      })),
     }
   })
   const shared: Row[] = [
-    ...tree.projectWide.map((n) => ({ name: n, managed: false, scope: 'project' as const })),
-    ...(env?.unbound ?? []).map((n) => ({ name: n, managed: false, scope: 'env' as const })),
+    ...tree.projectWide.map((n) => ({ name: n, kind: 'user' as const, scope: 'project' as const })),
+    ...(env?.unbound ?? []).map((n) => ({ name: n, kind: 'user' as const, scope: 'env' as const })),
   ]
   return { services, shared }
 }
@@ -54,10 +67,17 @@ function filterAndSort(rows: Row[], query: string, sort: SortOrder): Row[] {
     .sort((a, b) => (sort === 'az' ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name)))
 }
 
-function SourceBadge({ managed }: { managed: boolean }) {
+const BADGE: Record<Kind, { label: string; className: string }> = {
+  user: { label: 'User', className: 'bg-success/10 text-success' },
+  managed: { label: 'Managed', className: 'bg-alpha-8 text-muted-foreground' },
+  binding: { label: 'Binding', className: 'bg-alpha-8 text-muted-foreground' },
+}
+
+function SourceBadge({ kind, from }: { kind: Kind; from?: string }) {
   return (
-    <span className={cn('rounded-md px-1.5 py-0.5 text-xs font-medium', managed ? 'bg-alpha-8 text-muted-foreground' : 'bg-success/10 text-success')}>
-      {managed ? 'Managed' : 'User'}
+    <span className={cn('rounded-md px-1.5 py-0.5 text-xs font-medium', BADGE[kind].className)}
+      title={from ? `Bound from ${from}` : undefined}>
+      {BADGE[kind].label}
     </span>
   )
 }
@@ -84,13 +104,13 @@ function SecretsTable({ rows, emptyMessage, onEdit, onDelete }: {
         ) : rows.map((row) => (
           <tr key={`${row.scope}:${row.service ?? ''}:${row.name}`} className="group/row border-b border-border transition-colors last:border-b-0 hover:bg-alpha-4">
             <td className="truncate px-4 py-2 font-mono text-[13px]">{row.name}</td>
-            <td className="px-4 py-2"><SourceBadge managed={row.managed} /></td>
+            <td className="px-4 py-2"><SourceBadge kind={row.kind} from={row.from} /></td>
             <td className="py-2 pl-4">
               <div className="flex items-center gap-2">
                 <span className="min-w-0 flex-1 truncate font-mono text-[13px] tracking-widest text-muted-foreground select-none"
                   title="Values are never shown here. Read one with insta secrets --print.">••••••</span>
                 <div className="w-8 shrink-0">
-                  {!row.managed && (
+                  {row.kind === 'user' && (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${row.name}`} className="text-muted-foreground hover:text-primary">

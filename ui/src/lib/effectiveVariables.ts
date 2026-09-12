@@ -29,7 +29,11 @@ export function effectiveVariables(
     for (const n of tree.projectWide) effective.set(n, 'Project')
     for (const n of branch.unbound) effective.set(n, 'Environment')
     const own = branch.services.find((s) => s.type === 'compute' && s.name === service.name)
-    for (const n of own?.secrets ?? []) effective.set(n, 'This service')
+    // A BINDING is not "this service": the value is read from another service's credential and
+    // mapped into this group's env under a different name, and `envFor` applies bindings after
+    // everything else. Naming the source is the whole reason someone opens this tab.
+    const boundFrom = new Map((own?.bindings ?? []).map((x) => [x.envName, x.source]))
+    for (const n of own?.secrets ?? []) effective.set(n, boundFrom.get(n) ?? 'This service')
   } else {
     const own = branch.services.find((s) => s.type === service.type && s.name === service.name)
     for (const n of own?.secrets ?? []) effective.set(n, service.name)

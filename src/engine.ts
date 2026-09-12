@@ -1410,7 +1410,10 @@ export class Engine {
     projectWide: string[]
     branches: Array<{
       name: string; isDefault: boolean
-      services: Array<{ type: string; name: string; secrets: string[]; minted: string[] }>
+      services: Array<{
+        type: string; name: string; secrets: string[]; minted: string[]
+        bindings: Array<{ envName: string; source: string; sourceName: string }>
+      }>
       unbound: string[]
     }>
   } {
@@ -1422,8 +1425,15 @@ export class Engine {
       list.filter((u) => u.branch === branch && u.service === service).map((u) => u.name)
     // A binding is a name this group's env carries too, so the inventory lists it under the TARGET
     // group (where it appears) rather than under the service it reads from.
-    const boundIn = (b: Branch, group: string): string[] =>
-      (b.bindings ?? []).filter((x) => x.target === `compute/${group}`).map((x) => x.envName)
+    //
+    // It is reported SEPARATELY from the user secrets, not merged into an undifferentiated list. A
+    // binding is platform-owned: `unsetUserSecret` does not remove it (so a Delete reported success
+    // while the name stayed), and `bindingsFor` is applied LAST in `envFor` (so an Edit wrote a row
+    // the container never sees). Anything offering Edit/Delete has to be able to tell them apart,
+    // and the source is worth carrying too: "this service" is not where the value comes from.
+    const boundIn = (b: Branch, group: string): Array<{ envName: string; source: string; sourceName: string }> =>
+      (b.bindings ?? []).filter((x) => x.target === `compute/${group}`)
+        .map((x) => ({ envName: x.envName, source: x.source, sourceName: x.sourceName }))
     return {
       projectWide: list.filter((u) => u.branch === null).map((u) => u.name).sort(),
       // Per branch, only the services that branch CARRIES: the tree is an inventory of the names
@@ -1453,6 +1463,8 @@ export class Engine {
               type: 'postgres', name: d.name,
               secrets: [...minted, ...bound(b.name, `postgres/${d.name}`)].sort(),
               minted: [...minted].sort(),
+              // Only a compute group is a binding TARGET.
+              bindings: [],
             }
           }),
           ...this.stList(projectId).filter((s) => this.carries(project, b, s, 'storage')).map((s) => {
@@ -1461,6 +1473,8 @@ export class Engine {
               type: 'storage', name: s.name,
               secrets: [...minted, ...bound(b.name, `storage/${s.name}`)].sort(),
               minted: [...minted].sort(),
+              // Only a compute group is a binding TARGET.
+              bindings: [],
             }
           }),
           ...this.managedList(projectId).filter((m) => this.carries(project, b, m, 'managed')).map((m) => {
@@ -1470,14 +1484,22 @@ export class Engine {
               type: m.type, name: m.name,
               secrets: [...minted, ...bound(b.name, `${m.type}/${m.name}`)].sort(),
               minted: [...minted].sort(),
+              // Only a compute group is a binding TARGET.
+              bindings: [],
             }
           }),
           // A compute group mints nothing: everything under it is bound to it, and reaches only it.
-          ...groups.map((g) => ({
-            type: 'compute', name: g,
-            secrets: [...bound(b.name, `compute/${g}`), ...boundIn(b, g)].sort(),
-            minted: [],
-          })),
+          ...groups.map((g) => {
+            const bindings = boundIn(b, g)
+            return {
+              type: 'compute', name: g,
+              // `secrets` stays the full inventory of names this group's env carries; `bindings`
+              // says which of them are platform-owned and where each reads from.
+              secrets: [...bound(b.name, `compute/${g}`), ...bindings.map((x) => x.envName)].sort(),
+              minted: [],
+              bindings: [...bindings].sort((x, y) => x.envName.localeCompare(y.envName)),
+            }
+          }),
         ],
         unbound: list.filter((u) => u.branch === b.name && !u.service).map((u) => u.name).sort(),
         }

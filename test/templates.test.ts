@@ -681,6 +681,54 @@ test('an inline manifest with a postgres service binds its DATABASE_URL into the
   expect(secrets.DATABASE_URL).toMatch(/^postgres:\/\/postgres:pw@127\.0\.0\.1:2\d{4}\/app$/)
 })
 
+// A real template-created binding, not a synthesized tree: the secret inventory has to say that
+// DATABASE_URL_APP is a BINDING and where it reads from. It used to land in `secrets` next to the
+// user secrets with `minted` empty, so every surface read it as an editable user secret — and both
+// edits are lies. `unsetUserSecret` never removes a binding, so Delete reported success while the
+// name stayed; and `envFor` applies `bindingsFor` LAST, so an Edit wrote a row the container never
+// sees.
+test('a template binding is reported as a binding, with its source, not as a user secret', async () => {
+  const id = await project()
+  const manifest = {
+    code: 'stack', version: '1',
+    services: {
+      store: { type: 'postgres' },
+      app: {
+        type: 'web', image: 'app:1', port: 8080, healthcheck: '/',
+        env: { platform: { DATABASE_URL_APP: '${{services.store.DATABASE_URL}}' } },
+      },
+    },
+  }
+  expect((await deploy(id, { manifest, branch: 'main' })).statusCode).toBe(202)
+
+  const tree = (await get(`/projects/${id}/secrets/tree`)).json()
+  const env = tree.branches.find((b: { name: string }) => b.name === 'main')
+  const app = env.services.find((s: { type: string; name: string }) => s.type === 'compute' && s.name === 'app')
+
+  // Still in the inventory of names the group's env carries...
+  expect(app.secrets).toContain('DATABASE_URL_APP')
+  // ...but declared a binding, with the service and credential it reads from.
+  expect(app.bindings).toEqual([
+    { envName: 'DATABASE_URL_APP', source: 'postgres/store', sourceName: 'DATABASE_URL' },
+  ])
+  // And NOT minted: the two platform-owned kinds are distinct and neither is a user secret.
+  expect(app.minted).toEqual([])
+
+  // A user secret bound to the same group is still just a user secret, so the distinction is real
+  // rather than "everything on a compute group is a binding".
+  expect((await put(`/projects/${id}/secrets/MY_OWN`, { value: 'v', branch: 'main', service: 'compute/app' })).statusCode).toBe(200)
+  const after = (await get(`/projects/${id}/secrets/tree`)).json()
+  const app2 = after.branches.find((b: { name: string }) => b.name === 'main')
+    .services.find((s: { type: string; name: string }) => s.type === 'compute' && s.name === 'app')
+  expect(app2.secrets).toEqual(expect.arrayContaining(['DATABASE_URL_APP', 'MY_OWN']))
+  expect(app2.bindings.map((x: { envName: string }) => x.envName)).toEqual(['DATABASE_URL_APP'])
+
+  // Only a compute group is a binding target: the postgres service reports none.
+  const store = after.branches.find((b: { name: string }) => b.name === 'main')
+    .services.find((s: { type: string; name: string }) => s.type === 'postgres' && s.name === 'store')
+  expect(store.bindings).toEqual([])
+})
+
 test('the per-type cap is enforced synchronously, before any service is created', async () => {
   build({ INSTA_OSS_MAX_SERVICES_PER_TYPE: '1' })
   const id = await project()

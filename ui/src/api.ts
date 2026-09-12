@@ -48,8 +48,16 @@ export type SecretTree = {
   branches: Array<{
     name: string; isDefault: boolean
     /** `minted` is the platform-issued subset of `secrets`: those reach every compute group in the
-     *  branch, while the rest are user secrets bound to this service and reach only it. */
-    services: Array<{ type: string; name: string; secrets: string[]; minted: string[] }>
+     *  branch, while the rest are user secrets bound to this service and reach only it.
+     *
+     *  `bindings` is the OTHER platform-owned subset: names a `${{services.x.KEY}}` binding maps
+     *  into this compute group. They are not user secrets — `unsetUserSecret` does not remove one,
+     *  and a user row of the same name is overridden because `envFor` applies bindings last — so a
+     *  surface offering Edit or Delete has to exclude them. Only compute groups are targets. */
+    services: Array<{
+      type: string; name: string; secrets: string[]; minted: string[]
+      bindings: Array<{ envName: string; source: string; sourceName: string }>
+    }>
     unbound: string[]
   }>
 }
