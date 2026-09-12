@@ -1150,7 +1150,7 @@ export class Engine {
   private managedSecretsFor(projectId: string, branch: Branch): Record<string, string> {
     const project = this.getProject(projectId)
     const out: Record<string, string> = {}
-    const aliasedTypes = new Set<ManagedDbType>()
+    const aliased = this.aliasedManagedIds(projectId, branch)
     for (const m of project?.managedServices ?? []) {
       const cred = branch.managed?.[m.id]
       if (!cred) continue
@@ -1159,7 +1159,7 @@ export class Engine {
       const lane = this.laneAddress(project!, branch, m.id)
       const bundle = laneBundle(m.type, lane.host, lane.port, cred.password, lane.tls)
       Object.assign(out, suffixBundle(bundle, m.name))
-      if (!aliasedTypes.has(m.type)) { aliasedTypes.add(m.type); Object.assign(out, bundle) }
+      if (aliased.has(m.id)) Object.assign(out, bundle)
     }
     return out
   }
@@ -1425,7 +1425,8 @@ export class Engine {
             }
           }),
           ...this.managedList(projectId).filter((m) => this.carries(project, b, m, 'managed')).map((m) => {
-            const minted = this.mintedManagedNames(m)
+            // The branch's oldest service of each type also carries the canonical unsuffixed names.
+            const minted = this.mintedManagedNames(m, this.aliasedManagedIds(projectId, b).has(m.id))
             return {
               type: m.type, name: m.name,
               secrets: [...minted, ...bound(b.name, `${m.type}/${m.name}`)].sort(),
@@ -1444,9 +1445,29 @@ export class Engine {
     }
   }
 
-  /** A managed service's minted (suffixed) secret names — names only, derived from the catalog. */
-  private mintedManagedNames(m: { type: ManagedDbType; name: string }): string[] {
-    return Object.keys(suffixBundle(MANAGED_DB[m.type].bundle('h', 'p'), m.name))
+  /** Which managed services additionally surface the canonical UNSUFFIXED aliases on this branch:
+   *  the oldest carried service of each type (platform spec §2.1).
+   *
+   *  One definition, used by both the minting path and the inventory. They were separate, and the
+   *  inventory only knew about the suffixed forms — so an app's env carried `REDIS_URL` while the
+   *  Variables tab and the Secrets page listed only `REDIS_URL_<NAME>`, leaving the one name most
+   *  apps actually read invisible, and `REDIS_URL` typeable in Add Secret for a bare 400. */
+  private aliasedManagedIds(projectId: string, branch: Branch): Set<string> {
+    const seen = new Set<ManagedDbType>()
+    const ids = new Set<string>()
+    for (const m of this.getProject(projectId)?.managedServices ?? []) {
+      if (!branch.managed?.[m.id] || seen.has(m.type)) continue
+      seen.add(m.type)
+      ids.add(m.id)
+    }
+    return ids
+  }
+
+  /** A managed service's minted secret names: the suffixed bundle, plus the canonical unsuffixed
+   *  one when this is the branch's aliased service for its type. */
+  private mintedManagedNames(m: { id: string; type: ManagedDbType; name: string }, aliased: boolean): string[] {
+    const bundle = MANAGED_DB[m.type].bundle('h', 'p')
+    return [...Object.keys(suffixBundle(bundle, m.name)), ...(aliased ? Object.keys(bundle) : [])]
   }
 
   /** A service's secret names (names only): minted credentials + user secrets bound to it. Named
@@ -2077,7 +2098,10 @@ export class Engine {
       this.assertUsable(b, 'given new services')
       const existing = this.managedList(projectId).find((m) => m.type === type && m.name === name)
       if (existing && this.carries(project, b, existing, 'managed')) throw new Error(`${type} service "${name}" already exists`)
-      const wouldMint = this.mintedManagedNames({ type, name })
+      // Suffixed only, deliberately: a user secret can never hold a CANONICAL managed name, since
+      // setUserSecret refuses every reserved one (isReservedSecret covers `k` and `k_*`). Passing
+      // the aliases here would be unreachable defence.
+      const wouldMint = this.mintedManagedNames({ id: '', type, name }, false)
       const clash = (loadState().userSecrets[projectId] ?? []).find((u) => wouldMint.includes(u.name))
       if (clash) throw new Error(`service would mint secret names already used by user secrets: ${clash.name}`)
       // WP4: an immutable directory key, minted once and stored, so a rename never detaches the data
@@ -4342,7 +4366,15 @@ export class Engine {
       const canonical = this.stList(project.id).find((x) => this.carries(project, branch, x, 'storage'))?.id === parsed.serviceId
       return [...(canonical ? keys : []), ...keys.map((k) => `${k}_${envSuffix(parsed.name)}`)]
     }
-    if (isManagedDbType(parsed.type)) return this.mintedManagedNames({ type: parsed.type, name: parsed.name })
+    if (isManagedDbType(parsed.type)) {
+      // Same rule as postgres and storage above: the branch's oldest service of the type holds the
+      // canonical aliases. This arm used to return the suffixed set only, so the one name most
+      // apps read (REDIS_URL) was missing from every inventory that asks here.
+      return this.mintedManagedNames(
+        { id: parsed.serviceId, type: parsed.type, name: parsed.name },
+        this.aliasedManagedIds(project.id, branch).has(parsed.serviceId),
+      )
+    }
     return []
   }
 

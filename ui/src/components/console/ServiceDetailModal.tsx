@@ -314,11 +314,21 @@ function NameRow({ projectId, branch, service, onDone, onApproval }: Ctx) {
     if (r.kind === 'approval') return onApproval({ ...r, retry: () => { void commit() } })
     onDone()
   }
+  // Enter or an explicit Save, never blur. Blur fires BEFORE the click that caused it, so clicking
+  // Close, or Delete Service a few rows down, used to rename the service to whatever half-typed
+  // text was in the field — and the overlay could close before the result was visible. Worst for
+  // storage, where a rename is a re-key and a bucket handle is baked into every object URL.
+  const dirty = text.trim() !== service.name
   return (
-    <SettingsRow label="Service Name" hint="A unique name for your service.">
+    <SettingsRow label="Service Name" hint="A unique name for your service. Press Enter or Save to apply.">
       <div className="flex flex-col gap-1.5">
-        <Input value={text} aria-label="Service name" onChange={(e) => setText(e.target.value)}
-          onBlur={() => { void commit() }} onKeyDown={(e) => { if (e.key === 'Enter') void commit() }} />
+        <div className="flex items-center gap-2">
+          <Input value={text} aria-label="Service name" onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void commit() } }} />
+          {dirty && (
+            <Button variant="secondary" size="sm" onClick={() => { void commit() }}>Save</Button>
+          )}
+        </div>
         {rejected && <p className="text-sm text-destructive">{rejected}</p>}
       </div>
     </SettingsRow>

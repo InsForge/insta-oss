@@ -625,6 +625,39 @@ test('secrets tree separates minted credentials from service-bound user secrets'
   expect(svc('db').minted).not.toContain('PG_OWNED')
 })
 
+// The managed arm of the same property, and the one this test originally missed. A managed
+// service's env carries BOTH the suffixed bundle and, for the branch's oldest service of that
+// type, the canonical unsuffixed aliases (managedSecretsFor). `minted` reported only the suffixed
+// half, so the one name most apps actually read — REDIS_URL — was listed nowhere in the dashboard,
+// and a user could type it into Add Secret and get a bare 400 for a reserved name.
+test('minted covers the canonical managed aliases the oldest service of a type also holds', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'sessions' })
+
+  const main = (await get(`/projects/${id}/secrets/tree`)).json()
+    .branches.find((b: { name: string }) => b.name === 'main')
+  const svc = (name: string) => main.services.find((s: { name: string }) => s.name === name)
+
+  // The oldest redis holds the aliases, so it mints the canonical names AND its own suffixed set.
+  expect(svc('cache').minted).toContain('REDIS_URL')
+  expect(svc('cache').minted).toContain('REDIS_URL_CACHE')
+  // The second one only ever has its suffixed set: the aliases are not its to hold.
+  expect(svc('sessions').minted).toContain('REDIS_URL_SESSIONS')
+  expect(svc('sessions').minted).not.toContain('REDIS_URL')
+})
+
+// The other half of why listing the canonical names matters: they are RESERVED, so a user cannot
+// take one. Before `minted` carried them, the dashboard showed REDIS_URL nowhere and yet refused
+// it here, which reads as arbitrary.
+test('a canonical managed name is reserved, which is why the inventory has to show it', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  const r = await put(`/projects/${id}/secrets/REDIS_URL`, { value: 'mine', branch: 'main' })
+  expect(r.statusCode).toBeGreaterThanOrEqual(400)
+  expect(r.json().error).toContain('reserved')
+})
+
 test('secrets tree is gated by secrets.read', async () => {
   const id = await createProject()
   await put(`/projects/${id}/policy/secrets.read`, { decision: 'approve' })

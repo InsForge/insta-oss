@@ -30,6 +30,7 @@ export function Setup() {
   const [step, setStep] = useState<'form' | 'token'>('form')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -40,11 +41,12 @@ export function Setup() {
 
   const rules = PASSWORD_RULES.map((rule) => ({ ...rule, met: rule.test(password) }))
   const passwordValid = rules.every((rule) => rule.met)
+  const confirmValid = confirm === password
   const emailValid = EMAIL_RE.test(email.trim())
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault()
-    if (!emailValid || !passwordValid) return
+    if (!emailValid || !passwordValid || !confirmValid) return
     setPending(true); setError(null); setExists(false)
     const r = await api.signUp({ email: email.trim(), password })
     setPending(false)
@@ -96,8 +98,16 @@ export function Setup() {
             ))}
           </ul>
         </div>
+        {/* The console can drop a confirm field because it has email verification and a "Forgot
+            password?" flow. Self-hosting has neither: recovery is `instad --reset-admin`, which
+            needs shell access to the box. A single typo here would lock the operator out of their
+            own dashboard until they can SSH in, so the confirmation stays. */}
+        <InputField label="Confirm Password" type={showPassword ? 'text' : 'password'} name="confirm"
+          autoComplete="new-password" showIcon={false} showDropdown={false} showTip={false} showTipBadge={false}
+          placeholder="••••••" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+        {confirm && !confirmValid && <p className="text-sm text-destructive">Both passwords must match.</p>}
         {error && <p className="text-sm text-destructive">{error}</p>}
-        <Button type="submit" variant="primary" className="w-full" disabled={pending || !emailValid || !passwordValid}>
+        <Button type="submit" variant="primary" className="w-full" disabled={pending || !emailValid || !passwordValid || !confirmValid}>
           {pending ? 'Creating account…' : 'Create Account'}
         </Button>
         {exists && (
