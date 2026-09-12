@@ -19,6 +19,7 @@ import { RotateCw, X } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { api, obsComponentFor, type Service } from '../../api'
 import { usePoll } from '../../hooks'
+import { effectiveVariables } from '../../lib/effectiveVariables'
 import { LOWER_KEBAB_NAME_ERROR, SERVICE_NAME_RE } from '../../lib/serviceNames'
 import { useAuth } from '../AuthGate'
 import { ApprovalPrompt, type PendingApproval } from '../ApprovalPrompt'
@@ -126,7 +127,10 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
       root?.querySelectorAll<HTMLElement>(
         'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
       ) ?? [],
-    ).filter((el) => el.offsetParent !== null)
+      // `tabIndex >= 0`, not just the selector: a roving tablist gives its unselected tabs
+      // tabindex="-1", and they still match `button:not([disabled])`. Counting them made `last` a
+      // tab the browser skips, so Tab off the selected one walked out of the overlay entirely.
+    ).filter((el) => el.offsetParent !== null && el.tabIndex >= 0)
 
     focusable()[0]?.focus()
     const onTab = (e: KeyboardEvent) => {
@@ -195,8 +199,10 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
 
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 pb-4">
           <div className="flex items-start gap-6">
-            <SideTabs tabs={tabs.map((id) => ({ id, label: LABELS[id] }))} value={active} onChange={selectTab} className="sticky top-0" />
-            <div className="flex min-w-0 flex-1 flex-col gap-3">
+            <SideTabs tabs={tabs.map((id) => ({ id, label: LABELS[id] }))} value={active} onChange={selectTab}
+              className="sticky top-0" panelId="service-detail-panel" />
+            <div id="service-detail-panel" role="tabpanel" aria-labelledby={`service-detail-panel-tab-${active}`}
+              className="flex min-w-0 flex-1 flex-col gap-3">
               <ErrorNote error={error} />
               {active === 'database' && <DatabasePanel projectId={projectId} branch={branch} group={service.name} />}
               {active === 'metrics' && <LiveMetrics projectId={projectId} branch={branch} service={service} />}
@@ -222,26 +228,9 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
 function VariablesTab({ projectId, branch, service }: { projectId: string; branch: string; service: Service }) {
   const { data: tree, error } = usePoll(() => api.secretTree(projectId), [projectId], 15000)
   const env = tree?.branches.find((b) => b.name === branch)
-  const rows: Array<{ name: string; source: string }> = []
-  if (env && tree) {
-    if (service.type === 'compute') {
-      // Mirror engine.deploySecretsFor: an app's env is the credentials the other services MINT,
-      // plus project-wide, plus this branch's unbound secrets, plus the secrets bound to THIS
-      // group. A secret bound to another compute group never reaches this one, and listing every
-      // name under every service claimed otherwise.
-      for (const s of env.services) {
-        if (s.type === 'compute') continue
-        for (const n of s.minted) rows.push({ name: n, source: s.name })
-      }
-      const own = env.services.find((s) => s.type === 'compute' && s.name === service.name)
-      for (const n of own?.secrets ?? []) rows.push({ name: n, source: 'This service' })
-      for (const n of tree.projectWide) rows.push({ name: n, source: 'Project' })
-      for (const n of env.unbound) rows.push({ name: n, source: 'Environment' })
-    } else {
-      const own = env.services.find((s) => s.type === service.type && s.name === service.name)
-      for (const n of own?.secrets ?? []) rows.push({ name: n, source: service.name })
-    }
-  }
+  // Keyed by name in `effectiveVariables`, not appended here: the container receives ONE value
+  // per name, and the same name may legitimately exist at several scopes.
+  const rows = effectiveVariables(tree, env, service)
   return (
     <div className="flex flex-col gap-3">
       <div className="overflow-hidden border border-border bg-card">
@@ -252,7 +241,7 @@ function VariablesTab({ projectId, branch, service }: { projectId: string; branc
         {rows.length === 0 ? (
           <p className="px-4 py-8 text-center text-sm text-muted-foreground">{error ? error.message : tree ? 'No variables yet.' : 'Loading…'}</p>
         ) : rows.map((r) => (
-          <div key={`${r.source}:${r.name}`} className="flex items-center gap-6 border-b border-border px-4 py-2.5 last:border-b-0">
+          <div key={r.name} className="flex items-center gap-6 border-b border-border px-4 py-2.5 last:border-b-0">
             <span className="min-w-0 flex-2 truncate font-mono text-[13px]">{r.name}</span>
             <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">{r.source}</span>
           </div>

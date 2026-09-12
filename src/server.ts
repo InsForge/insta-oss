@@ -245,8 +245,12 @@ export function buildServer(
 
   app.post('/projects/:id/branches', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const { name, from } = (req.body ?? {}) as { name?: string; from?: string }
-    if (!name) return reply.code(400).send({ error: 'name required' })
+    const { name, from } = (req.body ?? {}) as { name?: unknown; from?: unknown }
+    // Typed at the boundary, not just truthy: `{"name": 123}` used to pass, because RegExp.test
+    // coerces its argument, and then failed deep in provisioning as a state-ish error instead of
+    // the malformed-request 400 it is. Same for a non-string `from`.
+    if (typeof name !== 'string' || !name) return reply.code(400).send({ error: 'name required' })
+    if (from !== undefined && typeof from !== 'string') return reply.code(400).send({ error: 'from must be a string' })
     try {
       const b = await engine.createBranch(id, name, from)
       return reply.code(201).send({ branch: { id: b.id, name: b.name } })
@@ -744,8 +748,9 @@ export function buildServer(
   // Branch rename — metadata only, like the cloud: provider resources keep their frozen ref.
   app.patch('/projects/:id/branches/:bid', async (req, reply) => {
     const { id, bid } = req.params as { id: string; bid: string }
-    const { name } = (req.body ?? {}) as { name?: string }
-    if (!name) return reply.code(400).send({ error: 'name required' })
+    const { name } = (req.body ?? {}) as { name?: unknown }
+    // Typed, not just truthy: RegExp.test coerces, so `{"name": 123}` reached the rename itself.
+    if (typeof name !== 'string' || !name) return reply.code(400).send({ error: 'name required' })
     try { return { branch: engine.renameBranch(id, bid, name) } }
     catch (e) {
       const m = e instanceof Error ? e.message : String(e)

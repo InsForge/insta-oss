@@ -7,6 +7,12 @@ import { useCallback, useSyncExternalStore } from 'react'
 
 const listeners = new Map<string, Set<() => void>>()
 
+// What a write held when localStorage refused it (a private window, blocked site data, a full
+// quota). Without this the catch below swallowed the write and the snapshot re-read `null`, so the
+// theme and sidebar toggles did nothing at all, rather than the "works until reload" this file
+// promised. Only written on failure, so a working localStorage is still the single source.
+const fallback = new Map<string, string | null>()
+
 function emit(key: string): void {
   listeners.get(key)?.forEach((listener) => listener())
 }
@@ -15,8 +21,22 @@ export function readLocal(key: string): string | null {
   try {
     return window.localStorage.getItem(key)
   } catch {
-    return null
+    return fallback.get(key) ?? null
   }
+}
+
+/** Store a preference and tell this tab's subscribers. */
+export function writeLocal(key: string, next: string | null): void {
+  try {
+    if (next === null) window.localStorage.removeItem(key)
+    else window.localStorage.setItem(key, next)
+    fallback.delete(key)
+  } catch {
+    // Storage blocked or full: hold it in memory so the choice still applies to this page. It
+    // just won't survive a reload.
+    fallback.set(key, next)
+  }
+  emit(key)
 }
 
 export function useLocalPref(key: string): [string | null, (value: string | null) => void] {
@@ -35,15 +55,7 @@ export function useLocalPref(key: string): [string | null, (value: string | null
     () => null,
   )
 
-  const setValue = useCallback((next: string | null) => {
-    try {
-      if (next === null) window.localStorage.removeItem(key)
-      else window.localStorage.setItem(key, next)
-    } catch {
-      // Storage blocked or full: the choice just won't survive a reload.
-    }
-    emit(key)
-  }, [key])
+  const setValue = useCallback((next: string | null) => { writeLocal(key, next) }, [key])
 
   return [value, setValue]
 }

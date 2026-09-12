@@ -2333,6 +2333,26 @@ test('a branch name that is not lower-kebab is refused on create, as it already 
   expect((await post(`/projects/${id}/branches`, { name: 'feat-1' })).statusCode).toBe(201)
 })
 
+// RegExp.test coerces, so a truthy non-string body value passed the name check and only failed
+// later, where provisioning calls string methods on it: a 409/500-shaped error for what is plainly
+// a malformed request. The boundary types it now.
+test('a branch name that is not a string is a 400, on create and on rename', async () => {
+  const id = await createProject()
+  for (const bad of [123, true, ['x'], { name: 'x' }]) {
+    const r = await post(`/projects/${id}/branches`, { name: bad })
+    expect(r.statusCode, JSON.stringify(bad)).toBe(400)
+    expect(r.json().error, JSON.stringify(bad)).toBe('name required')
+  }
+  expect((await post(`/projects/${id}/branches`, { name: 'ok-1', from: 7 })).statusCode).toBe(400)
+
+  const made = await post(`/projects/${id}/branches`, { name: 'renameable' })
+  expect(made.statusCode).toBe(201)
+  const bid = made.json().branch.id
+  const r = await patch(`/projects/${id}/branches/${bid}`, { name: 123 })
+  expect(r.statusCode).toBe(400)
+  expect(r.json().error).toBe('name required')
+})
+
 // docs/projects/branches.mdx states 39 characters, and the template parser enforced the same cap
 // for codes. Sharing one expression between them is only correct if it carries the cap: an
 // unbounded one silently removed the parser's and let these routes accept what the docs refuse.

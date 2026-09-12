@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import type { Engine } from '../engine'
 import { hostArch } from '../hostarch'
+import { SERVICE_NAME_RE } from '../names'
 import { loadState, mutate } from '../state'
 import { parseServiceId } from '../manageddb'
 import type { GatedAction, TemplateDeploymentRecord } from '../types'
@@ -34,7 +35,11 @@ const RUN_LEASE_MS = 10 * 60 * 1000
  *  `<name>-2`, `<name>-3` ... rather than taking the previous copy over. */
 const MAX_TEMPLATE_COPIES = 9
 const MINTED_NAME_MAX = 39
-const MINTED_NAME_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
+/** The one grammar, not a fourth copy of it. A local pattern here allowed the trailing hyphen
+ *  `src/names.ts` rejects; nothing that reaches this check can end in one today (the parser
+ *  validates the base and the suffix is '' or '-2'...'-N'), but the comment at the call site
+ *  claims the parser applied the same rule, and importing it is what makes that true. */
+const MINTED_NAME_RE = SERVICE_NAME_RE
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 /** What `abandonStale()` writes onto a run the daemon killed. `catalog.stats` excludes rows whose
  *  error starts with this text: a restart says nothing about the template. */
