@@ -20,16 +20,30 @@ import { useSidebarCollapsed } from './AppSidebar'
  *  and it rendered nothing. A module-level cache with one in-flight request and a subscriber set
  *  keeps every caller in step without pulling in a data layer. */
 let cache: Awaited<ReturnType<typeof api.projects>> | undefined
-let lastFetch = 0
+let nextFetchAt = 0
 let inflight: Promise<void> | null = null
+let retryTimer: ReturnType<typeof setTimeout> | null = null
 const listeners = new Set<() => void>()
 const PROJECTS_TTL = 30_000
+/** A FAILED fetch is not worth the full TTL. It used to take one — the catch advanced the same
+ *  clock a success did — so a single transient failure at load left both switchers blank for 30
+ *  seconds with nothing to retry them, and the very first paint is exactly when a daemon that is
+ *  still coming up returns one. Short enough to recover from a blip, long enough not to hammer a
+ *  daemon that is genuinely down. */
+const RETRY_AFTER_ERROR = 3_000
 
 function refreshProjects(): void {
-  if (inflight || Date.now() - lastFetch < PROJECTS_TTL) return
+  if (inflight || Date.now() < nextFetchAt) return
   inflight = api.projects()
-    .then((list) => { cache = list; lastFetch = Date.now(); listeners.forEach((l) => { l() }) })
-    .catch(() => { lastFetch = Date.now() })
+    .then((list) => { cache = list; nextFetchAt = Date.now() + PROJECTS_TTL; listeners.forEach((l) => { l() }) })
+    .catch(() => {
+      nextFetchAt = Date.now() + RETRY_AFTER_ERROR
+      // The interval only comes round every TTL, so the short backoff needs something to act on
+      // it. One timer at a time, and only while something is actually mounted to receive it.
+      if (listeners.size && !retryTimer) {
+        retryTimer = setTimeout(() => { retryTimer = null; refreshProjects() }, RETRY_AFTER_ERROR)
+      }
+    })
     .finally(() => { inflight = null })
 }
 
@@ -39,7 +53,13 @@ function useProjects() {
     listeners.add(bump)
     refreshProjects()
     const id = setInterval(refreshProjects, PROJECTS_TTL)
-    return () => { listeners.delete(bump); clearInterval(id) }
+    return () => {
+      listeners.delete(bump)
+      clearInterval(id)
+      // The last subscriber leaving takes the pending retry with it: nothing is listening for the
+      // result, and a timer left running holds a fetch against a shell that is gone.
+      if (!listeners.size && retryTimer) { clearTimeout(retryTimer); retryTimer = null }
+    }
   }, [])
   return cache
 }

@@ -53,4 +53,27 @@ describe('instanceLabels', () => {
   it('is empty for no containers', () => {
     expect(instanceLabels([])).toEqual({})
   })
+
+  // Falling back to the raw container name is not automatically unambiguous. A group may be NAMED
+  // like another container: `--group io-demo-main-pg-analytics` is a valid lower-kebab name, and it
+  // mints `io-demo-main-app-io-demo-main-pg-analytics`, whose label is the analytics database's own
+  // raw name. Two cards reading exactly the same thing is the bug this function exists to prevent.
+  it('never emits the same display value twice, even when a fallback collides with a label', () => {
+    const instances = [
+      'io-demo-main-pg',                                  // -> "postgres", collides
+      'io-demo-main-pg-pg',                               // -> "postgres", collides
+      'io-demo-main-app-io-demo-main-pg',                 // -> "io-demo-main-pg": the raw name above
+    ]
+    const got = instanceLabels(instances)
+    const shown = Object.values(got)
+    expect(new Set(shown).size).toBe(instances.length)
+    // Every container still has an entry, and each is traceable to its container.
+    expect(Object.keys(got).sort()).toEqual([...instances].sort())
+  })
+
+  it('leaves an unambiguous label alone while disambiguating its neighbours', () => {
+    const got = instanceLabels(['io-demo-main-pg', 'io-demo-main-pg-pg', 'io-demo-main-app-api'])
+    expect(got['io-demo-main-app-api']).toBe('api')
+    expect(new Set(Object.values(got)).size).toBe(3)
+  })
 })

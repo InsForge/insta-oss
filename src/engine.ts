@@ -1079,9 +1079,21 @@ export class Engine {
       {
         const settings = (s.projects[project.id].serviceSettings ??= {})
         const existing = settings[`cp-${group}`]?.createdAt
+        // Derived from every branch that already carries the group, NOT from this branch's
+        // `minting`. The stamp is project-level and `services()` reads it for every branch, while
+        // `minting` is per-branch: cloning a legacy group onto a NEW branch makes it true there, so
+        // keying off it stamped `Date.now()` and jumped the Created date of the copy that had been
+        // running all along. The oldest deploy we can still see is the closest thing to the truth;
+        // `Date.now()` is only for a group nothing has ever deployed.
+        const seen: number[] = []
+        for (const br of Object.values(s.branches)) {
+          if (br.projectId !== project.id) continue
+          const at = br.id === b.id ? priorUpdatedAt : br.apps?.[group]?.updatedAt
+          if (typeof at === 'number') seen.push(at)
+        }
         settings[`cp-${group}`] = {
           ...settings[`cp-${group}`],
-          createdAt: existing ?? (minting ? Date.now() : priorUpdatedAt ?? Date.now()),
+          createdAt: existing ?? (seen.length ? Math.min(...seen) : Date.now()),
         }
       }
       // The row now owns the port, exactly as `laneFor` retires a branch-create reservation.

@@ -731,6 +731,38 @@ test('created_at is backfilled for a group deployed before the stamp existed, an
   expect(third.created_at).toBe(after.created_at)
 })
 
+// The stamp is PROJECT-level and `services()` reads it for every branch, while `minting` is
+// per-branch. Deploying a legacy group onto a branch that does not carry it yet makes `minting`
+// true THERE, so keying the backfill off it stamped now and jumped the Created date of the copy
+// that had been running on main all along — a worse version of the bug being fixed.
+test('deploying a legacy group onto a new branch does not jump the existing copy\'s created_at', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'shared' })
+
+  // Rewind to the pre-stamp shape, and age main's deploy so "now" is clearly distinguishable.
+  const mainBid = await branchOf(id)
+  const aged = Date.now() - 5 * 24 * 60 * 60 * 1000
+  mutate((s) => {
+    s.branches[mainBid].apps.shared.updatedAt = aged
+    delete s.projects[id].serviceSettings!['cp-shared']
+  })
+
+  // A second branch that does NOT carry the group, then a deploy of it there: minting is true.
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  const featBid = await branchOf(id, 'feat')
+  mutate((s) => { delete s.branches[featBid].apps.shared })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'feat', port: 3000, group: 'shared' })
+
+  // main's Created is the oldest deploy still on record, not the moment feat was deployed.
+  const onMain = (await get(`/projects/${id}/services?branch=main`)).json()
+    .services.find((s: { name: string }) => s.name === 'shared')
+  expect(Date.parse(onMain.created_at)).toBe(aged)
+  // And the project-level stamp means feat reads the same date, rather than two different ones.
+  const onFeat = (await get(`/projects/${id}/services?branch=feat`)).json()
+    .services.find((s: { name: string }) => s.name === 'shared')
+  expect(onFeat.created_at).toBe(onMain.created_at)
+})
+
 // The dashboard's Environments table reads its branches from GET /projects/:id (one call for the
 // branches AND what each carries, as the console does), not from /branches. The Created column
 // therefore needs created_at on THAT payload; it was only on /branches, so every row showed an
@@ -2402,6 +2434,35 @@ test('a branch name that is not a string is a 400, on create and on rename', asy
   expect(r.json().error).toBe('name required')
 })
 
+// The SERVICE half of the same coercion. This one is worse than a wrong status code: the compute
+// path persisted the non-string into `computeGroups` and answered 201 with it, so the state held a
+// value its own types forbid and no later string request compared equal to it — the service could
+// not be addressed, renamed or removed again.
+test('a service name that is not a string is a 400, on create and on rename', async () => {
+  const id = await createProject()
+  for (const bad of [123, true, ['x'], { name: 'x' }]) {
+    const r = await post(`/projects/${id}/services`, { type: 'compute', name: bad, port: 3000 })
+    expect(r.statusCode, JSON.stringify(bad)).toBe(400)
+    expect(r.json().error, JSON.stringify(bad)).toBe('type and name required')
+  }
+  // A non-string TYPE is refused the same way, rather than reaching the unknown-type branch with
+  // a coerced value.
+  expect((await post(`/projects/${id}/services`, { type: 7, name: 'api', port: 3000 })).statusCode).toBe(400)
+  expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'api', port: 3000, branch: 7 })).statusCode).toBe(400)
+
+  // Nothing was persisted by any of the above: the project still carries no compute group.
+  expect(loadState().projects[id].computeGroups ?? []).toEqual([])
+
+  // The rule is a floor, not a ban: a real name still creates, and rename types its input too.
+  const ok = await post(`/projects/${id}/services`, { type: 'compute', name: 'api', port: 3000 })
+  expect(ok.statusCode).toBe(201)
+  const bad = await post(`/projects/${id}/services/cp-api/rename`, { name: 123 })
+  expect(bad.statusCode).toBe(400)
+  expect(bad.json().error).toBe('name required')
+  // And the service kept the name it had.
+  expect((await get(`/projects/${id}/services`)).json().services.map((s: { name: string }) => s.name)).toContain('api')
+})
+
 // docs/projects/branches.mdx states 39 characters, and the template parser enforced the same cap
 // for codes. Sharing one expression between them is only correct if it carries the cap: an
 // unbounded one silently removed the parser's and let these routes accept what the docs refuse.
@@ -2414,9 +2475,13 @@ test('a branch name is capped at 39 characters, on create and on rename', async 
   const ok = await post(`/projects/${id}/branches`, { name: at39 })
   expect(ok.statusCode).toBe(201)
 
-  // Rename is held to the same boundary.
+  // Rename is held to the same boundary, and to the same STATUS. `>= 400` left the documented
+  // "a malformed name answers 400" unverified on this route: unlike create, rename has no explicit
+  // lower-kebab mapping and reaches it through errCode's default, which is worth pinning.
   const bid = ok.json().branch.id
-  expect((await patch(`/projects/${id}/branches/${bid}`, { name: at40 })).statusCode).toBeGreaterThanOrEqual(400)
+  const renamed = await patch(`/projects/${id}/branches/${bid}`, { name: at40 })
+  expect(renamed.statusCode).toBe(400)
+  expect(renamed.json().error).toContain('lower-kebab')
 })
 
 // A service name is a DNS label (`<group>-<project>-<branch>.<domain>`), and RFC 1123 forbids a

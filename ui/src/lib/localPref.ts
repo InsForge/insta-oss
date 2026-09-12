@@ -31,6 +31,12 @@ export function readLocal(key: string): string | null {
   }
 }
 
+/** Drop the unpersisted value for `key`, so the shared store is the source again. Exported for the
+ *  storage-event path and for tests; a write that lands clears it too. */
+export function clearFallback(key: string): void {
+  fallback.delete(key)
+}
+
 /** Store a preference and tell this tab's subscribers. */
 export function writeLocal(key: string, next: string | null): void {
   try {
@@ -51,10 +57,18 @@ export function useLocalPref(key: string): [string | null, (value: string | null
       let set = listeners.get(key)
       if (!set) listeners.set(key, (set = new Set()))
       set.add(onChange)
-      window.addEventListener('storage', onChange)
+      // A `storage` event is ANOTHER tab writing the same key, and that write is authoritative: it
+      // landed in the shared store, while our fallback entry exists only because ours did not.
+      // Holding onto it past that point pinned this tab to a value the user had since changed or
+      // cleared elsewhere, for as long as the page stayed open.
+      const onStorage = (e: StorageEvent) => {
+        if (e.storageArea === window.localStorage && (e.key === null || e.key === key)) clearFallback(key)
+        onChange()
+      }
+      window.addEventListener('storage', onStorage)
       return () => {
         set.delete(onChange)
-        window.removeEventListener('storage', onChange)
+        window.removeEventListener('storage', onStorage)
       }
     }, [key]),
     () => readLocal(key),

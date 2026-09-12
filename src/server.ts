@@ -394,8 +394,20 @@ export function buildServer(
 
   app.post('/projects/:id/services', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const body = (req.body ?? {}) as { type?: string; name?: string; branch?: string; public?: boolean; volumeGib?: number; port?: number; alwaysOn?: boolean; image?: string }
-    if (!body.type || !body.name) return reply.code(400).send({ error: 'type and name required' })
+    const body = (req.body ?? {}) as { type?: unknown; name?: unknown; branch?: unknown; public?: boolean; volumeGib?: number; port?: number; alwaysOn?: boolean; image?: string }
+    // Typed at the boundary, BEFORE the governance gate, exactly as the branch routes are.
+    // `SERVICE_NAME_RE.test` coerces, so `{"name": 123}` satisfied the lower-kebab rule and the
+    // compute path persisted the NUMBER into computeGroups — state that violates its own types and
+    // that no later string request compares equal to, so the service could not be addressed again.
+    if (typeof body.type !== 'string' || !body.type || typeof body.name !== 'string' || !body.name) {
+      return reply.code(400).send({ error: 'type and name required' })
+    }
+    if (body.branch !== undefined && typeof body.branch !== 'string') {
+      return reply.code(400).send({ error: 'branch must be a string' })
+    }
+    // Bound as locals so the narrowing above holds inside `add` — a property narrowing does not
+    // survive into a closure, and re-reading `body.name` there is what let the unchecked value in.
+    const { type: svcType, name: svcName, branch: svcBranch } = body as { type: string; name: string; branch?: string }
     if (!gated(id, 'service.add', reply)) return reply
     // `branch` names the branch the service is created on, defaulting to the project's default
     // branch — the cloud's shape (platform server.ts:1492) and what the docs promise. Postgres,
@@ -406,22 +418,22 @@ export function buildServer(
     // `branch` does not apply to it. `image` is accepted and ignored — the image reaches a service
     // through deploy.
     const add = async (): Promise<unknown> => {
-      const on = { ...(body.branch !== undefined ? { branch: body.branch } : {}) }
-      if (body.type === 'postgres') return engine.addDbService(id, body.name!, on)
-      if (body.type === 'storage') return engine.addStorageService(id, body.name!, { ...on, ...(body.public !== undefined ? { public: body.public } : {}) })
-      if (isManagedDbType(body.type!)) return engine.addManagedService(id, body.type as 'redis' | 'mysql' | 'mongodb', body.name!, on)
+      const on = { ...(svcBranch !== undefined ? { branch: svcBranch } : {}) }
+      if (svcType === 'postgres') return engine.addDbService(id, svcName, on)
+      if (svcType === 'storage') return engine.addStorageService(id, svcName, { ...on, ...(body.public !== undefined ? { public: body.public } : {}) })
+      if (isManagedDbType(svcType)) return engine.addManagedService(id, svcType as 'redis' | 'mysql' | 'mongodb', svcName, on)
       // volumeGib (compute only) attaches a persistent /data volume (also attachable later via
       // PUT …/volume, and deletable via DELETE …/volume — cloud parity).
       // `branch` does not decide where a compute group lives (it is project-level, above); it
       // decides which branch's always-on the 201 reports, since that differs per branch.
-      return engine.addComputeService(id, body.name!, body.volumeGib, {
+      return engine.addComputeService(id, svcName, body.volumeGib, {
         ...(body.alwaysOn !== undefined ? { alwaysOn: body.alwaysOn } : {}),
         ...(body.port !== undefined ? { port: body.port } : {}),
-        ...(body.branch !== undefined ? { branch: body.branch } : {}),
+        ...(svcBranch !== undefined ? { branch: svcBranch } : {}),
       })
     }
-    if (!['postgres', 'storage', 'compute'].includes(body.type) && !isManagedDbType(body.type)) {
-      return reply.code(400).send({ error: `unknown service type: ${body.type}` })
+    if (!['postgres', 'storage', 'compute'].includes(svcType) && !isManagedDbType(svcType)) {
+      return reply.code(400).send({ error: `unknown service type: ${svcType}` })
     }
     try { return reply.code(201).send({ service: await add() }) }
     catch (e) {
@@ -498,8 +510,10 @@ export function buildServer(
   // bucket handle is baked into every object URL and into the key scoped to it.
   app.post('/projects/:id/services/:sid/rename', async (req, reply) => {
     const { id, sid: raw } = req.params as { id: string; sid: string }
-    const { name } = (req.body ?? {}) as { name?: string }
-    if (!name) return reply.code(400).send({ error: 'name required' })
+    const { name } = (req.body ?? {}) as { name?: unknown }
+    // Typed, not just truthy: RegExp.test coerces, so a rename could re-key a service under a
+    // non-string name that no later request can match.
+    if (typeof name !== 'string' || !name) return reply.code(400).send({ error: 'name required' })
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     // resolveSid rather than bareSid, per contract section 10, which names rename in that family:
     // a qualified sid that points at a deleted or foreign branch must 404, not have its qualifier

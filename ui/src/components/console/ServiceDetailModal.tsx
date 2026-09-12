@@ -107,11 +107,12 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
   // so one Escape could close the Restart dialog AND this overlay behind it. Same guard as the
   // focus trap: while a nested dialog is open, Escape is its to handle.
   //
-  // CAPTURE phase, so "is a nested dialog open?" is answered before any bubble-phase listener has
-  // had the chance to close one. In bubble phase this handler only ran first by registration order
-  // (Radix's layer registers when the nested dialog mounts, after this effect), which would have
-  // read `data-state="closed"` on a dialog Radix had just dismissed and closed the overlay behind
-  // it in the same keypress. Capture makes the ordering a property of the code, not of mount order.
+  // CAPTURE phase, so "is a nested dialog open?" is answered before Radix can answer it wrong.
+  // This listener is on `window`, and Radix's DismissableLayer listens on `document`. The bubble
+  // path runs target -> ... -> document -> window, so in bubble phase Radix ALWAYS ran first — not
+  // sometimes, and not by registration order — and by the time this handler read `data-state` the
+  // nested dialog it was meant to defer to already said "closed", so one Escape closed both layers.
+  // The capture path is the same order reversed (window first), which is what makes the guard hold.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return

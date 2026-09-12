@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { readLocal, writeLocal } from './localPref'
+import { clearFallback, readLocal, writeLocal } from './localPref'
 
 // The in-memory fallback is module state by design (one store per page), so each test uses its own
 // key rather than resetting a singleton through a test-only export.
@@ -70,6 +70,40 @@ describe('localPref with a FULL store', () => {
     // The in-memory entry is gone, so storage is the source again.
     store.set('rec-theme', 'light')
     expect(readLocal('rec-theme')).toBe('light')
+  })
+})
+
+describe('localPref when ANOTHER tab writes the key', () => {
+  // The other tab's write landed in the shared store; our fallback entry exists only because ours
+  // did not. Keeping it past that pinned this tab to a value the user had changed elsewhere, for
+  // as long as the page stayed open. `clearFallback` is what the storage-event handler calls.
+  it('drops the unpersisted value so the shared store is the source again', () => {
+    const store = new Map<string, string>([['xtab-theme', 'light']])
+    stub({
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem() { throw new Error('full') },
+      removeItem() { throw new Error('full') },
+    })
+    writeLocal('xtab-theme', 'dark')
+    expect(readLocal('xtab-theme')).toBe('dark')
+
+    // Another tab sets it to something else; our storage listener clears the stale entry.
+    store.set('xtab-theme', 'system')
+    clearFallback('xtab-theme')
+    expect(readLocal('xtab-theme')).toBe('system')
+  })
+
+  it('drops it when the other tab CLEARS the key too', () => {
+    const store = new Map<string, string>()
+    stub({
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem() { throw new Error('full') },
+      removeItem() { throw new Error('full') },
+    })
+    writeLocal('xtab-clear', 'dark')
+    expect(readLocal('xtab-clear')).toBe('dark')
+    clearFallback('xtab-clear')
+    expect(readLocal('xtab-clear')).toBe(null)
   })
 })
 

@@ -29,10 +29,24 @@ export function instanceLabels(instances: readonly string[]): Record<string, str
     const l = instanceLabel(i)
     count.set(l, (count.get(l) ?? 0) + 1)
   }
+  // Two passes, because falling back to the raw name is not automatically unambiguous: a group may
+  // be NAMED like another container (`insta deploy --group io-demo-main-pg-analytics` mints
+  // `io-demo-main-app-io-demo-main-pg-analytics`, whose label is the raw name of the analytics
+  // database). Claim the unambiguous labels first, then give anything left a value nothing has
+  // taken — the container name, or the container name with its label, which is unique because
+  // container names are.
   const out: Record<string, string> = {}
+  const used = new Set<string>()
+  const deferred: string[] = []
   for (const i of instances) {
     const l = instanceLabel(i)
-    out[i] = (count.get(l) ?? 0) > 1 ? i : l
+    if ((count.get(l) ?? 0) > 1) { deferred.push(i); continue }
+    out[i] = l
+    used.add(l)
+  }
+  for (const i of deferred) {
+    out[i] = used.has(i) ? `${i} (${instanceLabel(i)})` : i
+    used.add(out[i])
   }
   return out
 }
