@@ -423,8 +423,16 @@ function InstanceLimitCard({ projectId, branch, service, onApproval }: Ctx) {
   const memNum = Number(memValue)
   const valid = Number.isInteger(memNum) && memNum >= 256 && memNum % 256 === 0 && memNum <= cap.memoryMb
   const dirty = Number(cpuValue) !== data.limits.cpu || memNum !== data.limits.memoryMb
+  // A service can already sit on a CPU that is not on the ladder, or above the current cap (the
+  // cap can move). The Select then had no matching item, so the trigger rendered BLANK while the
+  // controlled value stayed at that out-of-range number and Save would happily send it. Offer the
+  // current value too, so what is shown is what is set.
+  const cpuOptions = [...new Set([...CPU_LADDER.filter((c) => c <= cap.cpu), data.limits.cpu])]
+    .filter((c) => Number.isFinite(c))
+    .sort((a, b) => a - b)
 
   const save = async () => {
+    if (!cpuOptions.includes(Number(cpuValue))) return setSaveError('Choose one of the listed CPU sizes.')
     if (!valid) return setSaveError(`Memory is 256 MB to ${cap.memoryMb} MB, in steps of 256.`)
     setBusy(true); setSaveError(undefined)
     const r = await api.setLimits(projectId, service.id, { memoryMb: memNum, cpu: Number(cpuValue) }, branch)
@@ -441,7 +449,7 @@ function InstanceLimitCard({ projectId, branch, service, onApproval }: Ctx) {
         <Select value={cpuValue} onValueChange={setCpu}>
           <SelectTrigger className="w-40" aria-label="CPU ceiling"><SelectValue /></SelectTrigger>
           <SelectContent>
-            {CPU_LADDER.filter((c) => c <= cap.cpu).map((c) => <SelectItem key={c} value={String(c)}>{c} vCPU</SelectItem>)}
+            {cpuOptions.map((c) => <SelectItem key={c} value={String(c)}>{c} vCPU</SelectItem>)}
           </SelectContent>
         </Select>
       </SettingsRow>

@@ -19,12 +19,6 @@ import { ApprovalPrompt, type PendingApproval } from '../components/ApprovalProm
 import { ServiceTypeIcon } from '../components/console/ServiceIcon'
 import { ErrorNote } from '../components/ui'
 
-/** Platform-minted credential names the daemon reserves: shown read-only, badged Managed. */
-function isManaged(name: string): boolean {
-  return /^(DATABASE_URL|BUCKET_NAME|REDIS_URL|MYSQL_URL|MONGODB_URL)(_|$)/.test(name) || name.startsWith('AWS_')
-}
-
-const USER_SECRET_NAME_RE = /^[A-Z_][A-Z0-9_]{0,63}$/
 
 type Scope = 'env' | 'project'
 type Row = { name: string; managed: boolean; scope: Scope; service?: string }
@@ -37,7 +31,15 @@ function grouped(tree: SecretTree, branch: string): { services: Group[]; shared:
   const env = tree.branches.find((b) => b.name === branch)
   const services: Group[] = (env?.services ?? []).map((s) => {
     const key = `${s.type}/${s.name}`
-    return { key, type: s.type, name: s.name, rows: s.secrets.map((n) => ({ name: n, managed: isManaged(n), scope: 'env' as const, service: key })) }
+    // The daemon says which names it minted (secrets/tree `minted`), so ask it rather than guess
+    // from the name. Guessing matched only the `*_URL` forms, so the rest of a managed bundle
+    // (REDIS_HOST_CACHE and friends) was badged User and offered Edit and Delete: the daemon
+    // refuses to edit a reserved name, and the delete removed no user row because there is none.
+    const minted = new Set(s.minted)
+    return {
+      key, type: s.type, name: s.name,
+      rows: s.secrets.map((n) => ({ name: n, managed: minted.has(n), scope: 'env' as const, service: key })),
+    }
   })
   const shared: Row[] = [
     ...tree.projectWide.map((n) => ({ name: n, managed: false, scope: 'project' as const })),
@@ -128,8 +130,10 @@ function SecretDialog({ projectId, branch, services, editing, onClose, onDone, o
     const r = await api.setSecret(projectId, nextName, value, scope === 'env' ? branch : undefined, bound)
     setBusy(false)
     if (r.kind === 'error') return setError(r.error)
-    onClose()
+    // Close on success only: closing first sent a failed approval-retry's error to a dialog that
+    // was no longer mounted.
     if (r.kind === 'approval') return onApproval({ ...r, retry: () => { void save(nextName) } })
+    onClose()
     onDone()
   }
 
@@ -137,8 +141,12 @@ function SecretDialog({ projectId, branch, services, editing, onClose, onDone, o
     event.preventDefault()
     setError(null)
     const nextName = name.trim()
-    if (!USER_SECRET_NAME_RE.test(nextName)) return setError('Use SCREAMING_SNAKE_CASE: A–Z, digits, and underscores (max 64 chars).')
-    if (new TextEncoder().encode(value).length > 8 * 1024) return setError('Secret value exceeds 8 KiB.')
+    // Only what the daemon itself refuses. The dialog used to demand SCREAMING_SNAKE_CASE within
+    // 64 characters and cap the value at 8 KiB, none of which the daemon enforces, so a secret
+    // created with the CLI could be listed here and then not edited: the form rejected its own
+    // existing name. An env var name cannot be empty or contain `=`; that is the real floor.
+    if (!nextName) return setError('A name is required.')
+    if (nextName.includes('=')) return setError('A secret name cannot contain "=".')
     void save(nextName)
   }
 
