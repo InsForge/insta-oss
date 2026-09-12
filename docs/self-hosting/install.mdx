@@ -24,23 +24,18 @@ Server mode wants a machine you can point DNS at:
 ## The one-liner
 
 ```bash
-curl -fsSL https://get.instacloud.com | sh
-```
-
-The raw URL is the documented fallback:
-
-```bash
 curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | sh
 ```
 
+It pulls `ghcr.io/insforge/instacloud`, published for linux/amd64 and linux/arm64. A fresh install
+takes the `latest` tag; an upgrade resolves the newest GitHub Release, so pin with
+`--version v0.1.0` when you want a specific one.
+
 ## Build the image yourself
 
-The daemon image is not published yet, so the one-liner above has nothing to pull. Note what
-"published" means here, because it is more than tagging: the installer resolves the version from
-the GitHub RELEASES endpoint (`/releases/latest`), not from the tag list, so pushing a `vX.Y.Z`
-tag builds and pushes the image but leaves `curl … | sh` still finding nothing. A GitHub Release
-has to be published for that tag as well. Until then, build the image on the box and point the
-installer at it with `INSTA_OSS_IMAGE`:
+You do not need to: the image is published. This is for running a build of your own, from a patch
+or an unreleased commit. Build it on the box and point the installer at it with
+`INSTA_OSS_IMAGE`:
 
 ```bash
 curl -fsSL https://get.docker.com | sudo sh          # only when the box has no Docker yet
@@ -177,7 +172,7 @@ Every `INSTA_OSS_*` variable in the environment when you run the script is passe
 [sleep and wake](/self-hosting/sleep) page.
 
 ```bash
-curl -fsSL https://get.instacloud.com | INSTA_OSS_IDLE_COMPUTE_SEC=900 sh -s -- --domain example.com --email ops@example.com
+curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | INSTA_OSS_IDLE_COMPUTE_SEC=900 sh -s -- --domain example.com --email ops@example.com
 ```
 
 ## Docker address pools
