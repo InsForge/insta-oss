@@ -1,7 +1,6 @@
 #!/usr/bin/env sh
 # install.sh: install or upgrade InstaCloud open source on one Linux box (root).
 #
-#   curl -fsSL https://get.instacloud.com | sh
 #   curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | sh
 #
 # What it does: installs Docker when missing; gives Docker an address pool large enough for
@@ -180,7 +179,7 @@ pkg_install() {
 # real cause was the missing tool. The print modes resolve nothing that needs either, so they skip
 # this whole section and stay root-free.
 preflight() {
-  [ "$(id -u)" -eq 0 ] || die "run as root: curl -fsSL https://get.instacloud.com | sudo sh"
+  [ "$(id -u)" -eq 0 ] || die "run as root: curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | sudo sh"
   [ "$(uname -s)" = Linux ] || die "Linux only (a laptop runs the daemon with npm run dev, no installer)"
   case $(uname -m) in x86_64|aarch64) ;; *) die "unsupported architecture $(uname -m) (x86_64 or aarch64)" ;; esac
   have curl || pkg_install curl || die "curl is required and no supported package manager was found"

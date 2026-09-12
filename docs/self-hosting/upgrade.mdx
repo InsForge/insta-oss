@@ -9,13 +9,13 @@ Re-run the one-liner. The script sees the existing `/etc/instacloud/instad.env`,
 setting in it, and recreates only what changed:
 
 ```bash
-curl -fsSL https://get.instacloud.com | sh
+curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | sh
 ```
 
 Pin a version, or go back to one:
 
 ```bash
-curl -fsSL https://get.instacloud.com | sh -s -- --version v0.4.1
+curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | sh -s -- --version v0.1.0
 ```
 
 Branch containers are not part of the compose stack, so they are not recreated and keep running
@@ -82,7 +82,7 @@ that a running Redis, MySQL or MongoDB is captured mid-write. There is no third 
 **Restore, on a clean machine:**
 
 ```bash
-curl -fsSL https://get.instacloud.com | sh            # same INSTA_OSS_DOMAIN as the old box
+curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | sh            # same INSTA_OSS_DOMAIN as the old box
 cd /etc/instacloud && docker compose stop
 tar -C /var/lib/instacloud -xzf instacloud-data.tgz
 docker compose start
