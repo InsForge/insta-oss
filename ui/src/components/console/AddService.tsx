@@ -214,8 +214,11 @@ function CreateServiceDialog({ projectId, branch, services, flow, onConnectImage
     const r = await api.addService(projectId, body)
     setBusy(false)
     if (r.kind === 'error') return setError(r.status === 409 ? `A ${label} named ${body.name} already exists.` : r.error)
-    onOpenChange(false)
+    // Close on success only, like the environment, rename and image flows. Closing first sent a
+    // failed approval-retry's error to an unmounted dialog, and abandoning the approval threw away
+    // the configuration that had been typed.
     if (r.kind === 'approval') return onApproval({ ...r, retry: () => { void create(body) } })
+    onOpenChange(false)
     onDone()
   }
 

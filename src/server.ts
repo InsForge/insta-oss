@@ -228,14 +228,20 @@ export function buildServer(
     return teardownReply(reply, await engine.destroyProject(id), 're-running the project delete')
   })
 
-  app.get('/projects/:id/branches', async (req) => ({
-    branches: engine.listBranches((req.params as { id: string }).id)
-      .map((b) => ({
+  app.get('/projects/:id/branches', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    // A project that does not exist is a 404, not an empty list. Answering 200 made "deleted" and
+    // "has no branches" indistinguishable, so a client cannot tell a stale link from a real
+    // project: the dashboard's deleted-project redirect keyed on the 404 that never came.
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    return {
+      branches: engine.listBranches(id).map((b) => ({
         id: b.id, name: b.name, is_default: b.isDefault, status: b.status,
         // The console's Created column. Every branch the engine creates stamps it.
         ...(b.createdAt ? { created_at: new Date(b.createdAt).toISOString() } : {}),
       })),
-  }))
+    }
+  })
 
   app.post('/projects/:id/branches', async (req, reply) => {
     const { id } = req.params as { id: string }

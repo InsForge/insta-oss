@@ -647,6 +647,21 @@ test('minted covers the canonical managed aliases the oldest service of a type a
   expect(svc('sessions').minted).not.toContain('REDIS_URL')
 })
 
+// "Deleted" and "has no branches" have to be distinguishable, or a client cannot tell a stale
+// link from a real project. This route answered 200 with an empty list either way, so the
+// dashboard's deleted-project redirect keyed on a 404 that never arrived and instead walked into
+// a shell full of failing requests.
+test('branches of a project that does not exist is a 404, not an empty list', async () => {
+  const gone = await get('/projects/00000000-0000-0000-0000-000000000000/branches')
+  expect(gone.statusCode).toBe(404)
+  expect(gone.json().error).toBe('project not found')
+  // A real project still answers with its branches.
+  const id = await createProject()
+  const ok = await get(`/projects/${id}/branches`)
+  expect(ok.statusCode).toBe(200)
+  expect(ok.json().branches.length).toBeGreaterThan(0)
+})
+
 // A group can be created two ways, and only one of them used to stamp createdAt. `insta deploy
 // --group <name>` materialises the group with no prior add, so the service row fell back to
 // `updatedAt` — which every redeploy rewrites — and the dashboard's Created column walked forward
