@@ -647,6 +647,26 @@ test('minted covers the canonical managed aliases the oldest service of a type a
   expect(svc('sessions').minted).not.toContain('REDIS_URL')
 })
 
+// A group can be created two ways, and only one of them used to stamp createdAt. `insta deploy
+// --group <name>` materialises the group with no prior add, so the service row fell back to
+// `updatedAt` — which every redeploy rewrites — and the dashboard's Created column walked forward
+// on each deploy. The earlier created_at test only exercised addComputeService, so it passed
+// either way.
+test('created_at of a deploy-materialised group does not move on a redeploy', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'viadeploy' })
+  const first = (await get(`/projects/${id}/services?branch=main`)).json()
+    .services.find((s: { name: string }) => s.name === 'viadeploy').created_at
+  expect(first).toEqual(expect.any(String))
+
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000, group: 'viadeploy' })
+  const second = (await get(`/projects/${id}/services?branch=main`)).json()
+    .services.find((s: { name: string }) => s.name === 'viadeploy')
+  expect(second.created_at).toBe(first)
+  // The redeploy did land, so this is not a stale row.
+  expect(second.image).toBe('app:2')
+})
+
 // The dashboard's Environments table reads its branches from GET /projects/:id (one call for the
 // branches AND what each carries, as the console does), not from /branches. The Created column
 // therefore needs created_at on THAT payload; it was only on /branches, so every row showed an

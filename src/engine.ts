@@ -1063,6 +1063,14 @@ export class Engine {
     const host = this.mintedHost(project, b, group)                                                     // WP2
     mutate((s) => {
       s.branches[b.id].apps[group] = { ...s.branches[b.id].apps[group], image: opts.image, port, hostPort, url, ...(host !== undefined ? { host } : {}), updatedAt: Date.now() }
+      // A group materialised BY this deploy (`insta deploy --group <name>`, no prior add) never got
+      // a createdAt, so the service row fell back to `updatedAt` — which every redeploy rewrites,
+      // making the dashboard's Created column walk forward on each deploy. Stamp it once, here,
+      // only when this deploy is what minted the group; an existing stamp is never overwritten.
+      if (minting) {
+        const settings = (s.projects[project.id].serviceSettings ??= {})
+        settings[`cp-${group}`] = { ...settings[`cp-${group}`], createdAt: settings[`cp-${group}`]?.createdAt ?? Date.now() }
+      }
       // The row now owns the port, exactly as `laneFor` retires a branch-create reservation.
       if (hostPort !== undefined) delete s.laneReservations?.[String(hostPort)]
       // ...and the row now owns the hostname, so the reservation retires with it.
@@ -1396,7 +1404,13 @@ export class Engine {
       // Per branch, only the services that branch CARRIES: the tree is an inventory of the names
       // a branch's env actually holds, and `secrets` never mints a credential for a service with
       // no row here, so listing one promised a name that is nowhere in the bundle.
-      branches: this.listBranches(projectId).map((b) => ({
+      branches: this.listBranches(projectId).map((b) => {
+        // Loop-INVARIANT within a branch, and each call clones the whole state via getProject, so
+        // it is computed once here rather than per managed service inside the map below. That is
+        // the same cost the note about mintedNamesOf warns of, and calling it per service put this
+        // route's clone count back up (27 -> 51 on 8 branches x 3 redis services).
+        const aliased = this.aliasedManagedIds(projectId, b)
+        return {
         name: b.name,
         isDefault: b.isDefault,
         services: [
@@ -1426,7 +1440,7 @@ export class Engine {
           }),
           ...this.managedList(projectId).filter((m) => this.carries(project, b, m, 'managed')).map((m) => {
             // The branch's oldest service of each type also carries the canonical unsuffixed names.
-            const minted = this.mintedManagedNames(m, this.aliasedManagedIds(projectId, b).has(m.id))
+            const minted = this.mintedManagedNames(m, aliased.has(m.id))
             return {
               type: m.type, name: m.name,
               secrets: [...minted, ...bound(b.name, `${m.type}/${m.name}`)].sort(),
@@ -1441,7 +1455,8 @@ export class Engine {
           })),
         ],
         unbound: list.filter((u) => u.branch === b.name && !u.service).map((u) => u.name).sort(),
-      })),
+        }
+      }),
     }
   }
 
