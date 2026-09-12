@@ -133,7 +133,7 @@ export function registerAuth(app: FastifyInstance, cfg: Config): void {
   if (!cfg.auth.enabled) {
     // Local mode: byte-identical to the pre-identity daemon (contract 00 section 11).
     const notCloud = (reply: FastifyReply, what: string) =>
-      reply.code(501).send({ error: `${what} is cloud-only — insta-oss is a single-tenant local runtime` })
+      reply.code(501).send({ error: `${what} is cloud-only — InstaCloud OSS is a single-tenant local runtime` })
     app.get('/me', async () => ({ user: LOCAL_USER }))
     app.get('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))
     app.post('/tokens', async (_req, reply) => notCloud(reply, 'agent tokens'))

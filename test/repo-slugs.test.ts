@@ -67,6 +67,15 @@ function isAllowed(path: string, line: string): boolean {
   return false
 }
 
+/** The two places the old product name is still the CORRECT string. Both are installed or
+ *  protocol state rather than a label: the WWW-Authenticate realm a client may already be pinned
+ *  to, and the pg_hba.conf marker postgres.ts writes into live databases and then greps for. */
+function isProseAllowed(path: string, line: string): boolean {
+  if (path === 'src/auth.ts') return /realm="insta-oss"/.test(line)
+  if (path === 'src/adapters/postgres.ts') return /insta-oss basebackup/.test(line)
+  return false
+}
+
 function offendersFor(re: RegExp, paths: string[], allow: (p: string, l: string) => boolean): string[] {
   const out: string[] = []
   for (const path of paths) {
@@ -92,13 +101,17 @@ describe('repo slugs', () => {
   // the prose and a repo URL on the same line — a false clean. So this matches on the occurrence,
   // never the line.
   it('calls the product InstaCloud OSS in user-facing prose', () => {
+    // WHOLE source and doc trees, not a hand-listed set of files. The previous version listed only
+    // src/server.ts — the one backend file already fixed — so the identical miss survived in
+    // src/auth.ts and src/main.ts. A guard shaped around what you already fixed proves nothing.
     const prose = scanned().filter(
       (p) =>
         p.startsWith('docs/') ||
-        p.startsWith('ui/src/') ||
-        ['README.md', 'COMPATIBILITY.md', 'CONTRIBUTING.md', 'ui/index.html', 'src/server.ts'].includes(p),
+        p.startsWith('src/') ||
+        p.startsWith('ui/') ||
+        ['README.md', 'COMPATIBILITY.md', 'CONTRIBUTING.md'].includes(p),
     )
-    const offenders = offendersFor(OLD_PRODUCT, prose, () => false)
+    const offenders = offendersFor(OLD_PRODUCT, prose, isProseAllowed)
     expect(offenders, `use "InstaCloud OSS" for the product name:\n${offenders.join('\n')}`).toEqual([])
   })
 

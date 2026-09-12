@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict'
-// Dependency-free CommonJS copy program for the insta-oss data directory (contract 00 section 12,
+// Dependency-free CommonJS copy program for the InstaCloud OSS data directory (contract 00 section 12,
 // 04 section H). It runs two ways, with the SAME argv:
 //   - as a short-lived child of the daemon (`node src/fsclone.cjs <argv>`): the `ficlone` engine on
 //     Linux (fs.copyFile + COPYFILE_FICLONE_FORCE) and the `cp-c` engine on macOS (/bin/cp -c -a,
