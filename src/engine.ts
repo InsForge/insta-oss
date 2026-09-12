@@ -1353,7 +1353,11 @@ export class Engine {
    *  → storage), matching the cloud, where minted secrets are service-bound rows. */
   secretTree(projectId: string): {
     projectWide: string[]
-    branches: Array<{ name: string; isDefault: boolean; services: Array<{ type: string; name: string; secrets: string[] }>; unbound: string[] }>
+    branches: Array<{
+      name: string; isDefault: boolean
+      services: Array<{ type: string; name: string; secrets: string[]; minted: string[] }>
+      unbound: string[]
+    }>
   } {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
@@ -1374,19 +1378,44 @@ export class Engine {
         name: b.name,
         isDefault: b.isDefault,
         services: [
-          ...this.dbList(projectId).filter((d) => this.carries(project, b, d, 'postgres')).map((d) => ({
-            type: 'postgres', name: d.name,
-            secrets: [...this.mintedNamesOf(project, b, d.id), ...bound(b.name, `postgres/${d.name}`)].sort(),
+          // `minted` is the platform-issued subset of `secrets`. They differ in who receives them:
+          // a minted credential is handed to EVERY compute group in the branch, while a user
+          // secret bound to this service reaches only this service. Callers that answer "what can
+          // service X read" cannot tell them apart from the merged list, and the dashboard read it
+          // as "every name under every service", which showed one app another app's bound secrets.
+          // `mintedNamesOf` clones state, so it is called ONCE per service and reused for both
+          // fields: calling it again for `minted` doubled the clones and broke the linear-clone
+          // guarantee this route is held to.
+          ...this.dbList(projectId).filter((d) => this.carries(project, b, d, 'postgres')).map((d) => {
+            const minted = this.mintedNamesOf(project, b, d.id)
+            return {
+              type: 'postgres', name: d.name,
+              secrets: [...minted, ...bound(b.name, `postgres/${d.name}`)].sort(),
+              minted: [...minted].sort(),
+            }
+          }),
+          ...this.stList(projectId).filter((s) => this.carries(project, b, s, 'storage')).map((s) => {
+            const minted = this.mintedNamesOf(project, b, s.id)
+            return {
+              type: 'storage', name: s.name,
+              secrets: [...minted, ...bound(b.name, `storage/${s.name}`)].sort(),
+              minted: [...minted].sort(),
+            }
+          }),
+          ...this.managedList(projectId).filter((m) => this.carries(project, b, m, 'managed')).map((m) => {
+            const minted = this.mintedManagedNames(m)
+            return {
+              type: m.type, name: m.name,
+              secrets: [...minted, ...bound(b.name, `${m.type}/${m.name}`)].sort(),
+              minted: [...minted].sort(),
+            }
+          }),
+          // A compute group mints nothing: everything under it is bound to it, and reaches only it.
+          ...groups.map((g) => ({
+            type: 'compute', name: g,
+            secrets: [...bound(b.name, `compute/${g}`), ...boundIn(b, g)].sort(),
+            minted: [],
           })),
-          ...this.stList(projectId).filter((s) => this.carries(project, b, s, 'storage')).map((s) => ({
-            type: 'storage', name: s.name,
-            secrets: [...this.mintedNamesOf(project, b, s.id), ...bound(b.name, `storage/${s.name}`)].sort(),
-          })),
-          ...this.managedList(projectId).filter((m) => this.carries(project, b, m, 'managed')).map((m) => ({
-            type: m.type, name: m.name,
-            secrets: [...this.mintedManagedNames(m), ...bound(b.name, `${m.type}/${m.name}`)].sort(),
-          })),
-          ...groups.map((g) => ({ type: 'compute', name: g, secrets: [...bound(b.name, `compute/${g}`), ...boundIn(b, g)].sort() })),
         ],
         unbound: list.filter((u) => u.branch === b.name && !u.service).map((u) => u.name).sort(),
       })),

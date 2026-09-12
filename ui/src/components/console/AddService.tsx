@@ -12,7 +12,7 @@
 //     changed; the console always starts it on and always sends it
 //   - creates apply now instead of staging into an apply-changes batch
 
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Button, cn, Dialog, DialogBody, DialogClose, DialogContent, DialogDivider, DialogFooter, DialogHeader, DialogTitle,
@@ -323,16 +323,26 @@ function DeployImageDialog({ projectId, branch, services, open, onOpenChange, on
   const deploy = async (group: string, portNum: number) => {
     const d = await api.deployImage(projectId, { image: ref, port: portNum, group, branch })
     setBusy(false)
-    if (d.kind === 'error') return setError(d.error)
+    if (d.kind === 'error') {
+      return setError(`${d.error} The service ${group} was created; submitting again retries the deploy.`)
+    }
     onOpenChange(false)
     if (d.kind === 'approval') return onApproval({ ...d, retry: () => { void deploy(group, portNum) } })
     onDone()
   }
+  // Registration and deploy are two operations, and the second can fail or be held for approval
+  // after the first has already succeeded. Remember a completed registration so submitting again
+  // resumes at the deploy: without this, the retry called addService on a name its own first
+  // attempt had just created, hit the 409, and the only way forward was to delete the service.
+  const registered = useRef<string | null>(null)
   const run = async (body: Parameters<typeof api.addService>[1], portNum: number) => {
     setBusy(true)
-    const a = await api.addService(projectId, body)
-    if (a.kind === 'error') { setBusy(false); return setError(a.status === 409 ? `A service named ${body.name} already exists.` : a.error) }
-    if (a.kind === 'approval') { setBusy(false); onOpenChange(false); return onApproval({ ...a, retry: () => { void run(body, portNum) } }) }
+    if (registered.current !== body.name) {
+      const a = await api.addService(projectId, body)
+      if (a.kind === 'error') { setBusy(false); return setError(a.status === 409 ? `A service named ${body.name} already exists.` : a.error) }
+      if (a.kind === 'approval') { setBusy(false); onOpenChange(false); return onApproval({ ...a, retry: () => { void run(body, portNum) } }) }
+      registered.current = body.name
+    }
     await deploy(body.name, portNum)
   }
 

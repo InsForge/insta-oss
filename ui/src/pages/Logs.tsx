@@ -2,12 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { EmptyState, Tab, Tabs, cn } from '@insforge/ui'
 import { Moon, ScrollText } from 'lucide-react'
-import { api, type LogLine } from '../api'
+import { api, type LogLine, type ObsComponent } from '../api'
 import { usePoll } from '../hooks'
 import { healthFor } from '../lib/status'
 import { ConsolePage } from '../components/console/ConsolePage'
 
-type Component = 'compute' | 'db'
+type Component = ObsComponent
 
 /** "io-demo-main-app-worker" → "worker"; the pg container → "postgres". */
 export function instanceLabel(instance?: string): string {

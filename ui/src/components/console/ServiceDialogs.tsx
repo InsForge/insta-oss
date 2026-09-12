@@ -68,6 +68,74 @@ export function RenameServiceDialog({ projectId, branch, service, open, onOpenCh
   )
 }
 
+/** Put a new image on a compute service that already exists. `POST /deploy` has always handled
+ *  both the first deploy and a redeploy, but the Add Service flow only ever reaches it for a
+ *  service it just registered, which left no way to update a running app's image from the
+ *  dashboard, and no way to finish a deploy that failed after registration. */
+export function DeployImageDialog({ projectId, branch, service, open, onOpenChange, onDone, onApproval }: ServiceDialogProps) {
+  const [image, setImage] = useState(service.image ?? '')
+  const [port, setPort] = useState(String(service.port ?? 80))
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const deploy = async (ref: string, portNum: number) => {
+    setBusy(true)
+    const d = await api.deployImage(projectId, { image: ref, port: portNum, group: service.name, branch })
+    setBusy(false)
+    if (d.kind === 'error') return setError(d.error)
+    onOpenChange(false)
+    if (d.kind === 'approval') return onApproval({ ...d, retry: () => { void deploy(ref, portNum) } })
+    onDone()
+  }
+
+  const onSubmit = (event: FormEvent) => {
+    event.preventDefault()
+    setError(null)
+    const ref = image.trim()
+    if (!ref) return setError('An image reference is required.')
+    const portNum = Number(port)
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      return setError('Port must be a whole number between 1 and 65535.')
+    }
+    void deploy(ref, portNum)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Deploy Image</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={onSubmit}>
+          <DialogBody className="flex flex-col gap-2">
+            <div className="flex items-center gap-6">
+              <label htmlFor="deploy-image" className="w-32 shrink-0 text-sm">Image</label>
+              <Input id="deploy-image" name="image" required autoFocus placeholder="nginx:alpine"
+                value={image} onChange={(e) => setImage(e.target.value)} />
+            </div>
+            <div className="flex items-center gap-6">
+              <label htmlFor="deploy-port" className="w-32 shrink-0 text-sm">Port</label>
+              <Input id="deploy-port" name="port" required inputMode="numeric"
+                value={port} onChange={(e) => setPort(e.target.value)} />
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Replaces what <span className="font-medium text-foreground">{service.name}</span> is running. Its database,
+              bucket and volume are untouched.
+            </p>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+          </DialogBody>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button type="button" variant="secondary">Cancel</Button>
+            </DialogClose>
+            <Button type="submit" variant="primary" disabled={busy}>Deploy</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /** Fire-and-return, like the console: the row's status shows the restart, not a held modal. */
 export function RestartServiceDialog({ projectId, branch, service, open, onOpenChange, onDone, onError, onApproval }: ServiceDialogProps) {
   const restart = async () => {

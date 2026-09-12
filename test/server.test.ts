@@ -595,6 +595,36 @@ test('secrets tree: minted creds under their service; user secrets grouped by bi
   expect(main.services.find((s: { name: string }) => s.name === 'api').secrets).toEqual(['API_KEY'])
 })
 
+// `secrets` merges platform-minted credentials with the user secrets bound to that service, and
+// the two have different reach: a minted credential goes to EVERY compute group in the branch, a
+// bound one only to its own service. Without `minted` a caller cannot answer "what can this app
+// read", and the dashboard answered it as "every name under every service" — showing one app
+// another app's bound secrets.
+test('secrets tree separates minted credentials from service-bound user secrets', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'api' })
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'worker' })
+  await put(`/projects/${id}/secrets/API_KEY`, { value: 'v', branch: 'main', service: 'compute/api' })
+  await put(`/projects/${id}/secrets/WORKER_KEY`, { value: 'v', branch: 'main', service: 'compute/worker' })
+  await put(`/projects/${id}/secrets/PG_OWNED`, { value: 'v', branch: 'main', service: 'postgres/db' })
+
+  const main = (await get(`/projects/${id}/secrets/tree`)).json()
+    .branches.find((b: { name: string }) => b.name === 'main')
+  const svc = (name: string) => main.services.find((s: { name: string }) => s.name === name)
+
+  // A compute group mints nothing, and each sees only its own bound secret.
+  expect(svc('api').minted).toEqual([])
+  expect(svc('api').secrets).toEqual(['API_KEY'])
+  expect(svc('worker').secrets).toEqual(['WORKER_KEY'])
+  expect(svc('api').secrets).not.toContain('WORKER_KEY')
+
+  // Postgres mints DATABASE_URL for every app, but a secret BOUND to postgres is not minted: it
+  // is in `secrets` and must stay out of `minted`, or apps would be told they receive it.
+  expect(svc('db').minted).toContain('DATABASE_URL')
+  expect(svc('db').secrets).toContain('PG_OWNED')
+  expect(svc('db').minted).not.toContain('PG_OWNED')
+})
+
 test('secrets tree is gated by secrets.read', async () => {
   const id = await createProject()
   await put(`/projects/${id}/policy/secrets.read`, { decision: 'approve' })

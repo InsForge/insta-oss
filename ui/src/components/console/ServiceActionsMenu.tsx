@@ -8,13 +8,14 @@ import { Button, cn, DropdownMenu, DropdownMenuContent, DropdownMenuItem, Dropdo
 import { EllipsisVertical } from 'lucide-react'
 import type { Service } from '../../api'
 import type { PendingApproval } from '../ApprovalPrompt'
-import { DeleteServiceDialog, RenameServiceDialog, RestartServiceDialog } from './ServiceDialogs'
+import { DeleteServiceDialog, DeployImageDialog, RenameServiceDialog, RestartServiceDialog } from './ServiceDialogs'
 
 export function ServiceActionsMenu({ projectId, branch, service, onDone, onError, onApproval, iconClassName = 'size-4 text-muted-foreground' }: {
   projectId: string; branch: string; service: Service
   onDone: () => void; onError: (message: string) => void; onApproval: (p: NonNullable<PendingApproval>) => void
   iconClassName?: string
 }) {
+  const [deployOpen, setDeployOpen] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   const [restartOpen, setRestartOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -30,6 +31,9 @@ export function ServiceActionsMenu({ projectId, branch, service, onDone, onError
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
+          {service.type === 'compute' && (
+            <DropdownMenuItem onSelect={() => setDeployOpen(true)}>Deploy Image</DropdownMenuItem>
+          )}
           <DropdownMenuItem onSelect={() => setRenameOpen(true)}>Rename Service</DropdownMenuItem>
           {service.type === 'compute' && (
             <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setRestartOpen(true)}>
@@ -42,6 +46,7 @@ export function ServiceActionsMenu({ projectId, branch, service, onDone, onError
         </DropdownMenuContent>
       </DropdownMenu>
 
+      {deployOpen && <DeployImageDialog {...common} open={deployOpen} onOpenChange={setDeployOpen} />}
       {renameOpen && <RenameServiceDialog {...common} open={renameOpen} onOpenChange={setRenameOpen} />}
       {restartOpen && <RestartServiceDialog {...common} open={restartOpen} onOpenChange={setRestartOpen} />}
       {deleteOpen && <DeleteServiceDialog {...common} open={deleteOpen} onOpenChange={setDeleteOpen} />}

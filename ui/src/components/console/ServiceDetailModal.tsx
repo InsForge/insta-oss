@@ -16,7 +16,7 @@ import {
   Button, CopyButton, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch,
 } from '@insforge/ui'
 import { RotateCw, X } from 'lucide-react'
-import { api, type Service } from '../../api'
+import { api, obsComponentFor, type Service } from '../../api'
 import { usePoll } from '../../hooks'
 import { LOWER_KEBAB_NAME_ERROR, SERVICE_NAME_RE } from '../../lib/serviceNames'
 import { useAuth } from '../AuthGate'
@@ -74,6 +74,9 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
   }, [onClose])
 
   if (!service) return null
+  // Each managed database is its own observability component; sending them all to `db` answered
+  // every Redis/MySQL/Mongo tab with the environment's Postgres instead.
+  const runtimeComponent = obsComponentFor(service.type)
   const accessUrl = service.type === 'compute' ? hrefFor(mode, service.domain, service.endpoint) : undefined
   const ctx: Ctx = { projectId, branch, service, onDone: reload, onError: setError, onApproval: setApproval }
 
@@ -119,8 +122,8 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
               {active === 'database' && <DatabasePanel projectId={projectId} branch={branch} group={service.name} />}
               {active === 'metrics' && <LiveMetrics projectId={projectId} branch={branch} service={service} />}
               {active === 'variables' && <VariablesTab projectId={projectId} branch={branch} service={service} />}
-              {active === 'runtime' && (
-                <LogsPanel projectId={projectId} branch={branch} component={service.type === 'compute' ? 'compute' : 'db'} service={service} />
+              {active === 'runtime' && runtimeComponent && (
+                <LogsPanel projectId={projectId} branch={branch} component={runtimeComponent} service={service} />
               )}
               {active === 'volume' && <VolumeSection projectId={projectId} branch={branch} service={service} onApproval={setApproval} />}
               {active === 'settings' && <SettingsTab {...ctx} serverMode={mode === 'server'} onDeleted={onClose} />}
@@ -143,7 +146,16 @@ function VariablesTab({ projectId, branch, service }: { projectId: string; branc
   const rows: Array<{ name: string; source: string }> = []
   if (env && tree) {
     if (service.type === 'compute') {
-      for (const s of env.services) for (const n of s.secrets) rows.push({ name: n, source: s.name })
+      // Mirror engine.deploySecretsFor: an app's env is the credentials the other services MINT,
+      // plus project-wide, plus this branch's unbound secrets, plus the secrets bound to THIS
+      // group. A secret bound to another compute group never reaches this one, and listing every
+      // name under every service claimed otherwise.
+      for (const s of env.services) {
+        if (s.type === 'compute') continue
+        for (const n of s.minted) rows.push({ name: n, source: s.name })
+      }
+      const own = env.services.find((s) => s.type === 'compute' && s.name === service.name)
+      for (const n of own?.secrets ?? []) rows.push({ name: n, source: 'This service' })
       for (const n of tree.projectWide) rows.push({ name: n, source: 'Project' })
       for (const n of env.unbound) rows.push({ name: n, source: 'Environment' })
     } else {

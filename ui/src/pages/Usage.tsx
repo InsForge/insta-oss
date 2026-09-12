@@ -3,7 +3,7 @@ import { useParams } from 'react-router-dom'
 import { EmptyState } from '@insforge/ui'
 import { Gauge } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { api, type MetricSeries } from '../api'
+import { api, obsComponentFor, type MetricSeries, type ObsComponent } from '../api'
 import { usePoll } from '../hooks'
 import { labelMatches } from './Logs'
 import { ConsolePage } from '../components/console/ConsolePage'
@@ -106,16 +106,26 @@ function SeriesChart({ title, snapshots, unit, format }: {
 /** Live container telemetry — NOT billing (that pipeline is cloud-only by design). The daemon
  *  serves a point-in-time docker-stats snapshot; the panel accumulates them into a rolling window
  *  while open. `service` narrows it to one service (a service's Metrics tab). */
-export function LiveMetrics({ projectId, branch, service }: { projectId: string; branch: string; service?: { name: string } }) {
+export function LiveMetrics({ projectId, branch, service }: {
+  projectId: string; branch: string; service?: { name: string; type: string }
+}) {
   const history = useRef<History>({ cpu: [], memory: [] })
   const only = service?.name
 
+  // Each managed database is its own observability component. Fetching only `compute` and `db`
+  // meant a Redis/MySQL/Mongo service's Metrics tab charted Postgres, or nothing at all.
+  const { data: svcList } = usePoll(() => api.services(projectId, branch), [projectId, branch], 15000)
+  const components = useMemo<ObsComponent[]>(() => {
+    if (service) { const c = obsComponentFor(service.type); return c ? [c] : [] }
+    const set = new Set<ObsComponent>()
+    for (const s of svcList ?? []) { const c = obsComponentFor(s.type); if (c) set.add(c) }
+    return [...set]
+  }, [service, svcList])
+  const componentKey = components.join(',')
+
   const { data, error } = usePoll(async () => {
-    const [compute, db] = await Promise.all([
-      api.metrics(projectId, 'compute', branch),
-      api.metrics(projectId, 'db', branch),
-    ])
-    const series = [...compute.series, ...db.series]
+    const answers = await Promise.all(components.map((c) => api.metrics(projectId, c, branch)))
+    const series = answers.flatMap((a) => a.series)
     const t = Date.now()
     for (const name of ['cpu', 'memory'] as const) {
       const values = latest(series, name, only)
@@ -123,8 +133,8 @@ export function LiveMetrics({ projectId, branch, service }: { projectId: string;
         history.current[name] = [...history.current[name], { t, values }].slice(-240)
       }
     }
-    return { series, note: compute.note }
-  }, [projectId, branch, only])
+    return { series, note: answers.find((a) => a.note)?.note }
+  }, [projectId, branch, only, componentKey])
 
   const cpuNow = data ? latest(data.series, 'cpu', only) : {}
   const memNow = data ? latest(data.series, 'memory', only) : {}

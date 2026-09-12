@@ -44,10 +44,26 @@ export type SecretTree = {
   projectWide: string[]
   branches: Array<{
     name: string; isDefault: boolean
-    services: Array<{ type: string; name: string; secrets: string[] }>
+    /** `minted` is the platform-issued subset of `secrets`: those reach every compute group in the
+     *  branch, while the rest are user secrets bound to this service and reach only it. */
+    services: Array<{ type: string; name: string; secrets: string[]; minted: string[] }>
     unbound: string[]
   }>
 }
+/** The observability components the daemon serves logs and metrics for. Each managed database is
+ *  its own component and is never folded into `db` (server.ts: `component must be
+ *  db|compute|redis|mysql|mongodb`), so asking for `db` on a Redis service answers about Postgres. */
+export type ObsComponent = 'compute' | 'db' | 'redis' | 'mysql' | 'mongodb'
+
+/** Service type as the services list reports it, to the component that observes it. `storage` has
+ *  no container of its own, so it has neither logs nor metrics and gets neither tab. */
+export function obsComponentFor(type: string): ObsComponent | undefined {
+  if (type === 'compute') return 'compute'
+  if (type === 'postgres') return 'db'
+  if (type === 'redis' || type === 'mysql' || type === 'mongodb') return type
+  return undefined
+}
+
 export type LogLine = { ts: string; level?: string; message: string; instance?: string }
 export type LogsResult = { source: string; lines: LogLine[]; note?: string }
 export type MetricSeries = { name: string; unit?: string; labels?: Record<string, string>; points: Array<[number, number]> }
@@ -123,9 +139,9 @@ export const api = {
   approvals: async (p: string) => (await get<{ approvals: Approval[] }>(`/projects/${p}/approvals`)).approvals,
   policy: async (p: string) => (await get<{ policy: Policy }>(`/projects/${p}/policy`)).policy,
   events: async (p: string, limit = 30) => (await get<{ events: AuditEvent[] }>(`/projects/${p}/events?limit=${limit}`)).events,
-  logs: (p: string, component: 'compute' | 'db', branch: string, limit = 200) =>
+  logs: (p: string, component: ObsComponent, branch: string, limit = 200) =>
     get<LogsResult>(`/projects/${p}/logs${qs({ component, branch, limit })}`),
-  metrics: (p: string, component: 'compute' | 'db', branch: string) =>
+  metrics: (p: string, component: ObsComponent, branch: string) =>
     get<MetricsResult>(`/projects/${p}/metrics${qs({ component, branch })}`),
 
   // Names-only inventory: the dashboard never shows secret VALUES (plan v1 non-goal; values
