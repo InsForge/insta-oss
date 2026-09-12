@@ -695,7 +695,15 @@ test('a template binding is reported as a binding, with its source, not as a use
       store: { type: 'postgres' },
       app: {
         type: 'web', image: 'app:1', port: 8080, healthcheck: '/',
-        env: { platform: { DATABASE_URL_APP: '${{services.store.DATABASE_URL}}' } },
+        env: {
+          platform: {
+            DATABASE_URL_APP: '${{services.store.DATABASE_URL}}',
+            // A second binding under a name the daemon does NOT reserve, so the collision below is
+            // reachable: `isReservedSecret` refuses `DATABASE_URL_*`, but an author may bind a
+            // credential into any env name they like.
+            APP_DB: '${{services.store.DATABASE_URL}}',
+          },
+        },
       },
     },
   }
@@ -709,7 +717,8 @@ test('a template binding is reported as a binding, with its source, not as a use
   expect(app.secrets).toContain('DATABASE_URL_APP')
   // ...but declared a binding, with the service and credential it reads from.
   expect(app.bindings).toEqual([
-    { envName: 'DATABASE_URL_APP', source: 'postgres/store', sourceName: 'DATABASE_URL' },
+    { envName: 'APP_DB', source: 'postgres/store', sourceName: 'DATABASE_URL', shadowsUserSecret: false },
+    { envName: 'DATABASE_URL_APP', source: 'postgres/store', sourceName: 'DATABASE_URL', shadowsUserSecret: false },
   ])
   // And NOT minted: the two platform-owned kinds are distinct and neither is a user secret.
   expect(app.minted).toEqual([])
@@ -721,12 +730,27 @@ test('a template binding is reported as a binding, with its source, not as a use
   const app2 = after.branches.find((b: { name: string }) => b.name === 'main')
     .services.find((s: { type: string; name: string }) => s.type === 'compute' && s.name === 'app')
   expect(app2.secrets).toEqual(expect.arrayContaining(['DATABASE_URL_APP', 'MY_OWN']))
-  expect(app2.bindings.map((x: { envName: string }) => x.envName)).toEqual(['DATABASE_URL_APP'])
+  expect(app2.bindings.map((x: { envName: string }) => x.envName)).toEqual(['APP_DB', 'DATABASE_URL_APP'])
 
   // Only a compute group is a binding target: the postgres service reports none.
   const store = after.branches.find((b: { name: string }) => b.name === 'main')
     .services.find((s: { type: string; name: string }) => s.type === 'postgres' && s.name === 'store')
   expect(store.bindings).toEqual([])
+  expect(app2.bindings.every((x: { shadowsUserSecret: boolean }) => !x.shadowsUserSecret)).toBe(true)
+
+  // A user secret of the SAME name as a binding IS reachable: `isReservedSecret` refuses the
+  // platform's own `DATABASE_URL_*` forms, but a binding may use any env name, and `APP_DB` is not
+  // reserved. The container still receives ONE value — the binding's, applied last — so the
+  // inventory lists the name once and says a dead user row is underneath it. Concatenating listed
+  // it twice and drew two rows for one variable.
+  expect((await put(`/projects/${id}/secrets/DATABASE_URL_APP`, { value: 'mine', branch: 'main', service: 'compute/app' })).statusCode).toBe(400)
+  expect((await put(`/projects/${id}/secrets/APP_DB`, { value: 'mine', branch: 'main', service: 'compute/app' })).statusCode).toBe(200)
+  const clash = (await get(`/projects/${id}/secrets/tree`)).json()
+    .branches.find((b: { name: string }) => b.name === 'main')
+    .services.find((s: { type: string; name: string }) => s.type === 'compute' && s.name === 'app')
+  expect(clash.secrets.filter((n: string) => n === 'APP_DB')).toHaveLength(1)
+  expect(clash.bindings.find((x: { envName: string }) => x.envName === 'APP_DB'))
+    .toEqual({ envName: 'APP_DB', source: 'postgres/store', sourceName: 'DATABASE_URL', shadowsUserSecret: true })
 })
 
 test('the per-type cap is enforced synchronously, before any service is created', async () => {

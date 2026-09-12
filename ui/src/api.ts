@@ -53,10 +53,15 @@ export type SecretTree = {
      *  `bindings` is the OTHER platform-owned subset: names a `${{services.x.KEY}}` binding maps
      *  into this compute group. They are not user secrets — `unsetUserSecret` does not remove one,
      *  and a user row of the same name is overridden because `envFor` applies bindings last — so a
-     *  surface offering Edit or Delete has to exclude them. Only compute groups are targets. */
+     *  surface offering Edit or Delete has to exclude them. Only compute groups are targets.
+     *
+     *  `shadowsUserSecret` means a user secret of the SAME name also exists on this group. The
+     *  binding still wins, so the row is a binding — but the dead user row underneath it is real
+     *  and removable, and `secrets` lists the name once because the container receives one value
+     *  for it. */
     services: Array<{
       type: string; name: string; secrets: string[]; minted: string[]
-      bindings: Array<{ envName: string; source: string; sourceName: string }>
+      bindings: Array<{ envName: string; source: string; sourceName: string; shadowsUserSecret: boolean }>
     }>
     unbound: string[]
   }>

@@ -1412,7 +1412,7 @@ export class Engine {
       name: string; isDefault: boolean
       services: Array<{
         type: string; name: string; secrets: string[]; minted: string[]
-        bindings: Array<{ envName: string; source: string; sourceName: string }>
+        bindings: Array<{ envName: string; source: string; sourceName: string; shadowsUserSecret: boolean }>
       }>
       unbound: string[]
     }>
@@ -1431,9 +1431,17 @@ export class Engine {
     // while the name stayed), and `bindingsFor` is applied LAST in `envFor` (so an Edit wrote a row
     // the container never sees). Anything offering Edit/Delete has to be able to tell them apart,
     // and the source is worth carrying too: "this service" is not where the value comes from.
-    const boundIn = (b: Branch, group: string): Array<{ envName: string; source: string; sourceName: string }> =>
+    const boundIn = (b: Branch, group: string, userBound: string[]): Array<{ envName: string; source: string; sourceName: string; shadowsUserSecret: boolean }> =>
       (b.bindings ?? []).filter((x) => x.target === `compute/${group}`)
-        .map((x) => ({ envName: x.envName, source: x.source, sourceName: x.sourceName }))
+        .map((x) => ({
+          envName: x.envName, source: x.source, sourceName: x.sourceName,
+          // A user secret of the same name can exist on this group — `insta secrets set NAME
+          // --service compute/<g>` is not refused, and a later template deploy can bind over one.
+          // The binding WINS (envFor applies it last), so the row is a binding; this says a dead
+          // user row is sitting underneath it, which is the only way a surface can offer to
+          // remove that row rather than pretending it is not there.
+          shadowsUserSecret: userBound.includes(x.envName),
+        }))
     return {
       projectWide: list.filter((u) => u.branch === null).map((u) => u.name).sort(),
       // Per branch, only the services that branch CARRIES: the tree is an inventory of the names
@@ -1490,12 +1498,16 @@ export class Engine {
           }),
           // A compute group mints nothing: everything under it is bound to it, and reaches only it.
           ...groups.map((g) => {
-            const bindings = boundIn(b, g)
+            const userBound = bound(b.name, `compute/${g}`)
+            const bindings = boundIn(b, g, userBound)
             return {
               type: 'compute', name: g,
-              // `secrets` stays the full inventory of names this group's env carries; `bindings`
-              // says which of them are platform-owned and where each reads from.
-              secrets: [...bound(b.name, `compute/${g}`), ...bindings.map((x) => x.envName)].sort(),
+              // `secrets` is the inventory of NAMES this group's env carries, and a container
+              // receives one value per name — so it is a SET. Concatenating listed a name that is
+              // both a user secret and a binding twice, and the page drew two rows for one
+              // variable. `bindings` says which of them are platform-owned and where each reads
+              // from.
+              secrets: [...new Set([...userBound, ...bindings.map((x) => x.envName)])].sort(),
               minted: [],
               bindings: [...bindings].sort((x, y) => x.envName.localeCompare(y.envName)),
             }

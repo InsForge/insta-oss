@@ -24,7 +24,7 @@ type Scope = 'env' | 'project'
 /** `kind` decides both the badge and whether Edit/Delete are offered. 'binding' is platform-owned
  *  like 'managed', but for a different reason and from a different place, so it says so. */
 type Kind = 'user' | 'managed' | 'binding'
-type Row = { name: string; kind: Kind; scope: Scope; service?: string; from?: string }
+type Row = { name: string; kind: Kind; scope: Scope; service?: string; from?: string; shadowed?: boolean }
 type Group = { key: string; type: string; name: string; rows: Row[] }
 type SortOrder = 'az' | 'za'
 const SORT_LABELS: Record<SortOrder, string> = { az: 'Name (A–Z)', za: 'Name (Z–A)' }
@@ -42,16 +42,19 @@ function grouped(tree: SecretTree, branch: string): { services: Group[]; shared:
     // A binding is platform-owned too, and editing or deleting one silently does nothing: Delete
     // calls unsetUserSecret, which never touches a binding, and Edit writes a user row that
     // `envFor` overrides because bindings are applied last. Both reported success.
-    const bindings = new Map(s.bindings.map((x) => [x.envName, `${x.source}.${x.sourceName}`]))
+    const bindings = new Map(s.bindings.map((x) => [x.envName, x]))
     return {
       key, type: s.type, name: s.name,
-      rows: s.secrets.map((n) => ({
-        name: n,
-        kind: (minted.has(n) ? 'managed' : bindings.has(n) ? 'binding' : 'user') as Kind,
-        scope: 'env' as const,
-        service: key,
-        ...(bindings.has(n) ? { from: bindings.get(n) } : {}),
-      })),
+      rows: s.secrets.map((n) => {
+        const bound = bindings.get(n)
+        return {
+          name: n,
+          kind: (minted.has(n) ? 'managed' : bound ? 'binding' : 'user') as Kind,
+          scope: 'env' as const,
+          service: key,
+          ...(bound ? { from: `${bound.source}.${bound.sourceName}`, shadowed: bound.shadowsUserSecret } : {}),
+        }
+      }),
     }
   })
   const shared: Row[] = [
@@ -110,7 +113,7 @@ function SecretsTable({ rows, emptyMessage, onEdit, onDelete }: {
                 <span className="min-w-0 flex-1 truncate font-mono text-[13px] tracking-widest text-muted-foreground select-none"
                   title="Values are never shown here. Read one with insta secrets --print.">••••••</span>
                 <div className="w-8 shrink-0">
-                  {row.kind === 'user' && (
+                  {(row.kind === 'user' || row.shadowed) && (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${row.name}`} className="text-muted-foreground hover:text-primary">
@@ -118,8 +121,13 @@ function SecretsTable({ rows, emptyMessage, onEdit, onDelete }: {
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
-                        <DropdownMenuItem onSelect={() => onEdit(row)}>Edit Secret</DropdownMenuItem>
-                        <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => onDelete(row)}>Delete Secret</DropdownMenuItem>
+                        {/* No Edit on a shadowed binding: the binding is applied last, so an edit
+                            would write a user row the container still never sees. Delete is the
+                            one action that does something — it removes the dead row underneath. */}
+                        {row.kind === 'user' && <DropdownMenuItem onSelect={() => onEdit(row)}>Edit Secret</DropdownMenuItem>}
+                        <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => onDelete(row)}>
+                          {row.shadowed ? 'Delete Shadowed Secret' : 'Delete Secret'}
+                        </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
                   )}
@@ -167,6 +175,16 @@ function SecretDialog({ projectId, branch, services, editing, onClose, onDone, o
     // existing name. An env var name cannot be empty or contain `=`; that is the real floor.
     if (!nextName) return setError('A name is required.')
     if (nextName.includes('=')) return setError('A secret name cannot contain "=".')
+    // The other door onto the same trap the row actions close: a name a BINDING already maps into
+    // the selected service can be written as a user secret, and `envFor` applies bindings last, so
+    // the container keeps the bound value and the row you just created does nothing. The daemon
+    // allows it (bindings bypass `isReservedSecret` by design), so say so here rather than write a
+    // secret that silently loses.
+    const target = scope === 'env' && service !== UNBOUND ? services.find((g) => g.key === service) : undefined
+    const clash = target?.rows.find((r) => r.kind === 'binding' && r.name === nextName)
+    if (clash) {
+      return setError(`${nextName} is bound on ${target?.name} from ${clash.from ?? 'another service'}. A secret of that name would be overridden by the binding.`)
+    }
     void save(nextName)
   }
 
