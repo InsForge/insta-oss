@@ -286,7 +286,7 @@ test('every cloud-only or not-yet route answers a clean 501, never a bare 404', 
   for (const [method, url] of notYetRoutes) {
     const r = await app.inject({ method: method as 'GET', url })
     expect(r.statusCode, `${method} ${url}`).toBe(501)
-    expect(r.json().error, `${method} ${url}`).toMatch(/not implemented by insta-oss yet/)
+    expect(r.json().error, `${method} ${url}`).toMatch(/not implemented by InstaCloud OSS yet/)
   }
 })
 

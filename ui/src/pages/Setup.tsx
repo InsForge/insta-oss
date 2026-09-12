@@ -15,7 +15,7 @@ export function AuthShell({ title, subtitle, children }: { title: string; subtit
       <div className="w-full max-w-md">
         <div className="mb-6 flex items-center gap-2">
           <span className="flex size-8 items-center justify-center rounded-md bg-foreground text-inverse"><Zap className="size-4" /></span>
-          <span className="text-sm font-bold">insta-oss</span>
+          <span className="text-sm font-bold">InstaCloud OSS</span>
         </div>
         <div className="rounded-lg border border-border bg-card p-6">
           <h1 className="text-xl font-semibold">{title}</h1>

@@ -1,8 +1,8 @@
 # CLI and MCP compatibility
 
-Command-by-command behavior of insta-oss against the standard insta surface.
+Command-by-command behavior of InstaCloud OSS against the standard insta surface.
 
-insta-oss implements the standard `insta` command surface: no daemon-only commands. This page is
+InstaCloud OSS implements the standard `insta` command surface: no daemon-only commands. This page is
 the command-by-command result of running every registered CLI command and every insta-mcp tool
 against the daemon. Cloud-only concepts return `501` with guidance rather than pretending to work.
 
@@ -12,7 +12,7 @@ domain. See [self-hosting](https://docs.instacloud.com/self-hosting/overview).
 
 ## CLI commands
 
-| Command | insta-oss behavior |
+| Command | InstaCloud OSS behavior |
 | --- | --- |
 | `status` | server: the admin email; local: `user: local` |
 | `login` / `logout` | server: `insta login --api-key insta_... --api-url https://api.<domain>`, and `--email` with the admin password; bare `insta login`, `--device` and `--oauth` are `501` (browser and OAuth flows are cloud-only). local: not needed, the daemon trusts loopback |
@@ -67,7 +67,7 @@ which the hosted API does not send; a create without scopes returns the cloud's 
 
 The CLI enrols itself as an agent whenever it detects one around it (Claude Code, Codex, Cursor)
 and mints a session at `POST /agent/sessions` before its first authenticated call, `insta login`
-included. insta-oss answers that route in both run modes, so the CLI works from an agent shell.
+included. InstaCloud OSS answers that route in both run modes, so the CLI works from an agent shell.
 The receipt is not a second credential: one box has one admin, the bearer already carries its full
 access, and the daemon does not verify the signed assertion the CLI attaches to later requests.
 
@@ -84,7 +84,7 @@ The insta-mcp server (`insta_*` tools) is a thin client over the same endpoints.
 daemon (`PLATFORM_API_URL=https://api.<domain>` in server mode with an `insta_` bearer,
 `http://127.0.0.1:8080` and any non-empty bearer in local mode) and it works:
 
-| Tools | insta-oss behavior |
+| Tools | InstaCloud OSS behavior |
 | --- | --- |
 | `whoami · org_list · project_* · service_add/list/remove/access · deploy · compute_control/status · branch_* · storage_list/download_url/delete · manifest · secrets_* · metrics · logs · events · policy_get · approvals_*` | end to end, including the full governance flow (`202` then `approvals_approve` or `approvals_deny`) |
 | `domain_*` | supported: the same add, check and remove behavior as the CLI verbs |

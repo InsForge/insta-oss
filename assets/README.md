@@ -10,7 +10,7 @@ than those only because "Deploy on InstaCloud" is four characters longer than "D
 ## Use it
 
 ```markdown
-[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/insta-oss@main/assets/deploy-button.svg)](https://console.instacloud.com/templates/<code>)
+[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/instacloud-oss@main/assets/deploy-button.svg)](https://console.instacloud.com/templates/<code>)
 ```
 
 Point the link at the console's deploy route, `https://console.instacloud.com/templates/<code>`,
@@ -29,7 +29,7 @@ go through. `@main` tracks this branch; pin a commit instead of `main` if you wo
 button never change under you:
 
 ```markdown
-[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/insta-oss@<sha>/assets/deploy-button.svg)](https://console.instacloud.com/templates/<code>)
+[![Deploy on InstaCloud](https://cdn.jsdelivr.net/gh/InsForge/instacloud-oss@<sha>/assets/deploy-button.svg)](https://console.instacloud.com/templates/<code>)
 ```
 
 ## Light and dark

@@ -20,7 +20,7 @@ Branching happens at the environment level: one command clones the whole stack, 
 | Compute | A clone of each app at its own URL, running the parent's image |
 | Secrets | Copied, with service bindings remapped to the branch's services |
 | Managed databases (`redis`/`mysql`/`mongodb`) | A fresh, empty instance, with no data cloned from the parent |
-| Compute `/data` volume | Same size, empty (self-hosted insta-oss forks the volume files instead) |
+| Compute `/data` volume | Same size, empty (self-hosted InstaCloud OSS forks the volume files instead) |
 
 The branch's connection string reaches your code the same way as any credential: `insta db url` prints it, `insta secrets bind` wires it into a compute service. After `insta branch switch`, both target the branch automatically.
 
@@ -41,7 +41,7 @@ There is no promote button, by design: data promotion is a migration, not a copy
 3. `insta deploy .` to ship the code that expects the new schema.
 4. Validate, then `insta branch delete <name>`.
 
-`insta branch merge <source> --into main` handles the structural half: services the source has that the target lacks are created there, empty, so deploy to them afterwards. It never moves data. (On self-hosted insta-oss, a merged compute group is created and deployed with the source branch's image against the target's own database and bucket.)
+`insta branch merge <source> --into main` handles the structural half: services the source has that the target lacks are created there, empty, so deploy to them afterwards. It never moves data. (On self-hosted InstaCloud OSS, a merged compute group is created and deployed with the source branch's image against the target's own database and bucket.)
 
 ## Limits
 
@@ -51,5 +51,5 @@ There is no promote button, by design: data promotion is a migration, not a copy
 - `insta branch create` does not switch you. `insta branch switch <name>` relinks the directory, then rerun `insta secrets` to refresh `.env`.
 
 <Note>
-On self-hosted insta-oss, a branch is a fork on disk: the Postgres data directory and every compute volume are reflink-copied, so `branch create` returns in about a second whatever a sleeping database weighs, and the bucket objects are synced. A source that is awake, or a filesystem without reflink support, streams `pg_basebackup` instead, which is correct but proportional to size. The command-by-command list is in [COMPATIBILITY.md](https://github.com/InsForge/insta-oss/blob/main/COMPATIBILITY.md).
+On self-hosted InstaCloud OSS, a branch is a fork on disk: the Postgres data directory and every compute volume are reflink-copied, so `branch create` returns in about a second whatever a sleeping database weighs, and the bucket objects are synced. A source that is awake, or a filesystem without reflink support, streams `pg_basebackup` instead, which is correct but proportional to size. The command-by-command list is in [COMPATIBILITY.md](https://github.com/InsForge/instacloud-oss/blob/main/COMPATIBILITY.md).
 </Note>

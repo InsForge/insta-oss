@@ -1,10 +1,10 @@
 {
-  "name": "@insforge/insta-oss",
+  "name": "@insforge/instacloud-oss",
   "version": "0.1.0",
   "description": "Self-hostable runtime for branchable, agent-native environments: per-project database, object storage, and app containers; every branch is a disposable isolated clone. Driven by the standard insta CLI.",
   "type": "module",
   "bin": {
-    "insta-oss": "src/main.ts"
+    "instacloud-oss": "src/main.ts"
   },
   "scripts": {
     "dev": "tsx src/main.ts",
@@ -34,7 +34,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/InsForge/insta-oss.git"
+    "url": "https://github.com/InsForge/instacloud-oss.git"
   },
   "keywords": [
     "branchable-environments",

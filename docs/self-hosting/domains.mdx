@@ -184,7 +184,7 @@ connections survive, and locks you out on the next reconnect.
 
 The installer never touches SSH rules, in either direction: your access is yours to preserve. It
 prints this recipe with your detected SSH ports AND your resolved lane ports filled in when it
-finds no active firewall, and the rules it adds itself are only for the ports insta-oss serves,
+finds no active firewall, and the rules it adds itself are only for the ports InstaCloud OSS serves,
 at the values it resolved rather than at the defaults. The
 tighter option, and the one to ask for if you want it, is binding the redis and mongodb lanes to
 the docker bridge instead of `0.0.0.0`; today `INSTA_OSS_LANE_BIND` moves all the lanes together,

@@ -73,11 +73,11 @@ export function buildServer(
   registerAuth(app, cfg)
 
   const notCloud = (reply: FastifyReply, what: string) =>
-    reply.code(501).send({ error: `${what} is cloud-only — insta-oss is a single-tenant local runtime` })
+    reply.code(501).send({ error: `${what} is cloud-only — InstaCloud OSS is a single-tenant local runtime` })
   // Locally meaningful but not built yet — still a clean 501 with the local workaround, never a
   // bare 404 the CLI would render as a mystery.
   const notYet = (reply: FastifyReply, what: string, hint: string) =>
-    reply.code(501).send({ error: `${what} is not implemented by insta-oss yet — ${hint}` })
+    reply.code(501).send({ error: `${what} is not implemented by InstaCloud OSS yet — ${hint}` })
 
   // Gate a sensitive action; on approval_required reply 202 (the CLI understands this shape).
   const gated = (projectId: string, action: GatedAction, reply: FastifyReply): boolean => {
@@ -1091,7 +1091,7 @@ export function buildServer(
     })
   } else {
     app.get('/', async (_req, reply) => reply.type('text/html').send(
-      '<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;max-width:40rem;margin:4rem auto"><h2>insta-oss daemon</h2><p>The API is up. To get the dashboard, build the UI once:</p><pre>npm run build:ui</pre><p>then restart <code>instad</code>.</p></body>'))
+      '<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;max-width:40rem;margin:4rem auto"><h2>InstaCloud OSS daemon</h2><p>The API is up. To get the dashboard, build the UI once:</p><pre>npm run build:ui</pre><p>then restart <code>instad</code>.</p></body>'))
   }
 
   return app
