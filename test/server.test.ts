@@ -647,6 +647,22 @@ test('minted covers the canonical managed aliases the oldest service of a type a
   expect(svc('sessions').minted).not.toContain('REDIS_URL')
 })
 
+// The dashboard's Environments table reads its branches from GET /projects/:id (one call for the
+// branches AND what each carries, as the console does), not from /branches. The Created column
+// therefore needs created_at on THAT payload; it was only on /branches, so every row showed an
+// em dash while a test covering only /branches stayed green.
+test('project detail carries created_at on its branches, like the branches route', async () => {
+  const id = await createProject()
+  const detail = (await get(`/projects/${id}`)).json()
+  const main = detail.branches.find((b: { name: string }) => b.name === 'main')
+  expect(main.created_at).toEqual(expect.any(String))
+  expect(new Date(main.created_at).getTime()).toBeGreaterThan(0)
+  // And the two payloads agree, since the page can arrive from either.
+  const listed = (await get(`/projects/${id}/branches`)).json()
+    .branches.find((b: { name: string }) => b.name === 'main')
+  expect(main.created_at).toBe(listed.created_at)
+})
+
 // The other half of why listing the canonical names matters: they are RESERVED, so a user cannot
 // take one. Before `minted` carried them, the dashboard showed REDIS_URL nowhere and yet refused
 // it here, which reads as arbitrary.

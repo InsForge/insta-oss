@@ -1,4 +1,5 @@
 import { Navigate, Route, Routes, useParams } from 'react-router-dom'
+import { Button } from '@insforge/ui'
 import { api } from './api'
 import { usePoll } from './hooks'
 import { AuthGate } from './components/AuthGate'
@@ -29,10 +30,21 @@ function Home() {
 }
 
 function ProjectRedirect({ projectId }: { projectId: string }) {
-  const { data: branches, error } = usePoll(() => api.branches(projectId), [projectId])
-  // A bookmark or a link to a project that has since been deleted used to render nothing at all,
-  // forever: the lookup rejects and there is no branch to redirect to. Send those home instead.
-  if (error) return <Navigate to="/" replace />
+  const { data: branches, error, reload } = usePoll(() => api.branches(projectId), [projectId])
+  // A link to a project that has since been deleted used to render nothing at all, forever: the
+  // lookup rejects and there is no branch to redirect to. Only a 404 means deleted, though.
+  // Treating EVERY failure as deletion sent a network blip, an auth race or a daemon 5xx back to
+  // Home, which redirects into the project again: a loop instead of the actual error.
+  const status = (error as (Error & { status?: number }) | undefined)?.status
+  if (status === 404) return <Navigate to="/" replace />
+  if (error) {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-3 text-center">
+        <p className="text-sm text-muted-foreground">{error.message}</p>
+        <Button variant="secondary" onClick={reload}>Try again</Button>
+      </div>
+    )
+  }
   if (!branches) return null
   const def = branches.find((b) => b.is_default) ?? branches[0]
   return <Navigate to={`/p/${projectId}/${encodeURIComponent(def?.name ?? 'main')}/services`} replace />

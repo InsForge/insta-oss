@@ -42,7 +42,11 @@ const MANAGED = new Set(['redis', 'mysql', 'mongodb'])
 export function tabsFor(type: string): TabId[] {
   if (type === 'compute') return ['metrics', 'variables', 'runtime', 'volume', 'settings']
   if (type === 'postgres') return ['database', 'metrics', 'variables', 'runtime', 'settings']
-  if (MANAGED.has(type)) return ['metrics', 'variables', 'runtime', 'volume', 'settings']
+  // No Volume for managed databases, unlike the console: the daemon's volume read and write both
+  // refuse every non-compute service, so the tab could only ever show "volumes are only supported
+  // for compute services" and an attach could never succeed. A tab that cannot work is worse than
+  // an absent one. It comes back if and when the daemon grows managed volumes.
+  if (MANAGED.has(type)) return ['metrics', 'variables', 'runtime', 'settings']
   return ['variables', 'settings']
 }
 

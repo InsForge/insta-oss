@@ -2984,7 +2984,13 @@ export class Engine {
     ])
     return {
       project: { id: project.id, name: project.name, status: project.status, org_id: 'local' },
-      branches: branches.map((b) => ({ id: b.id, name: b.name, is_default: b.isDefault, status: b.status })),
+      // Same branch shape the /branches route answers with, `created_at` included: the dashboard's
+      // Environments table reads its Created column from HERE (one call for branches and what each
+      // carries), and without the timestamp every row rendered an em dash.
+      branches: branches.map((b) => ({
+        id: b.id, name: b.name, is_default: b.isDefault, status: b.status,
+        ...(b.createdAt ? { created_at: new Date(b.createdAt).toISOString() } : {}),
+      })),
       resources,
     }
   }
