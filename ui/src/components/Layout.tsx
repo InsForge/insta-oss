@@ -135,12 +135,12 @@ function SideBar() {
       <Link
         to="/"
         className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-2.5 transition-colors hover:bg-alpha-4"
-        title="insta-oss"
+        title="InstaCloud OSS"
       >
         <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-foreground text-inverse">
           <Zap className="size-4" />
         </span>
-        <span className="flex-1 truncate text-sm font-bold">insta-oss</span>
+        <span className="flex-1 truncate text-sm font-bold">InstaCloud OSS</span>
       </Link>
       <nav className="flex flex-1 flex-col py-2">
         <SideItem to={`${base}/usage`} label="Usage" icon={ChartColumn} />
