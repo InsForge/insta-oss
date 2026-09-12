@@ -33,14 +33,22 @@ function ConfirmDeleteForm({ description, name, confirmText, cancelText, isLoadi
   onConfirm: () => void | Promise<void>; onOpenChange: (open: boolean) => void
 }) {
   const [typed, setTyped] = useState('')
+  const [submitting, setSubmitting] = useState(false)
   const inputId = useId()
-  const blocked = !nameMatches(typed, name) || isLoading
+  // `isLoading` is optional and no caller sets it, so the in-flight guard has to live here: the
+  // button stayed enabled while the DELETE was in flight, and a second Enter or click sent it
+  // again. The second request then reported "not found" for a resource the first one had removed.
+  const blocked = !nameMatches(typed, name) || isLoading || submitting
   return (
     <form onSubmit={(event) => {
       event.preventDefault()
       // Enter is a real path here, so the guard lives here too and not only on the button.
       if (blocked) return
-      void (async () => { await onConfirm(); onOpenChange(false) })()
+      setSubmitting(true)
+      void (async () => {
+        try { await onConfirm(); onOpenChange(false) }
+        finally { setSubmitting(false) }
+      })()
     }}>
       <DialogBody className="flex flex-col gap-4">
         <div className="text-sm leading-5 text-muted-foreground">{description}</div>

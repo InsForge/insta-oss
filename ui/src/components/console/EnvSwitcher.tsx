@@ -52,7 +52,8 @@ export function EnvSwitcher({ projectId, branch }: { projectId: string; branch: 
         <DropdownMenuContent align="start" className="w-60">
           <div className="max-h-78 overflow-y-auto">
             {environments.map((env) => (
-              <DropdownMenuItem key={env.id} onSelect={() => nav(`/p/${projectId}/${env.name}/${subpageForSwitch(pathname)}`)}>
+              <DropdownMenuItem key={env.id}
+                onSelect={() => nav(`/p/${projectId}/${encodeURIComponent(env.name)}/${subpageForSwitch(pathname)}`)}>
                 <Check className={env.name === branch ? 'size-4 shrink-0' : 'invisible size-4 shrink-0'} />
                 <span className="flex-1 truncate">{env.name}</span>
                 <EnvStatusBadge env={env} />
@@ -74,7 +75,7 @@ export function EnvSwitcher({ projectId, branch }: { projectId: string; branch: 
       </Button>
 
       <CreateEnvironmentDialog projectId={projectId} environments={all} open={createOpen} onOpenChange={setCreateOpen}
-        onCreated={(name) => { reload(); nav(`/p/${projectId}/${name}/services`) }} onApproval={setApproval} />
+        onCreated={(name) => { reload(); nav(`/p/${projectId}/${encodeURIComponent(name)}/services`) }} onApproval={setApproval} />
       <ApprovalPrompt projectId={projectId} pending={approval} onClose={() => setApproval(null)} />
     </div>
   )

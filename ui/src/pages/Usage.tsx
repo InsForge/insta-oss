@@ -5,18 +5,11 @@ import { Gauge } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api, obsComponentFor, type MetricSeries, type ObsComponent } from '../api'
 import { usePoll } from '../hooks'
-import { labelMatches } from './Logs'
+import { instanceLabel, labelMatches } from '../lib/instanceLabels'
 import { ConsolePage } from '../components/console/ConsolePage'
 
 // The one sanctioned hex exception: the chart series palette (Figma observability design).
 const SERIES_COLORS = ['#10b981', '#ec4899', '#3b82f6']
-
-/** "io-demo-main-app-worker" → "worker"; "io-demo-main-pg" → "postgres". */
-function instanceLabel(raw = ''): string {
-  if (raw.endsWith('-pg')) return 'postgres'
-  const m = /-app-(.+)$/.exec(raw)
-  return m ? m[1] : raw
-}
 
 function fmtBytes(n: number): string {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GiB`
@@ -111,6 +104,12 @@ export function LiveMetrics({ projectId, branch, service }: {
 }) {
   const history = useRef<History>({ cpu: [], memory: [] })
   const only = service?.name
+  // The rolling window belongs to ONE service in ONE environment. The modal stays mounted while
+  // the selected service changes, so without this the charts drew the new service's points on top
+  // of the previous one's history.
+  const scope = `${projectId}/${branch}/${only ?? '*'}`
+  const scopeRef = useRef(scope)
+  if (scopeRef.current !== scope) { scopeRef.current = scope; history.current = { cpu: [], memory: [] } }
 
   // Each managed database is its own observability component. Fetching only `compute` and `db`
   // meant a Redis/MySQL/Mongo service's Metrics tab charted Postgres, or nothing at all.

@@ -28,8 +28,10 @@ export function RenameServiceDialog({ projectId, branch, service, open, onOpenCh
     const r = await api.renameService(projectId, service.id, next, branch)
     setBusy(false)
     if (r.kind === 'error') return setError(r.status === 409 ? `A service named ${next} already exists.` : r.error)
-    onOpenChange(false)
+    // Close only on success: closing before the approval hand-off sent a failed retry's error to
+    // an unmounted dialog.
     if (r.kind === 'approval') return onApproval({ ...r, retry: () => { void rename(next) } })
+    onOpenChange(false)
     onDone()
   }
 
@@ -83,8 +85,8 @@ export function DeployImageDialog({ projectId, branch, service, open, onOpenChan
     const d = await api.deployImage(projectId, { image: ref, port: portNum, group: service.name, branch })
     setBusy(false)
     if (d.kind === 'error') return setError(d.error)
-    onOpenChange(false)
     if (d.kind === 'approval') return onApproval({ ...d, retry: () => { void deploy(ref, portNum) } })
+    onOpenChange(false)
     onDone()
   }
 

@@ -33,8 +33,10 @@ export function CreateEnvironmentDialog({ projectId, environments, open, onOpenC
     const r = await api.createBranch(projectId, next, from)
     setBusy(false)
     if (r.kind === 'error') return setError(r.error)
-    onOpenChange(false); reset()
+    // Close only on success. Closing before handing off to the approval prompt meant a retry that
+    // failed after the grant wrote setError into an unmounted dialog, and the user saw nothing.
     if (r.kind === 'approval') return onApproval({ ...r, retry: () => { void create(next) } })
+    onOpenChange(false); reset()
     onCreated(next)
   }
 

@@ -2,26 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { EmptyState, Tab, Tabs, cn } from '@insforge/ui'
 import { Moon, ScrollText } from 'lucide-react'
-import { api, type LogLine, type ObsComponent } from '../api'
+import { api, obsComponentFor, type LogLine, type ObsComponent } from '../api'
 import { usePoll } from '../hooks'
 import { healthFor } from '../lib/status'
+import { instanceLabel, labelMatches } from '../lib/instanceLabels'
 import { ConsolePage } from '../components/console/ConsolePage'
 
 type Component = ObsComponent
 
-/** "io-demo-main-app-worker" → "worker"; the pg container → "postgres". */
-export function instanceLabel(instance?: string): string {
-  if (!instance) return ''
-  if (instance.endsWith('-pg')) return 'postgres'
-  const m = /-app-(.+)$/.exec(instance)
-  return m ? m[1] : instance
-}
-
-/** Whether a container label belongs to the service named `name`: an app's label is its group, a
- *  managed or extra postgres container ends in `-<name>`, and the default database is "postgres". */
-export function labelMatches(label: string, name: string): boolean {
-  return label === name || label.endsWith(`-${name}`) || (name === 'db' && label === 'postgres')
-}
 
 function LogRows({ lines }: { lines: LogLine[] }) {
   const bottom = useRef<HTMLDivElement>(null)
@@ -54,15 +42,18 @@ function LogRows({ lines }: { lines: LogLine[] }) {
 /** The live container tail, for the Logs page and a service's Runtime Logs tab. `service` narrows
  *  it to one service's container. Reading logs never wakes anything. */
 export function LogsPanel({ projectId, branch, component, service }: {
-  projectId: string; branch: string; component: Component; service?: { name: string }
+  projectId: string; branch: string; component: Component; service?: { name: string; type: string }
 }) {
   const { data, error } = usePoll(() => api.logs(projectId, component, branch), [projectId, branch, component])
   const { data: services } = usePoll(() => api.services(projectId, branch), [projectId, branch], 15000)
   const { data: health } = usePoll(() => api.runtimeHealth(projectId, branch), [projectId, branch], 15000)
 
+  // Name alone is not a key: a compute service and a database can share one, and then the sleeping
+  // banner was decided by both. The selected service is identified by name AND type; the whole-page
+  // view takes every service the requested component observes.
   const wanted = (services ?? []).filter((s) => service
-    ? s.name === service.name
-    : component === 'compute' ? s.type === 'compute' : s.type === 'postgres')
+    ? s.name === service.name && s.type === service.type
+    : obsComponentFor(s.type) === component)
   const standby = wanted.length > 0 && wanted.every((s) => healthFor(health, s.id)?.status === 'standby')
   const lines = data ? (service ? data.lines.filter((l) => labelMatches(instanceLabel(l.instance), service.name)) : data.lines) : undefined
 

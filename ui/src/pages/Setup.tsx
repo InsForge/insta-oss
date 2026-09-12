@@ -40,7 +40,7 @@ export function Setup() {
 
   const rules = PASSWORD_RULES.map((rule) => ({ ...rule, met: rule.test(password) }))
   const passwordValid = rules.every((rule) => rule.met)
-  const emailValid = EMAIL_RE.test(email)
+  const emailValid = EMAIL_RE.test(email.trim())
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault()

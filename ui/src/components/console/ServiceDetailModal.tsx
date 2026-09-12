@@ -11,7 +11,7 @@
 // names only (values stay behind `insta secrets`); a Runtime row for Start / Stop / Suspend, states
 // the console does not have; Custom Domain only in server mode; changes apply immediately.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Button, CopyButton, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch,
 } from '@insforge/ui'
@@ -286,12 +286,17 @@ function GeneralSettings({ projectId, branch, service, onDone, onError, onApprov
 function NameRow({ projectId, branch, service, onDone, onApproval }: Ctx) {
   const [text, setText] = useState(service.name)
   const [rejected, setRejected] = useState<string | null>(null)
+  // Enter commits and then the field blurs, which commits again. The second request carried the
+  // OLD service name and reported "service not found" even though the first rename had succeeded.
+  const inFlight = useRef(false)
   const commit = async () => {
     const next = text.trim()
     if (next === service.name) return setRejected(null)
     if (!SERVICE_NAME_RE.test(next)) return setRejected(LOWER_KEBAB_NAME_ERROR)
+    if (inFlight.current) return
+    inFlight.current = true
     setRejected(null)
-    const r = await api.renameService(projectId, service.id, next, branch)
+    const r = await api.renameService(projectId, service.id, next, branch).finally(() => { inFlight.current = false })
     if (r.kind === 'error') return setRejected(r.status === 409 ? `A service named ${next} already exists.` : r.error)
     if (r.kind === 'approval') return onApproval({ ...r, retry: () => { void commit() } })
     onDone()

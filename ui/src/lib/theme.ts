@@ -24,7 +24,12 @@ function systemPrefersDark(): boolean {
 }
 
 export function applyTheme(pref: ThemePreference): void {
-  document.documentElement.classList.toggle('dark', isDark(pref, systemPrefersDark()))
+  const dark = isDark(pref, systemPrefersDark())
+  document.documentElement.classList.toggle('dark', dark)
+  // The class styles our own elements; it says nothing to the browser about the ones it draws
+  // itself. Without this, choosing Dark on a light OS left scrollbars, form controls and the
+  // caret in the OS scheme. `.light` subtrees (the auth pages) still override it locally.
+  document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
 }
 
 export function useTheme(): { theme: ThemePreference; setTheme: (t: ThemePreference) => void } {

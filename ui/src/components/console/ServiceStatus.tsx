@@ -22,7 +22,7 @@ export function ServiceStatusIndicator({ status }: { status: ServiceStatus }) {
     case 'online':
       return <Dot label="Online" dot="bg-success" text="text-success" />
     case 'sleeping':
-      return <Dot label="Sleeping" dot="bg-disabled" text="text-muted-foreground" title="Scaled to zero — wakes on request." />
+      return <Dot label="Sleeping" dot="bg-disabled" text="text-muted-foreground" title={status.title} />
     case 'starting':
       return <DeployingBadge />
     case 'waking':

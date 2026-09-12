@@ -36,9 +36,7 @@ export function ServiceActionsMenu({ projectId, branch, service, onDone, onError
           )}
           <DropdownMenuItem onSelect={() => setRenameOpen(true)}>Rename Service</DropdownMenuItem>
           {service.type === 'compute' && (
-            <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setRestartOpen(true)}>
-              Restart Service
-            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setRestartOpen(true)}>Restart Service</DropdownMenuItem>
           )}
           <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setDeleteOpen(true)}>
             Delete Service
