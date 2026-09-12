@@ -130,4 +130,18 @@ describe('repo slugs', () => {
   it('scans the tracked .github tree, where a stale workflow URL would hide', () => {
     expect(scanned().some((p) => p.startsWith('.github/'))).toBe(true)
   })
+
+  // The documented install command has to be one that resolves. get.instacloud.com is NXDOMAIN and
+  // always has been, yet it was the headline one-liner in nine places, so the first command a new
+  // user copied failed with "could not resolve host". When that host is finally served, promoting
+  // it back is deliberate: delete this assertion in the same commit.
+  it('documents an install command whose host resolves', () => {
+    const docs = scanned().filter(
+      (p) => p.startsWith('docs/') || p === 'README.md' || p === 'install.sh',
+    )
+    const dead = offendersFor(/get\.instacloud\.com/, docs, () => false)
+    expect(dead, `get.instacloud.com does not resolve; use the raw URL:\n${dead.join('\n')}`).toEqual([])
+    expect(readFileSync(join(ROOT, 'README.md'), 'utf8'))
+      .toContain('https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh')
+  })
 })

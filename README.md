@@ -23,20 +23,11 @@ busy port names the key that moves it, and a first install on a box under the me
 minimum stops there rather than failing later under load. As root:
 
 ```bash
-curl -fsSL https://get.instacloud.com | sh
+curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | sh
 ```
 
-The daemon image is not published yet, so until the first release the one-liner has nothing to
-pull. A tag is not enough on its own: the installer asks GitHub for the latest RELEASE, so a
-`vX.Y.Z` tag publishes the image but the one-liner keeps finding nothing until a Release is
-published for that tag too. Build it on the box and point the installer at it:
-
-```bash
-curl -fsSL https://get.docker.com | sudo sh          # only when the box has no Docker yet
-git clone https://github.com/InsForge/instacloud-oss.git && cd instacloud-oss
-sudo docker build -t instacloud:dev .
-sudo INSTA_OSS_IMAGE=instacloud:dev sh install.sh
-```
+It pulls `ghcr.io/insforge/instacloud`, published for linux/amd64 and linux/arm64. Re-run the same
+command to upgrade, or add `--version v0.1.0` to pin a release.
 
 The script installs Docker if it is missing, prepares a reflink-capable data directory, and
 starts three containers: the daemon, the TLS edge, and the object store. It prints where to go:
