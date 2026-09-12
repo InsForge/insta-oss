@@ -90,6 +90,44 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onClose])
 
+  // aria-modal="true" is a PROMISE to assistive tech that the rest of the page is inert, and this
+  // is a plain fixed div rather than the kit's Dialog, so nothing was keeping that promise: focus
+  // stayed wherever it was and Tab walked straight into the dashboard behind the overlay. Move
+  // focus in, keep it in, and give it back to whatever opened this on close.
+  const overlayRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null
+    const root = overlayRef.current
+    const focusable = () => Array.from(
+      root?.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ) ?? [],
+    ).filter((el) => el.offsetParent !== null)
+
+    focusable()[0]?.focus()
+    const onTab = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || !root) return
+      const items = focusable()
+      if (!items.length) return
+      const first = items[0]
+      const last = items[items.length - 1]
+      const active = document.activeElement
+      // Wrap at both ends, and pull focus back if it has escaped the overlay entirely.
+      if (!root.contains(active)) { e.preventDefault(); first.focus(); return }
+      if (!e.shiftKey && active === last) { e.preventDefault(); first.focus() }
+      else if (e.shiftKey && active === first) { e.preventDefault(); last.focus() }
+    }
+    document.addEventListener('keydown', onTab)
+    return () => {
+      document.removeEventListener('keydown', onTab)
+      opener?.focus?.()
+    }
+    // `service` is undefined on the first render, while the list is still loading, and the
+    // component returns null then — so the overlay does not exist yet and there is nothing to
+    // focus or to trap within. Re-run once it resolves, or the trap silently does nothing: a
+    // browser check showed 26 of 40 Tab presses walking out into the dashboard behind it.
+  }, [serviceId, service?.id])
+
   if (!service) return null
   // Each managed database is its own observability component; sending them all to `db` answered
   // every Redis/MySQL/Mongo tab with the environment's Postgres instead.
@@ -98,7 +136,7 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
   const ctx: Ctx = { projectId, branch, service, onDone: reload, onError: setError, onApproval: setApproval }
 
   return (
-    <div className="fixed inset-0 z-40" role="dialog" aria-modal="true" aria-label={service.name}>
+    <div ref={overlayRef} className="fixed inset-0 z-40" role="dialog" aria-modal="true" aria-label={service.name}>
       <div className="absolute inset-0 bg-black/80" onClick={onClose} />
       <div className="absolute inset-x-6 top-16 bottom-16 mx-auto flex max-w-[1440px] flex-col overflow-hidden border border-border bg-semantic-1 shadow-[0px_8px_12px_0px_rgba(0,0,0,0.24)]">
         <div className="flex shrink-0 items-center gap-3 px-4 py-4">
