@@ -20,10 +20,10 @@ const GHCR_ATTEMPTS = Number(process.env.GHCR_CHECK_ATTEMPTS ?? 15);
 const GHCR_DELAY_MS = Number(process.env.GHCR_CHECK_DELAY_MS ?? 40_000);
 
 // The repo whose raw/jsDelivr URLs published READMEs and logos point at. Consulted only when
-// GITHUB_REPOSITORY is absent — the supported local-publish path. ONE constant, because the repo
+// GITHUB_REPOSITORY is absent: the supported local-publish path. ONE constant, because the repo
 // rename had to fix this slug in two places and the sweep missed both. `||` not `??`: an
 // explicitly exported GITHUB_REPOSITORY="" is empty, not nullish, and would otherwise build
-// `cdn.jsdelivr.net/gh/@<sha>/…` — a broken URL with no error.
+// `cdn.jsdelivr.net/gh/@<sha>/…`, a broken URL with no error.
 const DEFAULT_REPO = "InsForge/instacloud-oss";
 
 // Mint a fresh session when bot credentials exist; fall back to a static token.

@@ -1,12 +1,12 @@
 // The repo rename (insta-oss -> instacloud-oss, insta-cli -> instacloud-cli, insta-skills ->
 // instacloud-skills) had to be swept by hand, and the sweep missed a leg: publish.mjs kept a
 // hardcoded old slug as its GITHUB_REPOSITORY fallback, and nothing failed. A review's negative
-// control then showed that reverting 28 of the 29 rewritten URLs left every gate green — tsc,
+// control then showed that reverting 28 of the 29 rewritten URLs left every gate green: tsc,
 // eslint, the template linter, the version guard and the doc tests all passed on a fully
 // sabotaged tree. Only the Dockerfile LABEL was bound, by test/image.int.test.ts.
 //
 // This test binds the rest. Both halves are verified by negative control, because a guard nobody
-// has watched fail is worth nothing — which is the whole lesson above.
+// has watched fail is worth nothing, which is the whole lesson above.
 
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -28,7 +28,7 @@ const OLD_PRODUCT = /(?<![./\w-])insta-oss(?![-\w/])/
 
 /** What git tracks, i.e. what we ship. Deliberately NOT a directory walk: the first version of
  *  this test skipped every root-level dot directory, which silently excluded the tracked
- *  `.github` tree — exactly where a stale workflow URL would live, and `.yml` was already the
+ *  `.github` tree, exactly where a stale workflow URL would live, and `.yml` was already the
  *  blind spot that let the template manifests through. The index also excludes untracked scratch
  *  files without needing a denylist that can drift. */
 function trackedFiles(): string[] {
@@ -101,11 +101,11 @@ describe('repo slugs', () => {
 
   // The product is "InstaCloud OSS" in user-facing prose. The first pass at this missed four doc
   // pages, because the check filtered out whole LINES containing "InsForge/" and those four carried
-  // the prose and a repo URL on the same line — a false clean. So this matches on the occurrence,
+  // the prose and a repo URL on the same line: a false clean. So this matches on the occurrence,
   // never the line.
   it('calls the product InstaCloud OSS in user-facing prose', () => {
     // WHOLE source and doc trees, not a hand-listed set of files. The previous version listed only
-    // src/server.ts — the one backend file already fixed — so the identical miss survived in
+    // src/server.ts, the one backend file already fixed, so the identical miss survived in
     // src/auth.ts and src/main.ts. A guard shaped around what you already fixed proves nothing.
     const prose = scanned().filter(
       (p) =>
