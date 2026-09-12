@@ -55,7 +55,16 @@ export function ServiceTable({ projectId, branch, services, health, isWaking, on
         <span className="w-7 shrink-0" aria-hidden="true" />
       </div>
       {services.map((service) => (
-        <div key={service.id} onClick={() => onOpen(service)} className={serviceRowClass()}>
+        // A div with onClick is unreachable by keyboard: button semantics and Enter/Space make the
+        // row an actual control. Key events from the nested actions menu are ignored, or Enter on
+        // "Delete Service" would also open the row behind the dialog.
+        <div key={service.id} role="button" tabIndex={0} aria-label={`Open ${service.name}`}
+          onClick={() => onOpen(service)}
+          onKeyDown={(e) => {
+            if (e.target !== e.currentTarget) return
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(service) }
+          }}
+          className={serviceRowClass()}>
           <div className="flex min-w-0 flex-2 items-center gap-1 self-stretch">
             <span className="w-7 shrink-0" aria-hidden="true" />
             <span className="flex size-14 shrink-0 items-center justify-center">

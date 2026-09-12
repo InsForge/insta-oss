@@ -29,10 +29,13 @@ function Home() {
 }
 
 function ProjectRedirect({ projectId }: { projectId: string }) {
-  const { data: branches } = usePoll(() => api.branches(projectId), [projectId])
+  const { data: branches, error } = usePoll(() => api.branches(projectId), [projectId])
+  // A bookmark or a link to a project that has since been deleted used to render nothing at all,
+  // forever: the lookup rejects and there is no branch to redirect to. Send those home instead.
+  if (error) return <Navigate to="/" replace />
   if (!branches) return null
   const def = branches.find((b) => b.is_default) ?? branches[0]
-  return <Navigate to={`/p/${projectId}/${def?.name ?? 'main'}/services`} replace />
+  return <Navigate to={`/p/${projectId}/${encodeURIComponent(def?.name ?? 'main')}/services`} replace />
 }
 
 function CenterNote({ title, body }: { title: string; body: string }) {

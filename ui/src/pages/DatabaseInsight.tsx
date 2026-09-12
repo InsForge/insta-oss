@@ -146,12 +146,20 @@ export function DatabasePanel({ projectId, branch, group, footer }: {
 /** The environment's (first) Postgres, as a page. */
 export function DatabaseInsight() {
   const { projectId, branch } = useParams() as { projectId: string; branch: string }
-  const { data: services } = usePoll(() => api.services(projectId, branch), [projectId, branch], 15000)
+  const { data: services, error } = usePoll(() => api.services(projectId, branch), [projectId, branch], 15000)
   const pg = useMemo(() => (services ?? []).find((s) => s.type === 'postgres'), [services])
 
   return (
     <ConsolePage title="Database">
-      {services && !pg ? (
+      {/* Rendering null while the service list is in flight, or when it failed, left the page as a
+          bare title with no sign that anything was happening. */}
+      {!services && !error ? (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => <div key={i} className="h-24 animate-pulse rounded-lg bg-alpha-8" />)}
+        </div>
+      ) : error ? (
+        <div className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-destructive">{error.message}</div>
+      ) : services && !pg ? (
         <EmptyState icon={Database} title="No Postgres in this environment"
           description="Add a postgres service on the Service page and this page fills in." />
       ) : pg ? (

@@ -5,7 +5,7 @@
 // GitHub deployments panel.
 
 import { useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   Button, ConfirmDialog, cn, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@insforge/ui'
@@ -122,10 +122,19 @@ export function Environments() {
                 // inside it works, so it does not open, but it keeps its menu.
                 const failed = envBadge(env).label === 'Failed'
                 return (
-                  <tr key={env.id} onClick={failed ? undefined : () => nav(`/p/${projectId}/${env.name}/services`)}
+                  <tr key={env.id} onClick={failed ? undefined : () => nav(`/p/${projectId}/${encodeURIComponent(env.name)}/services`)}
                     className={cn('border-b border-border transition-colors last:border-b-0',
                       failed ? 'opacity-60' : 'cursor-pointer hover:bg-alpha-4')}>
-                    <td className="px-4 py-3 text-sm">{env.name}</td>
+                    {/* The row click is a convenience; this link is what keyboard and screen-reader
+                        users navigate with, since a tr onClick reaches neither. */}
+                    <td className="px-4 py-3 text-sm">
+                      {failed ? env.name : (
+                        <Link to={`/p/${projectId}/${encodeURIComponent(env.name)}/services`}
+                          className="hover:underline" onClick={(e) => e.stopPropagation()}>
+                          {env.name}
+                        </Link>
+                      )}
+                    </td>
                     <td className="px-4 py-3">
                       {failed ? (
                         <span className="flex items-center gap-2 text-sm text-destructive"

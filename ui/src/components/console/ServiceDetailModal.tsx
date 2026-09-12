@@ -16,6 +16,7 @@ import {
   Button, CopyButton, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch,
 } from '@insforge/ui'
 import { RotateCw, X } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
 import { api, obsComponentFor, type Service } from '../../api'
 import { usePoll } from '../../hooks'
 import { LOWER_KEBAB_NAME_ERROR, SERVICE_NAME_RE } from '../../lib/serviceNames'
@@ -62,6 +63,18 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
   const tabs = tabsFor(service?.type ?? 'storage')
   const [tab, setTab] = useState<TabId | null>(null)
   const active: TabId = tab ?? (tabs.includes(requestedTab as TabId) ? (requestedTab as TabId) : tabs[0])
+  // The URL carries `?service=&tab=` so a tab can be linked and survives a refresh, but selecting
+  // one only moved local state, so reload reopened the tab the link had named rather than the one
+  // in front of you. Keep the URL in step, replacing rather than stacking history entries.
+  const [, setParams] = useSearchParams()
+  const selectTab = (next: TabId) => {
+    setTab(next)
+    setParams((prev) => {
+      const p = new URLSearchParams(prev)
+      p.set('tab', next)
+      return p
+    }, { replace: true })
+  }
 
   // A stale id (deleted service, another environment's link) closes instead of rendering nothing.
   const missing = services !== undefined && !service
@@ -116,7 +129,7 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
 
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 pb-4">
           <div className="flex items-start gap-6">
-            <SideTabs tabs={tabs.map((id) => ({ id, label: LABELS[id] }))} value={active} onChange={setTab} className="sticky top-0" />
+            <SideTabs tabs={tabs.map((id) => ({ id, label: LABELS[id] }))} value={active} onChange={selectTab} className="sticky top-0" />
             <div className="flex min-w-0 flex-1 flex-col gap-3">
               <ErrorNote error={error} />
               {active === 'database' && <DatabasePanel projectId={projectId} branch={branch} group={service.name} />}

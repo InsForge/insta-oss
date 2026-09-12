@@ -2217,6 +2217,23 @@ test('a branch name that is not lower-kebab is refused on create, as it already 
   expect((await post(`/projects/${id}/branches`, { name: 'feat-1' })).statusCode).toBe(201)
 })
 
+// A service name is a DNS label (`<group>-<project>-<branch>.<domain>`), and RFC 1123 forbids a
+// leading or trailing hyphen. Three of the four checks in the engine had drifted apart: compute
+// rename refused a trailing hyphen, while add-service and managed rename accepted it and minted a
+// name whose hostname is invalid. Which names were legal depended on the route you took.
+test('a trailing hyphen is refused by every service-name route, not just some', async () => {
+  const id = await createProject()
+  const add = await post(`/projects/${id}/services`, { type: 'compute', name: 'api-' })
+  expect(add.statusCode).toBe(400)
+  expect(add.json().error).toBe('service name must be lower-kebab (a-z, 0-9, -)')
+
+  const addManaged = await post(`/projects/${id}/services`, { type: 'redis', name: 'cache-' })
+  expect(addManaged.statusCode).toBe(400)
+
+  // And the names that were always legal still are.
+  expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'api-1' })).statusCode).toBe(201)
+})
+
 test('a redeploy re-checks nothing it already owns: the second deploy of a group still lands', async () => {
   const id = await createProject()
   expect((await post(`/projects/${id}/deploy`, { image: 'app:1', port: 3000, group: 'web' })).statusCode).toBe(200)

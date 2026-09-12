@@ -39,6 +39,16 @@ export const BRANCH_NAME_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
 function assertBranchName(name: string): void {
   if (!BRANCH_NAME_RE.test(name)) throw new Error('branch name must be lower-kebab (a-z, 0-9, -)')
 }
+
+/** A service name is a DNS label too (`<group>-<project>-<branch>.<domain>`), and RFC 1123 labels
+ *  may not start or end with a hyphen. Three call sites had drifted into two different rules: the
+ *  compute-rename one refused a trailing hyphen but had no length cap, while add-service and
+ *  managed-rename capped at 39 and ALLOWED a trailing hyphen, minting a name whose hostname is not
+ *  valid. One rule now, the strict one, matching what the dashboard already enforced. */
+export const SERVICE_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/
+function assertServiceName(name: string): void {
+  if (!SERVICE_NAME_RE.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+}
 const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
 
 // Volume-cap parity (platform #166–169): the cloud caps volumes per billing tier; oss has no
@@ -1854,7 +1864,7 @@ export class Engine {
     return this.serialize('provision', async () => {
       const project = this.getProject(projectId)
       if (!project) throw new Error('project not found')
-      if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(newName)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+      assertServiceName(newName)
       const groups = this.computeGroupNames(projectId)
       if (!groups.includes(oldName)) throw new Error('service not found')
       const current = async (): Promise<ServiceRow | undefined> =>
@@ -2062,7 +2072,7 @@ export class Engine {
     return this.serialize('provision', async () => {
       const project = this.getProject(projectId)
       if (!project) throw new Error('project not found')
-      if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+      assertServiceName(name)
       const b = this.targetBranch(projectId, opts.branch)
       this.assertUsable(b, 'given new services')
       const existing = this.managedList(projectId).find((m) => m.type === type && m.name === name)
@@ -2179,7 +2189,7 @@ export class Engine {
     if (!project) throw new Error('project not found')
     const m = this.managedList(projectId).find((x) => x.id === serviceId)
     if (!m) throw new Error('service not found')
-    if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(newName)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+    assertServiceName(newName)
     if (newName === m.name) return this.managedRow(m)
     if (this.managedList(projectId).some((x) => x.type === m.type && x.name === newName)) throw new Error(`${m.type} service "${newName}" already exists`)
     const newId = managedServiceId(m.type, newName)
@@ -4440,7 +4450,9 @@ export class Engine {
 
   // ---- postgres service registrations -----------------------------------------------------------
 
-  private static NAME_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
+  /** The one rule (see SERVICE_NAME_RE): this used to be a fourth, lenient copy that allowed a
+   *  trailing hyphen, so which names were legal depended on which route you reached. */
+  private static NAME_RE = SERVICE_NAME_RE
 
   private assertServiceName(name: string): void {
     if (!Engine.NAME_RE.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
