@@ -1,5 +1,5 @@
 #!/usr/bin/env -S npx tsx
-// instad: the insta-oss daemon. Local mode binds 127.0.0.1 (localhost trust; no OAuth) and the stock
+// instad: the InstaCloud OSS daemon. Local mode binds 127.0.0.1 (localhost trust; no OAuth) and the stock
 // `insta` CLI reaches it via INSTA_API_URL=http://127.0.0.1:8080. Boot order per contract 00 §1.1 /
 // 01 §1: every region marker below sits in its FINAL position; WP1 fills the bodies, nobody moves a
 // marker, every other package adds lines only inside its own region.
@@ -103,7 +103,7 @@ async function main(): Promise<void> {
     const version = (await docker(['version', '--format', '{{.Server.Version}} {{.Server.Arch}}'])).toString().trim()
     initHostArch(version.split(/\s+/)[1] ?? null)
   }
-  catch { console.error('error: Docker is required and must be running (insta-oss provisions branches as containers)'); process.exit(1) }
+  catch { console.error('error: Docker is required and must be running (InstaCloud OSS provisions branches as containers)'); process.exit(1) }
   // extraListenHosts (local + linux: the docker bridge gateway) on a frozen copy of cfg; the
   // primary listener stays cfg.listenHost and WP2's lanes bind the extras (decision 3).
   cfg = Object.freeze({ ...cfg, extraListenHosts: await bridgeGateway(cfg) })
@@ -217,7 +217,7 @@ async function main(): Promise<void> {
     console.log(`instad ${cfg.version} mode=server api=${cfg.apiUrl} console=${cfg.consoleUrl} data=${cfg.dataDir}`)
     if (!loadState().identity?.admin) console.log(`setup: ${cfg.consoleUrl}/setup`)
   } else {
-    console.log(`insta-oss daemon listening on http://${cfg.listenHost}:${cfg.port}`)
+    console.log(`InstaCloud OSS daemon listening on http://${cfg.listenHost}:${cfg.port}`)
     console.log('point the insta CLI here (this is its default):')
     console.log('  insta project create <name>   # then branch/deploy/secrets/manifest as usual')
   }

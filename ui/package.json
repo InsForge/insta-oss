@@ -1,8 +1,8 @@
 {
-  "name": "insta-oss-ui",
+  "name": "instacloud-oss-ui",
   "private": true,
   "type": "module",
-  "description": "Local dashboard for the insta-oss daemon — built to ui/dist, served by instad itself.",
+  "description": "Local dashboard for the InstaCloud OSS daemon, built to ui/dist, served by instad itself.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

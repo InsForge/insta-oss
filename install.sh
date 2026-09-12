@@ -2,7 +2,7 @@
 # install.sh: install or upgrade InstaCloud open source on one Linux box (root).
 #
 #   curl -fsSL https://get.instacloud.com | sh
-#   curl -fsSL https://raw.githubusercontent.com/InsForge/insta-oss/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/InsForge/instacloud-oss/main/install.sh | sh
 #
 # What it does: installs Docker when missing; gives Docker an address pool large enough for
 # hundreds of branch networks; mounts an XFS reflink volume at /var/lib/instacloud when the root
@@ -50,7 +50,7 @@ CFG=${IO_CFG_DIR:-/etc/instacloud}
 ENV_FILE=$CFG/instad.env
 DATA_DEFAULT=/var/lib/instacloud
 IMAGE_DEFAULT=ghcr.io/insforge/instacloud
-REPO=InsForge/insta-oss
+REPO=InsForge/instacloud-oss
 DAEMON_JSON=/etc/docker/daemon.json
 POOL_BASE_DEFAULT=10.100.0.0/14
 POOL_JSON='{"default-address-pools":[{"base":"10.100.0.0/14","size":24}]}'
@@ -131,7 +131,7 @@ resolve() {
 # The header comment is the usage text; under `curl ... | sh` there is no file to read, so point at it.
 usage() {
   if [ -r "$0" ]; then sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
-  else log 'usage: see the header comment of install.sh (https://github.com/InsForge/insta-oss/blob/main/install.sh)'
+  else log 'usage: see the header comment of install.sh (https://github.com/InsForge/instacloud-oss/blob/main/install.sh)'
   fi
 }
 

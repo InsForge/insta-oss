@@ -22,7 +22,7 @@
     "dark": "/logo/dark.svg"
   },
   "banner": {
-    "content": "InstaCloud docs are in early access: many pages are still being written. Missing something? [Open an issue](https://github.com/InsForge/insta-oss/issues).",
+    "content": "InstaCloud docs are in early access: many pages are still being written. Missing something? [Open an issue](https://github.com/InsForge/instacloud-oss/issues).",
     "dismissible": true
   },
   "seo": {
@@ -146,7 +146,7 @@
         },
         {
           "anchor": "GitHub",
-          "href": "https://github.com/InsForge/insta-oss",
+          "href": "https://github.com/InsForge/instacloud-oss",
           "icon": "github"
         },
         {
@@ -167,7 +167,7 @@
   "footer": {
     "socials": {
       "x": "https://x.com/InsForge_dev",
-      "github": "https://github.com/InsForge/insta-oss"
+      "github": "https://github.com/InsForge/instacloud-oss"
     }
   },
   "redirects": [

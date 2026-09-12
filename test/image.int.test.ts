@@ -45,7 +45,7 @@ test('docker build produces the image with the expected baked configuration', ()
   expect(JSON.parse(docker(['image', 'inspect', IMAGE, '--format', '{{json .Config.Cmd}}']))).toEqual(['node', 'node_modules/tsx/dist/cli.mjs', 'src/main.ts'])
   const labels = JSON.parse(docker(['image', 'inspect', IMAGE, '--format', '{{json .Config.Labels}}'])) as Record<string, string>
   expect(labels['org.opencontainers.image.version']).toBe('test')
-  expect(labels['org.opencontainers.image.source']).toBe('https://github.com/InsForge/insta-oss')
+  expect(labels['org.opencontainers.image.source']).toBe('https://github.com/InsForge/instacloud-oss')
   expect(docker(['image', 'inspect', IMAGE, '--format', '{{json .Config.Healthcheck.Test}}'])).toContain('/healthz')
 }, 900_000)
 

@@ -1797,7 +1797,7 @@ export class Engine {
 
   /** Rename a compute group everywhere it appears: registration, every branch's deployment
    *  (runtime artifact included, via the adapter), the minted hostname each branch answers on, and
-   *  service-bound user secrets. insta-oss mints no per-service secret names for compute, so there
+   *  service-bound user secrets. InstaCloud OSS mints no per-service secret names for compute, so there
    *  is nothing to re-key there.
    *
    *  The hostname is RE-MINTED, exactly as the postgres and managed renames do it. Moving the row
@@ -4426,7 +4426,7 @@ export class Engine {
    *  instead meant `insta services add postgres db --branch feat` silently built a second database,
    *  with its own credentials, on `main`.
    *
-   *  insta-oss keeps the REGISTRATION project-level, because a service id is the project's name
+   *  InstaCloud OSS keeps the REGISTRATION project-level, because a service id is the project's name
    *  space and has to stay stable across branches (contract decision 49); the service itself is the
    *  row on the branch. So a name this project has registered but this branch does not carry is
    *  MATERIALISED here rather than refused, which is what the cloud does too (it creates a fresh
