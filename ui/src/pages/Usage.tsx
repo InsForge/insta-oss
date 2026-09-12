@@ -3,9 +3,10 @@ import { useParams } from 'react-router-dom'
 import { EmptyState } from '@insforge/ui'
 import { Gauge } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { api, obsComponentFor, type MetricSeries, type ObsComponent } from '../api'
+import { api, obsComponentFor, type ObsComponent } from '../api'
 import { usePoll } from '../hooks'
-import { instanceLabel } from '../lib/instanceLabels'
+import { instanceLabels } from '../lib/instanceLabels'
+import { latestByInstance as latest } from '../lib/metricSeries'
 import { ConsolePage } from '../components/console/ConsolePage'
 
 // The one sanctioned hex exception: the chart series palette (Figma observability design).
@@ -18,20 +19,8 @@ function fmtBytes(n: number): string {
   return `${n.toFixed(0)} B`
 }
 
-type Snapshot = { t: number; values: Record<string, number> } // instance -> value
+type Snapshot = { t: number; values: Record<string, number> } // RAW instance -> value
 type History = { cpu: Snapshot[]; memory: Snapshot[] }
-
-/** Latest value per instance for one metric name across the returned series. */
-function latest(series: MetricSeries[], name: string): Record<string, number> {
-  const out: Record<string, number> = {}
-  for (const s of series) {
-    if (s.name !== name) continue
-    const label = instanceLabel(s.labels?.instance)
-    const last = s.points[s.points.length - 1]
-    if (label && last) out[label] = last[1]
-  }
-  return out
-}
 
 const HH_MM_SS = (t: number): string => new Date(t).toLocaleTimeString([], { hour12: false })
 
@@ -42,6 +31,9 @@ function SeriesChart({ title, snapshots, unit, format }: {
     () => [...new Set(snapshots.flatMap((s) => Object.keys(s.values)))].sort(),
     [snapshots],
   )
+  // Series are keyed by the raw container name so two services never collapse into one line; the
+  // legend and the tooltip show the readable label.
+  const labels = useMemo(() => instanceLabels(instances), [instances])
   const data = snapshots.map((s) => ({ t: s.t, ...s.values }))
   return (
     <div className="rounded-lg border border-border bg-card p-4">
@@ -67,7 +59,7 @@ function SeriesChart({ title, snapshots, unit, format }: {
                     {payload.map((p) => (
                       <p key={String(p.dataKey)} className="mt-1 flex items-center gap-1.5">
                         <span className="size-2 rounded-full" style={{ background: p.color }} />
-                        {String(p.dataKey)}: <span className="font-medium tabular-nums">{format(Number(p.value))}</span>
+                        {labels[String(p.dataKey)] ?? String(p.dataKey)}: <span className="font-medium tabular-nums">{format(Number(p.value))}</span>
                       </p>
                     ))}
                   </div>
@@ -86,7 +78,7 @@ function SeriesChart({ title, snapshots, unit, format }: {
           {instances.map((name, i) => (
             <span key={name} className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <span className="size-2 rounded-full" style={{ background: SERIES_COLORS[i % SERIES_COLORS.length] }} />
-              {name}
+              {labels[name] ?? name}
             </span>
           ))}
         </div>
@@ -137,6 +129,7 @@ export function LiveMetrics({ projectId, branch, service }: {
   const cpuNow = data ? latest(data.series, 'cpu') : {}
   const memNow = data ? latest(data.series, 'memory') : {}
   const instances = [...new Set([...Object.keys(cpuNow), ...Object.keys(memNow)])].sort()
+  const cardLabels = instanceLabels(instances)
 
   return (
     <div className="flex flex-col gap-4">
@@ -162,7 +155,7 @@ export function LiveMetrics({ projectId, branch, service }: {
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
               {instances.map((name) => (
                 <div key={name} className="rounded-lg border border-border bg-card p-4">
-                  <p className="text-xs tracking-wide text-muted-foreground uppercase">{name}</p>
+                  <p className="text-xs tracking-wide text-muted-foreground uppercase">{cardLabels[name] ?? name}</p>
                   <div className="mt-2 flex items-baseline gap-4">
                     <span className="text-[28px] font-bold tabular-nums">
                       {(cpuNow[name] ?? 0).toFixed(1)}<span className="text-sm font-medium text-muted-foreground"> % cpu</span>

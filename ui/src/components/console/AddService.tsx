@@ -319,7 +319,17 @@ function DeployImageDialog({ projectId, branch, services, open, onOpenChange, on
 
   const ref = image.trim()
   const taken = new Set(services.filter((s) => s.type === 'compute').map((s) => s.name))
-  const name = nameEdited ? nameInput : uniqueServiceName(suggestServiceName(ref) || 'app', taken)
+  // Registration and deploy are two operations, and the second can fail or be held for approval
+  // after the first has already succeeded. Remember a completed registration so submitting again
+  // resumes at the deploy: without this, the retry called addService on a name its own first
+  // attempt had just created, hit the 409, and the only way forward was to delete the service.
+  const registered = useRef<string | null>(null)
+  // Once a registration exists the name is FROZEN to it. The unedited name is derived from the
+  // image, so a retry where the user went back and changed the image (one suggesting `app` to one
+  // suggesting `worker`) silently moved the target: `run` registered `worker` and left the empty
+  // `app` it had already created behind, with nothing in the UI pointing at it.
+  const derived = nameEdited ? nameInput : uniqueServiceName(suggestServiceName(ref) || 'app', taken)
+  const name = registered.current ?? derived
 
   // Register the service with the choices made here, then put the image on it. Each step can be
   // held for approval; a grant resumes from the step that was held.
@@ -335,11 +345,6 @@ function DeployImageDialog({ projectId, branch, services, open, onOpenChange, on
     onOpenChange(false)
     onDone()
   }
-  // Registration and deploy are two operations, and the second can fail or be held for approval
-  // after the first has already succeeded. Remember a completed registration so submitting again
-  // resumes at the deploy: without this, the retry called addService on a name its own first
-  // attempt had just created, hit the 409, and the only way forward was to delete the service.
-  const registered = useRef<string | null>(null)
   const run = async (body: Parameters<typeof api.addService>[1], portNum: number) => {
     setBusy(true)
     if (registered.current !== body.name) {
@@ -410,8 +415,12 @@ function DeployImageDialog({ projectId, branch, services, open, onOpenChange, on
                 </div>
               </FormRow>
               <DialogDivider />
-              <FormRow htmlFor="svc-docker-name" label="Service Name" hint="A unique name for your service.">
+              <FormRow htmlFor="svc-docker-name" label="Service Name"
+                hint={registered.current !== null
+                  ? `${registered.current} already exists; submitting again retries the deploy onto it.`
+                  : 'A unique name for your service.'}>
                 <Input id="svc-docker-name" name="name" required autoFocus placeholder="api" value={name}
+                  disabled={registered.current !== null}
                   onChange={(e) => { setNameEdited(true); setNameInput(e.target.value) }} />
               </FormRow>
               <DialogDivider />

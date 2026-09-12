@@ -18,10 +18,16 @@ function emit(key: string): void {
 }
 
 export function readLocal(key: string): string | null {
+  // The fallback wins whenever it holds this key, not only when the read throws. A FULL store is
+  // the case that separates them: `setItem` throws on quota while `getItem` keeps working, so
+  // consulting storage first returned the value the failed write was meant to replace. An entry
+  // exists only while a write is unpersisted; a later write that lands clears it, which is how
+  // storage recovering reconciles.
+  if (fallback.has(key)) return fallback.get(key) ?? null
   try {
     return window.localStorage.getItem(key)
   } catch {
-    return fallback.get(key) ?? null
+    return null
   }
 }
 

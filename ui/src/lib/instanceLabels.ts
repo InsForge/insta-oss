@@ -16,3 +16,23 @@ export function instanceLabel(instance?: string): string {
   const m = /-app-(.+)$/.exec(instance)
   return m ? m[1] : instance
 }
+
+/** Display labels for a set of containers, raw instance -> label. The label is only ever a label:
+ *  data must be keyed by the raw instance, because `instanceLabel` is not injective — a postgres
+ *  service named `pg` gives `io-<ref>-pg-pg`, which ends in `-pg` exactly as the branch's default
+ *  database container does, so both reduce to "postgres". Keying a metrics record by the label
+ *  therefore dropped one of the two services from the cards and from every chart. Where a label
+ *  would be ambiguous within the set, the raw instance is shown instead of a second "postgres". */
+export function instanceLabels(instances: readonly string[]): Record<string, string> {
+  const count = new Map<string, number>()
+  for (const i of instances) {
+    const l = instanceLabel(i)
+    count.set(l, (count.get(l) ?? 0) + 1)
+  }
+  const out: Record<string, string> = {}
+  for (const i of instances) {
+    const l = instanceLabel(i)
+    out[i] = (count.get(l) ?? 0) > 1 ? i : l
+  }
+  return out
+}

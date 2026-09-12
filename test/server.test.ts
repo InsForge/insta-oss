@@ -30,7 +30,7 @@ import { docker as dockerFn } from '../src/docker'
 import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
 import type { Branch, ComputeAdapter, StorageAdapter } from '../src/types'
-import { mutate } from '../src/state'
+import { loadState, mutate } from '../src/state'
 import { calls, data, db, compute, storage, managed, makeEngine, resetFakes, runtime, serverConfig, testConfig } from './fakes'
 import { SuppliedCertWatch, suppliedCert, suppliedFiles } from '../src/router/certs'
 
@@ -427,8 +427,13 @@ test('GET /secrets/tree clones the state a linear number of times, not branches 
   for (let b = 1; b < 8; b++) { await engine.createBranch(id, `b${b}`, 'main'); branches.push(`b${b}`) }
   // Each branch carries 3 of its OWN, so every other registration is a miss on every branch.
   for (const name of branches) for (let d = 0; d < 3; d++) await engine.addDbService(id, `${name}-${d}`, { branch: name })
-  const regs = engine.getProject(id)!.dbServices!.length
-  expect([branches.length, regs]).toEqual([8, 24])
+  // MANAGED services too, and not as decoration: `aliasedManagedIds` lives only on that arm, and a
+  // postgres-only fixture never enters it. Calling it per managed service instead of once per
+  // branch took this route from 27 clones to 51 while this guard stayed green, because the shape
+  // it measured could not reach the code that regressed.
+  for (const name of branches) for (let d = 0; d < 3; d++) await engine.addManagedService(id, 'redis', `rd-${name}-${d}`, { branch: name })
+  const regs = engine.getProject(id)!.dbServices!.length + engine.getProject(id)!.managedServices!.length
+  expect([branches.length, regs]).toEqual([8, 48])
 
   let clones = 0
   const real = engine.getProject.bind(engine)
@@ -441,8 +446,15 @@ test('GET /secrets/tree clones the state a linear number of times, not branches 
   for (const b of rows) {
     expect(b.services.filter((x) => x.type === 'postgres').map((x) => x.name).sort())
       .toEqual([`${b.name}-0`, `${b.name}-1`, `${b.name}-2`])
+    expect(b.services.filter((x) => x.type === 'redis').map((x) => x.name).sort())
+      .toEqual([`rd-${b.name}-0`, `rd-${b.name}-1`, `rd-${b.name}-2`])
   }
-  expect(clones).toBeLessThanOrEqual(2 * (branches.length + regs))
+  // Linear in branches + registrations, plus at most two spare clones per branch for the
+  // per-branch invariants. The old bound was 2 x (branches + regs), which on this fixture is 112 —
+  // loose enough that hoisting `aliasedManagedIds` out of the managed map changed the measured
+  // count from 83 to 59 without either number touching it. Measured here: 59 hoisted, 83 per
+  // service, so the bound has to sit between them or this guard is decoration.
+  expect(clones).toBeLessThanOrEqual(branches.length + regs + 2 * branches.length)
 })
 
 test('removing ONE of two storage services leaves the shared object store on the branch network', async () => {
@@ -680,6 +692,43 @@ test('created_at of a deploy-materialised group does not move on a redeploy', as
   expect(second.created_at).toBe(first)
   // The redeploy did land, so this is not a stale row.
   expect(second.image).toBe('app:2')
+})
+
+// The UPGRADE path, which the test above cannot reach: a group direct-deployed by an OLDER daemon
+// has a host but no createdAt. Gating the stamp on `minting` meant it would never mint again, so
+// it would never be stamped, and its Created column would walk forward for the life of the
+// install — exactly the bug the stamp was added to fix, surviving for every existing group.
+test('created_at is backfilled for a group deployed before the stamp existed, and does not move after', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'legacy' })
+
+  // Rewind to the pre-stamp shape: the row keeps its host and updatedAt, the stamp is removed.
+  const bid = await branchOf(id)
+  let priorUpdatedAt = 0
+  mutate((s) => {
+    priorUpdatedAt = s.branches[bid].apps.legacy.updatedAt!
+    delete s.projects[id].serviceSettings!['cp-legacy']
+  })
+  expect(loadState().branches[bid].apps.legacy.host).toBeDefined()
+
+  // Pre-backfill the row falls back to updatedAt, which the next deploy rewrites.
+  const before = (await get(`/projects/${id}/services?branch=main`)).json()
+    .services.find((s: { name: string }) => s.name === 'legacy').created_at
+  expect(Date.parse(before)).toBe(priorUpdatedAt)
+
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000, group: 'legacy' })
+  const after = (await get(`/projects/${id}/services?branch=main`)).json()
+    .services.find((s: { name: string }) => s.name === 'legacy')
+  // Backfilled with the date the user was already reading, not with now: it stops moving without
+  // jumping on the upgrade deploy.
+  expect(Date.parse(after.created_at)).toBe(priorUpdatedAt)
+  expect(after.image).toBe('app:2')
+
+  // And it stays put on every deploy after that.
+  await post(`/projects/${id}/deploy`, { image: 'app:3', branch: 'main', port: 3000, group: 'legacy' })
+  const third = (await get(`/projects/${id}/services?branch=main`)).json()
+    .services.find((s: { name: string }) => s.name === 'legacy')
+  expect(third.created_at).toBe(after.created_at)
 })
 
 // The dashboard's Environments table reads its branches from GET /projects/:id (one call for the

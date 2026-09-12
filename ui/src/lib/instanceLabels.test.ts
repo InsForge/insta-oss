@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { instanceLabel } from './instanceLabels'
+import { instanceLabel, instanceLabels } from './instanceLabels'
 
 describe('instanceLabel', () => {
   it('reduces a compute container to its group and the default database to postgres', () => {
@@ -20,5 +20,37 @@ describe('instanceLabel', () => {
   it('cannot distinguish a service named pg from the default database, which is why filtering moved to the daemon', () => {
     expect(instanceLabel('io-demo-main-pg-pg')).toBe('postgres')
     expect(instanceLabel('io-demo-main-pg')).toBe('postgres')
+  })
+})
+
+// The same non-injectivity is why metrics are keyed by the RAW container name: keying a record by
+// the label made one of these two services overwrite the other, and it left the cards and every
+// chart entirely. These labels are for display only.
+describe('instanceLabels', () => {
+  it('keeps two containers that share a label apart by showing the raw name', () => {
+    const got = instanceLabels(['io-demo-main-pg', 'io-demo-main-pg-pg'])
+    expect(got['io-demo-main-pg']).toBe('io-demo-main-pg')
+    expect(got['io-demo-main-pg-pg']).toBe('io-demo-main-pg-pg')
+    // Two distinct entries, not one: this is the property the old keying destroyed.
+    expect(new Set(Object.values(got)).size).toBe(2)
+  })
+
+  it('uses the readable label when it is unambiguous', () => {
+    const got = instanceLabels(['io-demo-main-pg', 'io-demo-main-app-worker', 'io-demo-main-rd-cache'])
+    expect(got).toEqual({
+      'io-demo-main-pg': 'postgres',
+      'io-demo-main-app-worker': 'worker',
+      'io-demo-main-rd-cache': 'io-demo-main-rd-cache',
+    })
+  })
+
+  it('disambiguates only the colliding label, not the whole set', () => {
+    const got = instanceLabels(['io-demo-main-pg', 'io-demo-main-pg-pg', 'io-demo-main-app-api'])
+    expect(got['io-demo-main-app-api']).toBe('api')
+    expect(got['io-demo-main-pg']).toBe('io-demo-main-pg')
+  })
+
+  it('is empty for no containers', () => {
+    expect(instanceLabels([])).toEqual({})
   })
 })

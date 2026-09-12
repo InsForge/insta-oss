@@ -1061,14 +1061,28 @@ export class Engine {
     // checked the intent moments earlier. Matches the platform, whose desired_state survives a deploy.
     const host = this.mintedHost(project, b, group)                                                     // WP2
     mutate((s) => {
+      // Read BEFORE the row is rewritten: on an install upgraded to this code the previous
+      // `updatedAt` is the only record of when the group was last deployed, and it is exactly what
+      // the Created column has been showing for it.
+      const priorUpdatedAt = s.branches[b.id].apps[group]?.updatedAt
       s.branches[b.id].apps[group] = { ...s.branches[b.id].apps[group], image: opts.image, port, hostPort, url, ...(host !== undefined ? { host } : {}), updatedAt: Date.now() }
       // A group materialised BY this deploy (`insta deploy --group <name>`, no prior add) never got
       // a createdAt, so the service row fell back to `updatedAt` — which every redeploy rewrites,
-      // making the dashboard's Created column walk forward on each deploy. Stamp it once, here,
-      // only when this deploy is what minted the group; an existing stamp is never overwritten.
-      if (minting) {
+      // making the dashboard's Created column walk forward on each deploy. Stamp it once; an
+      // existing stamp is never overwritten.
+      //
+      // NOT gated on `minting`. A group that was direct-deployed BEFORE this code shipped already
+      // has a host, so it would never mint again and would never be stamped: its Created column
+      // would keep walking forward for the life of the install. Backfill it with the `updatedAt`
+      // it had on the way in rather than with now, so the date the user has been reading does not
+      // jump on the upgrade deploy — it just stops moving, which is the whole point.
+      {
         const settings = (s.projects[project.id].serviceSettings ??= {})
-        settings[`cp-${group}`] = { ...settings[`cp-${group}`], createdAt: settings[`cp-${group}`]?.createdAt ?? Date.now() }
+        const existing = settings[`cp-${group}`]?.createdAt
+        settings[`cp-${group}`] = {
+          ...settings[`cp-${group}`],
+          createdAt: existing ?? (minting ? Date.now() : priorUpdatedAt ?? Date.now()),
+        }
       }
       // The row now owns the port, exactly as `laneFor` retires a branch-create reservation.
       if (hostPort !== undefined) delete s.laneReservations?.[String(hostPort)]

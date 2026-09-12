@@ -106,14 +106,20 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
   // rely on: Radix dismisses on Escape without guaranteeing the native event is default-prevented,
   // so one Escape could close the Restart dialog AND this overlay behind it. Same guard as the
   // focus trap: while a nested dialog is open, Escape is its to handle.
+  //
+  // CAPTURE phase, so "is a nested dialog open?" is answered before any bubble-phase listener has
+  // had the chance to close one. In bubble phase this handler only ran first by registration order
+  // (Radix's layer registers when the nested dialog mounts, after this effect), which would have
+  // read `data-state="closed"` on a dialog Radix had just dismissed and closed the overlay behind
+  // it in the same keypress. Capture makes the ordering a property of the code, not of mount order.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return
       if (hasOpenNestedDialog(overlayRef.current)) return
       onClose()
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
   }, [onClose])
 
   // aria-modal="true" is a PROMISE to assistive tech that the rest of the page is inert, and this
