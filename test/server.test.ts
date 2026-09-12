@@ -2203,6 +2203,20 @@ test('a group name that is not lower-kebab is refused on the deploy that would m
   expect(calls.filter((c) => c.startsWith('deploy:'))).toEqual([])
 })
 
+// Rename enforced this and create did not, so the API accepted a branch whose own hostname and
+// URLs could not address it: `web-demo-my branch.<domain>` is not a host, and `/p/<id>/a/b` is not
+// a route. The dashboard showed it as created and then could not navigate to it.
+test('a branch name that is not lower-kebab is refused on create, as it already was on rename', async () => {
+  const id = await createProject()
+  for (const bad of ['my branch', 'a/b', 'x?', 'UPPER', '-lead', 'trail-']) {
+    const r = await post(`/projects/${id}/branches`, { name: bad })
+    expect(r.statusCode, bad).toBe(400)
+    expect(r.json().error, bad).toBe('branch name must be lower-kebab (a-z, 0-9, -)')
+  }
+  // The rule is a floor, not a ban: a normal name still creates.
+  expect((await post(`/projects/${id}/branches`, { name: 'feat-1' })).statusCode).toBe(201)
+})
+
 test('a redeploy re-checks nothing it already owns: the second deploy of a group still lands', async () => {
   const id = await createProject()
   expect((await post(`/projects/${id}/deploy`, { image: 'app:1', port: 3000, group: 'web' })).statusCode).toBe(200)

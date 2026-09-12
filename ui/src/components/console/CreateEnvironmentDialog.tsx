@@ -10,6 +10,7 @@ import {
 } from '@insforge/ui'
 import { api, type BranchInfo } from '../../api'
 import type { PendingApproval } from '../ApprovalPrompt'
+import { BRANCH_NAME_RE, LOWER_KEBAB_BRANCH_ERROR } from '../../lib/serviceNames'
 
 export function CreateEnvironmentDialog({ projectId, environments, open, onOpenChange, onCreated, onApproval }: {
   projectId: string; environments: BranchInfo[]; open: boolean
@@ -42,6 +43,10 @@ export function CreateEnvironmentDialog({ projectId, environments, open, onOpenC
     setError(null)
     const next = name.trim()
     if (!next) return
+    // The name becomes part of every URL and hostname for the environment, so it carries the same
+    // lower-kebab rule the daemon enforces. Checked here too, for the error next to the field
+    // rather than a round trip.
+    if (!BRANCH_NAME_RE.test(next)) return setError(LOWER_KEBAB_BRANCH_ERROR)
     if (environments.some((env) => env.name === next)) return setError('An environment with this name already exists.')
     void create(next)
   }

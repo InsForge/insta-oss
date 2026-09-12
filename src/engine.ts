@@ -31,6 +31,14 @@ import { ENV_NAME_RE } from './templates/manifest'
 // ---- end region WP5 ----
 
 const DEFAULT_BRANCH = 'main'
+
+/** A branch name becomes part of a hostname (`web-demo-<branch>.<domain>`) and of every URL that
+ *  addresses the branch, so it is restricted to what both can carry. Enforced on create AND on
+ *  rename: they disagreed, and create was the lenient one. */
+export const BRANCH_NAME_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
+function assertBranchName(name: string): void {
+  if (!BRANCH_NAME_RE.test(name)) throw new Error('branch name must be lower-kebab (a-z, 0-9, -)')
+}
 const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
 
 // Volume-cap parity (platform #166–169): the cloud caps volumes per billing tier; oss has no
@@ -625,6 +633,10 @@ export class Engine {
   async createBranch(projectId: string, name: string, from?: string): Promise<Branch> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
+    // Rename has always enforced this; create had not, so the API accepted a name that the
+    // per-branch hostnames and URLs cannot express (`my branch`, `a/b`, `x?`). Same rule both
+    // ways, at the daemon, so the CLI and agents get it too and not just the dashboard.
+    assertBranchName(name)
     const source = this.getBranchByName(projectId, from ?? DEFAULT_BRANCH)
     if (!source) throw new Error(`source branch "${from ?? DEFAULT_BRANCH}" not found`)
     if (this.getBranchByName(projectId, name)) throw new Error(`branch "${name}" already exists`)
@@ -940,7 +952,7 @@ export class Engine {
     const b = loadState().branches[branchId]
     if (!project || !b || b.projectId !== projectId) throw new Error('branch not found')
     if (b.isDefault) throw new Error('cannot rename the default branch')
-    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(newName)) throw new Error('branch name must be lower-kebab (a-z, 0-9, -)')
+    assertBranchName(newName)
     if (newName !== b.name && this.getBranchByName(projectId, newName)) throw new Error(`branch "${newName}" already exists`)
     const oldName = b.name
     mutate((st) => {

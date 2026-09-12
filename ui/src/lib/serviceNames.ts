@@ -9,6 +9,13 @@ export const SERVICE_NAME_RE = /^[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?$/
 /** What every create and rename surface says when the rule rejects (the console's copy). */
 export const LOWER_KEBAB_NAME_ERROR = 'Use lowercase letters, digits, and hyphens (must start with a letter or digit).'
 
+/** The daemon's branch-name rule (engine.ts BRANCH_NAME_RE). A branch name becomes part of every
+ *  hostname and URL that addresses the environment, so a name with a space, `/`, `?` or `#` would
+ *  create an environment its own URL cannot reach. */
+export const BRANCH_NAME_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
+export const LOWER_KEBAB_BRANCH_ERROR =
+  'Use lowercase letters, digits, and hyphens (must start and end with a letter or digit).'
+
 const MAX_NAME_LENGTH = 39
 
 /** `base` if free, else the first free "base-2", "base-3", …, trimming the base so the suffix fits. */

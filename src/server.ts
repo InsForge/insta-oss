@@ -246,6 +246,10 @@ export function buildServer(
       return reply.code(201).send({ branch: { id: b.id, name: b.name } })
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e)
+      // This route's fallback is 409, for "understood, and the state says no" (already exists, a
+      // source that is busy). A malformed name is not that: nothing about the state would make it
+      // work, so it is the request that is bad.
+      if (m.includes('must be lower-kebab')) return reply.code(400).send({ error: m })
       return reply.code(provisionCode(m, 409)).send({ error: m })
     }
   })
