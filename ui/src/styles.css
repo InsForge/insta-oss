@@ -2,12 +2,13 @@
 @import "@insforge/ui/styles.css";
 
 /*
- * Map @insforge/ui design tokens (defined in styles.css above) to Tailwind v4
- * theme colors — same mapping as insta-frontend's globals.css. RGB-triplet
- * tokens are wrapped in rgb(); alpha tokens are already full colors.
- * (Font: the package's Inter-first stack; no webfont bundled — the dashboard
- * must work offline, so we take the system fallback when Inter isn't local.)
+ * The cloud console's globals.css (InsForge/insta-frontend src/app/globals.css), minus what needs
+ * Next (next/font) or a cloud-only feature (identity-mark palette, Quick Start motion). Keep the
+ * two in step: the self-hosted dashboard is meant to look like the console.
  */
+
+/* Dark mode is class-based (`.dark` on <html>), so `dark:` utilities key off the class too. */
+@custom-variant dark (&:where(.dark, .dark *));
 
 /* InstaCloud brand: primary actions are black (white in dark mode), per Figma. */
 :root {
@@ -15,6 +16,64 @@
 }
 .dark {
   --primary: var(--insforge-white);
+}
+
+/* InstaCloud brand accent: emerald per theme — light #059669, dark #6EE7B7. */
+:root {
+  --theme: var(--insforge-emerald-600);
+}
+.dark {
+  --theme: var(--insforge-emerald-300);
+}
+
+/*
+ * special/page — per the design library: light #E8E8E8 (semantic-3), dark #161616 (semantic-0).
+ * The kit still maps light --page to semantic-1, which leaves the canvas indistinguishable from
+ * the chrome.
+ */
+:root {
+  --page: var(--semantic-3);
+}
+.dark {
+  --page: var(--semantic-0);
+}
+
+/*
+ * Pin a subtree to the LIGHT palette regardless of the active theme (the auth pages keep their
+ * light card even in dark mode). Restates the kit's light tokens plus this app's overrides; custom
+ * properties resolve from the nearest setter, so this wins over `.dark` on <html> inside the scope.
+ */
+.light {
+  --semantic-0: 255 255 255;
+  --semantic-1: 247 247 247;
+  --semantic-2: 240 240 240;
+  --semantic-3: 232 232 232;
+  --semantic-4: 224 224 224;
+  --semantic-5: 217 217 217;
+  --semantic-6: 209 209 209;
+  --alpha-4: rgba(0, 0, 0, 0.04);
+  --alpha-8: rgba(0, 0, 0, 0.08);
+  --alpha-12: rgba(0, 0, 0, 0.12);
+  --alpha-16: rgba(0, 0, 0, 0.16);
+  --alpha-inverse-4: rgba(255, 255, 255, 0.04);
+  --alpha-inverse-8: rgba(255, 255, 255, 0.08);
+  --alpha-inverse-12: rgba(255, 255, 255, 0.12);
+  --alpha-inverse-16: rgba(255, 255, 255, 0.16);
+  --foreground: var(--insforge-black);
+  --muted-foreground: var(--insforge-neutral-600);
+  --disabled: var(--insforge-neutral-400);
+  --inverse: var(--insforge-white);
+  --primary: var(--insforge-black);
+  --theme: var(--insforge-emerald-600);
+  --success: var(--insforge-green-600);
+  --destructive: var(--insforge-red-600);
+  --warning: var(--insforge-amber-600);
+  --info: var(--insforge-sky-600);
+  --border: var(--alpha-8);
+  --card: var(--insforge-white);
+  --toast: var(--insforge-white);
+  --page: var(--semantic-3);
+  color-scheme: light;
 }
 
 @theme inline {
@@ -26,6 +85,7 @@
   --color-disabled: rgb(var(--disabled));
   --color-inverse: rgb(var(--inverse));
   --color-primary: rgb(var(--primary));
+  --color-theme: rgb(var(--theme));
   --color-success: rgb(var(--success));
   --color-destructive: rgb(var(--destructive));
   --color-warning: rgb(var(--warning));
@@ -57,9 +117,62 @@
   --color-alpha-inverse-16: var(--alpha-inverse-16);
 }
 
+/*
+ * InstaCloud is squared: zero the whole Tailwind radius scale so every `rounded*` utility, ours
+ * and @insforge/ui's, renders square. `rounded-full` is untouched (calc(infinity*1px), not a
+ * variable), so dots, pills, switches and spinners stay circular.
+ */
+:root {
+  --radius-xs: 0;
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-2xl: 0;
+  --radius-3xl: 0;
+  --radius-4xl: 0;
+}
+
+/* The bare `rounded` utility and the kit Toast's `rounded-[8px]` inline their radius instead of
+ * reading a variable. Attribute selectors, unlayered, so they win over the layered originals. */
+[class~="rounded"],
+[class~="rounded-[8px]"] {
+  border-radius: 0;
+}
+
 body {
-  background: rgb(var(--page));
+  /* semantic-1, matching the console's center containers; --page is the recessed canvas. */
+  background: rgb(var(--semantic-1));
   color: rgb(var(--foreground));
   font-family: var(--insforge-font);
   -webkit-font-smoothing: antialiased;
+}
+
+/* The kit's menu items ship `gap-1`, which sets icons too close to their labels (console rule). */
+[role="menuitem"],
+[role="menuitemcheckbox"],
+[role="menuitemradio"] {
+  gap: 0.5rem;
+}
+
+/*
+ * Filled actions carry the theme accent (emerald), not black: the kit's primary Button ships
+ * `bg-primary`, repainted here rather than remapping --primary so `text-primary` keeps meaning the
+ * default foreground (console rule).
+ */
+[class~="bg-primary"] {
+  background-color: rgb(var(--theme));
+}
+
+/*
+ * The rule above is UNLAYERED, so it outranks every layered Tailwind utility regardless of
+ * specificity: while `bg-primary` is on the element, any hover or active background the kit's
+ * Button adds is suppressed and a filled button looks inert under the cursor. These restate the
+ * accent's own states at the same precedence, so the button responds again.
+ */
+[class~="bg-primary"]:hover:not(:disabled):not([data-disabled]) {
+  background-color: rgb(var(--theme) / 0.9);
+}
+[class~="bg-primary"]:active:not(:disabled):not([data-disabled]) {
+  background-color: rgb(var(--theme) / 0.8);
 }

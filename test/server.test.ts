@@ -30,7 +30,7 @@ import { docker as dockerFn } from '../src/docker'
 import { buildServer } from '../src/server'
 import { Engine } from '../src/engine'
 import type { Branch, ComputeAdapter, StorageAdapter } from '../src/types'
-import { mutate } from '../src/state'
+import { loadState, mutate } from '../src/state'
 import { calls, data, db, compute, storage, managed, makeEngine, resetFakes, runtime, serverConfig, testConfig } from './fakes'
 import { SuppliedCertWatch, suppliedCert, suppliedFiles } from '../src/router/certs'
 
@@ -427,8 +427,13 @@ test('GET /secrets/tree clones the state a linear number of times, not branches 
   for (let b = 1; b < 8; b++) { await engine.createBranch(id, `b${b}`, 'main'); branches.push(`b${b}`) }
   // Each branch carries 3 of its OWN, so every other registration is a miss on every branch.
   for (const name of branches) for (let d = 0; d < 3; d++) await engine.addDbService(id, `${name}-${d}`, { branch: name })
-  const regs = engine.getProject(id)!.dbServices!.length
-  expect([branches.length, regs]).toEqual([8, 24])
+  // MANAGED services too, and not as decoration: `aliasedManagedIds` lives only on that arm, and a
+  // postgres-only fixture never enters it. Calling it per managed service instead of once per
+  // branch took this route from 27 clones to 51 while this guard stayed green, because the shape
+  // it measured could not reach the code that regressed.
+  for (const name of branches) for (let d = 0; d < 3; d++) await engine.addManagedService(id, 'redis', `rd-${name}-${d}`, { branch: name })
+  const regs = engine.getProject(id)!.dbServices!.length + engine.getProject(id)!.managedServices!.length
+  expect([branches.length, regs]).toEqual([8, 48])
 
   let clones = 0
   const real = engine.getProject.bind(engine)
@@ -441,8 +446,15 @@ test('GET /secrets/tree clones the state a linear number of times, not branches 
   for (const b of rows) {
     expect(b.services.filter((x) => x.type === 'postgres').map((x) => x.name).sort())
       .toEqual([`${b.name}-0`, `${b.name}-1`, `${b.name}-2`])
+    expect(b.services.filter((x) => x.type === 'redis').map((x) => x.name).sort())
+      .toEqual([`rd-${b.name}-0`, `rd-${b.name}-1`, `rd-${b.name}-2`])
   }
-  expect(clones).toBeLessThanOrEqual(2 * (branches.length + regs))
+  // Linear in branches + registrations, plus at most two spare clones per branch for the
+  // per-branch invariants. The old bound was 2 x (branches + regs), which on this fixture is 112 —
+  // loose enough that hoisting `aliasedManagedIds` out of the managed map changed the measured
+  // count from 83 to 59 without either number touching it. Measured here: 59 hoisted, 83 per
+  // service, so the bound has to sit between them or this guard is decoration.
+  expect(clones).toBeLessThanOrEqual(branches.length + regs + 2 * branches.length)
 })
 
 test('removing ONE of two storage services leaves the shared object store on the branch network', async () => {
@@ -593,6 +605,189 @@ test('secrets tree: minted creds under their service; user secrets grouped by bi
   expect(main.services.find((s: { type: string }) => s.type === 'postgres').secrets).toContain('DATABASE_URL')
   expect(main.services.find((s: { type: string }) => s.type === 'storage').secrets).toContain('BUCKET_NAME')
   expect(main.services.find((s: { name: string }) => s.name === 'api').secrets).toEqual(['API_KEY'])
+})
+
+// `secrets` merges platform-minted credentials with the user secrets bound to that service, and
+// the two have different reach: a minted credential goes to EVERY compute group in the branch, a
+// bound one only to its own service. Without `minted` a caller cannot answer "what can this app
+// read", and the dashboard answered it as "every name under every service" — showing one app
+// another app's bound secrets.
+test('secrets tree separates minted credentials from service-bound user secrets', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'api' })
+  await post(`/projects/${id}/services`, { type: 'compute', name: 'worker' })
+  await put(`/projects/${id}/secrets/API_KEY`, { value: 'v', branch: 'main', service: 'compute/api' })
+  await put(`/projects/${id}/secrets/WORKER_KEY`, { value: 'v', branch: 'main', service: 'compute/worker' })
+  await put(`/projects/${id}/secrets/PG_OWNED`, { value: 'v', branch: 'main', service: 'postgres/db' })
+
+  const main = (await get(`/projects/${id}/secrets/tree`)).json()
+    .branches.find((b: { name: string }) => b.name === 'main')
+  const svc = (name: string) => main.services.find((s: { name: string }) => s.name === name)
+
+  // A compute group mints nothing, and each sees only its own bound secret.
+  expect(svc('api').minted).toEqual([])
+  expect(svc('api').secrets).toEqual(['API_KEY'])
+  expect(svc('worker').secrets).toEqual(['WORKER_KEY'])
+  expect(svc('api').secrets).not.toContain('WORKER_KEY')
+
+  // Postgres mints DATABASE_URL for every app, but a secret BOUND to postgres is not minted: it
+  // is in `secrets` and must stay out of `minted`, or apps would be told they receive it.
+  expect(svc('db').minted).toContain('DATABASE_URL')
+  expect(svc('db').secrets).toContain('PG_OWNED')
+  expect(svc('db').minted).not.toContain('PG_OWNED')
+})
+
+// The managed arm of the same property, and the one this test originally missed. A managed
+// service's env carries BOTH the suffixed bundle and, for the branch's oldest service of that
+// type, the canonical unsuffixed aliases (managedSecretsFor). `minted` reported only the suffixed
+// half, so the one name most apps actually read — REDIS_URL — was listed nowhere in the dashboard,
+// and a user could type it into Add Secret and get a bare 400 for a reserved name.
+test('minted covers the canonical managed aliases the oldest service of a type also holds', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'sessions' })
+
+  const main = (await get(`/projects/${id}/secrets/tree`)).json()
+    .branches.find((b: { name: string }) => b.name === 'main')
+  const svc = (name: string) => main.services.find((s: { name: string }) => s.name === name)
+
+  // The oldest redis holds the aliases, so it mints the canonical names AND its own suffixed set.
+  expect(svc('cache').minted).toContain('REDIS_URL')
+  expect(svc('cache').minted).toContain('REDIS_URL_CACHE')
+  // The second one only ever has its suffixed set: the aliases are not its to hold.
+  expect(svc('sessions').minted).toContain('REDIS_URL_SESSIONS')
+  expect(svc('sessions').minted).not.toContain('REDIS_URL')
+})
+
+// "Deleted" and "has no branches" have to be distinguishable, or a client cannot tell a stale
+// link from a real project. This route answered 200 with an empty list either way, so the
+// dashboard's deleted-project redirect keyed on a 404 that never arrived and instead walked into
+// a shell full of failing requests.
+test('branches of a project that does not exist is a 404, not an empty list', async () => {
+  const gone = await get('/projects/00000000-0000-0000-0000-000000000000/branches')
+  expect(gone.statusCode).toBe(404)
+  expect(gone.json().error).toBe('project not found')
+  // A real project still answers with its branches.
+  const id = await createProject()
+  const ok = await get(`/projects/${id}/branches`)
+  expect(ok.statusCode).toBe(200)
+  expect(ok.json().branches.length).toBeGreaterThan(0)
+})
+
+// A group can be created two ways, and only one of them used to stamp createdAt. `insta deploy
+// --group <name>` materialises the group with no prior add, so the service row fell back to
+// `updatedAt` — which every redeploy rewrites — and the dashboard's Created column walked forward
+// on each deploy. The earlier created_at test only exercised addComputeService, so it passed
+// either way.
+test('created_at of a deploy-materialised group does not move on a redeploy', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'viadeploy' })
+  const first = (await get(`/projects/${id}/services?branch=main`)).json()
+    .services.find((s: { name: string }) => s.name === 'viadeploy').created_at
+  expect(first).toEqual(expect.any(String))
+
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000, group: 'viadeploy' })
+  const second = (await get(`/projects/${id}/services?branch=main`)).json()
+    .services.find((s: { name: string }) => s.name === 'viadeploy')
+  expect(second.created_at).toBe(first)
+  // The redeploy did land, so this is not a stale row.
+  expect(second.image).toBe('app:2')
+})
+
+// The UPGRADE path, which the test above cannot reach: a group direct-deployed by an OLDER daemon
+// has a host but no createdAt. Gating the stamp on `minting` meant it would never mint again, so
+// it would never be stamped, and its Created column would walk forward for the life of the
+// install — exactly the bug the stamp was added to fix, surviving for every existing group.
+test('created_at is backfilled for a group deployed before the stamp existed, and does not move after', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'legacy' })
+
+  // Rewind to the pre-stamp shape: the row keeps its host and updatedAt, the stamp is removed.
+  const bid = await branchOf(id)
+  let priorUpdatedAt = 0
+  mutate((s) => {
+    priorUpdatedAt = s.branches[bid].apps.legacy.updatedAt!
+    delete s.projects[id].serviceSettings!['cp-legacy']
+  })
+  expect(loadState().branches[bid].apps.legacy.host).toBeDefined()
+
+  // Pre-backfill the row falls back to updatedAt, which the next deploy rewrites.
+  const before = (await get(`/projects/${id}/services?branch=main`)).json()
+    .services.find((s: { name: string }) => s.name === 'legacy').created_at
+  expect(Date.parse(before)).toBe(priorUpdatedAt)
+
+  await post(`/projects/${id}/deploy`, { image: 'app:2', branch: 'main', port: 3000, group: 'legacy' })
+  const after = (await get(`/projects/${id}/services?branch=main`)).json()
+    .services.find((s: { name: string }) => s.name === 'legacy')
+  // Backfilled with the date the user was already reading, not with now: it stops moving without
+  // jumping on the upgrade deploy.
+  expect(Date.parse(after.created_at)).toBe(priorUpdatedAt)
+  expect(after.image).toBe('app:2')
+
+  // And it stays put on every deploy after that.
+  await post(`/projects/${id}/deploy`, { image: 'app:3', branch: 'main', port: 3000, group: 'legacy' })
+  const third = (await get(`/projects/${id}/services?branch=main`)).json()
+    .services.find((s: { name: string }) => s.name === 'legacy')
+  expect(third.created_at).toBe(after.created_at)
+})
+
+// The stamp is PROJECT-level and `services()` reads it for every branch, while `minting` is
+// per-branch. Deploying a legacy group onto a branch that does not carry it yet makes `minting`
+// true THERE, so keying the backfill off it stamped now and jumped the Created date of the copy
+// that had been running on main all along — a worse version of the bug being fixed.
+test('deploying a legacy group onto a new branch does not jump the existing copy\'s created_at', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'shared' })
+
+  // Rewind to the pre-stamp shape, and age main's deploy so "now" is clearly distinguishable.
+  const mainBid = await branchOf(id)
+  const aged = Date.now() - 5 * 24 * 60 * 60 * 1000
+  mutate((s) => {
+    s.branches[mainBid].apps.shared.updatedAt = aged
+    delete s.projects[id].serviceSettings!['cp-shared']
+  })
+
+  // A second branch that does NOT carry the group, then a deploy of it there: minting is true.
+  expect((await post(`/projects/${id}/branches`, { name: 'feat' })).statusCode).toBe(201)
+  const featBid = await branchOf(id, 'feat')
+  mutate((s) => { delete s.branches[featBid].apps.shared })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'feat', port: 3000, group: 'shared' })
+
+  // main's Created is the oldest deploy still on record, not the moment feat was deployed.
+  const onMain = (await get(`/projects/${id}/services?branch=main`)).json()
+    .services.find((s: { name: string }) => s.name === 'shared')
+  expect(Date.parse(onMain.created_at)).toBe(aged)
+  // And the project-level stamp means feat reads the same date, rather than two different ones.
+  const onFeat = (await get(`/projects/${id}/services?branch=feat`)).json()
+    .services.find((s: { name: string }) => s.name === 'shared')
+  expect(onFeat.created_at).toBe(onMain.created_at)
+})
+
+// The dashboard's Environments table reads its branches from GET /projects/:id (one call for the
+// branches AND what each carries, as the console does), not from /branches. The Created column
+// therefore needs created_at on THAT payload; it was only on /branches, so every row showed an
+// em dash while a test covering only /branches stayed green.
+test('project detail carries created_at on its branches, like the branches route', async () => {
+  const id = await createProject()
+  const detail = (await get(`/projects/${id}`)).json()
+  const main = detail.branches.find((b: { name: string }) => b.name === 'main')
+  expect(main.created_at).toEqual(expect.any(String))
+  expect(new Date(main.created_at).getTime()).toBeGreaterThan(0)
+  // And the two payloads agree, since the page can arrive from either.
+  const listed = (await get(`/projects/${id}/branches`)).json()
+    .branches.find((b: { name: string }) => b.name === 'main')
+  expect(main.created_at).toBe(listed.created_at)
+})
+
+// The other half of why listing the canonical names matters: they are RESERVED, so a user cannot
+// take one. Before `minted` carried them, the dashboard showed REDIS_URL nowhere and yet refused
+// it here, which reads as arbitrary.
+test('a canonical managed name is reserved, which is why the inventory has to show it', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/services`, { type: 'redis', name: 'cache' })
+  const r = await put(`/projects/${id}/secrets/REDIS_URL`, { value: 'mine', branch: 'main' })
+  expect(r.statusCode).toBeGreaterThanOrEqual(400)
+  expect(r.json().error).toContain('reserved')
 })
 
 test('secrets tree is gated by secrets.read', async () => {
@@ -1263,6 +1458,78 @@ test('logs endpoint tails containers with the cloud LogsResult shape (db works l
   expect(r.lines.find((l: { ts: string }) => !l.ts)).toMatchObject({ message: 'no-timestamp-line' })
   const dbLogs = (await get(`/projects/${id}/logs?component=db`)).json()
   expect(dbLogs.lines.length).toBeGreaterThan(0) // the cloud returns a provider note for db; locally it is a real container
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
+})
+
+// runtimeLogs reads every container in the component, merges, sorts, and only THEN slices to the
+// limit. So a noisy neighbour can fill the whole window and a quiet service reads as having no
+// logs at all. The dashboard used to fetch the component stream and filter in the browser, which
+// is exactly this trap; `group` narrows at the source instead.
+test('group keeps a quiet service readable when a noisy sibling would fill the whole limit', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'quiet' })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'noisy' })
+
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) => {
+    if (args[0] !== 'logs') return Buffer.from('')
+    const container = args[args.length - 1]
+    // The noisy one is both LOUDER and NEWER, so the merged tail is entirely its own.
+    if (container.endsWith('-app-noisy')) {
+      return Buffer.from(
+        Array.from({ length: 50 }, (_, i) => `2026-07-22T02:00:${String(i).padStart(2, '0')}.000Z noise ${i}`).join('\n') + '\n')
+    }
+    return Buffer.from('2026-07-22T01:00:00.000Z quiet line\n')
+  })
+
+  // Unfiltered, at a limit the noisy service alone exceeds, the quiet line is gone.
+  const merged = (await get(`/projects/${id}/logs?component=compute&branch=main&limit=10`)).json()
+  expect(merged.lines.some((l: { message: string }) => l.message === 'quiet line')).toBe(false)
+
+  // Asked for by group, it survives: the truncation happens after picking the container.
+  const scoped = (await get(`/projects/${id}/logs?component=compute&branch=main&limit=10&group=quiet`)).json()
+  expect(scoped.lines.some((l: { message: string }) => l.message === 'quiet line')).toBe(true)
+  expect(scoped.lines.some((l: { message: string }) => l.message.startsWith('noise'))).toBe(false)
+
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
+})
+
+// The `db` arm of `?group=` is the one the dashboard's change was ABOUT — a postgres service named
+// `pg` is indistinguishable from the branch's default database by container label, which is why the
+// client-side name filter was deleted. Every other component's group arm is covered; this one was
+// only ever exercised WITHOUT a group, so the arm the UI now depends on was untested.
+test('group picks one postgres service out of several, for logs and for metrics', async () => {
+  const id = await createProject()
+  expect((await post(`/projects/${id}/services`, { type: 'postgres', name: 'analytics' })).statusCode).toBe(201)
+
+  const seen: string[][] = []
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) => {
+    seen.push(args)
+    if (args[0] === 'logs') return Buffer.from(`2026-07-22T01:00:00.000Z from ${args[args.length - 1]}\n`)
+    if (args[0] === 'stats') {
+      const names = args.filter((a) => a.startsWith('io-'))
+      return Buffer.from(names.map((n) => `{"Name":"${n}","CPUPerc":"1.00%","MemUsage":"10MiB / 4GiB"}`).join('\n') + '\n')
+    }
+    return Buffer.from('')
+  })
+
+  // Unscoped, both database containers are read.
+  const all = (await get(`/projects/${id}/logs?component=db&branch=main&limit=50`)).json()
+  const allInstances = new Set(all.lines.map((l: { instance: string }) => l.instance))
+  expect(allInstances.size).toBeGreaterThan(1)
+
+  // Scoped, exactly the named one.
+  const scoped = (await get(`/projects/${id}/logs?component=db&branch=main&limit=50&group=analytics`)).json()
+  const scopedInstances = [...new Set(scoped.lines.map((l: { instance: string }) => l.instance))] as string[]
+  expect(scopedInstances).toHaveLength(1)
+  expect(scopedInstances[0]).toContain('analytics')
+
+  // And the same narrowing reaches `docker stats`, not just the log tail.
+  seen.length = 0
+  const m = (await get(`/projects/${id}/metrics?component=db&branch=main&group=analytics`)).json()
+  const statsArgs = seen.find((a) => a[0] === 'stats') ?? []
+  expect(statsArgs.filter((a) => a.startsWith('io-'))).toHaveLength(1)
+  expect(m.series.every((s: { labels?: { instance?: string } }) => s.labels?.instance?.includes('analytics'))).toBe(true)
+
   vi.mocked(dockerFn).mockImplementation(fakeDocker)
 })
 
@@ -2171,6 +2438,107 @@ test('a group name that is not lower-kebab is refused on the deploy that would m
   expect(r.statusCode).toBe(400)
   expect(r.json().error).toBe('service name must be lower-kebab (a-z, 0-9, -)')
   expect(calls.filter((c) => c.startsWith('deploy:'))).toEqual([])
+})
+
+// Rename enforced this and create did not, so the API accepted a branch whose own hostname and
+// URLs could not address it: `web-demo-my branch.<domain>` is not a host, and `/p/<id>/a/b` is not
+// a route. The dashboard showed it as created and then could not navigate to it.
+test('a branch name that is not lower-kebab is refused on create, as it already was on rename', async () => {
+  const id = await createProject()
+  for (const bad of ['my branch', 'a/b', 'x?', 'UPPER', '-lead', 'trail-']) {
+    const r = await post(`/projects/${id}/branches`, { name: bad })
+    expect(r.statusCode, bad).toBe(400)
+    expect(r.json().error, bad).toBe('branch name must be lower-kebab (a-z, 0-9, -)')
+  }
+  // The rule is a floor, not a ban: a normal name still creates.
+  expect((await post(`/projects/${id}/branches`, { name: 'feat-1' })).statusCode).toBe(201)
+})
+
+// RegExp.test coerces, so a truthy non-string body value passed the name check and only failed
+// later, where provisioning calls string methods on it: a 409/500-shaped error for what is plainly
+// a malformed request. The boundary types it now.
+test('a branch name that is not a string is a 400, on create and on rename', async () => {
+  const id = await createProject()
+  for (const bad of [123, true, ['x'], { name: 'x' }]) {
+    const r = await post(`/projects/${id}/branches`, { name: bad })
+    expect(r.statusCode, JSON.stringify(bad)).toBe(400)
+    expect(r.json().error, JSON.stringify(bad)).toBe('name required')
+  }
+  expect((await post(`/projects/${id}/branches`, { name: 'ok-1', from: 7 })).statusCode).toBe(400)
+
+  const made = await post(`/projects/${id}/branches`, { name: 'renameable' })
+  expect(made.statusCode).toBe(201)
+  const bid = made.json().branch.id
+  const r = await patch(`/projects/${id}/branches/${bid}`, { name: 123 })
+  expect(r.statusCode).toBe(400)
+  expect(r.json().error).toBe('name required')
+})
+
+// The SERVICE half of the same coercion. This one is worse than a wrong status code: the compute
+// path persisted the non-string into `computeGroups` and answered 201 with it, so the state held a
+// value its own types forbid and no later string request compared equal to it — the service could
+// not be addressed, renamed or removed again.
+test('a service name that is not a string is a 400, on create and on rename', async () => {
+  const id = await createProject()
+  for (const bad of [123, true, ['x'], { name: 'x' }]) {
+    const r = await post(`/projects/${id}/services`, { type: 'compute', name: bad, port: 3000 })
+    expect(r.statusCode, JSON.stringify(bad)).toBe(400)
+    expect(r.json().error, JSON.stringify(bad)).toBe('type and name required')
+  }
+  // A non-string TYPE is refused the same way, rather than reaching the unknown-type branch with
+  // a coerced value.
+  expect((await post(`/projects/${id}/services`, { type: 7, name: 'api', port: 3000 })).statusCode).toBe(400)
+  expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'api', port: 3000, branch: 7 })).statusCode).toBe(400)
+
+  // Nothing was persisted by any of the above: the project still carries no compute group.
+  expect(loadState().projects[id].computeGroups ?? []).toEqual([])
+
+  // The rule is a floor, not a ban: a real name still creates, and rename types its input too.
+  const ok = await post(`/projects/${id}/services`, { type: 'compute', name: 'api', port: 3000 })
+  expect(ok.statusCode).toBe(201)
+  const bad = await post(`/projects/${id}/services/cp-api/rename`, { name: 123 })
+  expect(bad.statusCode).toBe(400)
+  expect(bad.json().error).toBe('name required')
+  // And the service kept the name it had.
+  expect((await get(`/projects/${id}/services`)).json().services.map((s: { name: string }) => s.name)).toContain('api')
+})
+
+// docs/projects/branches.mdx states 39 characters, and the template parser enforced the same cap
+// for codes. Sharing one expression between them is only correct if it carries the cap: an
+// unbounded one silently removed the parser's and let these routes accept what the docs refuse.
+test('a branch name is capped at 39 characters, on create and on rename', async () => {
+  const id = await createProject()
+  const at39 = 'b'.repeat(39)
+  const at40 = 'b'.repeat(40)
+
+  expect((await post(`/projects/${id}/branches`, { name: at40 })).statusCode).toBe(400)
+  const ok = await post(`/projects/${id}/branches`, { name: at39 })
+  expect(ok.statusCode).toBe(201)
+
+  // Rename is held to the same boundary, and to the same STATUS. `>= 400` left the documented
+  // "a malformed name answers 400" unverified on this route: unlike create, rename has no explicit
+  // lower-kebab mapping and reaches it through errCode's default, which is worth pinning.
+  const bid = ok.json().branch.id
+  const renamed = await patch(`/projects/${id}/branches/${bid}`, { name: at40 })
+  expect(renamed.statusCode).toBe(400)
+  expect(renamed.json().error).toContain('lower-kebab')
+})
+
+// A service name is a DNS label (`<group>-<project>-<branch>.<domain>`), and RFC 1123 forbids a
+// leading or trailing hyphen. Three of the four checks in the engine had drifted apart: compute
+// rename refused a trailing hyphen, while add-service and managed rename accepted it and minted a
+// name whose hostname is invalid. Which names were legal depended on the route you took.
+test('a trailing hyphen is refused by every service-name route, not just some', async () => {
+  const id = await createProject()
+  const add = await post(`/projects/${id}/services`, { type: 'compute', name: 'api-' })
+  expect(add.statusCode).toBe(400)
+  expect(add.json().error).toBe('service name must be lower-kebab (a-z, 0-9, -)')
+
+  const addManaged = await post(`/projects/${id}/services`, { type: 'redis', name: 'cache-' })
+  expect(addManaged.statusCode).toBe(400)
+
+  // And the names that were always legal still are.
+  expect((await post(`/projects/${id}/services`, { type: 'compute', name: 'api-1' })).statusCode).toBe(201)
 })
 
 test('a redeploy re-checks nothing it already owns: the second deploy of a group still lands', async () => {
@@ -4339,6 +4707,28 @@ test('the always-on default: main is always-on like the cloud, a branch clone sc
   // A managed database's create reports what the branch it lands on will do, as compute's does.
   expect((await engine.addManagedService(project.id, 'redis', 'queue', {})).always_on).toBe(true)
   expect((await engine.addManagedService(project.id, 'redis', 'scratch', { branch: 'feat' })).always_on).toBe(false)
+})
+
+test('every branch row carries created_at (the console’s Environments Created column)', async () => {
+  app = buildServer(makeEngine(testConfig()))
+  const id = await createProject()
+  await post(`/projects/${id}/branches`, { name: 'feat', from: 'main' })
+  const branches = (await get(`/projects/${id}/branches`)).json().branches as Array<{ name: string; created_at?: string }>
+  expect(branches.map((b) => b.name).sort()).toEqual(['feat', 'main'])
+  for (const b of branches) expect(Number.isNaN(Date.parse(b.created_at ?? '')), b.name).toBe(false)
+})
+
+test('every service row carries created_at, the time the service was created (the console’s Created column)', async () => {
+  const engine = makeEngine(testConfig())
+  const { project } = await engine.createProject('demo')
+  await engine.addComputeService(project.id, 'web')
+  await engine.addManagedService(project.id, 'redis', 'cache', {})
+  const rows = await engine.services(project.id)
+  expect(rows.map((r) => r.type).sort()).toEqual(expect.arrayContaining(['compute', 'redis']))
+  for (const row of rows) {
+    expect(typeof row.created_at, `${row.type} ${row.name}`).toBe('string')
+    expect(Number.isNaN(Date.parse(row.created_at!)), `${row.type} ${row.name}`).toBe(false)
+  }
 })
 
 test('PUT always-on takes null to follow the default again, and refuses anything else that is not a boolean', async () => {

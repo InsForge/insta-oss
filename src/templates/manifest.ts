@@ -22,8 +22,15 @@ export class ManifestError extends Error {
 // Template codes and service names both end up as platform names: the code becomes a default
 // branch name (lower-kebab, same shape as branch/service names), the service name becomes the
 // compute service / deploy group name (the engine's own service-name grammar).
-const CODE_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
-const SERVICE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
+//
+// IMPORTED from the shared grammar (src/names.ts) rather than restated. These were local copies permitting a trailing
+// hyphen, which the engine's own rules now reject, so `api-` passed validation here and then
+// failed partway through deployment — after preliminary state such as the branch had been
+// created. A parser that claims to apply the engine grammar has to use it.
+import { BRANCH_NAME_RE, SERVICE_NAME_RE as ENGINE_SERVICE_NAME_RE } from '../names'
+
+const CODE_RE = BRANCH_NAME_RE
+const SERVICE_NAME_RE = ENGINE_SERVICE_NAME_RE
 /** The one generator family: `secret:N` -> N chars from the CSPRNG. */
 const GENERATOR_RE = /^secret:([1-9]\d{0,2})$/
 // Generator NAMES are object keys that later feed lookups and ${...} refs, so the grammar excludes

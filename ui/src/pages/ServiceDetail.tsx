@@ -233,7 +233,7 @@ function ResourcesSection({ projectId, branch, service, onApproval }: {
     : <ComputeResources projectId={projectId} branch={branch} service={service} onApproval={onApproval} />
 }
 
-function ComputeResources({ projectId, branch, service, onApproval }: {
+export function ComputeResources({ projectId, branch, service, onApproval }: {
   projectId: string; branch: string; service: Service
   onApproval: (p: NonNullable<PendingApproval>) => void
 }) {
@@ -287,7 +287,7 @@ function ComputeResources({ projectId, branch, service, onApproval }: {
   )
 }
 
-function PgResources({ projectId, branch, group, onApproval }: {
+export function PgResources({ projectId, branch, group, onApproval }: {
   projectId: string; branch: string; group: string
   onApproval: (p: NonNullable<PendingApproval>) => void
 }) {
@@ -331,7 +331,7 @@ function PgResources({ projectId, branch, group, onApproval }: {
   )
 }
 
-function VolumeSection({ projectId, branch, service, onApproval }: {
+export function VolumeSection({ projectId, branch, service, onApproval }: {
   projectId: string; branch: string; service: Service
   onApproval: (p: NonNullable<PendingApproval>) => void
 }) {

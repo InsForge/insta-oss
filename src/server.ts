@@ -228,20 +228,38 @@ export function buildServer(
     return teardownReply(reply, await engine.destroyProject(id), 're-running the project delete')
   })
 
-  app.get('/projects/:id/branches', async (req) => ({
-    branches: engine.listBranches((req.params as { id: string }).id)
-      .map((b) => ({ id: b.id, name: b.name, is_default: b.isDefault, status: b.status })),
-  }))
+  app.get('/projects/:id/branches', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    // A project that does not exist is a 404, not an empty list. Answering 200 made "deleted" and
+    // "has no branches" indistinguishable, so a client cannot tell a stale link from a real
+    // project: the dashboard's deleted-project redirect keyed on the 404 that never came.
+    if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
+    return {
+      branches: engine.listBranches(id).map((b) => ({
+        id: b.id, name: b.name, is_default: b.isDefault, status: b.status,
+        // The console's Created column. Every branch the engine creates stamps it.
+        ...(b.createdAt ? { created_at: new Date(b.createdAt).toISOString() } : {}),
+      })),
+    }
+  })
 
   app.post('/projects/:id/branches', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const { name, from } = (req.body ?? {}) as { name?: string; from?: string }
-    if (!name) return reply.code(400).send({ error: 'name required' })
+    const { name, from } = (req.body ?? {}) as { name?: unknown; from?: unknown }
+    // Typed at the boundary, not just truthy: `{"name": 123}` used to pass, because RegExp.test
+    // coerces its argument, and then failed deep in provisioning as a state-ish error instead of
+    // the malformed-request 400 it is. Same for a non-string `from`.
+    if (typeof name !== 'string' || !name) return reply.code(400).send({ error: 'name required' })
+    if (from !== undefined && typeof from !== 'string') return reply.code(400).send({ error: 'from must be a string' })
     try {
       const b = await engine.createBranch(id, name, from)
       return reply.code(201).send({ branch: { id: b.id, name: b.name } })
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e)
+      // This route's fallback is 409, for "understood, and the state says no" (already exists, a
+      // source that is busy). A malformed name is not that: nothing about the state would make it
+      // work, so it is the request that is bad.
+      if (m.includes('must be lower-kebab')) return reply.code(400).send({ error: m })
       return reply.code(provisionCode(m, 409)).send({ error: m })
     }
   })
@@ -376,8 +394,20 @@ export function buildServer(
 
   app.post('/projects/:id/services', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const body = (req.body ?? {}) as { type?: string; name?: string; branch?: string; public?: boolean; volumeGib?: number; port?: number; alwaysOn?: boolean; image?: string }
-    if (!body.type || !body.name) return reply.code(400).send({ error: 'type and name required' })
+    const body = (req.body ?? {}) as { type?: unknown; name?: unknown; branch?: unknown; public?: boolean; volumeGib?: number; port?: number; alwaysOn?: boolean; image?: string }
+    // Typed at the boundary, BEFORE the governance gate, exactly as the branch routes are.
+    // `SERVICE_NAME_RE.test` coerces, so `{"name": 123}` satisfied the lower-kebab rule and the
+    // compute path persisted the NUMBER into computeGroups — state that violates its own types and
+    // that no later string request compares equal to, so the service could not be addressed again.
+    if (typeof body.type !== 'string' || !body.type || typeof body.name !== 'string' || !body.name) {
+      return reply.code(400).send({ error: 'type and name required' })
+    }
+    if (body.branch !== undefined && typeof body.branch !== 'string') {
+      return reply.code(400).send({ error: 'branch must be a string' })
+    }
+    // Bound as locals so the narrowing above holds inside `add` — a property narrowing does not
+    // survive into a closure, and re-reading `body.name` there is what let the unchecked value in.
+    const { type: svcType, name: svcName, branch: svcBranch } = body as { type: string; name: string; branch?: string }
     if (!gated(id, 'service.add', reply)) return reply
     // `branch` names the branch the service is created on, defaulting to the project's default
     // branch — the cloud's shape (platform server.ts:1492) and what the docs promise. Postgres,
@@ -388,22 +418,22 @@ export function buildServer(
     // `branch` does not apply to it. `image` is accepted and ignored — the image reaches a service
     // through deploy.
     const add = async (): Promise<unknown> => {
-      const on = { ...(body.branch !== undefined ? { branch: body.branch } : {}) }
-      if (body.type === 'postgres') return engine.addDbService(id, body.name!, on)
-      if (body.type === 'storage') return engine.addStorageService(id, body.name!, { ...on, ...(body.public !== undefined ? { public: body.public } : {}) })
-      if (isManagedDbType(body.type!)) return engine.addManagedService(id, body.type as 'redis' | 'mysql' | 'mongodb', body.name!, on)
+      const on = { ...(svcBranch !== undefined ? { branch: svcBranch } : {}) }
+      if (svcType === 'postgres') return engine.addDbService(id, svcName, on)
+      if (svcType === 'storage') return engine.addStorageService(id, svcName, { ...on, ...(body.public !== undefined ? { public: body.public } : {}) })
+      if (isManagedDbType(svcType)) return engine.addManagedService(id, svcType as 'redis' | 'mysql' | 'mongodb', svcName, on)
       // volumeGib (compute only) attaches a persistent /data volume (also attachable later via
       // PUT …/volume, and deletable via DELETE …/volume — cloud parity).
       // `branch` does not decide where a compute group lives (it is project-level, above); it
       // decides which branch's always-on the 201 reports, since that differs per branch.
-      return engine.addComputeService(id, body.name!, body.volumeGib, {
+      return engine.addComputeService(id, svcName, body.volumeGib, {
         ...(body.alwaysOn !== undefined ? { alwaysOn: body.alwaysOn } : {}),
         ...(body.port !== undefined ? { port: body.port } : {}),
-        ...(body.branch !== undefined ? { branch: body.branch } : {}),
+        ...(svcBranch !== undefined ? { branch: svcBranch } : {}),
       })
     }
-    if (!['postgres', 'storage', 'compute'].includes(body.type) && !isManagedDbType(body.type)) {
-      return reply.code(400).send({ error: `unknown service type: ${body.type}` })
+    if (!['postgres', 'storage', 'compute'].includes(svcType) && !isManagedDbType(svcType)) {
+      return reply.code(400).send({ error: `unknown service type: ${svcType}` })
     }
     try { return reply.code(201).send({ service: await add() }) }
     catch (e) {
@@ -480,8 +510,10 @@ export function buildServer(
   // bucket handle is baked into every object URL and into the key scoped to it.
   app.post('/projects/:id/services/:sid/rename', async (req, reply) => {
     const { id, sid: raw } = req.params as { id: string; sid: string }
-    const { name } = (req.body ?? {}) as { name?: string }
-    if (!name) return reply.code(400).send({ error: 'name required' })
+    const { name } = (req.body ?? {}) as { name?: unknown }
+    // Typed, not just truthy: RegExp.test coerces, so a rename could re-key a service under a
+    // non-string name that no later request can match.
+    if (typeof name !== 'string' || !name) return reply.code(400).send({ error: 'name required' })
     if (!engine.getProject(id)) return reply.code(404).send({ error: 'project not found' })
     // resolveSid rather than bareSid, per contract section 10, which names rename in that family:
     // a qualified sid that points at a deleted or foreign branch must 404, not have its qualifier
@@ -730,8 +762,9 @@ export function buildServer(
   // Branch rename — metadata only, like the cloud: provider resources keep their frozen ref.
   app.patch('/projects/:id/branches/:bid', async (req, reply) => {
     const { id, bid } = req.params as { id: string; bid: string }
-    const { name } = (req.body ?? {}) as { name?: string }
-    if (!name) return reply.code(400).send({ error: 'name required' })
+    const { name } = (req.body ?? {}) as { name?: unknown }
+    // Typed, not just truthy: RegExp.test coerces, so `{"name": 123}` reached the rename itself.
+    if (typeof name !== 'string' || !name) return reply.code(400).send({ error: 'name required' })
     try { return { branch: engine.renameBranch(id, bid, name) } }
     catch (e) {
       const m = e instanceof Error ? e.message : String(e)

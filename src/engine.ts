@@ -9,6 +9,7 @@ import { loadConfig, type Config } from './config'
 import { dataLayout, ensureDirSync, lazyDataDirOps, probedCapabilities } from './datadir'
 import { migrateLegacyData } from './datadir-migrate'
 import { docker } from './docker'
+import { BRANCH_NAME_RE, SERVICE_NAME_RE } from './names'
 import { MANAGED_DB, CANONICAL_MANAGED_KEYS, CANONICAL_KEYS, GARAGE_CONTAINER, suffixBundle, envSuffix, laneBundle, managedServiceId, managedContainerName, isManagedDbType, parseServiceId, pgContainerName, pgServiceId, storageServiceId, bucketName, appContainerName, dataPaths } from './manageddb'
 import * as observe from './observe'
 import { loadState, mutate } from './state'
@@ -31,6 +32,22 @@ import { ENV_NAME_RE } from './templates/manifest'
 // ---- end region WP5 ----
 
 const DEFAULT_BRANCH = 'main'
+
+/** A branch name becomes part of a hostname (`web-demo-<branch>.<domain>`) and of every URL that
+ *  addresses the branch, so it is restricted to what both can carry. Enforced on create AND on
+ *  rename: they disagreed, and create was the lenient one. */
+function assertBranchName(name: string): void {
+  if (!BRANCH_NAME_RE.test(name)) throw new Error('branch name must be lower-kebab (a-z, 0-9, -)')
+}
+
+/** A service name is a DNS label too (`<group>-<project>-<branch>.<domain>`), and RFC 1123 labels
+ *  may not start or end with a hyphen. Three call sites had drifted into two different rules: the
+ *  compute-rename one refused a trailing hyphen but had no length cap, while add-service and
+ *  managed-rename capped at 39 and ALLOWED a trailing hyphen, minting a name whose hostname is not
+ *  valid. One rule now, the strict one, matching what the dashboard already enforced. */
+function assertServiceName(name: string): void {
+  if (!SERVICE_NAME_RE.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+}
 const slug = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
 
 // Volume-cap parity (platform #166–169): the cloud caps volumes per billing tier; oss has no
@@ -57,6 +74,8 @@ export interface ServiceRow {
   domain?: string
   endpoint?: string
   runtime?: string
+  /** When the service was created (the console's Created column). */
+  created_at?: string
   updated_at?: string
   public?: boolean
   desired_state?: string
@@ -623,6 +642,10 @@ export class Engine {
   async createBranch(projectId: string, name: string, from?: string): Promise<Branch> {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
+    // Rename has always enforced this; create had not, so the API accepted a name that the
+    // per-branch hostnames and URLs cannot express (`my branch`, `a/b`, `x?`). Same rule both
+    // ways, at the daemon, so the CLI and agents get it too and not just the dashboard.
+    assertBranchName(name)
     const source = this.getBranchByName(projectId, from ?? DEFAULT_BRANCH)
     if (!source) throw new Error(`source branch "${from ?? DEFAULT_BRANCH}" not found`)
     if (this.getBranchByName(projectId, name)) throw new Error(`branch "${name}" already exists`)
@@ -938,7 +961,7 @@ export class Engine {
     const b = loadState().branches[branchId]
     if (!project || !b || b.projectId !== projectId) throw new Error('branch not found')
     if (b.isDefault) throw new Error('cannot rename the default branch')
-    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(newName)) throw new Error('branch name must be lower-kebab (a-z, 0-9, -)')
+    assertBranchName(newName)
     if (newName !== b.name && this.getBranchByName(projectId, newName)) throw new Error(`branch "${newName}" already exists`)
     const oldName = b.name
     mutate((st) => {
@@ -1038,7 +1061,41 @@ export class Engine {
     // checked the intent moments earlier. Matches the platform, whose desired_state survives a deploy.
     const host = this.mintedHost(project, b, group)                                                     // WP2
     mutate((s) => {
+      // Read BEFORE the row is rewritten: on an install upgraded to this code the previous
+      // `updatedAt` is the only record of when the group was last deployed, and it is exactly what
+      // the Created column has been showing for it.
+      const priorUpdatedAt = s.branches[b.id].apps[group]?.updatedAt
       s.branches[b.id].apps[group] = { ...s.branches[b.id].apps[group], image: opts.image, port, hostPort, url, ...(host !== undefined ? { host } : {}), updatedAt: Date.now() }
+      // A group materialised BY this deploy (`insta deploy --group <name>`, no prior add) never got
+      // a createdAt, so the service row fell back to `updatedAt` — which every redeploy rewrites,
+      // making the dashboard's Created column walk forward on each deploy. Stamp it once; an
+      // existing stamp is never overwritten.
+      //
+      // NOT gated on `minting`. A group that was direct-deployed BEFORE this code shipped already
+      // has a host, so it would never mint again and would never be stamped: its Created column
+      // would keep walking forward for the life of the install. Backfill it with the `updatedAt`
+      // it had on the way in rather than with now, so the date the user has been reading does not
+      // jump on the upgrade deploy — it just stops moving, which is the whole point.
+      {
+        const settings = (s.projects[project.id].serviceSettings ??= {})
+        const existing = settings[`cp-${group}`]?.createdAt
+        // Derived from every branch that already carries the group, NOT from this branch's
+        // `minting`. The stamp is project-level and `services()` reads it for every branch, while
+        // `minting` is per-branch: cloning a legacy group onto a NEW branch makes it true there, so
+        // keying off it stamped `Date.now()` and jumped the Created date of the copy that had been
+        // running all along. The oldest deploy we can still see is the closest thing to the truth;
+        // `Date.now()` is only for a group nothing has ever deployed.
+        const seen: number[] = []
+        for (const br of Object.values(s.branches)) {
+          if (br.projectId !== project.id) continue
+          const at = br.id === b.id ? priorUpdatedAt : br.apps?.[group]?.updatedAt
+          if (typeof at === 'number') seen.push(at)
+        }
+        settings[`cp-${group}`] = {
+          ...settings[`cp-${group}`],
+          createdAt: existing ?? (seen.length ? Math.min(...seen) : Date.now()),
+        }
+      }
       // The row now owns the port, exactly as `laneFor` retires a branch-create reservation.
       if (hostPort !== undefined) delete s.laneReservations?.[String(hostPort)]
       // ...and the row now owns the hostname, so the reservation retires with it.
@@ -1126,7 +1183,7 @@ export class Engine {
   private managedSecretsFor(projectId: string, branch: Branch): Record<string, string> {
     const project = this.getProject(projectId)
     const out: Record<string, string> = {}
-    const aliasedTypes = new Set<ManagedDbType>()
+    const aliased = this.aliasedManagedIds(projectId, branch)
     for (const m of project?.managedServices ?? []) {
       const cred = branch.managed?.[m.id]
       if (!cred) continue
@@ -1135,7 +1192,7 @@ export class Engine {
       const lane = this.laneAddress(project!, branch, m.id)
       const bundle = laneBundle(m.type, lane.host, lane.port, cred.password, lane.tls)
       Object.assign(out, suffixBundle(bundle, m.name))
-      if (!aliasedTypes.has(m.type)) { aliasedTypes.add(m.type); Object.assign(out, bundle) }
+      if (aliased.has(m.id)) Object.assign(out, bundle)
     }
     return out
   }
@@ -1285,6 +1342,7 @@ export class Engine {
         ...this.rowNetwork(project, branch, { id: d.id, type: 'postgres', name: d.name }),
         runtime: rt(d.id),
         ...(d.templateDeploymentId ? { template_deployment_id: d.templateDeploymentId } : {}),
+        created_at: iso(d.createdAt),
         updated_at: iso(d.createdAt),
       })),
       // Storage endpoint/container derive from the branch's OWN minted creds, so branches
@@ -1298,6 +1356,7 @@ export class Engine {
         // `s3.<domain>`, which matches no container, so every bucket on a real install read
         // 'stopped' while Garage was up and serving it.
         runtime: branch ? this.runtimeOf(GARAGE_CONTAINER) : undefined,
+        created_at: iso(s.createdAt),
         updated_at: iso(s.createdAt),
       })),
       // Managed databases (redis/mysql/mongodb): one private container per branch. `port` +
@@ -1309,6 +1368,7 @@ export class Engine {
         always_on: branch ? this.effectiveAlwaysOn(project, branch, m.id) : undefined,
         ...this.rowNetwork(project, branch, { id: m.id, type: m.type, name: m.name }),
         runtime: rt(m.id),
+        created_at: iso(m.createdAt),
         updated_at: iso(m.createdAt),
       })),
       ...[...groups].sort().map((g) => {
@@ -1327,6 +1387,9 @@ export class Engine {
           ...(cfgd.templateCode ? { template_code: cfgd.templateCode } : {}),
           ...this.rowNetwork(project, branch, { id: `cp-${g}`, type: 'compute', name: g }),
           runtime: branch ? rt(`cp-${g}`) : app ? undefined : 'none',
+          // The registration's own time (addComputeService stamps it); a group that predates the
+          // stamp falls back to its last deploy.
+          created_at: iso(cfgd.createdAt ?? app?.updatedAt),
           updated_at: iso(app?.updatedAt),
         }
       }),
@@ -1345,7 +1408,14 @@ export class Engine {
    *  → storage), matching the cloud, where minted secrets are service-bound rows. */
   secretTree(projectId: string): {
     projectWide: string[]
-    branches: Array<{ name: string; isDefault: boolean; services: Array<{ type: string; name: string; secrets: string[] }>; unbound: string[] }>
+    branches: Array<{
+      name: string; isDefault: boolean
+      services: Array<{
+        type: string; name: string; secrets: string[]; minted: string[]
+        bindings: Array<{ envName: string; source: string; sourceName: string; shadowsUserSecret: boolean }>
+      }>
+      unbound: string[]
+    }>
   } {
     const project = this.getProject(projectId)
     if (!project) throw new Error('project not found')
@@ -1355,39 +1425,123 @@ export class Engine {
       list.filter((u) => u.branch === branch && u.service === service).map((u) => u.name)
     // A binding is a name this group's env carries too, so the inventory lists it under the TARGET
     // group (where it appears) rather than under the service it reads from.
-    const boundIn = (b: Branch, group: string): string[] =>
-      (b.bindings ?? []).filter((x) => x.target === `compute/${group}`).map((x) => x.envName)
+    //
+    // It is reported SEPARATELY from the user secrets, not merged into an undifferentiated list. A
+    // binding is platform-owned: `unsetUserSecret` does not remove it (so a Delete reported success
+    // while the name stayed), and `bindingsFor` is applied LAST in `envFor` (so an Edit wrote a row
+    // the container never sees). Anything offering Edit/Delete has to be able to tell them apart,
+    // and the source is worth carrying too: "this service" is not where the value comes from.
+    const boundIn = (b: Branch, group: string, userBound: string[]): Array<{ envName: string; source: string; sourceName: string; shadowsUserSecret: boolean }> =>
+      (b.bindings ?? []).filter((x) => x.target === `compute/${group}`)
+        .map((x) => ({
+          envName: x.envName, source: x.source, sourceName: x.sourceName,
+          // A user secret of the same name can exist on this group — `insta secrets set NAME
+          // --service compute/<g>` is not refused, and a later template deploy can bind over one.
+          // The binding WINS (envFor applies it last), so the row is a binding; this says a dead
+          // user row is sitting underneath it, which is the only way a surface can offer to
+          // remove that row rather than pretending it is not there.
+          shadowsUserSecret: userBound.includes(x.envName),
+        }))
     return {
       projectWide: list.filter((u) => u.branch === null).map((u) => u.name).sort(),
       // Per branch, only the services that branch CARRIES: the tree is an inventory of the names
       // a branch's env actually holds, and `secrets` never mints a credential for a service with
       // no row here, so listing one promised a name that is nowhere in the bundle.
-      branches: this.listBranches(projectId).map((b) => ({
+      branches: this.listBranches(projectId).map((b) => {
+        // Loop-INVARIANT within a branch, and each call clones the whole state via getProject, so
+        // it is computed once here rather than per managed service inside the map below. That is
+        // the same cost the note about mintedNamesOf warns of, and calling it per service put this
+        // route's clone count back up (27 -> 51 on 8 branches x 3 redis services).
+        const aliased = this.aliasedManagedIds(projectId, b)
+        return {
         name: b.name,
         isDefault: b.isDefault,
         services: [
-          ...this.dbList(projectId).filter((d) => this.carries(project, b, d, 'postgres')).map((d) => ({
-            type: 'postgres', name: d.name,
-            secrets: [...this.mintedNamesOf(project, b, d.id), ...bound(b.name, `postgres/${d.name}`)].sort(),
-          })),
-          ...this.stList(projectId).filter((s) => this.carries(project, b, s, 'storage')).map((s) => ({
-            type: 'storage', name: s.name,
-            secrets: [...this.mintedNamesOf(project, b, s.id), ...bound(b.name, `storage/${s.name}`)].sort(),
-          })),
-          ...this.managedList(projectId).filter((m) => this.carries(project, b, m, 'managed')).map((m) => ({
-            type: m.type, name: m.name,
-            secrets: [...this.mintedManagedNames(m), ...bound(b.name, `${m.type}/${m.name}`)].sort(),
-          })),
-          ...groups.map((g) => ({ type: 'compute', name: g, secrets: [...bound(b.name, `compute/${g}`), ...boundIn(b, g)].sort() })),
+          // `minted` is the platform-issued subset of `secrets`. They differ in who receives them:
+          // a minted credential is handed to EVERY compute group in the branch, while a user
+          // secret bound to this service reaches only this service. Callers that answer "what can
+          // service X read" cannot tell them apart from the merged list, and the dashboard read it
+          // as "every name under every service", which showed one app another app's bound secrets.
+          // `mintedNamesOf` clones state, so it is called ONCE per service and reused for both
+          // fields: calling it again for `minted` doubled the clones and broke the linear-clone
+          // guarantee this route is held to.
+          ...this.dbList(projectId).filter((d) => this.carries(project, b, d, 'postgres')).map((d) => {
+            const minted = this.mintedNamesOf(project, b, d.id)
+            return {
+              type: 'postgres', name: d.name,
+              secrets: [...minted, ...bound(b.name, `postgres/${d.name}`)].sort(),
+              minted: [...minted].sort(),
+              // Only a compute group is a binding TARGET.
+              bindings: [],
+            }
+          }),
+          ...this.stList(projectId).filter((s) => this.carries(project, b, s, 'storage')).map((s) => {
+            const minted = this.mintedNamesOf(project, b, s.id)
+            return {
+              type: 'storage', name: s.name,
+              secrets: [...minted, ...bound(b.name, `storage/${s.name}`)].sort(),
+              minted: [...minted].sort(),
+              // Only a compute group is a binding TARGET.
+              bindings: [],
+            }
+          }),
+          ...this.managedList(projectId).filter((m) => this.carries(project, b, m, 'managed')).map((m) => {
+            // The branch's oldest service of each type also carries the canonical unsuffixed names.
+            const minted = this.mintedManagedNames(m, aliased.has(m.id))
+            return {
+              type: m.type, name: m.name,
+              secrets: [...minted, ...bound(b.name, `${m.type}/${m.name}`)].sort(),
+              minted: [...minted].sort(),
+              // Only a compute group is a binding TARGET.
+              bindings: [],
+            }
+          }),
+          // A compute group mints nothing: everything under it is bound to it, and reaches only it.
+          ...groups.map((g) => {
+            const userBound = bound(b.name, `compute/${g}`)
+            const bindings = boundIn(b, g, userBound)
+            return {
+              type: 'compute', name: g,
+              // `secrets` is the inventory of NAMES this group's env carries, and a container
+              // receives one value per name — so it is a SET. Concatenating listed a name that is
+              // both a user secret and a binding twice, and the page drew two rows for one
+              // variable. `bindings` says which of them are platform-owned and where each reads
+              // from.
+              secrets: [...new Set([...userBound, ...bindings.map((x) => x.envName)])].sort(),
+              minted: [],
+              bindings: [...bindings].sort((x, y) => x.envName.localeCompare(y.envName)),
+            }
+          }),
         ],
         unbound: list.filter((u) => u.branch === b.name && !u.service).map((u) => u.name).sort(),
-      })),
+        }
+      }),
     }
   }
 
-  /** A managed service's minted (suffixed) secret names — names only, derived from the catalog. */
-  private mintedManagedNames(m: { type: ManagedDbType; name: string }): string[] {
-    return Object.keys(suffixBundle(MANAGED_DB[m.type].bundle('h', 'p'), m.name))
+  /** Which managed services additionally surface the canonical UNSUFFIXED aliases on this branch:
+   *  the oldest carried service of each type (platform spec §2.1).
+   *
+   *  One definition, used by both the minting path and the inventory. They were separate, and the
+   *  inventory only knew about the suffixed forms — so an app's env carried `REDIS_URL` while the
+   *  Variables tab and the Secrets page listed only `REDIS_URL_<NAME>`, leaving the one name most
+   *  apps actually read invisible, and `REDIS_URL` typeable in Add Secret for a bare 400. */
+  private aliasedManagedIds(projectId: string, branch: Branch): Set<string> {
+    const seen = new Set<ManagedDbType>()
+    const ids = new Set<string>()
+    for (const m of this.getProject(projectId)?.managedServices ?? []) {
+      if (!branch.managed?.[m.id] || seen.has(m.type)) continue
+      seen.add(m.type)
+      ids.add(m.id)
+    }
+    return ids
+  }
+
+  /** A managed service's minted secret names: the suffixed bundle, plus the canonical unsuffixed
+   *  one when this is the branch's aliased service for its type. */
+  private mintedManagedNames(m: { id: string; type: ManagedDbType; name: string }, aliased: boolean): string[] {
+    const bundle = MANAGED_DB[m.type].bundle('h', 'p')
+    return [...Object.keys(suffixBundle(bundle, m.name)), ...(aliased ? Object.keys(bundle) : [])]
   }
 
   /** A service's secret names (names only): minted credentials + user secrets bound to it. Named
@@ -1805,7 +1959,7 @@ export class Engine {
     return this.serialize('provision', async () => {
       const project = this.getProject(projectId)
       if (!project) throw new Error('project not found')
-      if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(newName)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+      assertServiceName(newName)
       const groups = this.computeGroupNames(projectId)
       if (!groups.includes(oldName)) throw new Error('service not found')
       const current = async (): Promise<ServiceRow | undefined> =>
@@ -2013,12 +2167,15 @@ export class Engine {
     return this.serialize('provision', async () => {
       const project = this.getProject(projectId)
       if (!project) throw new Error('project not found')
-      if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+      assertServiceName(name)
       const b = this.targetBranch(projectId, opts.branch)
       this.assertUsable(b, 'given new services')
       const existing = this.managedList(projectId).find((m) => m.type === type && m.name === name)
       if (existing && this.carries(project, b, existing, 'managed')) throw new Error(`${type} service "${name}" already exists`)
-      const wouldMint = this.mintedManagedNames({ type, name })
+      // Suffixed only, deliberately: a user secret can never hold a CANONICAL managed name, since
+      // setUserSecret refuses every reserved one (isReservedSecret covers `k` and `k_*`). Passing
+      // the aliases here would be unreachable defence.
+      const wouldMint = this.mintedManagedNames({ id: '', type, name }, false)
       const clash = (loadState().userSecrets[projectId] ?? []).find((u) => wouldMint.includes(u.name))
       if (clash) throw new Error(`service would mint secret names already used by user secrets: ${clash.name}`)
       // WP4: an immutable directory key, minted once and stored, so a rename never detaches the data
@@ -2130,7 +2287,7 @@ export class Engine {
     if (!project) throw new Error('project not found')
     const m = this.managedList(projectId).find((x) => x.id === serviceId)
     if (!m) throw new Error('service not found')
-    if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(newName)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')
+    assertServiceName(newName)
     if (newName === m.name) return this.managedRow(m)
     if (this.managedList(projectId).some((x) => x.type === m.type && x.name === newName)) throw new Error(`${m.type} service "${newName}" already exists`)
     const newId = managedServiceId(m.type, newName)
@@ -2901,7 +3058,13 @@ export class Engine {
     ])
     return {
       project: { id: project.id, name: project.name, status: project.status, org_id: 'local' },
-      branches: branches.map((b) => ({ id: b.id, name: b.name, is_default: b.isDefault, status: b.status })),
+      // Same branch shape the /branches route answers with, `created_at` included: the dashboard's
+      // Environments table reads its Created column from HERE (one call for branches and what each
+      // carries), and without the timestamp every row rendered an em dash.
+      branches: branches.map((b) => ({
+        id: b.id, name: b.name, is_default: b.isDefault, status: b.status,
+        ...(b.createdAt ? { created_at: new Date(b.createdAt).toISOString() } : {}),
+      })),
       resources,
     }
   }
@@ -4283,7 +4446,15 @@ export class Engine {
       const canonical = this.stList(project.id).find((x) => this.carries(project, branch, x, 'storage'))?.id === parsed.serviceId
       return [...(canonical ? keys : []), ...keys.map((k) => `${k}_${envSuffix(parsed.name)}`)]
     }
-    if (isManagedDbType(parsed.type)) return this.mintedManagedNames({ type: parsed.type, name: parsed.name })
+    if (isManagedDbType(parsed.type)) {
+      // Same rule as postgres and storage above: the branch's oldest service of the type holds the
+      // canonical aliases. This arm used to return the suffixed set only, so the one name most
+      // apps read (REDIS_URL) was missing from every inventory that asks here.
+      return this.mintedManagedNames(
+        { id: parsed.serviceId, type: parsed.type, name: parsed.name },
+        this.aliasedManagedIds(project.id, branch).has(parsed.serviceId),
+      )
+    }
     return []
   }
 
@@ -4391,7 +4562,9 @@ export class Engine {
 
   // ---- postgres service registrations -----------------------------------------------------------
 
-  private static NAME_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
+  /** The one rule (see SERVICE_NAME_RE): this used to be a fourth, lenient copy that allowed a
+   *  trailing hyphen, so which names were legal depended on which route you reached. */
+  private static NAME_RE = SERVICE_NAME_RE
 
   private assertServiceName(name: string): void {
     if (!Engine.NAME_RE.test(name)) throw new Error('service name must be lower-kebab (a-z, 0-9, -)')

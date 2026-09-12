@@ -4,6 +4,7 @@ import { Button, EmptyState } from '@insforge/ui'
 import { Database, Moon } from 'lucide-react'
 import { api } from '../api'
 import { usePoll } from '../hooks'
+import { ConsolePage } from '../components/console/ConsolePage'
 
 function fmtBytes(n: number): string {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GiB`
@@ -27,90 +28,56 @@ function Th({ children, className }: { children?: string; className?: string }) 
 }
 
 /** A read that answered 503 `database is sleeping`: the daemon never wakes a database to answer a
- *  dashboard poll (decision 48), so the page says so instead of retrying in a loop. */
+ *  dashboard poll (decision 48), so the panel says so instead of retrying in a loop. */
 function isSleeping(e: Error | undefined): boolean {
   if (!e) return false
   const status = (e as Error & { status?: number }).status
   return status === 503 && /sleeping/i.test(e.message)
 }
 
-/** Point-in-time database insight for this environment — the same SQL signals the cloud serves
- *  (pg_stat_activity / pg_stat_database / pg_stat_statements), sampled from the branch database. */
-export function DatabaseInsight() {
-  const { projectId, branch } = useParams() as { projectId: string; branch: string }
-  const { data: services } = usePoll(() => api.services(projectId, branch), [projectId, branch], 15000)
-  // Several postgres services are possible; this page reads the first one (a picker is deferred).
-  const pg = useMemo(() => (services ?? []).find((s) => s.type === 'postgres'), [services])
-  const group = pg?.name
-
+/** Point-in-time insight for one Postgres service: the same SQL signals the cloud serves
+ *  (pg_stat_activity / pg_stat_database / pg_stat_statements). The page and a Postgres service's
+ *  Database tab both render it. */
+export function DatabasePanel({ projectId, branch, group, footer }: {
+  projectId: string; branch: string; group?: string; footer?: React.ReactNode
+}) {
   const metricsPoll = usePoll(() => api.dbMetrics(projectId, branch, group), [projectId, branch, group], { intervalMs: 10000 })
   const sleeping = isSleeping(metricsPoll.error)
   const { data: metrics, error, reload } = metricsPoll
   const { data: activity } = usePoll(() => api.dbActivity(projectId, branch, group), [projectId, branch, group], { intervalMs: 10000, enabled: !sleeping })
   const { data: stats } = usePoll(() => api.dbQueryStats(projectId, branch, group), [projectId, branch, group], { intervalMs: 15000, enabled: !sleeping })
 
-  if (services && !pg) {
-    return (
-      <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
-        <h1 className="text-[32px] leading-12 font-bold">Database</h1>
-        <EmptyState icon={Database} title="No Postgres in this environment"
-          description="Add a postgres service on the Services page and this page fills in." />
-      </div>
-    )
-  }
-
   if (sleeping) {
     return (
-      <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
-        <h1 className="text-[32px] leading-12 font-bold">Database</h1>
+      <div className="flex flex-col gap-4">
         <EmptyState icon={Moon} title="Postgres is sleeping"
-          description="It wakes on the next connection. Turn on Always on in the service settings to keep it warm."
+          description="It wakes on the next connection. Turn off Scale to Zero in the service settings to keep it warm."
           action={{ label: 'Check again', onClick: reload }} />
-        {pg && (
-          <div className="flex justify-center">
-            <Link to={`/p/${projectId}/${branch}/services/${pg.id}`}>
-              <Button variant="secondary">Service settings</Button>
-            </Link>
-          </div>
-        )}
+        {footer}
       </div>
     )
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h1 className="text-[32px] leading-12 font-bold">Database</h1>
-        <p className="text-sm text-muted-foreground">
-          Live signals from <span className="font-medium">{branch}</span>&apos;s Postgres — connections,
-          size, cache efficiency, running queries, and the heaviest statements.
-        </p>
-      </div>
-
+    <div className="flex flex-col gap-4">
       {error && (
-        <div className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-destructive">
-          {error.message}
-        </div>
+        <div className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-destructive">{error.message}</div>
       )}
-
       {!metrics && !error && (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
           {[0, 1, 2, 3].map((i) => <div key={i} className="h-24 animate-pulse rounded-lg bg-alpha-8" />)}
         </div>
       )}
-
       {metrics && (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
           <Stat label="Connections" value={`${metrics.connections.total}`}
             hint={`${metrics.connections.active} active · ${metrics.connections.idle} idle · max ${metrics.connections.max}`} />
           <Stat label="Database size" value={fmtBytes(metrics.dbSizeBytes)} />
-          <Stat label="Cache hit" value={`${(metrics.cacheHitRatio * 100).toFixed(1)}%`}
-            hint={`${metrics.deadlocks} deadlocks`} />
+          <Stat label="Cache hit" value={`${(metrics.cacheHitRatio * 100).toFixed(1)}%`} hint={`${metrics.deadlocks} deadlocks`} />
           <Stat label="Tuple churn" value={`${metrics.tuples.inserted + metrics.tuples.updated + metrics.tuples.deleted}`}
             hint={`${metrics.tuples.inserted} ins · ${metrics.tuples.updated} upd · ${metrics.tuples.deleted} del`} />
         </div>
       )}
-
       <div className="overflow-hidden rounded-lg border border-border bg-card">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Running queries</div>
         <table className="w-full table-fixed">
@@ -138,7 +105,6 @@ export function DatabaseInsight() {
           </tbody>
         </table>
       </div>
-
       <div className="overflow-hidden rounded-lg border border-border bg-card">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Top statements</div>
         <table className="w-full table-fixed">
@@ -169,11 +135,43 @@ export function DatabaseInsight() {
           </tbody>
         </table>
       </div>
-
       <p className="text-xs text-muted-foreground">
         Reads run against this environment&apos;s database on each refresh and never wake it: a sleeping
         Postgres answers with its sleeping state instead.
       </p>
     </div>
+  )
+}
+
+/** The environment's (first) Postgres, as a page. */
+export function DatabaseInsight() {
+  const { projectId, branch } = useParams() as { projectId: string; branch: string }
+  const { data: services, error } = usePoll(() => api.services(projectId, branch), [projectId, branch], 15000)
+  const pg = useMemo(() => (services ?? []).find((s) => s.type === 'postgres'), [services])
+
+  return (
+    <ConsolePage title="Database">
+      {/* Rendering null while the service list is in flight, or when it failed, left the page as a
+          bare title with no sign that anything was happening. */}
+      {!services && !error ? (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => <div key={i} className="h-24 animate-pulse rounded-lg bg-alpha-8" />)}
+        </div>
+      ) : error ? (
+        <div className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-destructive">{error.message}</div>
+      ) : services && !pg ? (
+        <EmptyState icon={Database} title="No Postgres in this environment"
+          description="Add a postgres service on the Service page and this page fills in." />
+      ) : pg ? (
+        <DatabasePanel projectId={projectId} branch={branch} group={pg.name}
+          footer={
+            <div className="flex justify-center">
+              <Link to={`/p/${projectId}/${branch}/services?service=${encodeURIComponent(pg.id)}&tab=settings`}>
+                <Button variant="secondary">Service settings</Button>
+              </Link>
+            </div>
+          } />
+      ) : null}
+    </ConsolePage>
   )
 }

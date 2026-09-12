@@ -1,10 +1,10 @@
 import { Navigate, Route, Routes, useParams } from 'react-router-dom'
+import { Button } from '@insforge/ui'
 import { api } from './api'
 import { usePoll } from './hooks'
 import { AuthGate } from './components/AuthGate'
 import { Layout } from './components/Layout'
 import { Services } from './pages/Services'
-import { ServiceDetail } from './pages/ServiceDetail'
 import { Templates } from './pages/Templates'
 import { Environments } from './pages/Environments'
 import { Logs } from './pages/Logs'
@@ -30,10 +30,24 @@ function Home() {
 }
 
 function ProjectRedirect({ projectId }: { projectId: string }) {
-  const { data: branches } = usePoll(() => api.branches(projectId), [projectId])
+  const { data: branches, error, reload } = usePoll(() => api.branches(projectId), [projectId])
+  // A link to a project that has since been deleted used to render nothing at all, forever: the
+  // lookup rejects and there is no branch to redirect to. Only a 404 means deleted, though.
+  // Treating EVERY failure as deletion sent a network blip, an auth race or a daemon 5xx back to
+  // Home, which redirects into the project again: a loop instead of the actual error.
+  const status = (error as (Error & { status?: number }) | undefined)?.status
+  if (status === 404) return <Navigate to="/" replace />
+  if (error) {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-3 text-center">
+        <p className="text-sm text-muted-foreground">{error.message}</p>
+        <Button variant="secondary" onClick={reload}>Try again</Button>
+      </div>
+    )
+  }
   if (!branches) return null
   const def = branches.find((b) => b.is_default) ?? branches[0]
-  return <Navigate to={`/p/${projectId}/${def?.name ?? 'main'}/services`} replace />
+  return <Navigate to={`/p/${projectId}/${encodeURIComponent(def?.name ?? 'main')}/services`} replace />
 }
 
 function CenterNote({ title, body }: { title: string; body: string }) {
@@ -53,6 +67,19 @@ function ProjectShell() {
   return <Layout />
 }
 
+/** `services/<id>`: the old detail page's links open the console-style overlay instead. */
+function ServiceLink() {
+  const { projectId, branch, sid } = useParams()
+  return <Navigate to={`/p/${projectId}/${branch}/services?service=${encodeURIComponent(sid ?? '')}`} replace />
+}
+
+/** `/p/<id>`: the project switcher's target, which lands on that project's default environment. */
+function ProjectIndex() {
+  const { projectId } = useParams()
+  if (!projectId) return <Navigate to="/" replace />
+  return <ProjectRedirect projectId={projectId} />
+}
+
 export default function App() {
   return (
     <AuthGate>
@@ -62,11 +89,12 @@ export default function App() {
         <Route path="/setup" element={<Setup />} />
         <Route path="/login" element={<Login />} />
         <Route path="/account/tokens" element={<Tokens />} />
+        <Route path="/p/:projectId" element={<ProjectIndex />} />
         <Route path="/p/:projectId/:branch" element={<ProjectShell />}>
           <Route index element={<Navigate to="services" replace />} />
           <Route path="services" element={<Services />} />
           {/* Branch-scoped, opaque service id (decision 49); the `:` in it is path-safe. */}
-          <Route path="services/:sid" element={<ServiceDetail />} />
+          <Route path="services/:sid" element={<ServiceLink />} />
           <Route path="templates" element={<Templates />} />
           <Route path="env" element={<Environments />} />
           {/* pre-rename bookmarks */}
@@ -75,7 +103,9 @@ export default function App() {
           <Route path="secrets" element={<Secrets />} />
           <Route path="database" element={<DatabaseInsight />} />
           <Route path="operations" element={<Operations />} />
-          <Route path="usage" element={<Usage />} />
+          {/* The console's Observability entry; `usage` stays for bookmarks. */}
+          <Route path="observability" element={<Usage />} />
+          <Route path="usage" element={<Navigate to="../observability" replace />} />
           <Route path="approvals" element={<Approvals />} />
           <Route path="settings" element={<Settings />} />
         </Route>

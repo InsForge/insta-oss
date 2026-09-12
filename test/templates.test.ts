@@ -198,6 +198,26 @@ test('manifest parity: the refusals the platform makes, one case each', () => {
   expect(parse({ ...base, services: { web: { ...base.services.web, volume: { sizeGib: 20 } } } }).services.web.volume).toBe(true)
 })
 
+// The parser claims to apply the engine's grammar, and it did not: both regexes were local copies
+// permitting a trailing hyphen, which the engine rejects. A code or service name ending in `-`
+// therefore passed validation here and failed partway through DEPLOYMENT, after preliminary state
+// such as the template's branch had already been created. Both now come from src/names.ts.
+test('manifest names are held to the engine grammar, trailing hyphen included', () => {
+  refuses({ ...base, code: 'api-' }, /code/)
+  refuses({ ...base, services: { 'web-': { ...base.services.web } } }, /web-|service name/)
+  // The shapes that were always legal still parse.
+  expect(parse({ ...base, code: 'api-1' }).code).toBe('api-1')
+  expect(Object.keys(parse({ ...base, services: { 'web-1': { ...base.services.web } } }).services)).toEqual(['web-1'])
+
+  // The 39-character cap the parser has always applied survives being shared with the engine: an
+  // unbounded expression would silently have removed it.
+  expect(parse({ ...base, code: 'c'.repeat(39) }).code).toBe('c'.repeat(39))
+  refuses({ ...base, code: 'c'.repeat(40) }, /code/)
+  expect(Object.keys(parse({ ...base, services: { ['s'.repeat(39)]: { ...base.services.web } } }).services))
+    .toEqual(['s'.repeat(39)])
+  refuses({ ...base, services: { ['s'.repeat(40)]: { ...base.services.web } } }, /service name|s{10}/)
+})
+
 test('manifestDigest is stable under key reordering and moves with content', () => {
   const a = parse({ code: 'x', version: '1', generated: { t: 'secret:8' }, services: { web: { type: 'web', image: 'i', healthcheck: '/', port: 8080 } } })
   const b = parse({ services: { web: { healthcheck: '/', port: 8080, image: 'i', type: 'web' } }, version: '1', generated: { t: 'secret:8' }, code: 'x' })
@@ -661,6 +681,78 @@ test('an inline manifest with a postgres service binds its DATABASE_URL into the
   expect(secrets.DATABASE_URL).toMatch(/^postgres:\/\/postgres:pw@127\.0\.0\.1:2\d{4}\/app$/)
 })
 
+// A real template-created binding, not a synthesized tree: the secret inventory has to say that
+// DATABASE_URL_APP is a BINDING and where it reads from. It used to land in `secrets` next to the
+// user secrets with `minted` empty, so every surface read it as an editable user secret — and both
+// edits are lies. `unsetUserSecret` never removes a binding, so Delete reported success while the
+// name stayed; and `envFor` applies `bindingsFor` LAST, so an Edit wrote a row the container never
+// sees.
+test('a template binding is reported as a binding, with its source, not as a user secret', async () => {
+  const id = await project()
+  const manifest = {
+    code: 'stack', version: '1',
+    services: {
+      store: { type: 'postgres' },
+      app: {
+        type: 'web', image: 'app:1', port: 8080, healthcheck: '/',
+        env: {
+          platform: {
+            DATABASE_URL_APP: '${{services.store.DATABASE_URL}}',
+            // A second binding under a name the daemon does NOT reserve, so the collision below is
+            // reachable: `isReservedSecret` refuses `DATABASE_URL_*`, but an author may bind a
+            // credential into any env name they like.
+            APP_DB: '${{services.store.DATABASE_URL}}',
+          },
+        },
+      },
+    },
+  }
+  expect((await deploy(id, { manifest, branch: 'main' })).statusCode).toBe(202)
+
+  const tree = (await get(`/projects/${id}/secrets/tree`)).json()
+  const env = tree.branches.find((b: { name: string }) => b.name === 'main')
+  const app = env.services.find((s: { type: string; name: string }) => s.type === 'compute' && s.name === 'app')
+
+  // Still in the inventory of names the group's env carries...
+  expect(app.secrets).toContain('DATABASE_URL_APP')
+  // ...but declared a binding, with the service and credential it reads from.
+  expect(app.bindings).toEqual([
+    { envName: 'APP_DB', source: 'postgres/store', sourceName: 'DATABASE_URL', shadowsUserSecret: false },
+    { envName: 'DATABASE_URL_APP', source: 'postgres/store', sourceName: 'DATABASE_URL', shadowsUserSecret: false },
+  ])
+  // And NOT minted: the two platform-owned kinds are distinct and neither is a user secret.
+  expect(app.minted).toEqual([])
+
+  // A user secret bound to the same group is still just a user secret, so the distinction is real
+  // rather than "everything on a compute group is a binding".
+  expect((await put(`/projects/${id}/secrets/MY_OWN`, { value: 'v', branch: 'main', service: 'compute/app' })).statusCode).toBe(200)
+  const after = (await get(`/projects/${id}/secrets/tree`)).json()
+  const app2 = after.branches.find((b: { name: string }) => b.name === 'main')
+    .services.find((s: { type: string; name: string }) => s.type === 'compute' && s.name === 'app')
+  expect(app2.secrets).toEqual(expect.arrayContaining(['DATABASE_URL_APP', 'MY_OWN']))
+  expect(app2.bindings.map((x: { envName: string }) => x.envName)).toEqual(['APP_DB', 'DATABASE_URL_APP'])
+
+  // Only a compute group is a binding target: the postgres service reports none.
+  const store = after.branches.find((b: { name: string }) => b.name === 'main')
+    .services.find((s: { type: string; name: string }) => s.type === 'postgres' && s.name === 'store')
+  expect(store.bindings).toEqual([])
+  expect(app2.bindings.every((x: { shadowsUserSecret: boolean }) => !x.shadowsUserSecret)).toBe(true)
+
+  // A user secret of the SAME name as a binding IS reachable: `isReservedSecret` refuses the
+  // platform's own `DATABASE_URL_*` forms, but a binding may use any env name, and `APP_DB` is not
+  // reserved. The container still receives ONE value — the binding's, applied last — so the
+  // inventory lists the name once and says a dead user row is underneath it. Concatenating listed
+  // it twice and drew two rows for one variable.
+  expect((await put(`/projects/${id}/secrets/DATABASE_URL_APP`, { value: 'mine', branch: 'main', service: 'compute/app' })).statusCode).toBe(400)
+  expect((await put(`/projects/${id}/secrets/APP_DB`, { value: 'mine', branch: 'main', service: 'compute/app' })).statusCode).toBe(200)
+  const clash = (await get(`/projects/${id}/secrets/tree`)).json()
+    .branches.find((b: { name: string }) => b.name === 'main')
+    .services.find((s: { type: string; name: string }) => s.type === 'compute' && s.name === 'app')
+  expect(clash.secrets.filter((n: string) => n === 'APP_DB')).toHaveLength(1)
+  expect(clash.bindings.find((x: { envName: string }) => x.envName === 'APP_DB'))
+    .toEqual({ envName: 'APP_DB', source: 'postgres/store', sourceName: 'DATABASE_URL', shadowsUserSecret: true })
+})
+
 test('the per-type cap is enforced synchronously, before any service is created', async () => {
   build({ INSTA_OSS_MAX_SERVICES_PER_TYPE: '1' })
   const id = await project()
@@ -706,4 +798,45 @@ test('the default health probe dials 127.0.0.1:<cfg.port> with the service Host,
 test('GET /template-deployments/:id is 404 for an unknown id', async () => {
   expect((await get('/template-deployments/11111111-2222-4333-8444-555555555555')).statusCode).toBe(404)
   expect((await get('/template-deployments/11111111-2222-4333-8444-555555555555')).json().error).toBe('template deployment not found')
+})
+
+// The 39-character branch-name cap opened exactly one gap: `resolveBranch` mints `<code>-2` for the
+// second copy, so a code of 38 or 39 characters is legal on its own but 40 or 41 with the suffix.
+// It used to reach `assertBranchName` and surface as the route's default 400 "branch name must be
+// lower-kebab" - a rule the author's code did not break - AFTER governance had run, so a single-use
+// approval could be consumed by it. The service-name copy path has always refused this case with a
+// purpose-built 409 naming the real cause; the branch path now matches.
+test('a template code too long to suffix is refused by NAME LENGTH, not by the kebab rule', async () => {
+  const id = await project()
+  const code = 'c'.repeat(39)
+  const manifest = { code, version: '1', services: { web: { type: 'web', image: 'nginx:alpine', healthcheck: '/' } } }
+
+  const first = await post(`/projects/${id}/template-deployments`, { manifest })
+  expect(first.statusCode).toBe(202)
+  expect((await get(`/projects/${id}/branches`)).json().branches.map((b: { name: string }) => b.name)).toContain(code)
+
+  const second = await post(`/projects/${id}/template-deployments`, { manifest })
+  expect(second.statusCode).toBe(409)
+  expect(second.json().error).toContain('too long to copy')
+  expect(second.json().error).toContain('39-character branch-name limit')
+  expect(second.json().error).not.toContain('lower-kebab')
+
+  // Nothing was created for the refused attempt.
+  const names = (await get(`/projects/${id}/branches`)).json().branches.map((b: { name: string }) => b.name)
+  expect(names.filter((n: string) => n.startsWith('c')).length).toBe(1)
+})
+
+// The positive half: a normal code still takes a second branch, so the guard above refuses only
+// what it must. A LONG-but-legal code cannot be used here — two long names collide on the
+// truncated resource ref (`branch ... already exists as ...`) well before the cap matters, which is
+// a separate, pre-existing constraint with its own clear error.
+test('a normal code still takes a second branch', async () => {
+  const id = await project()
+  const code = 'demo-app'
+  const manifest = { code, version: '1', services: { web: { type: 'web', image: 'nginx:alpine', healthcheck: '/' } } }
+  expect((await post(`/projects/${id}/template-deployments`, { manifest })).statusCode).toBe(202)
+  expect((await post(`/projects/${id}/template-deployments`, { manifest })).statusCode).toBe(202)
+  const names = (await get(`/projects/${id}/branches`)).json().branches.map((b: { name: string }) => b.name)
+  expect(names).toContain(code)
+  expect(names).toContain(`${code}-2`)
 })

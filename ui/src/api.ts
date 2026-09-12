@@ -9,8 +9,11 @@ import type { DomainResult } from './lib/domains'
 import type { TemplateVariable } from './lib/templateVars'
 
 export type Project = { id: string; name: string; status: string }
-export type BranchInfo = { id: string; name: string; is_default: boolean; status: string }
+export type BranchInfo = { id: string; name: string; is_default: boolean; status: string; created_at?: string }
 export type ServiceType = 'postgres' | 'storage' | 'compute' | 'redis' | 'mysql' | 'mongodb'
+/** One row of `GET /projects/:id`'s `resources`: what a single branch carries. The daemon's `kind`
+ *  IS the service type (the cloud maps provider names like `neon`/`fly`/`s3` onto the same set). */
+export type ProjectResource = { kind: string; name: string | null; branchId: string; status: string }
 export type Service = {
   /** Opaque and branch-scoped (decision 49): `<branchId>:<serviceId>` off the default branch. */
   id: string; type: ServiceType; name: string; status: string
@@ -22,6 +25,8 @@ export type Service = {
   /** `host[:port]` (a script may read it); never a URL (decision 40). */
   endpoint?: string
   updated_at?: string
+  /** When the service was created (the console's Created column). */
+  created_at?: string
   // Additive columns from the serverless routes (contract section 9, services row).
   always_on?: boolean; image?: string; port?: number; volume_gib?: number | null
   template_deployment_id?: string; template_code?: string; pg_version?: number
@@ -42,10 +47,39 @@ export type SecretTree = {
   projectWide: string[]
   branches: Array<{
     name: string; isDefault: boolean
-    services: Array<{ type: string; name: string; secrets: string[] }>
+    /** `minted` is the platform-issued subset of `secrets`: those reach every compute group in the
+     *  branch, while the rest are user secrets bound to this service and reach only it.
+     *
+     *  `bindings` is the OTHER platform-owned subset: names a `${{services.x.KEY}}` binding maps
+     *  into this compute group. They are not user secrets — `unsetUserSecret` does not remove one,
+     *  and a user row of the same name is overridden because `envFor` applies bindings last — so a
+     *  surface offering Edit or Delete has to exclude them. Only compute groups are targets.
+     *
+     *  `shadowsUserSecret` means a user secret of the SAME name also exists on this group. The
+     *  binding still wins, so the row is a binding — but the dead user row underneath it is real
+     *  and removable, and `secrets` lists the name once because the container receives one value
+     *  for it. */
+    services: Array<{
+      type: string; name: string; secrets: string[]; minted: string[]
+      bindings: Array<{ envName: string; source: string; sourceName: string; shadowsUserSecret: boolean }>
+    }>
     unbound: string[]
   }>
 }
+/** The observability components the daemon serves logs and metrics for. Each managed database is
+ *  its own component and is never folded into `db` (server.ts: `component must be
+ *  db|compute|redis|mysql|mongodb`), so asking for `db` on a Redis service answers about Postgres. */
+export type ObsComponent = 'compute' | 'db' | 'redis' | 'mysql' | 'mongodb'
+
+/** Service type as the services list reports it, to the component that observes it. `storage` has
+ *  no container of its own, so it has neither logs nor metrics and gets neither tab. */
+export function obsComponentFor(type: string): ObsComponent | undefined {
+  if (type === 'compute') return 'compute'
+  if (type === 'postgres') return 'db'
+  if (type === 'redis' || type === 'mysql' || type === 'mongodb') return type
+  return undefined
+}
+
 export type LogLine = { ts: string; level?: string; message: string; instance?: string }
 export type LogsResult = { source: string; lines: LogLine[]; note?: string }
 export type MetricSeries = { name: string; unit?: string; labels?: Record<string, string>; points: Array<[number, number]> }
@@ -116,15 +150,23 @@ export const api = {
   health: () => get<{ ok: boolean }>('/healthz'),
   projects: async () => (await get<{ projects: Project[] }>('/orgs/local/projects')).projects,
   branches: async (p: string) => (await get<{ branches: BranchInfo[] }>(`/projects/${p}/branches`)).branches,
+  /** Branches AND the resources each one carries, in one call. The console builds its Environments
+   *  table from exactly this (`GET /projects/{projectId}` + `mapEnvironments`), deriving a branch's
+   *  service types by matching `resource.branchId`, rather than asking per environment. */
+  projectDetail: (p: string) => get<{ branches: BranchInfo[]; resources: ProjectResource[] }>(`/projects/${p}`),
   services: async (p: string, branch: string) =>
     (await get<{ services: Service[] }>(`/projects/${p}/services${qs({ branch })}`)).services,
   approvals: async (p: string) => (await get<{ approvals: Approval[] }>(`/projects/${p}/approvals`)).approvals,
   policy: async (p: string) => (await get<{ policy: Policy }>(`/projects/${p}/policy`)).policy,
   events: async (p: string, limit = 30) => (await get<{ events: AuditEvent[] }>(`/projects/${p}/events?limit=${limit}`)).events,
-  logs: (p: string, component: 'compute' | 'db', branch: string, limit = 200) =>
-    get<LogsResult>(`/projects/${p}/logs${qs({ component, branch, limit })}`),
-  metrics: (p: string, component: 'compute' | 'db', branch: string) =>
-    get<MetricsResult>(`/projects/${p}/metrics${qs({ component, branch })}`),
+  /** `group` narrows to ONE service's container. It matters for more than bandwidth: the daemon
+   *  merges every container in the component and truncates to `limit` LAST, so a noisy sibling can
+   *  fill the whole window and a quiet service looks like it has no logs at all. */
+  logs: (p: string, component: ObsComponent, branch: string, limit = 200, group?: string) =>
+    get<LogsResult>(`/projects/${p}/logs${qs({ component, branch, limit, group })}`),
+  /** `group` narrows to one service's container, as on the logs route. */
+  metrics: (p: string, component: ObsComponent, branch: string, group?: string) =>
+    get<MetricsResult>(`/projects/${p}/metrics${qs({ component, branch, group })}`),
 
   // Names-only inventory: the dashboard never shows secret VALUES (plan v1 non-goal; values
   // stay behind `insta secrets`, secrets.read-gated). This route emits no audit event.
@@ -140,8 +182,11 @@ export const api = {
   operations: async (p: string, limit = 50) =>
     (await get<{ operations: Operation[] }>(`/projects/${p}/operations?limit=${limit}`)).operations,
 
-  setSecret: (p: string, name: string, value: string, branch?: string) =>
-    call<{ ok: boolean }>('PUT', `/projects/${p}/secrets/${encodeURIComponent(name)}`, branch ? { value, branch } : { value }),
+  /** `service` binds an environment-scoped secret to one service (`<type>/<name>`, as the CLI's
+   *  `--service` sends it); omitted, the secret is shared by the environment or the project. */
+  setSecret: (p: string, name: string, value: string, branch?: string, service?: string) =>
+    call<{ ok: boolean }>('PUT', `/projects/${p}/secrets/${encodeURIComponent(name)}`,
+      { value, ...(branch ? { branch } : {}), ...(branch && service ? { service } : {}) }),
   unsetSecret: (p: string, name: string, branch?: string) =>
     call<{ ok: boolean }>('DELETE', `/projects/${p}/secrets/${encodeURIComponent(name)}${qs({ branch })}`),
   renameService: (p: string, sid: string, name: string, branch?: string) =>

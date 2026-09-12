@@ -10,6 +10,7 @@ import { ApprovalPrompt, type PendingApproval } from '../components/ApprovalProm
 import { DeployDialog } from '../components/DeployDialog'
 import { Markdown } from '../components/Markdown'
 import { categoryLabel, ErrorNote, Modal, TemplateLogo } from '../components/ui'
+import { ConsolePage } from '../components/console/ConsolePage'
 
 /** The bundled catalog (plan 07 I): `GET /templates` reads the images and manifests shipped with
  *  the daemon, so the gallery works with no network. Logos arrive as data: URIs (decision 29). */
@@ -27,13 +28,8 @@ export function Templates() {
   const shown = useMemo(() => filterTemplates(items, query, category), [items, query, category])
 
   return (
-    <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-4">
-      <div>
-        <h1 className="text-[32px] leading-12 font-bold">Templates</h1>
-        <p className="text-sm text-muted-foreground">
-          Ready-made services, deployed into <span className="font-mono">{branch}</span> with their own credentials.
-        </p>
-      </div>
+    <ConsolePage title="Templates"
+      subtitle={<>Ready-made services, deployed into <span className="font-medium">{branch}</span> with their own credentials</>}>
 
       <div className="flex flex-wrap items-center gap-3">
         <SearchInput value={query} onChange={setQuery} placeholder="Search templates" className="w-72" debounceTime={0} />
@@ -67,7 +63,7 @@ export function Templates() {
           onApproval={setApproval} />
       )}
       <ApprovalPrompt projectId={projectId} pending={approval} onClose={() => setApproval(null)} />
-    </div>
+    </ConsolePage>
   )
 }
 
