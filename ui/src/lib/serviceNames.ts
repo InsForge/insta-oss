@@ -12,7 +12,7 @@ export const LOWER_KEBAB_NAME_ERROR = 'Use lowercase letters, digits, and hyphen
 /** The daemon's branch-name rule (engine.ts BRANCH_NAME_RE). A branch name becomes part of every
  *  hostname and URL that addresses the environment, so a name with a space, `/`, `?` or `#` would
  *  create an environment its own URL cannot reach. */
-export const BRANCH_NAME_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
+export const BRANCH_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/
 export const LOWER_KEBAB_BRANCH_ERROR =
   'Use lowercase letters, digits, and hyphens (must start and end with a letter or digit).'
 

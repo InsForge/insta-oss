@@ -208,6 +208,14 @@ test('manifest names are held to the engine grammar, trailing hyphen included', 
   // The shapes that were always legal still parse.
   expect(parse({ ...base, code: 'api-1' }).code).toBe('api-1')
   expect(Object.keys(parse({ ...base, services: { 'web-1': { ...base.services.web } } }).services)).toEqual(['web-1'])
+
+  // The 39-character cap the parser has always applied survives being shared with the engine: an
+  // unbounded expression would silently have removed it.
+  expect(parse({ ...base, code: 'c'.repeat(39) }).code).toBe('c'.repeat(39))
+  refuses({ ...base, code: 'c'.repeat(40) }, /code/)
+  expect(Object.keys(parse({ ...base, services: { ['s'.repeat(39)]: { ...base.services.web } } }).services))
+    .toEqual(['s'.repeat(39)])
+  refuses({ ...base, services: { ['s'.repeat(40)]: { ...base.services.web } } }, /service name|s{10}/)
 })
 
 test('manifestDigest is stable under key reordering and moves with content', () => {

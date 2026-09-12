@@ -50,6 +50,22 @@ export function tabsFor(type: string): TabId[] {
   return ['variables', 'settings']
 }
 
+/** Is a nested dialog OPEN above this overlay?
+ *
+ *  Restart, Delete and the approval prompt are the kit's Radix Dialog, which PORTALS to
+ *  document.body — outside the overlay's DOM root. Both the focus trap and the Escape handler have
+ *  to stand down for them: the trap because the nested dialog's own buttons look like "focus
+ *  outside", and Escape because Radix dismisses on it without guaranteeing the native event is
+ *  default-prevented, so one press would close the dialog AND the overlay behind it.
+ *
+ *  Keyed on `data-state="open"`, not mere presence, so an unrelated dialog element or one still
+ *  mounted through a close animation cannot silently disable either guard. */
+function hasOpenNestedDialog(root: HTMLElement | null): boolean {
+  return Array.from(
+    document.querySelectorAll('[role="dialog"][data-state="open"],[role="alertdialog"][data-state="open"]'),
+  ).some((d) => d !== root && !root?.contains(d))
+}
+
 type Ctx = {
   projectId: string; branch: string; service: Service
   onDone: () => void; onError: (m: string) => void; onApproval: (p: NonNullable<PendingApproval>) => void
@@ -80,12 +96,21 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
     }, { replace: true })
   }
 
+  const overlayRef = useRef<HTMLDivElement>(null)
+
   // A stale id (deleted service, another environment's link) closes instead of rendering nothing.
   const missing = services !== undefined && !service
   useEffect(() => { if (missing) onClose() }, [missing, onClose])
-  // Window-level so a nested dialog's Escape wins first (it preventDefaults).
+  // Window-level so a nested dialog's Escape wins first. `defaultPrevented` alone is not enough to
+  // rely on: Radix dismisses on Escape without guaranteeing the native event is default-prevented,
+  // so one Escape could close the Restart dialog AND this overlay behind it. Same guard as the
+  // focus trap: while a nested dialog is open, Escape is its to handle.
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) onClose() }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      if (hasOpenNestedDialog(overlayRef.current)) return
+      onClose()
+    }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onClose])
@@ -94,7 +119,6 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
   // is a plain fixed div rather than the kit's Dialog, so nothing was keeping that promise: focus
   // stayed wherever it was and Tab walked straight into the dashboard behind the overlay. Move
   // focus in, keep it in, and give it back to whatever opened this on close.
-  const overlayRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null
     const root = overlayRef.current
@@ -104,22 +128,9 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
       ) ?? [],
     ).filter((el) => el.offsetParent !== null)
 
-    // Restart, Delete and the approval prompt are the kit's Radix Dialog, which PORTALS to
-    // document.body — outside this overlay. Without standing down for them, "focus is outside the
-    // overlay" was true of the nested dialog's own buttons, and this handler dragged focus back
-    // out of it, making its keyboard controls unreachable. Radix traps focus itself, so when one
-    // is open the outer trap has nothing to do.
-    // `data-state="open"` and not merely "mounted": Radix stamps it on open content, so an
-    // unrelated dialog element, or one still mounted through a close animation, cannot silently
-    // stand the whole trap down. Verified in a browser: the nested dialog reports
-    // data-state="open" while open, and this overlay carries no data-state of its own.
-    const nestedOpen = () => Array.from(
-      document.querySelectorAll('[role="dialog"][data-state="open"],[role="alertdialog"][data-state="open"]'),
-    ).some((d) => d !== root && !root?.contains(d))
-
     focusable()[0]?.focus()
     const onTab = (e: KeyboardEvent) => {
-      if (e.key !== 'Tab' || !root || nestedOpen()) return
+      if (e.key !== 'Tab' || !root || hasOpenNestedDialog(root)) return
       const items = focusable()
       if (!items.length) return
       const first = items[0]

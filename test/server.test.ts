@@ -2333,6 +2333,23 @@ test('a branch name that is not lower-kebab is refused on create, as it already 
   expect((await post(`/projects/${id}/branches`, { name: 'feat-1' })).statusCode).toBe(201)
 })
 
+// docs/projects/branches.mdx states 39 characters, and the template parser enforced the same cap
+// for codes. Sharing one expression between them is only correct if it carries the cap: an
+// unbounded one silently removed the parser's and let these routes accept what the docs refuse.
+test('a branch name is capped at 39 characters, on create and on rename', async () => {
+  const id = await createProject()
+  const at39 = 'b'.repeat(39)
+  const at40 = 'b'.repeat(40)
+
+  expect((await post(`/projects/${id}/branches`, { name: at40 })).statusCode).toBe(400)
+  const ok = await post(`/projects/${id}/branches`, { name: at39 })
+  expect(ok.statusCode).toBe(201)
+
+  // Rename is held to the same boundary.
+  const bid = ok.json().branch.id
+  expect((await patch(`/projects/${id}/branches/${bid}`, { name: at40 })).statusCode).toBeGreaterThanOrEqual(400)
+})
+
 // A service name is a DNS label (`<group>-<project>-<branch>.<domain>`), and RFC 1123 forbids a
 // leading or trailing hyphen. Three of the four checks in the engine had drifted apart: compute
 // rename refused a trailing hyphen, while add-service and managed rename accepted it and minted a
