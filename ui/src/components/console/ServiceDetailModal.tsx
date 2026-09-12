@@ -109,8 +109,13 @@ export function ServiceDetailModal({ projectId, branch, serviceId, requestedTab,
     // overlay" was true of the nested dialog's own buttons, and this handler dragged focus back
     // out of it, making its keyboard controls unreachable. Radix traps focus itself, so when one
     // is open the outer trap has nothing to do.
-    const nestedOpen = () => Array.from(document.querySelectorAll('[role="dialog"],[role="alertdialog"]'))
-      .some((d) => d !== root && !root?.contains(d))
+    // `data-state="open"` and not merely "mounted": Radix stamps it on open content, so an
+    // unrelated dialog element, or one still mounted through a close animation, cannot silently
+    // stand the whole trap down. Verified in a browser: the nested dialog reports
+    // data-state="open" while open, and this overlay carries no data-state of its own.
+    const nestedOpen = () => Array.from(
+      document.querySelectorAll('[role="dialog"][data-state="open"],[role="alertdialog"][data-state="open"]'),
+    ).some((d) => d !== root && !root?.contains(d))
 
     focusable()[0]?.focus()
     const onTab = (e: KeyboardEvent) => {
