@@ -5,7 +5,7 @@ import { Moon, ScrollText } from 'lucide-react'
 import { api, obsComponentFor, type LogLine, type ObsComponent } from '../api'
 import { usePoll } from '../hooks'
 import { healthFor } from '../lib/status'
-import { instanceLabel, labelMatches } from '../lib/instanceLabels'
+import { instanceLabel } from '../lib/instanceLabels'
 import { ConsolePage } from '../components/console/ConsolePage'
 
 type Component = ObsComponent
@@ -61,7 +61,11 @@ export function LogsPanel({ projectId, branch, component, service }: {
     ? s.name === service.name && s.type === service.type
     : obsComponentFor(s.type) === component)
   const standby = wanted.length > 0 && wanted.every((s) => healthFor(health, s.id)?.status === 'standby')
-  const lines = data ? (service ? data.lines.filter((l) => labelMatches(instanceLabel(l.instance), service.name)) : data.lines) : undefined
+  // No client-side filter: the request is already scoped with `group`, so this could only
+  // SUBTRACT, and it did. instanceLabel reduces any container ending in `-pg` to "postgres", so a
+  // postgres service actually NAMED "pg" arrived as label "postgres", failed to match the name
+  // "pg", and had every one of its own lines dropped.
+  const lines = data?.lines
 
   return (
     <div className="flex flex-col gap-3">

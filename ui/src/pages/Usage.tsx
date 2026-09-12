@@ -5,7 +5,7 @@ import { Gauge } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api, obsComponentFor, type MetricSeries, type ObsComponent } from '../api'
 import { usePoll } from '../hooks'
-import { instanceLabel, labelMatches } from '../lib/instanceLabels'
+import { instanceLabel } from '../lib/instanceLabels'
 import { ConsolePage } from '../components/console/ConsolePage'
 
 // The one sanctioned hex exception: the chart series palette (Figma observability design).
@@ -22,12 +22,11 @@ type Snapshot = { t: number; values: Record<string, number> } // instance -> val
 type History = { cpu: Snapshot[]; memory: Snapshot[] }
 
 /** Latest value per instance for one metric name across the returned series. */
-function latest(series: MetricSeries[], name: string, only?: string): Record<string, number> {
+function latest(series: MetricSeries[], name: string): Record<string, number> {
   const out: Record<string, number> = {}
   for (const s of series) {
     if (s.name !== name) continue
     const label = instanceLabel(s.labels?.instance)
-    if (only && !labelMatches(label, only)) continue
     const last = s.points[s.points.length - 1]
     if (label && last) out[label] = last[1]
   }
@@ -123,11 +122,11 @@ export function LiveMetrics({ projectId, branch, service }: {
   const componentKey = components.join(',')
 
   const { data, error } = usePoll(async () => {
-    const answers = await Promise.all(components.map((c) => api.metrics(projectId, c, branch)))
+    const answers = await Promise.all(components.map((c) => api.metrics(projectId, c, branch, only)))
     const series = answers.flatMap((a) => a.series)
     const t = Date.now()
     for (const name of ['cpu', 'memory'] as const) {
-      const values = latest(series, name, only)
+      const values = latest(series, name)
       if (Object.keys(values).length) {
         history.current[name] = [...history.current[name], { t, values }].slice(-240)
       }
@@ -135,8 +134,8 @@ export function LiveMetrics({ projectId, branch, service }: {
     return { series, note: answers.find((a) => a.note)?.note }
   }, [projectId, branch, only, componentKey])
 
-  const cpuNow = data ? latest(data.series, 'cpu', only) : {}
-  const memNow = data ? latest(data.series, 'memory', only) : {}
+  const cpuNow = data ? latest(data.series, 'cpu') : {}
+  const memNow = data ? latest(data.series, 'memory') : {}
   const instances = [...new Set([...Object.keys(cpuNow), ...Object.keys(memNow)])].sort()
 
   return (
