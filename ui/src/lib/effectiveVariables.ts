@@ -8,6 +8,12 @@ import type { SecretTree } from '../api'
 
 export type EffectiveVariable = { name: string; source: string }
 
+/** `<type>/<name>` -> `<name>`. A service id with no slash is already a name. */
+function serviceNameOf(serviceId: string): string {
+  const i = serviceId.indexOf('/')
+  return i === -1 ? serviceId : serviceId.slice(i + 1)
+}
+
 type Branch = SecretTree['branches'][number]
 
 /** The order engine.envFor merges in, lowest precedence first:
@@ -32,7 +38,12 @@ export function effectiveVariables(
     // A BINDING is not "this service": the value is read from another service's credential and
     // mapped into this group's env under a different name, and `envFor` applies bindings after
     // everything else. Naming the source is the whole reason someone opens this tab.
-    const boundFrom = new Map((own?.bindings ?? []).map((x) => [x.envName, x.source]))
+    //
+    // The bare SERVICE NAME, to match the minted rows above (which use `s.name`). `x.source` is the
+    // `<type>/<name>` service id, so labelling with it put two conventions in one column — the same
+    // view showed `cache` on a minted row and `redis/cache` on a bound one. `sourceName` is the
+    // credential KEY, not a service, so the name is the only service-shaped half available.
+    const boundFrom = new Map((own?.bindings ?? []).map((x) => [x.envName, serviceNameOf(x.source)]))
     for (const n of own?.secrets ?? []) effective.set(n, boundFrom.get(n) ?? 'This service')
   } else {
     const own = branch.services.find((s) => s.type === service.type && s.name === service.name)

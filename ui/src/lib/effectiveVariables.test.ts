@@ -57,7 +57,8 @@ describe('effectiveVariables', () => {
       ],
     })
     const rows = effectiveVariables(tree, b, { type: 'compute', name: 'app' })
-    expect(rows.find((r) => r.name === 'APP_DB_URL')?.source).toBe('postgres/db')
+    // The bare service name, matching the minted rows: ONE convention per column.
+    expect(rows.find((r) => r.name === 'APP_DB_URL')?.source).toBe('db')
     // A genuine service-bound user secret is still this service's.
     expect(rows.find((r) => r.name === 'MY_OWN')?.source).toBe('This service')
   })
@@ -74,7 +75,26 @@ describe('effectiveVariables', () => {
     })
     const rows = effectiveVariables(tree, b, { type: 'compute', name: 'app' })
     expect(rows.filter((r) => r.name === 'SHARED')).toHaveLength(1)
-    expect(rows[0]?.source).toBe('redis/cache')
+    expect(rows[0]?.source).toBe('cache')
+  })
+
+  // The property, not just the two cases: whatever a row's source is, it reads like the service
+  // names used for minted rows, never a `<type>/<name>` id.
+  it('uses ONE naming convention in the source column', () => {
+    const tree: SecretTree = { projectWide: [], branches: [] }
+    const b = branch({
+      services: [
+        { type: 'redis', name: 'cache', secrets: ['REDIS_URL'], minted: ['REDIS_URL'], bindings: [] },
+        {
+          type: 'compute', name: 'app', secrets: ['BOUND'], minted: [],
+          bindings: [{ envName: 'BOUND', source: 'redis/cache', sourceName: 'REDIS_URL', shadowsUserSecret: false }],
+        },
+      ],
+    })
+    const rows = effectiveVariables(tree, b, { type: 'compute', name: 'app' })
+    expect(rows.find((r) => r.name === 'REDIS_URL')?.source).toBe('cache')
+    expect(rows.find((r) => r.name === 'BOUND')?.source).toBe('cache')
+    for (const r of rows) expect(r.source, r.name).not.toContain('/')
   })
 
   it('never carries a secret bound to another compute group', () => {
