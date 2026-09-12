@@ -44,7 +44,13 @@ function LogRows({ lines }: { lines: LogLine[] }) {
 export function LogsPanel({ projectId, branch, component, service }: {
   projectId: string; branch: string; component: Component; service?: { name: string; type: string }
 }) {
-  const { data, error } = usePoll(() => api.logs(projectId, component, branch), [projectId, branch, component])
+  // Ask the daemon for THIS service's container rather than filtering the component stream here:
+  // it truncates the merged stream to the limit before returning it, so a noisy sibling could use
+  // up the whole window and leave the selected service reading "No logs yet."
+  const { data, error } = usePoll(
+    () => api.logs(projectId, component, branch, 200, service?.name),
+    [projectId, branch, component, service?.name],
+  )
   const { data: services } = usePoll(() => api.services(projectId, branch), [projectId, branch], 15000)
   const { data: health } = usePoll(() => api.runtimeHealth(projectId, branch), [projectId, branch], 15000)
 

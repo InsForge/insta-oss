@@ -1296,6 +1296,38 @@ test('logs endpoint tails containers with the cloud LogsResult shape (db works l
   vi.mocked(dockerFn).mockImplementation(fakeDocker)
 })
 
+// runtimeLogs reads every container in the component, merges, sorts, and only THEN slices to the
+// limit. So a noisy neighbour can fill the whole window and a quiet service reads as having no
+// logs at all. The dashboard used to fetch the component stream and filter in the browser, which
+// is exactly this trap; `group` narrows at the source instead.
+test('group keeps a quiet service readable when a noisy sibling would fill the whole limit', async () => {
+  const id = await createProject()
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'quiet' })
+  await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000, group: 'noisy' })
+
+  vi.mocked(dockerFn).mockImplementation(async (args: string[]) => {
+    if (args[0] !== 'logs') return Buffer.from('')
+    const container = args[args.length - 1]
+    // The noisy one is both LOUDER and NEWER, so the merged tail is entirely its own.
+    if (container.endsWith('-app-noisy')) {
+      return Buffer.from(
+        Array.from({ length: 50 }, (_, i) => `2026-07-22T02:00:${String(i).padStart(2, '0')}.000Z noise ${i}`).join('\n') + '\n')
+    }
+    return Buffer.from('2026-07-22T01:00:00.000Z quiet line\n')
+  })
+
+  // Unfiltered, at a limit the noisy service alone exceeds, the quiet line is gone.
+  const merged = (await get(`/projects/${id}/logs?component=compute&branch=main&limit=10`)).json()
+  expect(merged.lines.some((l: { message: string }) => l.message === 'quiet line')).toBe(false)
+
+  // Asked for by group, it survives: the truncation happens after picking the container.
+  const scoped = (await get(`/projects/${id}/logs?component=compute&branch=main&limit=10&group=quiet`)).json()
+  expect(scoped.lines.some((l: { message: string }) => l.message === 'quiet line')).toBe(true)
+  expect(scoped.lines.some((l: { message: string }) => l.message.startsWith('noise'))).toBe(false)
+
+  vi.mocked(dockerFn).mockImplementation(fakeDocker)
+})
+
 test('metrics endpoint returns docker-stats series (cpu %, memory bytes)', async () => {
   const id = await createProject()
   await post(`/projects/${id}/deploy`, { image: 'app:1', branch: 'main', port: 3000 })

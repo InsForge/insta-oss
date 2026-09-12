@@ -4,7 +4,7 @@
 // deleted). Self-host divergences: no Rename Environment (the daemon has no branch rename), and no
 // GitHub deployments panel.
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   Button, ConfirmDialog, cn, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
@@ -26,14 +26,11 @@ function Th({ children }: { children?: string }) {
 
 /** One icon per service type the environment carries.
  *
- *  There is no all-environments service route, so this is one request per row. It used to repeat
- *  them every 30 seconds purely to redraw icons: an N-environment project issued N requests a
- *  minute for a set of types that changes only when a service is added or removed. Five minutes is
- *  plenty for an icon strip, and the Service page is where live state belongs. */
-function ServiceIcons({ projectId, env }: { projectId: string; env: string }) {
-  const { data } = usePoll(() => api.services(projectId, env), [projectId, env], 300_000)
-  if (!data) return <span className="text-sm text-muted-foreground">…</span>
-  const types = [...new Set(data.map((s) => s.type))]
+ *  The types come from the ONE `GET /projects/:id` the page already makes, exactly as the console
+ *  builds this table (`mapEnvironments` derives a branch's services by matching
+ *  `resource.branchId`). This used to be a `GET /services` poll per row, so opening a project with
+ *  N environments fired N requests of Docker-backed work, repeatedly, just to draw icons. */
+function ServiceIcons({ types }: { types: string[] }) {
   if (types.length === 0) return <span className="text-sm text-muted-foreground">—</span>
   return (
     <div className="flex items-center gap-2">
@@ -90,7 +87,17 @@ function EnvironmentActionsMenu({ projectId, env, onDeleted, onError, onApproval
 export function Environments() {
   const { projectId, branch } = useParams() as { projectId: string; branch: string }
   const nav = useNavigate()
-  const { data: envs, reload } = usePoll(() => api.branches(projectId), [projectId])
+  // One call for the branches AND what each carries, like the console's Environments table.
+  const { data: detail, reload } = usePoll(() => api.projectDetail(projectId), [projectId])
+  const envs = detail?.branches
+  const typesByBranch = useMemo(() => {
+    const m = new Map<string, string[]>()
+    for (const r of detail?.resources ?? []) {
+      const seen = m.get(r.branchId) ?? []
+      if (!seen.includes(r.kind)) m.set(r.branchId, [...seen, r.kind])
+    }
+    return m
+  }, [detail])
   const [createOpen, setCreateOpen] = useState(false)
   const [approval, setApproval] = useState<PendingApproval>(null)
   const [error, setError] = useState<string>()
@@ -151,7 +158,7 @@ export function Environments() {
                         <EnvStatusBadge env={env} />
                       )}
                     </td>
-                    <td className="px-4 py-3"><ServiceIcons projectId={projectId} env={env.name} /></td>
+                    <td className="px-4 py-3"><ServiceIcons types={typesByBranch.get(env.id) ?? []} /></td>
                     <td className="px-4 py-3 text-sm text-muted-foreground">{createdDate(env.created_at)}</td>
                     {env.is_default ? (
                       <td className="w-12" />

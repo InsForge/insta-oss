@@ -11,6 +11,9 @@ import type { TemplateVariable } from './lib/templateVars'
 export type Project = { id: string; name: string; status: string }
 export type BranchInfo = { id: string; name: string; is_default: boolean; status: string; created_at?: string }
 export type ServiceType = 'postgres' | 'storage' | 'compute' | 'redis' | 'mysql' | 'mongodb'
+/** One row of `GET /projects/:id`'s `resources`: what a single branch carries. The daemon's `kind`
+ *  IS the service type (the cloud maps provider names like `neon`/`fly`/`s3` onto the same set). */
+export type ProjectResource = { kind: string; name: string | null; branchId: string; status: string }
 export type Service = {
   /** Opaque and branch-scoped (decision 49): `<branchId>:<serviceId>` off the default branch. */
   id: string; type: ServiceType; name: string; status: string
@@ -134,13 +137,20 @@ export const api = {
   health: () => get<{ ok: boolean }>('/healthz'),
   projects: async () => (await get<{ projects: Project[] }>('/orgs/local/projects')).projects,
   branches: async (p: string) => (await get<{ branches: BranchInfo[] }>(`/projects/${p}/branches`)).branches,
+  /** Branches AND the resources each one carries, in one call. The console builds its Environments
+   *  table from exactly this (`GET /projects/{projectId}` + `mapEnvironments`), deriving a branch's
+   *  service types by matching `resource.branchId`, rather than asking per environment. */
+  projectDetail: (p: string) => get<{ branches: BranchInfo[]; resources: ProjectResource[] }>(`/projects/${p}`),
   services: async (p: string, branch: string) =>
     (await get<{ services: Service[] }>(`/projects/${p}/services${qs({ branch })}`)).services,
   approvals: async (p: string) => (await get<{ approvals: Approval[] }>(`/projects/${p}/approvals`)).approvals,
   policy: async (p: string) => (await get<{ policy: Policy }>(`/projects/${p}/policy`)).policy,
   events: async (p: string, limit = 30) => (await get<{ events: AuditEvent[] }>(`/projects/${p}/events?limit=${limit}`)).events,
-  logs: (p: string, component: ObsComponent, branch: string, limit = 200) =>
-    get<LogsResult>(`/projects/${p}/logs${qs({ component, branch, limit })}`),
+  /** `group` narrows to ONE service's container. It matters for more than bandwidth: the daemon
+   *  merges every container in the component and truncates to `limit` LAST, so a noisy sibling can
+   *  fill the whole window and a quiet service looks like it has no logs at all. */
+  logs: (p: string, component: ObsComponent, branch: string, limit = 200, group?: string) =>
+    get<LogsResult>(`/projects/${p}/logs${qs({ component, branch, limit, group })}`),
   metrics: (p: string, component: ObsComponent, branch: string) =>
     get<MetricsResult>(`/projects/${p}/metrics${qs({ component, branch })}`),
 

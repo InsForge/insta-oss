@@ -326,8 +326,10 @@ function DeployImageDialog({ projectId, branch, services, open, onOpenChange, on
     if (d.kind === 'error') {
       return setError(`${d.error} The service ${group} was created; submitting again retries the deploy.`)
     }
-    onOpenChange(false)
+    // Close on success only. Closing before the approval hand-off meant a retry that failed after
+    // the grant called setError on an unmounted dialog, and the failure was invisible.
     if (d.kind === 'approval') return onApproval({ ...d, retry: () => { void deploy(group, portNum) } })
+    onOpenChange(false)
     onDone()
   }
   // Registration and deploy are two operations, and the second can fail or be held for approval
@@ -340,7 +342,7 @@ function DeployImageDialog({ projectId, branch, services, open, onOpenChange, on
     if (registered.current !== body.name) {
       const a = await api.addService(projectId, body)
       if (a.kind === 'error') { setBusy(false); return setError(a.status === 409 ? `A service named ${body.name} already exists.` : a.error) }
-      if (a.kind === 'approval') { setBusy(false); onOpenChange(false); return onApproval({ ...a, retry: () => { void run(body, portNum) } }) }
+      if (a.kind === 'approval') { setBusy(false); return onApproval({ ...a, retry: () => { void run(body, portNum) } }) }
       registered.current = body.name
     }
     await deploy(body.name, portNum)
